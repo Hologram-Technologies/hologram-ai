@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(cat:*)",
+      "Bash(curl:*)",
+      "Bash(cargo build:*)",
+      "Bash(cargo clippy:*)"
+    ]
+  }
+}

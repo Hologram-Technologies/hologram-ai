@@ -1,0 +1,66 @@
+{
+  "name": "Hologram ONNX",
+  "dockerComposeFile": "docker-compose.yml",
+  "service": "app",
+  "workspaceFolder": "/workspace",
+  "shutdownAction": "stopCompose",
+  "remoteUser": "vscode",
+  "postCreateCommand": "bash .devcontainer/post-create.sh",
+  "mounts": [
+    "source=${localWorkspaceFolder}/../hologram,target=/hologram,type=bind,consistency=cached"
+  ],
+  "containerEnv": {
+    "CARGO_TERM_COLOR": "always",
+    "RUST_BACKTRACE": "1",
+    "RUST_LOG": "info",
+    "PATH": "/home/vscode/.cargo/bin:/home/vscode/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+  },
+  "customizations": {
+    "vscode": {
+      "settings": {
+        "editor.formatOnSave": true,
+        "editor.rulers": [100],
+        "rust-analyzer.checkOnSave": true,
+        "rust-analyzer.check.command": "clippy",
+        "rust-analyzer.check.extraArgs": ["--", "-D", "warnings"],
+        "rust-analyzer.cargo.features": "all",
+        "rust-analyzer.cargo.buildScripts.enable": true,
+        "rust-analyzer.procMacro.enable": true,
+        "rust-analyzer.workspace.symbol.search.scope": "workspace",
+        "files.watcherExclude": {
+          "**/target/**": true,
+          "**/node_modules/**": true,
+          "**/.cargo/**": true
+        },
+        "terminal.integrated.profiles.linux": {
+          "zsh": {
+            "path": "/usr/bin/zsh"
+          }
+        },
+        "terminal.integrated.defaultProfile.linux": "zsh",
+        "terminal.integrated.cwd": "/workspace",
+        "[rust]": {
+          "editor.defaultFormatter": "rust-lang.rust-analyzer",
+          "editor.formatOnSave": true
+        },
+        "[toml]": {
+          "editor.defaultFormatter": "tamasfe.even-better-toml"
+        }
+      },
+      "extensions": [
+        "rust-lang.rust-analyzer",
+        "tamasfe.even-better-toml",
+        "fill-labs.dependi",
+        "anthropic.claude-code",
+        "vadimcn.vscode-lldb"
+      ]
+    }
+  },
+  "features": {
+    "ghcr.io/devcontainers/features/common-utils:2": {
+      "installZsh": true,
+      "installOhMyZsh": true,
+      "upgradePackages": true
+    }
+  }
+}
