@@ -15,10 +15,7 @@ use std::path::PathBuf;
 
 use hologram_compiler::ir::IRBuilder;
 use hologram_compiler::shapes::Dim;
-use hologram_onnx_core::{
-    parse_model, validate_model,
-    OnnxConfig, SymbolicShape,
-};
+use hologram_onnx_core::{OnnxConfig, SymbolicShape, parse_model, validate_model};
 use hologram_onnx_ops::translate_onnx_op;
 use tempfile::TempDir;
 
@@ -59,7 +56,11 @@ fn sd_component_paths() -> SDComponentPaths {
         unet: find_component(&["unet.onnx", "unet/model.onnx"]),
         vae_encoder: find_component(&["vae_encoder.onnx", "vae_encoder/model.onnx"]),
         vae_decoder: find_component(&["vae_decoder.onnx", "vae_decoder/model.onnx"]),
-        text_encoder: find_component(&["text_encoder.onnx", "text_encoder/model.onnx", "clip.onnx"]),
+        text_encoder: find_component(&[
+            "text_encoder.onnx",
+            "text_encoder/model.onnx",
+            "clip.onnx",
+        ]),
         safety_checker: find_component(&["safety_checker.onnx", "safety_checker/model.onnx"]),
     }
 }
@@ -96,12 +97,18 @@ fn test_sd_unet_parsing() {
 
     let graph = model.graph.as_ref().expect("Model should have graph");
 
-    eprintln!("UNet parsed: {} nodes, {} initializers",
+    eprintln!(
+        "UNet parsed: {} nodes, {} initializers",
         graph.node.len(),
-        graph.initializer.len());
+        graph.initializer.len()
+    );
 
     // UNet is a large model (typically 3000+ nodes)
-    assert!(graph.node.len() > 1000, "UNet should have many nodes (got {})", graph.node.len());
+    assert!(
+        graph.node.len() > 1000,
+        "UNet should have many nodes (got {})",
+        graph.node.len()
+    );
 }
 
 /// Test UNet validation.
@@ -116,7 +123,11 @@ fn test_sd_unet_validation() {
     let model = parse_model(&onnx_bytes).expect("Failed to parse UNet model");
     let result = validate_model(&model);
 
-    assert!(result.is_ok(), "UNet validation should pass: {:?}", result.err());
+    assert!(
+        result.is_ok(),
+        "UNet validation should pass: {:?}",
+        result.err()
+    );
 }
 
 /// Test UNet input shapes (latent, timestep, encoder_hidden_states).
@@ -171,13 +182,7 @@ fn test_sd_unet_operation_coverage() {
     for node in &graph.node {
         *op_counts.entry(node.op_type.clone()).or_insert(0) += 1;
 
-        let result = translate_onnx_op(
-            &node.op_type,
-            &[],
-            &node.attribute,
-            &shapes,
-            &mut builder,
-        );
+        let result = translate_onnx_op(&node.op_type, &[], &node.attribute, &shapes, &mut builder);
 
         match &result {
             Err(hologram_onnx_core::OnnxError::UnsupportedOp { op_type, .. }) => {
@@ -264,9 +269,11 @@ fn test_sd_vae_decoder_parsing() {
     let model = parse_model(&onnx_bytes).expect("Failed to parse VAE decoder");
 
     let graph = model.graph.as_ref().expect("Model should have graph");
-    eprintln!("VAE decoder parsed: {} nodes, {} initializers",
+    eprintln!(
+        "VAE decoder parsed: {} nodes, {} initializers",
         graph.node.len(),
-        graph.initializer.len());
+        graph.initializer.len()
+    );
 }
 
 /// Test VAE decoder input/output shapes.
@@ -356,9 +363,11 @@ fn test_sd_text_encoder_parsing() {
     let model = parse_model(&onnx_bytes).expect("Failed to parse text encoder");
 
     let graph = model.graph.as_ref().expect("Model should have graph");
-    eprintln!("Text encoder parsed: {} nodes, {} initializers",
+    eprintln!(
+        "Text encoder parsed: {} nodes, {} initializers",
         graph.node.len(),
-        graph.initializer.len());
+        graph.initializer.len()
+    );
 }
 
 /// Test text encoder input shapes (token IDs).
@@ -521,7 +530,10 @@ fn test_sd_config_validation() {
         memory_budget: Some(2048), // 2GB limit
     };
 
-    assert!(constrained_config.validate().is_ok(), "Constrained config should be valid");
+    assert!(
+        constrained_config.validate().is_ok(),
+        "Constrained config should be valid"
+    );
 }
 
 /// Test SD weight sizes.
@@ -551,7 +563,9 @@ fn test_sd_weight_sizes() {
         let model = parse_model(&onnx_bytes).expect("Failed to parse model");
         let graph = model.graph.as_ref().expect("Model should have graph");
 
-        let weight_bytes: usize = graph.initializer.iter()
+        let weight_bytes: usize = graph
+            .initializer
+            .iter()
             .map(|init| {
                 if !init.raw_data.is_empty() {
                     init.raw_data.len()
@@ -569,13 +583,18 @@ fn test_sd_weight_sizes() {
 
         total_size += weight_bytes;
 
-        eprintln!("{} weights: {} MB ({} initializers)",
+        eprintln!(
+            "{} weights: {} MB ({} initializers)",
             name,
             weight_bytes / (1024 * 1024),
-            graph.initializer.len());
+            graph.initializer.len()
+        );
     }
 
-    eprintln!("Total SD weights: {} GB", total_size as f64 / (1024.0 * 1024.0 * 1024.0));
+    eprintln!(
+        "Total SD weights: {} GB",
+        total_size as f64 / (1024.0 * 1024.0 * 1024.0)
+    );
 }
 
 /// Test variable image resolution support.
@@ -591,7 +610,9 @@ fn test_sd_variable_resolution() {
     let graph = model.graph.as_ref().expect("Model should have graph");
 
     // Find latent input
-    let latent_input = graph.input.iter()
+    let latent_input = graph
+        .input
+        .iter()
         .filter(|i| !graph.initializer.iter().any(|init| init.name == i.name))
         .find_map(|i| SymbolicShape::from_value_info(i).ok());
 
@@ -616,22 +637,31 @@ fn test_sd_variable_resolution() {
         for (i, dim) in dims.iter().enumerate() {
             match i {
                 0 => concrete_dims.push(Dim::Concrete(1)), // batch
-                1 => concrete_dims.push(dim.clone()),       // channels (4)
-                2 => concrete_dims.push(Dim::Concrete(h)),  // height
-                3 => concrete_dims.push(Dim::Concrete(w)),  // width
+                1 => concrete_dims.push(dim.clone()),      // channels (4)
+                2 => concrete_dims.push(Dim::Concrete(h)), // height
+                3 => concrete_dims.push(Dim::Concrete(w)), // width
                 _ => concrete_dims.push(dim.clone()),
             }
         }
 
-        let concrete_shape = SymbolicShape::new(concrete_dims.into_iter().map(|d| {
-            match d {
-                Dim::Concrete(n) => hologram_onnx_core::Dim::Concrete(n),
-                Dim::Var(name) => hologram_onnx_core::Dim::Var(name),
-                Dim::Expr(expr) => hologram_onnx_core::Dim::Expr(expr),
-            }
-        }).collect());
+        let concrete_shape = SymbolicShape::new(
+            concrete_dims
+                .into_iter()
+                .map(|d| match d {
+                    Dim::Concrete(n) => hologram_onnx_core::Dim::Concrete(n),
+                    Dim::Var(name) => hologram_onnx_core::Dim::Var(name),
+                    Dim::Expr(expr) => hologram_onnx_core::Dim::Expr(expr),
+                })
+                .collect(),
+        );
 
-        eprintln!("SD latent {}x{} (image {}x{}): {:?}",
-            h, w, h * 8, w * 8, concrete_shape.dims());
+        eprintln!(
+            "SD latent {}x{} (image {}x{}): {:?}",
+            h,
+            w,
+            h * 8,
+            w * 8,
+            concrete_shape.dims()
+        );
     }
 }

@@ -9,11 +9,7 @@ use tracing::trace;
 /// Parse integer attribute with default value.
 ///
 /// **Performance**: O(1) - single linear scan of attributes
-pub fn parse_attr_int(
-    attrs: &[AttributeProto],
-    name: &str,
-    default: i64,
-) -> Result<i64> {
+pub fn parse_attr_int(attrs: &[AttributeProto], name: &str, default: i64) -> Result<i64> {
     for attr in attrs {
         if attr.name == name {
             trace!("Found attribute '{}' with value {}", name, attr.i);
@@ -46,11 +42,7 @@ pub fn parse_attr_ints(
 /// Parse float attribute with default value.
 ///
 /// **Performance**: O(1) - single linear scan of attributes
-pub fn parse_attr_float(
-    attrs: &[AttributeProto],
-    name: &str,
-    default: f32,
-) -> Result<f32> {
+pub fn parse_attr_float(attrs: &[AttributeProto], name: &str, default: f32) -> Result<f32> {
     for attr in attrs {
         if attr.name == name {
             trace!("Found attribute '{}' with value {}", name, attr.f);
@@ -72,7 +64,11 @@ pub fn parse_attr_floats(
     for attr in attrs {
         if attr.name == name {
             if !attr.floats.is_empty() {
-                trace!("Found attribute '{}' with {} values", name, attr.floats.len());
+                trace!(
+                    "Found attribute '{}' with {} values",
+                    name,
+                    attr.floats.len()
+                );
                 return Ok(attr.floats.clone());
             }
         }
@@ -84,18 +80,14 @@ pub fn parse_attr_floats(
 /// Parse string attribute.
 ///
 /// **Performance**: O(1) - single linear scan of attributes
-pub fn parse_attr_string(
-    attrs: &[AttributeProto],
-    name: &str,
-) -> Result<String> {
+pub fn parse_attr_string(attrs: &[AttributeProto], name: &str) -> Result<String> {
     for attr in attrs {
         if attr.name == name {
             // Convert bytes to String (UTF-8)
-            let s = String::from_utf8(attr.s.clone())
-                .map_err(|e| OnnxError::InvalidAttribute {
-                    name: name.to_string(),
-                    reason: format!("Invalid UTF-8: {}", e),
-                })?;
+            let s = String::from_utf8(attr.s.clone()).map_err(|e| OnnxError::InvalidAttribute {
+                name: name.to_string(),
+                reason: format!("Invalid UTF-8: {}", e),
+            })?;
             trace!("Found attribute '{}' with value '{}'", name, s);
             return Ok(s);
         }
@@ -109,34 +101,29 @@ pub fn parse_attr_string(
 /// Parse string attribute with default value.
 ///
 /// **Performance**: O(1) - single linear scan of attributes
-pub fn parse_attr_string_or(
-    attrs: &[AttributeProto],
-    name: &str,
-    default: &str,
-) -> Result<String> {
+pub fn parse_attr_string_or(attrs: &[AttributeProto], name: &str, default: &str) -> Result<String> {
     for attr in attrs {
         if attr.name == name {
             // Convert bytes to String (UTF-8)
-            let s = String::from_utf8(attr.s.clone())
-                .map_err(|e| OnnxError::InvalidAttribute {
-                    name: name.to_string(),
-                    reason: format!("Invalid UTF-8: {}", e),
-                })?;
+            let s = String::from_utf8(attr.s.clone()).map_err(|e| OnnxError::InvalidAttribute {
+                name: name.to_string(),
+                reason: format!("Invalid UTF-8: {}", e),
+            })?;
             trace!("Found attribute '{}' with value '{}'", name, s);
             return Ok(s);
         }
     }
-    trace!("Attribute '{}' not found, using default '{}'", name, default);
+    trace!(
+        "Attribute '{}' not found, using default '{}'",
+        name, default
+    );
     Ok(default.to_string())
 }
 
 /// Parse tensor attribute.
 ///
 /// **Performance**: O(1) - single linear scan of attributes
-pub fn parse_attr_tensor<'a>(
-    attrs: &'a [AttributeProto],
-    name: &str,
-) -> Result<&'a TensorProto> {
+pub fn parse_attr_tensor<'a>(attrs: &'a [AttributeProto], name: &str) -> Result<&'a TensorProto> {
     for attr in attrs {
         if attr.name == name {
             if let Some(ref tensor) = attr.t {
@@ -155,15 +142,11 @@ pub fn parse_attr_tensor<'a>(
 ///
 /// **Performance**: O(1)
 #[allow(dead_code)] // Utility function for downstream use
-pub fn validate_attr_type(
-    attr: &AttributeProto,
-    expected: AttributeType,
-) -> Result<()> {
-    let actual = AttributeType::try_from(attr.r#type)
-        .map_err(|_| OnnxError::InvalidAttribute {
-            name: attr.name.clone(),
-            reason: format!("Unknown attribute type: {}", attr.r#type),
-        })?;
+pub fn validate_attr_type(attr: &AttributeProto, expected: AttributeType) -> Result<()> {
+    let actual = AttributeType::try_from(attr.r#type).map_err(|_| OnnxError::InvalidAttribute {
+        name: attr.name.clone(),
+        reason: format!("Unknown attribute type: {}", attr.r#type),
+    })?;
 
     if actual != expected {
         return Err(OnnxError::InvalidAttribute {
@@ -227,10 +210,7 @@ mod tests {
 
     #[test]
     fn test_parse_attr_int() {
-        let attrs = vec![
-            make_int_attr("alpha", 42),
-            make_int_attr("beta", 100),
-        ];
+        let attrs = vec![make_int_attr("alpha", 42), make_int_attr("beta", 100)];
 
         assert_eq!(parse_attr_int(&attrs, "alpha", 0).unwrap(), 42);
         assert_eq!(parse_attr_int(&attrs, "beta", 0).unwrap(), 100);
@@ -260,10 +240,7 @@ mod tests {
 
     #[test]
     fn test_parse_attr_float() {
-        let attrs = vec![
-            make_float_attr("alpha", 0.5),
-            make_float_attr("beta", 1.5),
-        ];
+        let attrs = vec![make_float_attr("alpha", 0.5), make_float_attr("beta", 1.5)];
 
         assert_eq!(parse_attr_float(&attrs, "alpha", 0.0).unwrap(), 0.5);
         assert_eq!(parse_attr_float(&attrs, "beta", 0.0).unwrap(), 1.5);
@@ -272,9 +249,7 @@ mod tests {
 
     #[test]
     fn test_parse_attr_floats() {
-        let attrs = vec![
-            make_floats_attr("scales", vec![0.5, 1.0, 1.5]),
-        ];
+        let attrs = vec![make_floats_attr("scales", vec![0.5, 1.0, 1.5])];
 
         assert_eq!(
             parse_attr_floats(&attrs, "scales", vec![]).unwrap(),
@@ -305,7 +280,10 @@ mod tests {
 
         let result = parse_attr_string(&attrs, "test");
         assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), OnnxError::InvalidAttribute { .. }));
+        assert!(matches!(
+            result.unwrap_err(),
+            OnnxError::InvalidAttribute { .. }
+        ));
     }
 
     #[test]
@@ -323,9 +301,15 @@ mod tests {
         let attrs: Vec<AttributeProto> = vec![];
 
         assert_eq!(parse_attr_int(&attrs, "any", 99).unwrap(), 99);
-        assert_eq!(parse_attr_ints(&attrs, "any", vec![1, 2]).unwrap(), vec![1, 2]);
+        assert_eq!(
+            parse_attr_ints(&attrs, "any", vec![1, 2]).unwrap(),
+            vec![1, 2]
+        );
         assert_eq!(parse_attr_float(&attrs, "any", 3.14).unwrap(), 3.14);
-        assert_eq!(parse_attr_floats(&attrs, "any", vec![1.0]).unwrap(), vec![1.0]);
+        assert_eq!(
+            parse_attr_floats(&attrs, "any", vec![1.0]).unwrap(),
+            vec![1.0]
+        );
         assert!(parse_attr_string(&attrs, "any").is_err());
     }
 
@@ -333,10 +317,7 @@ mod tests {
     fn test_multiple_attrs_same_name() {
         // ONNX spec doesn't allow this, but test robustness
         // Should return first match
-        let attrs = vec![
-            make_int_attr("alpha", 10),
-            make_int_attr("alpha", 20),
-        ];
+        let attrs = vec![make_int_attr("alpha", 10), make_int_attr("alpha", 20)];
 
         assert_eq!(parse_attr_int(&attrs, "alpha", 0).unwrap(), 10);
     }

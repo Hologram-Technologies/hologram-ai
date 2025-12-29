@@ -19,7 +19,7 @@
 use std::collections::HashMap;
 
 use hologram_compiler::ir::{
-    decompose_function, DecomposeConfig, IRBuilder, IRFunction, NodeId, ScalarType, Type,
+    DecomposeConfig, IRBuilder, IRFunction, NodeId, ScalarType, Type, decompose_function,
 };
 use hologram_compiler::shapes::{Dim as IRDim, Shape};
 use hologram_onnx_core::{Dim, OnnxConfig, OnnxError, Result, SymbolicShape};
@@ -50,10 +50,7 @@ use tracing::{debug, info, trace, warn};
 /// - Unsupported operations encountered
 /// - Shape inference fails
 /// - Graph structure is invalid
-pub fn translate_graph_to_ir(
-    graph: &GraphProto,
-    opset_version: i64,
-) -> Result<IRFunction> {
+pub fn translate_graph_to_ir(graph: &GraphProto, opset_version: i64) -> Result<IRFunction> {
     info!("Starting ONNX graph translation (opset {})", opset_version);
 
     let graph_name = if graph.name.is_empty() {
@@ -96,11 +93,18 @@ pub fn translate_graph_to_ir(
     // Step 3: Process nodes in topological order
     info!("Translating {} nodes", graph.node.len());
     for (idx, node) in graph.node.iter().enumerate() {
-        trace!("Translating node {}/{}: {} ({})",
-               idx + 1, graph.node.len(), node.name, node.op_type);
+        trace!(
+            "Translating node {}/{}: {} ({})",
+            idx + 1,
+            graph.node.len(),
+            node.name,
+            node.op_type
+        );
 
         // Gather input NodeIds
-        let input_ids: Vec<NodeId> = node.input.iter()
+        let input_ids: Vec<NodeId> = node
+            .input
+            .iter()
             .filter(|name| !name.is_empty())
             .map(|name| {
                 tensor_map.get(name).copied().ok_or_else(|| {
@@ -134,8 +138,11 @@ pub fn translate_graph_to_ir(
         // Handle multi-output operations (like Split)
         // For now, we only support single outputs
         if node.output.len() > 1 {
-            warn!("Node '{}' has {} outputs, only first is mapped",
-                  node.name, node.output.len());
+            warn!(
+                "Node '{}' has {} outputs, only first is mapped",
+                node.name,
+                node.output.len()
+            );
         }
     }
 
@@ -166,10 +173,7 @@ pub fn translate_graph_to_ir(
 /// - **Conv2D → Im2col + GEMM**: Enables SIMD vectorization
 /// - **Pooling → Window ops**: Enables PhiCoordinate addressing
 /// - **BatchNorm → Element-wise**: Enables ClassMap fusion
-pub fn apply_ir_decomposition(
-    ir_func: IRFunction,
-    config: &OnnxConfig,
-) -> Result<IRFunction> {
+pub fn apply_ir_decomposition(ir_func: IRFunction, config: &OnnxConfig) -> Result<IRFunction> {
     info!("Applying decomposition pass");
 
     let decompose_config = DecomposeConfig {
@@ -190,9 +194,7 @@ fn process_initializer(
     initializer: &TensorProto,
     builder: &mut IRBuilder,
 ) -> Result<(NodeId, SymbolicShape)> {
-    let dims: Vec<usize> = initializer.dims.iter()
-        .map(|&d| d as usize)
-        .collect();
+    let dims: Vec<usize> = initializer.dims.iter().map(|&d| d as usize).collect();
 
     let scalar_type = data_type_to_scalar(initializer.data_type)?;
 
@@ -211,26 +213,31 @@ fn process_input(
     input: &hologram_onnx_spec::ValueInfoProto,
     builder: &mut IRBuilder,
 ) -> Result<(NodeId, SymbolicShape)> {
-    let tensor_type = input.r#type.as_ref()
+    let tensor_type = input
+        .r#type
+        .as_ref()
         .and_then(|t| t.value.as_ref())
-        .ok_or_else(|| OnnxError::InvalidModel(
-            format!("Input '{}' has no type information", input.name)
-        ))?;
+        .ok_or_else(|| {
+            OnnxError::InvalidModel(format!("Input '{}' has no type information", input.name))
+        })?;
 
     let tensor_type = match tensor_type {
         hologram_onnx_spec::type_proto::Value::TensorType(t) => t,
-        _ => return Err(OnnxError::InvalidModel(
-            format!("Input '{}' is not a tensor type", input.name)
-        )),
+        _ => {
+            return Err(OnnxError::InvalidModel(format!(
+                "Input '{}' is not a tensor type",
+                input.name
+            )));
+        }
     };
 
     let scalar_type = data_type_to_scalar(tensor_type.elem_type)?;
 
     // Extract shape with symbolic dimension support
-    let shape_proto = tensor_type.shape.as_ref()
-        .ok_or_else(|| OnnxError::InvalidModel(
-            format!("Input '{}' has no shape", input.name)
-        ))?;
+    let shape_proto = tensor_type
+        .shape
+        .as_ref()
+        .ok_or_else(|| OnnxError::InvalidModel(format!("Input '{}' has no shape", input.name)))?;
 
     let mut ir_dims = Vec::new();
     let mut symbolic_dims = Vec::new();
@@ -278,7 +285,10 @@ fn data_type_to_scalar(data_type: i32) -> Result<ScalarType> {
         Ok(DataType::Bfloat16) => Ok(ScalarType::BF16),
         Ok(DataType::Bool) => Ok(ScalarType::Bool),
         Ok(dt) => Err(OnnxError::UnsupportedDataType(format!("{:?}", dt))),
-        Err(_) => Err(OnnxError::UnsupportedDataType(format!("unknown type {}", data_type))),
+        Err(_) => Err(OnnxError::UnsupportedDataType(format!(
+            "unknown type {}",
+            data_type
+        ))),
     }
 }
 
@@ -295,31 +305,41 @@ fn extract_tensor_data(tensor: &TensorProto) -> Result<Vec<u8>> {
 
     match data_type {
         DataType::Float => {
-            let bytes: Vec<u8> = tensor.float_data.iter()
+            let bytes: Vec<u8> = tensor
+                .float_data
+                .iter()
                 .flat_map(|f| f.to_le_bytes())
                 .collect();
             Ok(bytes)
         }
         DataType::Double => {
-            let bytes: Vec<u8> = tensor.double_data.iter()
+            let bytes: Vec<u8> = tensor
+                .double_data
+                .iter()
                 .flat_map(|f| f.to_le_bytes())
                 .collect();
             Ok(bytes)
         }
         DataType::Int32 => {
-            let bytes: Vec<u8> = tensor.int32_data.iter()
+            let bytes: Vec<u8> = tensor
+                .int32_data
+                .iter()
                 .flat_map(|i| i.to_le_bytes())
                 .collect();
             Ok(bytes)
         }
         DataType::Int64 => {
-            let bytes: Vec<u8> = tensor.int64_data.iter()
+            let bytes: Vec<u8> = tensor
+                .int64_data
+                .iter()
                 .flat_map(|i| i.to_le_bytes())
                 .collect();
             Ok(bytes)
         }
         DataType::Uint64 => {
-            let bytes: Vec<u8> = tensor.uint64_data.iter()
+            let bytes: Vec<u8> = tensor
+                .uint64_data
+                .iter()
                 .flat_map(|i| i.to_le_bytes())
                 .collect();
             Ok(bytes)
@@ -334,7 +354,9 @@ fn infer_output_shape(
     shape_map: &HashMap<String, SymbolicShape>,
 ) -> Result<Option<SymbolicShape>> {
     // Get input shapes
-    let input_shapes: Vec<&SymbolicShape> = node.input.iter()
+    let input_shapes: Vec<&SymbolicShape> = node
+        .input
+        .iter()
         .filter(|name| !name.is_empty())
         .filter_map(|name| shape_map.get(name))
         .collect();
@@ -344,11 +366,7 @@ fn infer_output_shape(
     }
 
     // Use the shape inference from hologram-onnx-ops
-    match hologram_onnx_ops::infer_op_output_shape(
-        &node.op_type,
-        &input_shapes,
-        &node.attribute,
-    ) {
+    match hologram_onnx_ops::infer_op_output_shape(&node.op_type, &input_shapes, &node.attribute) {
         Ok(shape) => Ok(Some(shape)),
         Err(_) => {
             // Fall back to first input shape for unary ops

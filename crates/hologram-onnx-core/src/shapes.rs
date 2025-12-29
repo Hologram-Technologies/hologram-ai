@@ -169,13 +169,15 @@ impl SymbolicShape {
     /// # }
     /// ```
     pub fn from_value_info(value_info: &ValueInfoProto) -> Result<Self> {
-        use hologram_onnx_spec::type_proto::Value;
         use hologram_onnx_spec::tensor_shape_proto::dimension::Value as DimValue;
+        use hologram_onnx_spec::type_proto::Value;
 
-        let type_proto = value_info.r#type.as_ref()
-            .ok_or_else(|| OnnxError::InvalidModel(
-                format!("Value '{}' has no type information", value_info.name)
-            ))?;
+        let type_proto = value_info.r#type.as_ref().ok_or_else(|| {
+            OnnxError::InvalidModel(format!(
+                "Value '{}' has no type information",
+                value_info.name
+            ))
+        })?;
 
         let tensor_type = match &type_proto.value {
             Some(Value::TensorType(tt)) => tt,
@@ -187,27 +189,31 @@ impl SymbolicShape {
             }
         };
 
-        let shape_proto = tensor_type.shape.as_ref()
-            .ok_or_else(|| OnnxError::InvalidModel(
-                format!("Tensor '{}' has no shape", value_info.name)
-            ))?;
+        let shape_proto = tensor_type.shape.as_ref().ok_or_else(|| {
+            OnnxError::InvalidModel(format!("Tensor '{}' has no shape", value_info.name))
+        })?;
 
-        let dims: Vec<Dim> = shape_proto.dim.iter().enumerate().map(|(idx, dim)| {
-            match &dim.value {
-                Some(DimValue::DimValue(v)) if *v > 0 => {
-                    // Concrete dimension
-                    Dim::Concrete(*v as usize)
+        let dims: Vec<Dim> = shape_proto
+            .dim
+            .iter()
+            .enumerate()
+            .map(|(idx, dim)| {
+                match &dim.value {
+                    Some(DimValue::DimValue(v)) if *v > 0 => {
+                        // Concrete dimension
+                        Dim::Concrete(*v as usize)
+                    }
+                    Some(DimValue::DimParam(param)) if !param.is_empty() => {
+                        // Named symbolic dimension
+                        Dim::Var(param.clone())
+                    }
+                    _ => {
+                        // No value or unnamed - create unique symbolic dimension
+                        Dim::Var(format!("dim_{}_{}", value_info.name, idx))
+                    }
                 }
-                Some(DimValue::DimParam(param)) if !param.is_empty() => {
-                    // Named symbolic dimension
-                    Dim::Var(param.clone())
-                }
-                _ => {
-                    // No value or unnamed - create unique symbolic dimension
-                    Dim::Var(format!("dim_{}_{}", value_info.name, idx))
-                }
-            }
-        }).collect();
+            })
+            .collect();
 
         Ok(Self::new(dims))
     }
@@ -346,11 +352,14 @@ impl SymbolicShape {
                 (Dim::Concrete(1), d) | (d, Dim::Concrete(1)) => d.clone(),
                 (Dim::Concrete(a), Dim::Concrete(b)) if a == b => Dim::Concrete(*a),
                 (Dim::Var(v1), Dim::Var(v2)) if v1 == v2 => Dim::Var(v1.clone()),
-                (d @ Dim::Var(_), Dim::Concrete(_)) | (Dim::Concrete(_), d @ Dim::Var(_)) => d.clone(),
+                (d @ Dim::Var(_), Dim::Concrete(_)) | (Dim::Concrete(_), d @ Dim::Var(_)) => {
+                    d.clone()
+                }
                 _ => {
-                    return Err(OnnxError::ShapeInferenceError(
-                        format!("Cannot broadcast dimensions: {:?} and {:?}", dim1, dim2)
-                    ));
+                    return Err(OnnxError::ShapeInferenceError(format!(
+                        "Cannot broadcast dimensions: {:?} and {:?}",
+                        dim1, dim2
+                    )));
                 }
             };
 
@@ -393,7 +402,7 @@ impl SymbolicShape {
 
         if dims1.len() < 2 || dims2.len() < 2 {
             return Err(OnnxError::ShapeInferenceError(
-                "MatMul requires at least 2D tensors".into()
+                "MatMul requires at least 2D tensors".into(),
             ));
         }
 
@@ -409,9 +418,10 @@ impl SymbolicShape {
         // Check inner dimensions match
         match (k1, k2) {
             (Dim::Concrete(a), Dim::Concrete(b)) if a != b => {
-                return Err(OnnxError::ShapeInferenceError(
-                    format!("MatMul inner dimensions mismatch: {} != {}", a, b)
-                ));
+                return Err(OnnxError::ShapeInferenceError(format!(
+                    "MatMul inner dimensions mismatch: {} != {}",
+                    a, b
+                )));
             }
             _ => {} // Symbolic or matching
         }
@@ -450,11 +460,14 @@ impl SymbolicShape {
                     (Dim::Concrete(1), d) | (d, Dim::Concrete(1)) => d.clone(),
                     (Dim::Concrete(a), Dim::Concrete(b)) if a == b => Dim::Concrete(*a),
                     (Dim::Var(v1), Dim::Var(v2)) if v1 == v2 => Dim::Var(v1.clone()),
-                    (d @ Dim::Var(_), Dim::Concrete(_)) | (Dim::Concrete(_), d @ Dim::Var(_)) => d.clone(),
+                    (d @ Dim::Var(_), Dim::Concrete(_)) | (Dim::Concrete(_), d @ Dim::Var(_)) => {
+                        d.clone()
+                    }
                     _ => {
-                        return Err(OnnxError::ShapeInferenceError(
-                            format!("Cannot broadcast batch dimensions: {:?} and {:?}", dim1, dim2)
-                        ));
+                        return Err(OnnxError::ShapeInferenceError(format!(
+                            "Cannot broadcast batch dimensions: {:?} and {:?}",
+                            dim1, dim2
+                        )));
                     }
                 };
 
@@ -499,26 +512,28 @@ impl SymbolicShape {
         let perm: Vec<usize> = if let Some(p) = perm {
             // Validate permutation
             if p.len() != rank {
-                return Err(OnnxError::ShapeInferenceError(
-                    format!("Permutation length {} != rank {}", p.len(), rank)
-                ));
+                return Err(OnnxError::ShapeInferenceError(format!(
+                    "Permutation length {} != rank {}",
+                    p.len(),
+                    rank
+                )));
             }
 
-            p.iter().map(|&i| {
-                if i < 0 {
-                    (rank as i64 + i) as usize
-                } else {
-                    i as usize
-                }
-            }).collect()
+            p.iter()
+                .map(|&i| {
+                    if i < 0 {
+                        (rank as i64 + i) as usize
+                    } else {
+                        i as usize
+                    }
+                })
+                .collect()
         } else {
             // Default: reverse axes
             (0..rank).rev().collect()
         };
 
-        let new_dims: Vec<Dim> = perm.iter()
-            .map(|&i| self.dims()[i].clone())
-            .collect();
+        let new_dims: Vec<Dim> = perm.iter().map(|&i| self.dims()[i].clone()).collect();
 
         Ok(Self::new(new_dims))
     }
@@ -607,10 +622,7 @@ mod tests {
 
     #[test]
     fn test_new_shape() {
-        let shape = SymbolicShape::new(vec![
-            Dim::Var("N".into()),
-            Dim::Concrete(10),
-        ]);
+        let shape = SymbolicShape::new(vec![Dim::Var("N".into()), Dim::Concrete(10)]);
         assert_eq!(shape.rank(), 2);
         assert!(shape.is_partially_symbolic());
     }

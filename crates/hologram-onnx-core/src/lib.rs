@@ -51,7 +51,7 @@ pub use error::{OnnxError, Result};
 pub use parser::{extract_opset_version, get_tensor_shape, parse_model, validate_model};
 pub use partitioning::{GraphPartition, GraphPartitioner};
 pub use shapes::{Dim, Shape, SymbolicShape};
-pub use translator::{lower_to_operation_graph, OperationGraph};
+pub use translator::{OperationGraph, lower_to_operation_graph};
 pub use weights::WeightData;
 
 // Note: OnnxCompiler has been moved to the top-level hologram-onnx crate

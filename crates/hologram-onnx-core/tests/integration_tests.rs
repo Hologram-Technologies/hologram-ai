@@ -4,12 +4,12 @@
 //! through weight extraction and validation.
 
 use hologram_onnx_core::{
-    extract_opset_version, parse_model, validate_model, OnnxConfig, OnnxError,
-    SymbolicShape, WeightData,
+    OnnxConfig, OnnxError, SymbolicShape, WeightData, extract_opset_version, parse_model,
+    validate_model,
 };
 use hologram_onnx_spec::{
-    AttributeProto, GraphProto, ModelProto, NodeProto, TensorProto, TensorShapeProto,
-    TypeProto, ValueInfoProto,
+    AttributeProto, GraphProto, ModelProto, NodeProto, TensorProto, TensorShapeProto, TypeProto,
+    ValueInfoProto,
 };
 use prost::Message;
 use tempfile::NamedTempFile;
@@ -22,9 +22,7 @@ fn make_value_info(name: &str, dims: &[i64]) -> ValueInfoProto {
     let shape_dims: Vec<Dimension> = dims
         .iter()
         .map(|&d| Dimension {
-            value: Some(
-                hologram_onnx_spec::tensor_shape_proto::dimension::Value::DimValue(d),
-            ),
+            value: Some(hologram_onnx_spec::tensor_shape_proto::dimension::Value::DimValue(d)),
             ..Default::default()
         })
         .collect();
@@ -32,12 +30,10 @@ fn make_value_info(name: &str, dims: &[i64]) -> ValueInfoProto {
     ValueInfoProto {
         name: name.to_string(),
         r#type: Some(TypeProto {
-            value: Some(Value::TensorType(
-                hologram_onnx_spec::type_proto::Tensor {
-                    elem_type: 1, // FLOAT
-                    shape: Some(TensorShapeProto { dim: shape_dims }),
-                },
-            )),
+            value: Some(Value::TensorType(hologram_onnx_spec::type_proto::Tensor {
+                elem_type: 1, // FLOAT
+                shape: Some(TensorShapeProto { dim: shape_dims }),
+            })),
             ..Default::default()
         }),
         ..Default::default()
@@ -45,7 +41,11 @@ fn make_value_info(name: &str, dims: &[i64]) -> ValueInfoProto {
 }
 
 /// Helper to create a symbolic ValueInfoProto with a variable dimension.
-fn make_symbolic_value_info(name: &str, symbolic_dim_name: &str, concrete_dims: &[i64]) -> ValueInfoProto {
+fn make_symbolic_value_info(
+    name: &str,
+    symbolic_dim_name: &str,
+    concrete_dims: &[i64],
+) -> ValueInfoProto {
     use hologram_onnx_spec::tensor_shape_proto::Dimension;
     use hologram_onnx_spec::type_proto::Value;
 
@@ -64,9 +64,7 @@ fn make_symbolic_value_info(name: &str, symbolic_dim_name: &str, concrete_dims: 
     // Rest are concrete
     for &d in concrete_dims {
         shape_dims.push(Dimension {
-            value: Some(
-                hologram_onnx_spec::tensor_shape_proto::dimension::Value::DimValue(d),
-            ),
+            value: Some(hologram_onnx_spec::tensor_shape_proto::dimension::Value::DimValue(d)),
             ..Default::default()
         });
     }
@@ -74,12 +72,10 @@ fn make_symbolic_value_info(name: &str, symbolic_dim_name: &str, concrete_dims: 
     ValueInfoProto {
         name: name.to_string(),
         r#type: Some(TypeProto {
-            value: Some(Value::TensorType(
-                hologram_onnx_spec::type_proto::Tensor {
-                    elem_type: 1, // FLOAT
-                    shape: Some(TensorShapeProto { dim: shape_dims }),
-                },
-            )),
+            value: Some(Value::TensorType(hologram_onnx_spec::type_proto::Tensor {
+                elem_type: 1, // FLOAT
+                shape: Some(TensorShapeProto { dim: shape_dims }),
+            })),
             ..Default::default()
         }),
         ..Default::default()
@@ -124,10 +120,7 @@ fn make_ints_attr(name: &str, values: Vec<i64>) -> AttributeProto {
 fn create_minimal_model() -> ModelProto {
     let graph = GraphProto {
         name: "minimal_graph".to_string(),
-        input: vec![
-            make_value_info("A", &[1, 3]),
-            make_value_info("B", &[1, 3]),
-        ],
+        input: vec![make_value_info("A", &[1, 3]), make_value_info("B", &[1, 3])],
         output: vec![make_value_info("C", &[1, 3])],
         node: vec![NodeProto {
             name: "add_node".to_string(),
@@ -901,7 +894,10 @@ fn test_real_mnist_model_parsing() {
     assert!(!graph.output.is_empty(), "MNIST should have outputs");
 
     // Should have multiple nodes (conv, relu, pool, etc.)
-    assert!(graph.node.len() > 5, "MNIST should have multiple operations");
+    assert!(
+        graph.node.len() > 5,
+        "MNIST should have multiple operations"
+    );
 
     // Should have weights (initializers)
     assert!(!graph.initializer.is_empty(), "MNIST should have weights");
@@ -980,7 +976,10 @@ fn test_real_mnist_model_weight_extraction() {
     );
 
     // Weights buffer should have non-zero size
-    assert!(weights.buffer_size() > 0, "Should have extracted weight data");
+    assert!(
+        weights.buffer_size() > 0,
+        "Should have extracted weight data"
+    );
 }
 
 #[test]
@@ -1024,7 +1023,12 @@ fn test_real_mnist_model_weight_file_output() {
 
     // All values should be finite (not NaN or Inf)
     for (i, &val) in floats.iter().enumerate() {
-        assert!(val.is_finite(), "Weight at index {} is not finite: {}", i, val);
+        assert!(
+            val.is_finite(),
+            "Weight at index {} is not finite: {}",
+            i,
+            val
+        );
     }
 }
 
@@ -1042,15 +1046,29 @@ fn test_real_mnist_model_shape_parsing() {
     let graph = model.graph.as_ref().unwrap();
 
     // Parse input shape
-    if let Some(shape) = graph.input.first().and_then(|i| SymbolicShape::from_value_info(i).ok()) {
+    if let Some(shape) = graph
+        .input
+        .first()
+        .and_then(|i| SymbolicShape::from_value_info(i).ok())
+    {
         // MNIST input is typically [batch, 1, 28, 28] or similar
-        assert!(shape.rank() >= 3, "MNIST input should have at least 3 dimensions");
+        assert!(
+            shape.rank() >= 3,
+            "MNIST input should have at least 3 dimensions"
+        );
     }
 
     // Parse output shape
-    if let Some(shape) = graph.output.first().and_then(|o| SymbolicShape::from_value_info(o).ok()) {
+    if let Some(shape) = graph
+        .output
+        .first()
+        .and_then(|o| SymbolicShape::from_value_info(o).ok())
+    {
         // MNIST output is typically [batch, 10] (10 digit classes)
-        assert!(shape.rank() >= 1, "MNIST output should have at least 1 dimension");
+        assert!(
+            shape.rank() >= 1,
+            "MNIST output should have at least 1 dimension"
+        );
     }
 }
 
@@ -1068,7 +1086,8 @@ fn test_real_mnist_model_operation_types() {
     let graph = model.graph.as_ref().unwrap();
 
     // Collect operation types
-    let op_types: std::collections::HashSet<_> = graph.node.iter().map(|n| n.op_type.as_str()).collect();
+    let op_types: std::collections::HashSet<_> =
+        graph.node.iter().map(|n| n.op_type.as_str()).collect();
 
     // MNIST should contain common operations
     // Typical ops: Conv, Relu, MaxPool, Reshape, MatMul, Add, Softmax
@@ -1176,12 +1195,24 @@ fn test_real_resnet_model_parsing() {
     assert!(!graph.output.is_empty(), "ResNet should have outputs");
 
     // Should have many nodes (ResNet50 has ~120+ operations)
-    assert!(graph.node.len() > 50, "ResNet should have many operations, got {}", graph.node.len());
+    assert!(
+        graph.node.len() > 50,
+        "ResNet should have many operations, got {}",
+        graph.node.len()
+    );
 
     // Should have many weights (initializers) - ResNet50 has ~100+ weight tensors
-    assert!(graph.initializer.len() > 50, "ResNet should have many weights, got {}", graph.initializer.len());
+    assert!(
+        graph.initializer.len() > 50,
+        "ResNet should have many weights, got {}",
+        graph.initializer.len()
+    );
 
-    eprintln!("ResNet parsing: {} nodes, {} initializers", graph.node.len(), graph.initializer.len());
+    eprintln!(
+        "ResNet parsing: {} nodes, {} initializers",
+        graph.node.len(),
+        graph.initializer.len()
+    );
 }
 
 #[test]
@@ -1250,7 +1281,11 @@ fn test_real_resnet_model_weight_extraction() {
     }
 
     // Should have extracted most weights successfully
-    assert!(extracted_count > 50, "Should extract at least 50 weights, got {}", extracted_count);
+    assert!(
+        extracted_count > 50,
+        "Should extract at least 50 weights, got {}",
+        extracted_count
+    );
     assert!(
         failed_count == 0,
         "All weights should be extractable, but {} failed",
@@ -1258,10 +1293,17 @@ fn test_real_resnet_model_weight_extraction() {
     );
 
     // ResNet50 weights should be substantial (>90MB)
-    assert!(weights.buffer_size() > 90_000_000, "ResNet weights should be >90MB, got {} bytes", weights.buffer_size());
+    assert!(
+        weights.buffer_size() > 90_000_000,
+        "ResNet weights should be >90MB, got {} bytes",
+        weights.buffer_size()
+    );
 
-    eprintln!("ResNet weight extraction: {} weights, {} MB",
-              extracted_count, weights.buffer_size() / (1024 * 1024));
+    eprintln!(
+        "ResNet weight extraction: {} weights, {} MB",
+        extracted_count,
+        weights.buffer_size() / (1024 * 1024)
+    );
 }
 
 #[test]
@@ -1278,16 +1320,27 @@ fn test_real_resnet_model_shape_parsing() {
     let graph = model.graph.as_ref().unwrap();
 
     // Parse input shape
-    if let Some(shape) = graph.input.first().and_then(|i| SymbolicShape::from_value_info(i).ok()) {
+    if let Some(shape) = graph
+        .input
+        .first()
+        .and_then(|i| SymbolicShape::from_value_info(i).ok())
+    {
         // ResNet input is typically [batch, 3, 224, 224] (NCHW format)
         assert_eq!(shape.rank(), 4, "ResNet input should have 4 dimensions");
         eprintln!("ResNet input shape: {:?}", shape.dims());
     }
 
     // Parse output shape
-    if let Some(shape) = graph.output.first().and_then(|o| SymbolicShape::from_value_info(o).ok()) {
+    if let Some(shape) = graph
+        .output
+        .first()
+        .and_then(|o| SymbolicShape::from_value_info(o).ok())
+    {
         // ResNet output is typically [batch, 1000] (1000 ImageNet classes)
-        assert!(shape.rank() >= 1, "ResNet output should have at least 1 dimension");
+        assert!(
+            shape.rank() >= 1,
+            "ResNet output should have at least 1 dimension"
+        );
         eprintln!("ResNet output shape: {:?}", shape.dims());
     }
 }
@@ -1312,7 +1365,14 @@ fn test_real_resnet_model_operation_types() {
     }
 
     // ResNet should contain these operations
-    let expected_ops = ["Conv", "Relu", "BatchNormalization", "Add", "GlobalAveragePool", "MaxPool"];
+    let expected_ops = [
+        "Conv",
+        "Relu",
+        "BatchNormalization",
+        "Add",
+        "GlobalAveragePool",
+        "MaxPool",
+    ];
 
     let mut found_count = 0;
     for op in &expected_ops {
@@ -1353,7 +1413,11 @@ fn test_real_resnet_model_residual_connections() {
 
     // ResNet50 should have many residual connections (Add operations)
     // ResNet50 has 16 bottleneck blocks, each with an Add for the skip connection
-    assert!(add_count >= 10, "ResNet should have residual Add operations, got {}", add_count);
+    assert!(
+        add_count >= 10,
+        "ResNet should have residual Add operations, got {}",
+        add_count
+    );
 
     eprintln!("ResNet residual connections (Add ops): {}", add_count);
 }
@@ -1397,7 +1461,11 @@ fn test_real_resnet_full_pipeline() {
 
     // Verify
     let file_size = std::fs::metadata(temp_file.path()).unwrap().len();
-    assert!(file_size > 90_000_000, "ResNet weight file should be >90MB, got {} bytes", file_size);
+    assert!(
+        file_size > 90_000_000,
+        "ResNet weight file should be >90MB, got {} bytes",
+        file_size
+    );
 
     eprintln!(
         "ResNet full pipeline test passed: {} nodes, {} weights, {} MB",

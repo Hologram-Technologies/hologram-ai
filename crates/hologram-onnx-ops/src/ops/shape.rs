@@ -11,9 +11,9 @@
 //! - **Zero-copy**: Reshape/transpose can be view operations when possible
 //! - **Compile-time**: Shape transformations resolved during compilation
 
+use hologram_compiler::ir::{IRBuilder, NodeId};
 use hologram_onnx_core::{OnnxError, Result, SymbolicShape};
 use hologram_onnx_spec::AttributeProto;
-use hologram_compiler::ir::{IRBuilder, NodeId};
 use std::collections::HashMap;
 use tracing::{debug, trace};
 
@@ -40,9 +40,10 @@ pub fn translate_reshape(
     builder: &mut IRBuilder,
 ) -> Result<NodeId> {
     if inputs.len() != 2 {
-        return Err(OnnxError::InvalidModel(
-            format!("Reshape expects 2 inputs, got {}", inputs.len())
-        ));
+        return Err(OnnxError::InvalidModel(format!(
+            "Reshape expects 2 inputs, got {}",
+            inputs.len()
+        )));
     }
 
     let data = inputs[0];
@@ -56,7 +57,8 @@ pub fn translate_reshape(
     // For now, return not-implemented error for dynamic reshape
     let _ = builder;
     Err(OnnxError::IrTranslationError(
-        "Reshape with dynamic shape input not yet implemented (requires shape extraction)".to_string()
+        "Reshape with dynamic shape input not yet implemented (requires shape extraction)"
+            .to_string(),
     ))
 }
 
@@ -82,7 +84,7 @@ pub fn translate_transpose(
 ) -> Result<NodeId> {
     if inputs.is_empty() {
         return Err(OnnxError::InvalidModel(
-            "Transpose expects 1 input, got 0".to_string()
+            "Transpose expects 1 input, got 0".to_string(),
         ));
     }
 
@@ -129,7 +131,7 @@ pub fn translate_squeeze(
 ) -> Result<NodeId> {
     if inputs.is_empty() {
         return Err(OnnxError::InvalidModel(
-            "Squeeze expects 1 input, got 0".to_string()
+            "Squeeze expects 1 input, got 0".to_string(),
         ));
     }
 
@@ -145,7 +147,7 @@ pub fn translate_squeeze(
     // For now, return not-implemented error
     let _ = (builder, input, axes);
     Err(OnnxError::IrTranslationError(
-        "Squeeze operation not yet implemented (requires reshape decomposition)".to_string()
+        "Squeeze operation not yet implemented (requires reshape decomposition)".to_string(),
     ))
 }
 
@@ -169,7 +171,7 @@ pub fn translate_unsqueeze(
 ) -> Result<NodeId> {
     if inputs.is_empty() {
         return Err(OnnxError::InvalidModel(
-            "Unsqueeze expects 1 input, got 0".to_string()
+            "Unsqueeze expects 1 input, got 0".to_string(),
         ));
     }
 
@@ -191,7 +193,7 @@ pub fn translate_unsqueeze(
     // For now, return not-implemented error
     let _ = (builder, input);
     Err(OnnxError::IrTranslationError(
-        "Unsqueeze operation not yet implemented (requires reshape decomposition)".to_string()
+        "Unsqueeze operation not yet implemented (requires reshape decomposition)".to_string(),
     ))
 }
 
@@ -215,9 +217,10 @@ pub fn translate_concat(
     builder: &mut IRBuilder,
 ) -> Result<NodeId> {
     if inputs.len() < 2 {
-        return Err(OnnxError::InvalidModel(
-            format!("Concat expects at least 2 inputs, got {}", inputs.len())
-        ));
+        return Err(OnnxError::InvalidModel(format!(
+            "Concat expects at least 2 inputs, got {}",
+            inputs.len()
+        )));
     }
 
     // Parse axis attribute (required)
@@ -229,7 +232,11 @@ pub fn translate_concat(
         });
     }
 
-    debug!("Translating Concat operation (axis={}, {} inputs)", axis, inputs.len());
+    debug!(
+        "Translating Concat operation (axis={}, {} inputs)",
+        axis,
+        inputs.len()
+    );
     trace!("Concat inputs: {:?}", inputs);
 
     // Create Concat IR node
@@ -267,7 +274,7 @@ pub fn translate_split(
 ) -> Result<NodeId> {
     if inputs.is_empty() {
         return Err(OnnxError::InvalidModel(
-            "Split expects 1 input, got 0".to_string()
+            "Split expects 1 input, got 0".to_string(),
         ));
     }
 
@@ -277,14 +284,17 @@ pub fn translate_split(
     let axis = parse_attr_int(attrs, "axis", 0)?;
     let split_sizes = parse_attr_ints(attrs, "split", vec![])?;
 
-    debug!("Translating Split operation (axis={}, splits={:?})", axis, split_sizes);
+    debug!(
+        "Translating Split operation (axis={}, splits={:?})",
+        axis, split_sizes
+    );
     trace!("Split input: {:?}", input);
 
     // IRBuilder doesn't have split, need to decompose to slice operations
     // For now, return not-implemented error
     let _ = (builder, input, axis, split_sizes);
     Err(OnnxError::IrTranslationError(
-        "Split operation not yet implemented (requires slice decomposition)".to_string()
+        "Split operation not yet implemented (requires slice decomposition)".to_string(),
     ))
 }
 
@@ -320,7 +330,7 @@ pub fn translate_flatten(
 
     if inputs.is_empty() {
         return Err(OnnxError::InvalidModel(
-            "Flatten expects 1 input, got 0".to_string()
+            "Flatten expects 1 input, got 0".to_string(),
         ));
     }
 
@@ -401,15 +411,13 @@ mod tests {
         let data = builder.add_input("data", f32_tensor(&[2, 3, 4]));
         let shape = builder.add_input("shape", f32_tensor(&[2]));
 
-        let result = translate_reshape(
-            &vec![data, shape],
-            &[],
-            &HashMap::new(),
-            &mut builder
-        );
+        let result = translate_reshape(&vec![data, shape], &[], &HashMap::new(), &mut builder);
         // Dynamic reshape not yet implemented
         assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), OnnxError::IrTranslationError(_)));
+        assert!(matches!(
+            result.unwrap_err(),
+            OnnxError::IrTranslationError(_)
+        ));
     }
 
     #[test]
@@ -452,7 +460,10 @@ mod tests {
         // Squeeze not yet implemented
         let result = translate_squeeze(&vec![input], &[], &HashMap::new(), &mut builder);
         assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), OnnxError::IrTranslationError(_)));
+        assert!(matches!(
+            result.unwrap_err(),
+            OnnxError::IrTranslationError(_)
+        ));
     }
 
     #[test]
@@ -465,7 +476,10 @@ mod tests {
         let result = translate_unsqueeze(&vec![input], &attrs, &HashMap::new(), &mut builder);
         // Unsqueeze not yet implemented
         assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), OnnxError::IrTranslationError(_)));
+        assert!(matches!(
+            result.unwrap_err(),
+            OnnxError::IrTranslationError(_)
+        ));
     }
 
     #[test]
@@ -476,7 +490,10 @@ mod tests {
         // No axes attribute should fail with InvalidAttribute
         let result = translate_unsqueeze(&vec![input], &[], &HashMap::new(), &mut builder);
         assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), OnnxError::InvalidAttribute { .. }));
+        assert!(matches!(
+            result.unwrap_err(),
+            OnnxError::InvalidAttribute { .. }
+        ));
     }
 
     #[test]
@@ -488,12 +505,7 @@ mod tests {
 
         let attrs = vec![make_int_attr("axis", 1)];
 
-        let result = translate_concat(
-            &vec![a, b, c],
-            &attrs,
-            &HashMap::new(),
-            &mut builder
-        );
+        let result = translate_concat(&vec![a, b, c], &attrs, &HashMap::new(), &mut builder);
         assert!(result.is_ok());
     }
 
@@ -519,7 +531,10 @@ mod tests {
         // No axis attribute should fail
         let result = translate_concat(&vec![a, b], &[], &HashMap::new(), &mut builder);
         assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), OnnxError::InvalidAttribute { .. }));
+        assert!(matches!(
+            result.unwrap_err(),
+            OnnxError::InvalidAttribute { .. }
+        ));
     }
 
     #[test]
@@ -532,7 +547,10 @@ mod tests {
         let result = translate_split(&vec![input], &attrs, &HashMap::new(), &mut builder);
         // Split not yet implemented
         assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), OnnxError::IrTranslationError(_)));
+        assert!(matches!(
+            result.unwrap_err(),
+            OnnxError::IrTranslationError(_)
+        ));
     }
 
     #[test]

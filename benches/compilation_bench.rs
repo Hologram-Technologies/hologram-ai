@@ -5,7 +5,7 @@
 //! - Decomposition pass
 //! - Full compilation pipeline
 
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
 use prost::Message;
 use std::path::Path;
 
@@ -54,7 +54,7 @@ fn bench_onnx_parsing(c: &mut Criterion) {
 // =============================================================================
 
 fn bench_decomposition(c: &mut Criterion) {
-    use hologram_compiler::ir::{decompose_function, DecomposeConfig, IRBuilder, ScalarType, Type};
+    use hologram_compiler::ir::{DecomposeConfig, IRBuilder, ScalarType, Type, decompose_function};
     use hologram_compiler::shapes::Shape;
 
     let mut group = c.benchmark_group("decomposition");

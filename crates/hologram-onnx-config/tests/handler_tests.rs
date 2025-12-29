@@ -7,8 +7,8 @@ use std::fs;
 use tempfile::TempDir;
 
 use hologram_onnx_config::{
-    PipelineConfig, OutputHandlerConfig, OutputHandlerRegistry, OutputHandler,
-    ProcessedOutput, TensorData, ConfigError,
+    ConfigError, OutputHandler, OutputHandlerConfig, OutputHandlerRegistry, PipelineConfig,
+    ProcessedOutput, TensorData,
 };
 
 // ============================================================================
@@ -43,9 +43,9 @@ fn mock_image_tensor_nchw(height: usize, width: usize) -> TensorData {
             for w in 0..width {
                 // Each channel gets a different gradient
                 let value = match c {
-                    0 => h as f32 / height as f32,      // R: vertical gradient
-                    1 => w as f32 / width as f32,      // G: horizontal gradient
-                    2 => 0.5,                          // B: constant mid-gray
+                    0 => h as f32 / height as f32, // R: vertical gradient
+                    1 => w as f32 / width as f32,  // G: horizontal gradient
+                    2 => 0.5,                      // B: constant mid-gray
                     _ => 0.0,
                 };
                 data.push(value);
@@ -64,9 +64,9 @@ fn mock_image_tensor_nhwc(height: usize, width: usize) -> TensorData {
     for h in 0..height {
         for w in 0..width {
             // RGB interleaved
-            data.push(h as f32 / height as f32);  // R
-            data.push(w as f32 / width as f32);   // G
-            data.push(0.5);                        // B
+            data.push(h as f32 / height as f32); // R
+            data.push(w as f32 / width as f32); // G
+            data.push(0.5); // B
         }
     }
 
@@ -257,7 +257,10 @@ fn test_config_with_multi_stage_pipeline() {
     // Stage 1: text encoder
     assert_eq!(stages[0].name, "text_encoder");
     assert_eq!(stages[0].model, "models/text_encoder.holo");
-    assert_eq!(stages[0].inputs.get("prompt"), Some(&"input_ids".to_string()));
+    assert_eq!(
+        stages[0].inputs.get("prompt"),
+        Some(&"input_ids".to_string())
+    );
 
     // Stage 2: unet
     assert_eq!(stages[1].name, "unet");
@@ -361,11 +364,14 @@ fn test_registry_create_multiple_handlers() {
         let mut image_config = HashMap::new();
         image_config.insert("format".to_string(), toml::Value::String("rgb".to_string()));
 
-        configs.insert("image".to_string(), OutputHandlerConfig {
-            handler_type: "image".to_string(),
-            output: "sample".to_string(),
-            config: image_config,
-        });
+        configs.insert(
+            "image".to_string(),
+            OutputHandlerConfig {
+                handler_type: "image".to_string(),
+                output: "sample".to_string(),
+                config: image_config,
+            },
+        );
     }
 
     // Add audio handler config (if feature enabled)
@@ -375,11 +381,14 @@ fn test_registry_create_multiple_handlers() {
         audio_config.insert("sample_rate".to_string(), toml::Value::Integer(44100));
         audio_config.insert("channels".to_string(), toml::Value::Integer(2));
 
-        configs.insert("audio".to_string(), OutputHandlerConfig {
-            handler_type: "audio".to_string(),
-            output: "waveform".to_string(),
-            config: audio_config,
-        });
+        configs.insert(
+            "audio".to_string(),
+            OutputHandlerConfig {
+                handler_type: "audio".to_string(),
+                output: "waveform".to_string(),
+                config: audio_config,
+            },
+        );
     }
 
     if !configs.is_empty() {
@@ -405,8 +414,14 @@ mod image_handler_tests {
         // Create handler from config
         let mut config_map = HashMap::new();
         config_map.insert("format".to_string(), toml::Value::String("rgb".to_string()));
-        config_map.insert("layout".to_string(), toml::Value::String("NCHW".to_string()));
-        config_map.insert("value_range".to_string(), toml::Value::String("zero_one".to_string()));
+        config_map.insert(
+            "layout".to_string(),
+            toml::Value::String("NCHW".to_string()),
+        );
+        config_map.insert(
+            "value_range".to_string(),
+            toml::Value::String("zero_one".to_string()),
+        );
 
         let config = OutputHandlerConfig {
             handler_type: "image".to_string(),
@@ -453,8 +468,14 @@ mod image_handler_tests {
 
         let mut config_map = HashMap::new();
         config_map.insert("format".to_string(), toml::Value::String("rgb".to_string()));
-        config_map.insert("layout".to_string(), toml::Value::String("NHWC".to_string()));
-        config_map.insert("value_range".to_string(), toml::Value::String("zero_one".to_string()));
+        config_map.insert(
+            "layout".to_string(),
+            toml::Value::String("NHWC".to_string()),
+        );
+        config_map.insert(
+            "value_range".to_string(),
+            toml::Value::String("zero_one".to_string()),
+        );
 
         let config = OutputHandlerConfig {
             handler_type: "image".to_string(),
@@ -490,9 +511,18 @@ mod image_handler_tests {
         let output_path = temp_dir.path().join("output.png");
 
         let mut config_map = HashMap::new();
-        config_map.insert("format".to_string(), toml::Value::String("grayscale".to_string()));
-        config_map.insert("layout".to_string(), toml::Value::String("NCHW".to_string()));
-        config_map.insert("value_range".to_string(), toml::Value::String("zero_one".to_string()));
+        config_map.insert(
+            "format".to_string(),
+            toml::Value::String("grayscale".to_string()),
+        );
+        config_map.insert(
+            "layout".to_string(),
+            toml::Value::String("NCHW".to_string()),
+        );
+        config_map.insert(
+            "value_range".to_string(),
+            toml::Value::String("zero_one".to_string()),
+        );
 
         let config = OutputHandlerConfig {
             handler_type: "image".to_string(),
@@ -548,7 +578,10 @@ mod image_handler_tests {
 
         let mut config_map = HashMap::new();
         config_map.insert("format".to_string(), toml::Value::String("rgb".to_string()));
-        config_map.insert("layout".to_string(), toml::Value::String("NCHW".to_string()));
+        config_map.insert(
+            "layout".to_string(),
+            toml::Value::String("NCHW".to_string()),
+        );
 
         let config = OutputHandlerConfig {
             handler_type: "image".to_string(),
@@ -607,7 +640,10 @@ mod audio_handler_tests {
         let mut config_map = HashMap::new();
         config_map.insert("sample_rate".to_string(), toml::Value::Integer(44100));
         config_map.insert("channels".to_string(), toml::Value::Integer(1));
-        config_map.insert("sample_format".to_string(), toml::Value::String("int16".to_string()));
+        config_map.insert(
+            "sample_format".to_string(),
+            toml::Value::String("int16".to_string()),
+        );
 
         let config = OutputHandlerConfig {
             handler_type: "audio".to_string(),
@@ -649,7 +685,10 @@ mod audio_handler_tests {
         let mut config_map = HashMap::new();
         config_map.insert("sample_rate".to_string(), toml::Value::Integer(48000));
         config_map.insert("channels".to_string(), toml::Value::Integer(2));
-        config_map.insert("sample_format".to_string(), toml::Value::String("float32".to_string()));
+        config_map.insert(
+            "sample_format".to_string(),
+            toml::Value::String("float32".to_string()),
+        );
 
         let config = OutputHandlerConfig {
             handler_type: "audio".to_string(),
@@ -787,20 +826,24 @@ fn test_multi_handler_creation_from_config() {
 #[cfg(all(feature = "image-output", feature = "audio-output"))]
 #[test]
 fn test_multi_handler_processing() {
-    use hologram_onnx_config::{ImageHandler, AudioHandler};
+    use hologram_onnx_config::{AudioHandler, ImageHandler};
 
     let temp_dir = TempDir::new().unwrap();
 
     // Create image handler
     let mut img_config = HashMap::new();
     img_config.insert("format".to_string(), toml::Value::String("rgb".to_string()));
-    img_config.insert("layout".to_string(), toml::Value::String("NCHW".to_string()));
+    img_config.insert(
+        "layout".to_string(),
+        toml::Value::String("NCHW".to_string()),
+    );
 
     let image_handler = ImageHandler::from_config(&OutputHandlerConfig {
         handler_type: "image".to_string(),
         output: "image".to_string(),
         config: img_config,
-    }).unwrap();
+    })
+    .unwrap();
 
     // Create audio handler
     let mut audio_config = HashMap::new();
@@ -811,7 +854,8 @@ fn test_multi_handler_processing() {
         handler_type: "audio".to_string(),
         output: "audio".to_string(),
         config: audio_config,
-    }).unwrap();
+    })
+    .unwrap();
 
     // Create mock outputs (simulating model output)
     let mut outputs = HashMap::new();
@@ -865,15 +909,12 @@ fn test_tensor_data_empty() {
 #[test]
 fn test_tensor_data_4d() {
     // Simulate NCHW tensor
-    let tensor = TensorData::new(
-        vec![0.0; 1 * 3 * 64 * 64],
-        vec![1, 3, 64, 64],
-    );
+    let tensor = TensorData::new(vec![0.0; 1 * 3 * 64 * 64], vec![1, 3, 64, 64]);
 
     assert_eq!(tensor.ndim(), 4);
     assert_eq!(tensor.len(), 1 * 3 * 64 * 64);
-    assert_eq!(tensor.shape[0], 1);  // batch
-    assert_eq!(tensor.shape[1], 3);  // channels
+    assert_eq!(tensor.shape[0], 1); // batch
+    assert_eq!(tensor.shape[1], 3); // channels
     assert_eq!(tensor.shape[2], 64); // height
     assert_eq!(tensor.shape[3], 64); // width
 }
@@ -911,14 +952,17 @@ fn test_unknown_handler_type_error() {
 #[test]
 fn test_config_save_to_readonly_dir() {
     // This test may not work on all systems, but demonstrates the pattern
-    let result = PipelineConfig::from_str(r#"
+    let result = PipelineConfig::from_str(
+        r#"
         [pipeline]
         name = "test"
         version = "1.0"
         [pipeline.execution]
         inputs = ["in"]
         outputs = ["out"]
-    "#).unwrap();
+    "#,
+    )
+    .unwrap();
 
     // Try to save to a non-existent path
     let save_result = result.to_file("/nonexistent/deeply/nested/path/config.toml");
@@ -1028,7 +1072,10 @@ fn test_whisper_config() {
 
     let handlers = config.output_handlers();
     let text = handlers.get("text").unwrap();
-    assert_eq!(text.get_string("tokenizer_path"), Some("tokenizers/whisper.json"));
+    assert_eq!(
+        text.get_string("tokenizer_path"),
+        Some("tokenizers/whisper.json")
+    );
 }
 
 #[test]

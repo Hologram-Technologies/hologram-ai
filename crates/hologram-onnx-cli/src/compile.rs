@@ -7,12 +7,12 @@
 //! - Writes the resulting .holo and .weights files
 
 use anyhow::{Context, Result};
-use hologram_onnx_core::{parse_model, validate_model, extract_opset_version, OnnxConfig};
+use hologram_onnx_core::{OnnxConfig, extract_opset_version, parse_model, validate_model};
 use std::fs;
 use std::path::Path;
-use tracing::{info, debug};
+use tracing::{debug, info};
 
-use crate::translator::{translate_graph_to_ir, apply_ir_decomposition};
+use crate::translator::{apply_ir_decomposition, translate_graph_to_ir};
 
 /// Compile an ONNX model to .holo format.
 ///
@@ -59,35 +59,35 @@ pub fn compile_command(
         memory_budget,
     };
 
-    config.validate()
+    config
+        .validate()
         .map_err(|e| anyhow::anyhow!("Invalid configuration: {}", e))?;
 
     // Step 1: Parse and validate ONNX model
     info!("Parsing ONNX protobuf...");
-    let model = parse_model(&onnx_bytes)
-        .context("Failed to parse ONNX model")?;
+    let model = parse_model(&onnx_bytes).context("Failed to parse ONNX model")?;
 
-    validate_model(&model)
-        .context("Model validation failed")?;
+    validate_model(&model).context("Model validation failed")?;
 
     let opset_version = extract_opset_version(&model);
     info!("ONNX opset version: {}", opset_version);
 
     // Get the graph
-    let graph = model.graph.as_ref()
+    let graph = model
+        .graph
+        .as_ref()
         .ok_or_else(|| anyhow::anyhow!("Model has no graph"))?;
 
     info!("Graph: {} ({} nodes)", graph.name, graph.node.len());
 
     // Step 2: Translate ONNX → IR with symbolic shapes
     info!("Translating ONNX → IR...");
-    let ir_func = translate_graph_to_ir(graph, opset_version)
-        .context("Failed to translate ONNX to IR")?;
+    let ir_func =
+        translate_graph_to_ir(graph, opset_version).context("Failed to translate ONNX to IR")?;
 
     // Step 3: Apply decomposition pass
     info!("Applying decomposition pass...");
-    let decomposed = apply_ir_decomposition(ir_func, &config)
-        .context("Decomposition failed")?;
+    let decomposed = apply_ir_decomposition(ir_func, &config).context("Decomposition failed")?;
 
     info!("Decomposition complete: {} IR nodes", decomposed.body.len());
 
@@ -112,8 +112,12 @@ pub fn compile_command(
     if has_weights {
         let weights_path = output.with_extension("weights");
         info!("Writing .weights file: {}", weights_path.display());
-        fs::write(&weights_path, &weight_bytes)
-            .with_context(|| format!("Failed to write .weights file to {}", weights_path.display()))?;
+        fs::write(&weights_path, &weight_bytes).with_context(|| {
+            format!(
+                "Failed to write .weights file to {}",
+                weights_path.display()
+            )
+        })?;
     } else {
         info!("No external weights (all weights embedded in .holo file)");
     }
@@ -172,7 +176,12 @@ mod tests {
 
         let result = compile_command(&input, &output, false, 500, None, 4096);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("Failed to read ONNX model"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("Failed to read ONNX model")
+        );
     }
 
     #[test]
@@ -182,7 +191,13 @@ mod tests {
 
         // The compile will fail because we don't have a valid ONNX model,
         // but we can test that the paths are constructed correctly
-        assert_eq!(output.with_extension("holo"), temp_dir.path().join("model.holo"));
-        assert_eq!(output.with_extension("weights"), temp_dir.path().join("model.weights"));
+        assert_eq!(
+            output.with_extension("holo"),
+            temp_dir.path().join("model.holo")
+        );
+        assert_eq!(
+            output.with_extension("weights"),
+            temp_dir.path().join("model.weights")
+        );
     }
 }

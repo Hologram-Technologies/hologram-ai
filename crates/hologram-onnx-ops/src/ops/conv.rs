@@ -13,10 +13,10 @@
 //! - **LOOP instructions**: O(1) space complexity for sliding windows
 //! - **SIMD**: All GEMM operations use SIMD vectorization
 
-use hologram_onnx_core::{OnnxError, Result, SymbolicShape};
-use hologram_onnx_spec::AttributeProto;
 use hologram_compiler::ir::{IRBuilder, NodeId};
 use hologram_compiler::shapes::Dim;
+use hologram_onnx_core::{OnnxError, Result, SymbolicShape};
+use hologram_onnx_spec::AttributeProto;
 use std::collections::HashMap;
 use tracing::{debug, trace};
 
@@ -59,9 +59,10 @@ pub fn translate_conv(
     builder: &mut IRBuilder,
 ) -> Result<NodeId> {
     if inputs.len() < 2 || inputs.len() > 3 {
-        return Err(OnnxError::InvalidModel(
-            format!("Conv expects 2-3 inputs, got {}", inputs.len())
-        ));
+        return Err(OnnxError::InvalidModel(format!(
+            "Conv expects 2-3 inputs, got {}",
+            inputs.len()
+        )));
     }
 
     let input = inputs[0];
@@ -99,7 +100,10 @@ pub fn translate_conv(
         "Translating Conv2D: strides={:?}, pads={:?}, dilations={:?}, groups={}",
         strides, pads, dilations, groups
     );
-    trace!("Conv2D inputs: input={:?}, kernel={:?}, bias={:?}", input, kernel, bias);
+    trace!(
+        "Conv2D inputs: input={:?}, kernel={:?}, bias={:?}",
+        input, kernel, bias
+    );
 
     // Create Conv2D IR node using builder method
     // CRITICAL: hologram's decomposition pass will transform this to Im2col+GEMM
@@ -149,15 +153,17 @@ pub fn infer_conv_output_shape(
     let kernel_dims = kernel_shape.dims();
 
     if input_dims.len() != 4 {
-        return Err(OnnxError::ShapeInferenceError(
-            format!("Conv2D input must be 4D, got {}D", input_dims.len())
-        ));
+        return Err(OnnxError::ShapeInferenceError(format!(
+            "Conv2D input must be 4D, got {}D",
+            input_dims.len()
+        )));
     }
 
     if kernel_dims.len() != 4 {
-        return Err(OnnxError::ShapeInferenceError(
-            format!("Conv2D kernel must be 4D, got {}D", kernel_dims.len())
-        ));
+        return Err(OnnxError::ShapeInferenceError(format!(
+            "Conv2D kernel must be 4D, got {}D",
+            kernel_dims.len()
+        )));
     }
 
     // Preserve batch dimension (can be symbolic)
@@ -201,9 +207,10 @@ fn calculate_conv_output_dim(
             // Concrete calculation
             let effective_kernel = dilation * (k - 1) + 1;
             if *i + padding < effective_kernel {
-                return Err(OnnxError::ShapeInferenceError(
-                    format!("Input size {} too small for kernel {}", i, k)
-                ));
+                return Err(OnnxError::ShapeInferenceError(format!(
+                    "Input size {} too small for kernel {}",
+                    i, k
+                )));
             }
             let output = (*i + padding - effective_kernel) / stride + 1;
             Ok(Dim::Concrete(output))
@@ -216,7 +223,7 @@ fn calculate_conv_output_dim(
             )))
         }
         _ => Err(OnnxError::ShapeInferenceError(
-            "Kernel dimensions must be concrete".to_string()
+            "Kernel dimensions must be concrete".to_string(),
         )),
     }
 }
@@ -245,9 +252,10 @@ pub fn translate_conv_transpose(
     builder: &mut IRBuilder,
 ) -> Result<NodeId> {
     if inputs.len() < 2 || inputs.len() > 3 {
-        return Err(OnnxError::InvalidModel(
-            format!("ConvTranspose expects 2-3 inputs, got {}", inputs.len())
-        ));
+        return Err(OnnxError::InvalidModel(format!(
+            "ConvTranspose expects 2-3 inputs, got {}",
+            inputs.len()
+        )));
     }
 
     let input = inputs[0];
@@ -268,9 +276,19 @@ pub fn translate_conv_transpose(
 
     // IRBuilder doesn't have conv_transpose, need to decompose
     // For now, return not-implemented error
-    let _ = (builder, input, kernel, bias, strides, pads, dilations, output_padding, groups);
+    let _ = (
+        builder,
+        input,
+        kernel,
+        bias,
+        strides,
+        pads,
+        dilations,
+        output_padding,
+        groups,
+    );
     Err(OnnxError::IrTranslationError(
-        "ConvTranspose operation not yet implemented".to_string()
+        "ConvTranspose operation not yet implemented".to_string(),
     ))
 }
 
@@ -296,7 +314,7 @@ pub fn infer_conv_transpose_output_shape(
 
     if input_dims.len() != 4 || kernel_dims.len() != 4 {
         return Err(OnnxError::ShapeInferenceError(
-            "ConvTranspose requires 4D input and kernel".to_string()
+            "ConvTranspose requires 4D input and kernel".to_string(),
         ));
     }
 
@@ -346,7 +364,7 @@ fn calculate_conv_transpose_output_dim(
             )))
         }
         _ => Err(OnnxError::ShapeInferenceError(
-            "Kernel dimensions must be concrete".to_string()
+            "Kernel dimensions must be concrete".to_string(),
         )),
     }
 }
@@ -386,12 +404,7 @@ mod tests {
         let input = builder.add_input("X", f32_tensor(&[1, 3, 224, 224]));
         let kernel = builder.add_input("W", f32_tensor(&[64, 3, 7, 7]));
 
-        let result = translate_conv(
-            &vec![input, kernel],
-            &[],
-            &HashMap::new(),
-            &mut builder
-        );
+        let result = translate_conv(&vec![input, kernel], &[], &HashMap::new(), &mut builder);
         assert!(result.is_ok());
     }
 
@@ -406,7 +419,7 @@ mod tests {
             &vec![input, kernel, bias],
             &[],
             &HashMap::new(),
-            &mut builder
+            &mut builder,
         );
         assert!(result.is_ok());
     }
@@ -424,12 +437,7 @@ mod tests {
             make_int_attr("group", 1),
         ];
 
-        let result = translate_conv(
-            &vec![input, kernel],
-            &attrs,
-            &HashMap::new(),
-            &mut builder
-        );
+        let result = translate_conv(&vec![input, kernel], &attrs, &HashMap::new(), &mut builder);
         assert!(result.is_ok());
     }
 
@@ -482,15 +490,14 @@ mod tests {
         let input = builder.add_input("X", f32_tensor(&[1, 64, 56, 56]));
         let kernel = builder.add_input("W", f32_tensor(&[64, 3, 2, 2]));
 
-        let result = translate_conv_transpose(
-            &vec![input, kernel],
-            &[],
-            &HashMap::new(),
-            &mut builder
-        );
+        let result =
+            translate_conv_transpose(&vec![input, kernel], &[], &HashMap::new(), &mut builder);
         // ConvTranspose not yet implemented
         assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), OnnxError::IrTranslationError(_)));
+        assert!(matches!(
+            result.unwrap_err(),
+            OnnxError::IrTranslationError(_)
+        ));
     }
 
     #[test]
@@ -504,7 +511,8 @@ mod tests {
             make_ints_attr("output_padding", vec![0, 0]),
         ];
 
-        let result = infer_conv_transpose_output_shape(&input_shape, &kernel_shape, &attrs).unwrap();
+        let result =
+            infer_conv_transpose_output_shape(&input_shape, &kernel_shape, &attrs).unwrap();
 
         // H_out = 2 * (56 - 1) + 2 = 112
         assert_eq!(result.dims()[0], Dim::Concrete(1));

@@ -37,7 +37,10 @@ pub trait OutputHandler: Send + Sync {
     /// # Performance: O(n) where n = tensor size
     ///
     /// Implementations should use SIMD and zero-copy where possible.
-    fn process(&self, outputs: &HashMap<String, TensorData>) -> Result<ProcessedOutput, ConfigError>;
+    fn process(
+        &self,
+        outputs: &HashMap<String, TensorData>,
+    ) -> Result<ProcessedOutput, ConfigError>;
 
     /// Save processed output to file.
     ///
@@ -112,11 +115,22 @@ pub struct ImageOutput {
 impl ImageOutput {
     /// Create new image output.
     pub fn new(data: Vec<u8>, width: u32, height: u32, channels: u8) -> Self {
-        assert!(channels == 1 || channels == 3 || channels == 4,
-                "Invalid channel count: {}", channels);
-        assert_eq!(data.len(), (width * height * channels as u32) as usize,
-                   "Data size mismatch");
-        Self { data, width, height, channels }
+        assert!(
+            channels == 1 || channels == 3 || channels == 4,
+            "Invalid channel count: {}",
+            channels
+        );
+        assert_eq!(
+            data.len(),
+            (width * height * channels as u32) as usize,
+            "Data size mismatch"
+        );
+        Self {
+            data,
+            width,
+            height,
+            channels,
+        }
     }
 }
 
@@ -137,7 +151,11 @@ impl AudioOutput {
     /// Create new audio output.
     pub fn new(samples: Vec<f32>, sample_rate: u32, channels: u16) -> Self {
         assert!(channels > 0, "Invalid channel count: {}", channels);
-        Self { samples, sample_rate, channels }
+        Self {
+            samples,
+            sample_rate,
+            channels,
+        }
     }
 }
 
@@ -159,7 +177,8 @@ impl TensorOutput {
 }
 
 /// Factory function type for creating output handlers.
-pub type HandlerFactory = Box<dyn Fn(&OutputHandlerConfig) -> Result<Box<dyn OutputHandler>, ConfigError> + Send + Sync>;
+pub type HandlerFactory =
+    Box<dyn Fn(&OutputHandlerConfig) -> Result<Box<dyn OutputHandler>, ConfigError> + Send + Sync>;
 
 /// Registry for output handler factories.
 ///
@@ -185,28 +204,37 @@ impl OutputHandlerRegistry {
         #[cfg(feature = "image-output")]
         {
             debug!("Registering image output handler");
-            registry.register("image", Box::new(|config| {
-                image::ImageHandler::from_config(config)
-                    .map(|h| Box::new(h) as Box<dyn OutputHandler>)
-            }));
+            registry.register(
+                "image",
+                Box::new(|config| {
+                    image::ImageHandler::from_config(config)
+                        .map(|h| Box::new(h) as Box<dyn OutputHandler>)
+                }),
+            );
         }
 
         #[cfg(feature = "audio-output")]
         {
             debug!("Registering audio output handler");
-            registry.register("audio", Box::new(|config| {
-                audio::AudioHandler::from_config(config)
-                    .map(|h| Box::new(h) as Box<dyn OutputHandler>)
-            }));
+            registry.register(
+                "audio",
+                Box::new(|config| {
+                    audio::AudioHandler::from_config(config)
+                        .map(|h| Box::new(h) as Box<dyn OutputHandler>)
+                }),
+            );
         }
 
         #[cfg(feature = "text-output")]
         {
             debug!("Registering text output handler");
-            registry.register("text", Box::new(|config| {
-                text::TextHandler::from_config(config)
-                    .map(|h| Box::new(h) as Box<dyn OutputHandler>)
-            }));
+            registry.register(
+                "text",
+                Box::new(|config| {
+                    text::TextHandler::from_config(config)
+                        .map(|h| Box::new(h) as Box<dyn OutputHandler>)
+                }),
+            );
         }
 
         registry
@@ -228,26 +256,22 @@ impl OutputHandlerRegistry {
         &self,
         config: &OutputHandlerConfig,
     ) -> Result<Box<dyn OutputHandler>, ConfigError> {
-        let factory = self.factories.get(&config.handler_type)
-            .ok_or_else(|| {
-                // Check if feature is disabled
-                let feature_map = [
-                    ("image", "image-output"),
-                    ("audio", "audio-output"),
-                    ("text", "text-output"),
-                ];
+        let factory = self.factories.get(&config.handler_type).ok_or_else(|| {
+            // Check if feature is disabled
+            let feature_map = [
+                ("image", "image-output"),
+                ("audio", "audio-output"),
+                ("text", "text-output"),
+            ];
 
-                for (handler_type, feature) in &feature_map {
-                    if &config.handler_type == handler_type {
-                        return ConfigError::feature_not_enabled(
-                            *handler_type,
-                            *feature,
-                        );
-                    }
+            for (handler_type, feature) in &feature_map {
+                if &config.handler_type == handler_type {
+                    return ConfigError::feature_not_enabled(*handler_type, *feature);
                 }
+            }
 
-                ConfigError::unknown_handler_type(&config.handler_type)
-            })?;
+            ConfigError::unknown_handler_type(&config.handler_type)
+        })?;
 
         trace!("Creating handler: {}", config.handler_type);
         factory(config)

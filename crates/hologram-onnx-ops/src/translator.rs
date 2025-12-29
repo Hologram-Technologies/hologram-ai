@@ -3,14 +3,15 @@
 //! This module provides the central translation function that dispatches
 //! ONNX operations to their specific translators.
 
+use hologram_compiler::ir::{IRBuilder, NodeId};
 use hologram_onnx_core::{OnnxError, Result, SymbolicShape};
 use hologram_onnx_spec::AttributeProto;
-use hologram_compiler::ir::{IRBuilder, NodeId};
 use std::collections::HashMap;
 use tracing::{debug, trace};
 
 use crate::ops::{
-    core::*, activation::*, shape::*, conv::*, norm::*, pool::*, reduction::*, advanced::*,
+    activation::*, advanced::*, conv::*, core::*, norm::*, pool::*, reduction::*, shape::*,
+    unary::*,
 };
 
 /// Trait for operation translators.
@@ -67,7 +68,11 @@ pub fn translate_onnx_op(
     shapes: &HashMap<String, SymbolicShape>,
     builder: &mut IRBuilder,
 ) -> Result<NodeId> {
-    debug!("Translating ONNX op: {} with {} inputs", op_type, inputs.len());
+    debug!(
+        "Translating ONNX op: {} with {} inputs",
+        op_type,
+        inputs.len()
+    );
     trace!("Operation attributes: {} attrs", attrs.len());
 
     // Dispatch to specific translator based on operation type
@@ -81,6 +86,7 @@ pub fn translate_onnx_op(
         "Mul" => translate_mul(inputs, attrs, shapes, builder),
         "Div" => translate_div(inputs, attrs, shapes, builder),
         "Pow" => translate_pow(inputs, attrs, shapes, builder),
+        "Cast" => translate_cast(inputs, attrs, shapes, builder),
 
         // Activation functions
         "Relu" => translate_relu(inputs, attrs, shapes, builder),
@@ -111,6 +117,7 @@ pub fn translate_onnx_op(
         "BatchNormalization" => translate_batch_normalization(inputs, attrs, shapes, builder),
         "LayerNormalization" => translate_layer_normalization(inputs, attrs, shapes, builder),
         "InstanceNormalization" => translate_instance_normalization(inputs, attrs, shapes, builder),
+        "GroupNormalization" => translate_group_normalization(inputs, attrs, shapes, builder),
 
         // Pooling operations
         "MaxPool" => translate_max_pool(inputs, attrs, shapes, builder),
@@ -130,6 +137,14 @@ pub fn translate_onnx_op(
         "LSTM" => translate_lstm(inputs, attrs, shapes, builder),
         "GRU" => translate_gru(inputs, attrs, shapes, builder),
         "RNN" => translate_rnn(inputs, attrs, shapes, builder),
+
+        // Unary operations
+        "Sqrt" => translate_sqrt(inputs, attrs, shapes, builder),
+        "Exp" => translate_exp(inputs, attrs, shapes, builder),
+        "Log" => translate_log(inputs, attrs, shapes, builder),
+        "Neg" => translate_neg(inputs, attrs, shapes, builder),
+        "Abs" => translate_abs(inputs, attrs, shapes, builder),
+        "Reciprocal" => translate_reciprocal(inputs, attrs, shapes, builder),
 
         // Unsupported operation
         _ => {
@@ -175,9 +190,10 @@ pub fn infer_op_output_shape(
         // Core operations
         "MatMul" => {
             if input_shapes.len() != 2 {
-                return Err(OnnxError::ShapeInferenceError(
-                    format!("MatMul expects 2 inputs, got {}", input_shapes.len())
-                ));
+                return Err(OnnxError::ShapeInferenceError(format!(
+                    "MatMul expects 2 inputs, got {}",
+                    input_shapes.len()
+                )));
             }
             input_shapes[0].infer_matmul(input_shapes[1])
         }
@@ -186,9 +202,10 @@ pub fn infer_op_output_shape(
             // Gemm: Y = alpha * A @ B + beta * C
             // Output shape is same as MatMul(A, B)
             if input_shapes.len() < 2 {
-                return Err(OnnxError::ShapeInferenceError(
-                    format!("Gemm expects at least 2 inputs, got {}", input_shapes.len())
-                ));
+                return Err(OnnxError::ShapeInferenceError(format!(
+                    "Gemm expects at least 2 inputs, got {}",
+                    input_shapes.len()
+                )));
             }
             input_shapes[0].infer_matmul(input_shapes[1])
         }
@@ -196,9 +213,11 @@ pub fn infer_op_output_shape(
         // Binary operations (broadcasting)
         "Add" | "Sub" | "Mul" | "Div" | "Pow" => {
             if input_shapes.len() != 2 {
-                return Err(OnnxError::ShapeInferenceError(
-                    format!("{} expects 2 inputs, got {}", op_type, input_shapes.len())
-                ));
+                return Err(OnnxError::ShapeInferenceError(format!(
+                    "{} expects 2 inputs, got {}",
+                    op_type,
+                    input_shapes.len()
+                )));
             }
             input_shapes[0].infer_binary_op(input_shapes[1])
         }
@@ -206,9 +225,10 @@ pub fn infer_op_output_shape(
         // Unary operations (shape unchanged)
         "Relu" | "Sigmoid" | "Tanh" => {
             if input_shapes.is_empty() {
-                return Err(OnnxError::ShapeInferenceError(
-                    format!("{} expects 1 input, got 0", op_type)
-                ));
+                return Err(OnnxError::ShapeInferenceError(format!(
+                    "{} expects 1 input, got 0",
+                    op_type
+                )));
             }
             Ok(input_shapes[0].clone())
         }
@@ -217,7 +237,7 @@ pub fn infer_op_output_shape(
             // Softmax output shape same as input
             if input_shapes.is_empty() {
                 return Err(OnnxError::ShapeInferenceError(
-                    "Softmax expects 1 input, got 0".to_string()
+                    "Softmax expects 1 input, got 0".to_string(),
                 ));
             }
             Ok(input_shapes[0].clone())
@@ -226,13 +246,17 @@ pub fn infer_op_output_shape(
         "Transpose" => {
             if input_shapes.is_empty() {
                 return Err(OnnxError::ShapeInferenceError(
-                    "Transpose expects 1 input, got 0".to_string()
+                    "Transpose expects 1 input, got 0".to_string(),
                 ));
             }
             // Parse perm attribute
             use crate::utils::parse_attr_ints;
             let perm = parse_attr_ints(attrs, "perm", vec![])?;
-            let perm_opt = if perm.is_empty() { None } else { Some(perm.as_slice()) };
+            let perm_opt = if perm.is_empty() {
+                None
+            } else {
+                Some(perm.as_slice())
+            };
             input_shapes[0].infer_transpose(perm_opt)
         }
 
@@ -240,28 +264,29 @@ pub fn infer_op_output_shape(
             // Reshape output shape is specified in attributes or second input
             // For now, return error as we need more context
             Err(OnnxError::ShapeInferenceError(
-                "Reshape shape inference requires target shape".to_string()
+                "Reshape shape inference requires target shape".to_string(),
             ))
         }
 
         "Squeeze" | "Unsqueeze" => {
             // These modify dimensions, but we need attribute context
-            Err(OnnxError::ShapeInferenceError(
-                format!("{} shape inference requires axes attribute", op_type)
-            ))
+            Err(OnnxError::ShapeInferenceError(format!(
+                "{} shape inference requires axes attribute",
+                op_type
+            )))
         }
 
         "Concat" => {
             // Concat needs axis and all input shapes
             Err(OnnxError::ShapeInferenceError(
-                "Concat shape inference requires axis and all inputs".to_string()
+                "Concat shape inference requires axis and all inputs".to_string(),
             ))
         }
 
         "Split" => {
             // Split produces multiple outputs
             Err(OnnxError::ShapeInferenceError(
-                "Split has multiple outputs, use operation-specific inference".to_string()
+                "Split has multiple outputs, use operation-specific inference".to_string(),
             ))
         }
 
@@ -279,13 +304,12 @@ mod tests {
         let shape1 = SymbolicShape::concrete(vec![2, 3, 4]);
         let shape2 = SymbolicShape::concrete(vec![2, 3, 4]);
 
-        let result = infer_op_output_shape(
-            "Add",
-            &[&shape1, &shape2],
-            &[],
-        ).unwrap();
+        let result = infer_op_output_shape("Add", &[&shape1, &shape2], &[]).unwrap();
 
-        assert_eq!(result.dims(), &[Dim::Concrete(2), Dim::Concrete(3), Dim::Concrete(4)]);
+        assert_eq!(
+            result.dims(),
+            &[Dim::Concrete(2), Dim::Concrete(3), Dim::Concrete(4)]
+        );
     }
 
     #[test]
@@ -293,11 +317,7 @@ mod tests {
         let shape1 = SymbolicShape::concrete(vec![2, 3]);
         let shape2 = SymbolicShape::concrete(vec![3, 4]);
 
-        let result = infer_op_output_shape(
-            "MatMul",
-            &[&shape1, &shape2],
-            &[],
-        ).unwrap();
+        let result = infer_op_output_shape("MatMul", &[&shape1, &shape2], &[]).unwrap();
 
         assert_eq!(result.dims(), &[Dim::Concrete(2), Dim::Concrete(4)]);
     }
@@ -307,11 +327,7 @@ mod tests {
         let shape = SymbolicShape::concrete(vec![1, 2, 3, 4]);
 
         for op in &["Relu", "Sigmoid", "Tanh"] {
-            let result = infer_op_output_shape(
-                op,
-                &[&shape],
-                &[],
-            ).unwrap();
+            let result = infer_op_output_shape(op, &[&shape], &[]).unwrap();
 
             assert_eq!(result.dims(), shape.dims());
         }
@@ -322,11 +338,7 @@ mod tests {
         let shape1 = SymbolicShape::symbolic(vec!["batch", "seq_len", "hidden"]);
         let shape2 = SymbolicShape::concrete(vec![1, 1, 512]);
 
-        let result = infer_op_output_shape(
-            "Add",
-            &[&shape1, &shape2],
-            &[],
-        ).unwrap();
+        let result = infer_op_output_shape("Add", &[&shape1, &shape2], &[]).unwrap();
 
         // Result should preserve symbolic dimensions
         assert!(matches!(result.dims()[0], Dim::Var(_)));
@@ -336,14 +348,13 @@ mod tests {
     fn test_unsupported_op() {
         let shape = SymbolicShape::concrete(vec![1, 2, 3]);
 
-        let result = infer_op_output_shape(
-            "UnsupportedOp",
-            &[&shape],
-            &[],
-        );
+        let result = infer_op_output_shape("UnsupportedOp", &[&shape], &[]);
 
         assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), OnnxError::UnsupportedOp { .. }));
+        assert!(matches!(
+            result.unwrap_err(),
+            OnnxError::UnsupportedOp { .. }
+        ));
     }
 
     #[test]

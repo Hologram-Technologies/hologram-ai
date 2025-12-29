@@ -12,8 +12,7 @@ use std::path::PathBuf;
 use hologram_compiler::ir::IRBuilder;
 use hologram_compiler::shapes::Dim;
 use hologram_onnx_core::{
-    parse_model, validate_model, extract_opset_version,
-    OnnxConfig, SymbolicShape,
+    OnnxConfig, SymbolicShape, extract_opset_version, parse_model, validate_model,
 };
 use hologram_onnx_ops::translate_onnx_op;
 use tempfile::TempDir;
@@ -63,10 +62,12 @@ fn test_mnist_parsing() {
     assert!(!graph.input.is_empty(), "Graph should have inputs");
     assert!(!graph.output.is_empty(), "Graph should have outputs");
 
-    eprintln!("MNIST parsed: {} nodes, {} inputs, {} outputs",
+    eprintln!(
+        "MNIST parsed: {} nodes, {} inputs, {} outputs",
         graph.node.len(),
         graph.input.len(),
-        graph.output.len());
+        graph.output.len()
+    );
 }
 
 /// Test MNIST model validation passes.
@@ -80,7 +81,11 @@ fn test_mnist_validation() {
     let model = parse_model(&onnx_bytes).expect("Failed to parse MNIST model");
     let result = validate_model(&model);
 
-    assert!(result.is_ok(), "MNIST validation should pass: {:?}", result.err());
+    assert!(
+        result.is_ok(),
+        "MNIST validation should pass: {:?}",
+        result.err()
+    );
 }
 
 /// Test MNIST opset version extraction.
@@ -95,7 +100,11 @@ fn test_mnist_opset_version() {
     let opset = extract_opset_version(&model);
 
     // MNIST-12 should be opset 12 or higher
-    assert!(opset >= 8, "MNIST opset should be at least 8, got {}", opset);
+    assert!(
+        opset >= 8,
+        "MNIST opset should be at least 8, got {}",
+        opset
+    );
     eprintln!("MNIST opset version: {}", opset);
 }
 
@@ -116,7 +125,10 @@ fn test_mnist_symbolic_batch_size() {
 
     // MNIST input should be [batch, 1, 28, 28] or similar
     let dims = shape.dims();
-    assert!(dims.len() >= 3, "MNIST input should have at least 3 dimensions");
+    assert!(
+        dims.len() >= 3,
+        "MNIST input should have at least 3 dimensions"
+    );
 
     // First dimension should be batch (often symbolic)
     match &dims[0] {
@@ -177,13 +189,19 @@ fn test_mnist_operation_translation() {
         }
     }
 
-    eprintln!("MNIST operations: {} supported, {} unsupported", supported, unsupported);
+    eprintln!(
+        "MNIST operations: {} supported, {} unsupported",
+        supported, unsupported
+    );
     if !unsupported_ops.is_empty() {
         eprintln!("Unsupported ops: {:?}", unsupported_ops);
     }
 
     // MNIST uses basic operations that should all be supported
-    assert!(supported > 0, "At least some MNIST operations should be supported");
+    assert!(
+        supported > 0,
+        "At least some MNIST operations should be supported"
+    );
 }
 
 /// Test MNIST output shape inference.
@@ -244,15 +262,22 @@ fn test_mnist_variable_batch_sizes() {
             }
         }
 
-        let concrete_shape = SymbolicShape::new(concrete_dims.into_iter().map(|d| {
-            match d {
-                Dim::Concrete(n) => hologram_onnx_core::Dim::Concrete(n),
-                Dim::Var(name) => hologram_onnx_core::Dim::Var(name),
-                Dim::Expr(expr) => hologram_onnx_core::Dim::Expr(expr),
-            }
-        }).collect());
+        let concrete_shape = SymbolicShape::new(
+            concrete_dims
+                .into_iter()
+                .map(|d| match d {
+                    Dim::Concrete(n) => hologram_onnx_core::Dim::Concrete(n),
+                    Dim::Var(name) => hologram_onnx_core::Dim::Var(name),
+                    Dim::Expr(expr) => hologram_onnx_core::Dim::Expr(expr),
+                })
+                .collect(),
+        );
 
-        eprintln!("MNIST with batch size {}: {:?}", batch_size, concrete_shape.dims());
+        eprintln!(
+            "MNIST with batch size {}: {:?}",
+            batch_size,
+            concrete_shape.dims()
+        );
     }
 }
 
@@ -291,7 +316,11 @@ fn test_mnist_full_compilation() {
     assert!(!holo_content.is_empty(), ".holo file should not be empty");
 
     // Verify magic header
-    assert_eq!(&holo_content[0..4], b"HOLO", "Should have HOLO magic header");
+    assert_eq!(
+        &holo_content[0..4],
+        b"HOLO",
+        "Should have HOLO magic header"
+    );
 
     eprintln!("MNIST compiled successfully: {} bytes", holo_content.len());
 }
@@ -333,7 +362,10 @@ fn test_mnist_compilation_with_config() {
         .status()
         .expect("Failed to run hologram-onnx compile");
 
-    assert!(status.success(), "MNIST compilation with config should succeed");
+    assert!(
+        status.success(),
+        "MNIST compilation with config should succeed"
+    );
 }
 
 /// Test MNIST compilation produces deterministic output.
@@ -349,23 +381,25 @@ fn test_mnist_deterministic_compilation() {
     use std::process::Command;
 
     // Compile twice
-    let outputs: Vec<_> = (0..2).map(|i| {
-        let output = temp_dir.path().join(format!("mnist_compile_{}", i));
+    let outputs: Vec<_> = (0..2)
+        .map(|i| {
+            let output = temp_dir.path().join(format!("mnist_compile_{}", i));
 
-        let status = Command::new(env!("CARGO_BIN_EXE_hologram-onnx"))
-            .args([
-                "compile",
-                mnist_model_path().to_str().unwrap(),
-                "-o",
-                output.to_str().unwrap(),
-            ])
-            .status()
-            .expect("Failed to run hologram-onnx compile");
+            let status = Command::new(env!("CARGO_BIN_EXE_hologram-onnx"))
+                .args([
+                    "compile",
+                    mnist_model_path().to_str().unwrap(),
+                    "-o",
+                    output.to_str().unwrap(),
+                ])
+                .status()
+                .expect("Failed to run hologram-onnx compile");
 
-        assert!(status.success(), "Compilation {} should succeed", i);
+            assert!(status.success(), "Compilation {} should succeed", i);
 
-        fs::read(output.with_extension("holo")).expect("Should read .holo file")
-    }).collect();
+            fs::read(output.with_extension("holo")).expect("Should read .holo file")
+        })
+        .collect();
 
     // Verify both compilations produce same size output
     assert_eq!(
@@ -374,5 +408,8 @@ fn test_mnist_deterministic_compilation() {
         "Deterministic compilation should produce same size output"
     );
 
-    eprintln!("MNIST deterministic compilation verified: {} bytes", outputs[0].len());
+    eprintln!(
+        "MNIST deterministic compilation verified: {} bytes",
+        outputs[0].len()
+    );
 }

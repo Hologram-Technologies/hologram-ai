@@ -13,8 +13,7 @@ use std::path::PathBuf;
 use hologram_compiler::ir::IRBuilder;
 use hologram_compiler::shapes::Dim;
 use hologram_onnx_core::{
-    parse_model, validate_model, extract_opset_version,
-    OnnxConfig, SymbolicShape,
+    OnnxConfig, SymbolicShape, extract_opset_version, parse_model, validate_model,
 };
 use hologram_onnx_ops::translate_onnx_op;
 use tempfile::TempDir;
@@ -25,8 +24,7 @@ use tempfile::TempDir;
 
 /// Get path to ResNet50 model.
 fn resnet_model_path() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("models/resnet50-v1-7.onnx")
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("models/resnet50-v1-7.onnx")
 }
 
 /// Check if ResNet50 model exists.
@@ -52,7 +50,10 @@ fn load_resnet_model() -> Option<Vec<u8>> {
 #[test]
 fn test_resnet_parsing() {
     let Some(onnx_bytes) = load_resnet_model() else {
-        eprintln!("Skipping test_resnet_parsing: ResNet model not found at {:?}", resnet_model_path());
+        eprintln!(
+            "Skipping test_resnet_parsing: ResNet model not found at {:?}",
+            resnet_model_path()
+        );
         return;
     };
 
@@ -60,14 +61,20 @@ fn test_resnet_parsing() {
 
     // Verify basic structure
     let graph = model.graph.as_ref().expect("Model should have graph");
-    assert!(graph.node.len() > 100, "ResNet should have many nodes (got {})", graph.node.len());
+    assert!(
+        graph.node.len() > 100,
+        "ResNet should have many nodes (got {})",
+        graph.node.len()
+    );
     assert!(!graph.input.is_empty(), "Graph should have inputs");
     assert!(!graph.output.is_empty(), "Graph should have outputs");
 
     // ResNet50 has ~175 nodes
-    eprintln!("ResNet parsed: {} nodes, {} initializers",
+    eprintln!(
+        "ResNet parsed: {} nodes, {} initializers",
         graph.node.len(),
-        graph.initializer.len());
+        graph.initializer.len()
+    );
 }
 
 /// Test ResNet50 model validation passes.
@@ -81,7 +88,11 @@ fn test_resnet_validation() {
     let model = parse_model(&onnx_bytes).expect("Failed to parse ResNet model");
     let result = validate_model(&model);
 
-    assert!(result.is_ok(), "ResNet validation should pass: {:?}", result.err());
+    assert!(
+        result.is_ok(),
+        "ResNet validation should pass: {:?}",
+        result.err()
+    );
 }
 
 /// Test ResNet50 opset version extraction.
@@ -96,7 +107,11 @@ fn test_resnet_opset_version() {
     let opset = extract_opset_version(&model);
 
     // ResNet50-v1-7 is opset 7 or higher
-    assert!(opset >= 7, "ResNet opset should be at least 7, got {}", opset);
+    assert!(
+        opset >= 7,
+        "ResNet opset should be at least 7, got {}",
+        opset
+    );
     eprintln!("ResNet opset version: {}", opset);
 }
 
@@ -170,13 +185,15 @@ fn test_resnet_conv2d_count() {
     let graph = model.graph.as_ref().expect("Model should have graph");
 
     // Count Conv operations
-    let conv_count = graph.node.iter()
-        .filter(|n| n.op_type == "Conv")
-        .count();
+    let conv_count = graph.node.iter().filter(|n| n.op_type == "Conv").count();
 
     // ResNet50 has 53 Conv layers
     eprintln!("ResNet Conv count: {}", conv_count);
-    assert!(conv_count >= 50, "ResNet should have ~53 Conv layers, got {}", conv_count);
+    assert!(
+        conv_count >= 50,
+        "ResNet should have ~53 Conv layers, got {}",
+        conv_count
+    );
 }
 
 /// Test ResNet50 residual connection (Add) count.
@@ -191,13 +208,15 @@ fn test_resnet_residual_connections() {
     let graph = model.graph.as_ref().expect("Model should have graph");
 
     // Count Add operations (residual connections)
-    let add_count = graph.node.iter()
-        .filter(|n| n.op_type == "Add")
-        .count();
+    let add_count = graph.node.iter().filter(|n| n.op_type == "Add").count();
 
     // ResNet50 has 16 residual blocks
     eprintln!("ResNet Add (residual) count: {}", add_count);
-    assert!(add_count >= 16, "ResNet should have ~16 residual connections, got {}", add_count);
+    assert!(
+        add_count >= 16,
+        "ResNet should have ~16 residual connections, got {}",
+        add_count
+    );
 }
 
 /// Test ResNet50 operation translation coverage.
@@ -223,13 +242,7 @@ fn test_resnet_operation_coverage() {
         *op_counts.entry(node.op_type.clone()).or_insert(0) += 1;
 
         // Test if operation type is supported
-        let result = translate_onnx_op(
-            &node.op_type,
-            &[],
-            &node.attribute,
-            &shapes,
-            &mut builder,
-        );
+        let result = translate_onnx_op(&node.op_type, &[], &node.attribute, &shapes, &mut builder);
 
         match &result {
             Err(hologram_onnx_core::OnnxError::UnsupportedOp { op_type, .. }) => {
@@ -257,7 +270,10 @@ fn test_resnet_operation_coverage() {
     // Most ResNet operations should be supported
     let support_ratio = supported_count as f64 / graph.node.len() as f64;
     eprintln!("Support ratio: {:.1}%", support_ratio * 100.0);
-    assert!(support_ratio > 0.9, "At least 90% of ResNet operations should be supported");
+    assert!(
+        support_ratio > 0.9,
+        "At least 90% of ResNet operations should be supported"
+    );
 }
 
 /// Test ResNet50 with variable batch sizes.
@@ -290,15 +306,22 @@ fn test_resnet_variable_batch_sizes() {
             }
         }
 
-        let concrete_shape = SymbolicShape::new(concrete_dims.into_iter().map(|d| {
-            match d {
-                Dim::Concrete(n) => hologram_onnx_core::Dim::Concrete(n),
-                Dim::Var(name) => hologram_onnx_core::Dim::Var(name),
-                Dim::Expr(expr) => hologram_onnx_core::Dim::Expr(expr),
-            }
-        }).collect());
+        let concrete_shape = SymbolicShape::new(
+            concrete_dims
+                .into_iter()
+                .map(|d| match d {
+                    Dim::Concrete(n) => hologram_onnx_core::Dim::Concrete(n),
+                    Dim::Var(name) => hologram_onnx_core::Dim::Var(name),
+                    Dim::Expr(expr) => hologram_onnx_core::Dim::Expr(expr),
+                })
+                .collect(),
+        );
 
-        eprintln!("ResNet with batch size {}: {:?}", batch_size, concrete_shape.dims());
+        eprintln!(
+            "ResNet with batch size {}: {:?}",
+            batch_size,
+            concrete_shape.dims()
+        );
     }
 }
 
@@ -333,7 +356,11 @@ fn test_resnet_full_compilation() {
 
     let holo_content = fs::read(&holo_path).expect("Should read .holo file");
     assert!(!holo_content.is_empty(), ".holo file should not be empty");
-    assert_eq!(&holo_content[0..4], b"HOLO", "Should have HOLO magic header");
+    assert_eq!(
+        &holo_content[0..4],
+        b"HOLO",
+        "Should have HOLO magic header"
+    );
 
     eprintln!("ResNet compiled successfully: {} bytes", holo_content.len());
 }
@@ -364,10 +391,16 @@ fn test_resnet_compilation_with_partitioning() {
         .status()
         .expect("Failed to run hologram-onnx compile");
 
-    assert!(status.success(), "ResNet compilation with partitioning should succeed");
+    assert!(
+        status.success(),
+        "ResNet compilation with partitioning should succeed"
+    );
 
     let holo_path = output.with_extension("holo");
-    assert!(holo_path.exists(), ".holo file should be created with partitioning");
+    assert!(
+        holo_path.exists(),
+        ".holo file should be created with partitioning"
+    );
 
     eprintln!("ResNet compiled with partitioning successfully");
 }
@@ -385,7 +418,7 @@ fn test_resnet_conv2d_decomposition() {
         weight_threshold: 4096,
         enable_partitioning: false,
         partition_size: 500,
-        decompose_conv2d: true,  // Enable Conv2D → Im2col + GEMM
+        decompose_conv2d: true, // Enable Conv2D → Im2col + GEMM
         decompose_pooling: true,
         memory_budget: None,
     };
@@ -408,7 +441,10 @@ fn test_resnet_conv2d_decomposition() {
         .status()
         .expect("Failed to run hologram-onnx compile");
 
-    assert!(status.success(), "ResNet compilation with decomposition should succeed");
+    assert!(
+        status.success(),
+        "ResNet compilation with decomposition should succeed"
+    );
 
     let holo_path = output.with_extension("holo");
     let holo_content = fs::read(&holo_path).expect("Should read .holo file");
@@ -433,7 +469,9 @@ fn test_resnet_weight_extraction() {
     let weight_count = graph.initializer.len();
 
     // Calculate total weight size
-    let total_weight_bytes: usize = graph.initializer.iter()
+    let total_weight_bytes: usize = graph
+        .initializer
+        .iter()
         .map(|init| {
             if !init.raw_data.is_empty() {
                 init.raw_data.len()
@@ -450,12 +488,17 @@ fn test_resnet_weight_extraction() {
         })
         .sum();
 
-    eprintln!("ResNet weights: {} initializers, {} MB total",
+    eprintln!(
+        "ResNet weights: {} initializers, {} MB total",
         weight_count,
-        total_weight_bytes / (1024 * 1024));
+        total_weight_bytes / (1024 * 1024)
+    );
 
     // ResNet50 has ~25M parameters * 4 bytes = ~97MB
-    assert!(total_weight_bytes > 90_000_000, "ResNet should have ~97MB of weights");
+    assert!(
+        total_weight_bytes > 90_000_000,
+        "ResNet should have ~97MB of weights"
+    );
 }
 
 /// Test ResNet50 ISA optimization markers (verification that translation prepares for ISA).
@@ -495,9 +538,16 @@ fn test_resnet_isa_optimization_readiness() {
     }
 
     let isa_ratio = isa_benefiting_ops as f64 / graph.node.len() as f64;
-    eprintln!("ResNet ISA-optimizable operations: {} / {} ({:.1}%)",
-        isa_benefiting_ops, graph.node.len(), isa_ratio * 100.0);
+    eprintln!(
+        "ResNet ISA-optimizable operations: {} / {} ({:.1}%)",
+        isa_benefiting_ops,
+        graph.node.len(),
+        isa_ratio * 100.0
+    );
 
     // Most ResNet operations should benefit from ISA
-    assert!(isa_ratio > 0.8, "At least 80% of ResNet ops should benefit from ISA");
+    assert!(
+        isa_ratio > 0.8,
+        "At least 80% of ResNet ops should benefit from ISA"
+    );
 }

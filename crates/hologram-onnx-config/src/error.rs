@@ -99,7 +99,9 @@ pub enum ConfigError {
 impl ConfigError {
     /// Create a missing field error.
     pub fn missing_field(field: impl Into<String>) -> Self {
-        Self::MissingField { field: field.into() }
+        Self::MissingField {
+            field: field.into(),
+        }
     }
 
     /// Create an invalid value error.
@@ -187,7 +189,8 @@ mod tests {
 
     #[test]
     fn test_invalid_tensor_shape_error() {
-        let err = ConfigError::invalid_tensor_shape("image", "[1, 3, 224, 224]", "[1, 3, 512, 512]");
+        let err =
+            ConfigError::invalid_tensor_shape("image", "[1, 3, 224, 224]", "[1, 3, 512, 512]");
         assert!(err.to_string().contains("image"));
         assert!(err.to_string().contains("224"));
         assert!(err.to_string().contains("512"));

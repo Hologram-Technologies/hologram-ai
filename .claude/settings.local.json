@@ -29,7 +29,14 @@
       "Bash(./target/release/hologram-onnx:*)",
       "Bash(mkdir:*)",
       "Bash(/usr/bin/time:*)",
-      "Bash(time ./target/release/hologram-onnx compile:*)"
+      "Bash(time ./target/release/hologram-onnx compile:*)",
+      "Bash(wc:*)",
+      "Bash(gh workflow:*)",
+      "Bash(gh run list:*)",
+      "Bash(gh run view:*)",
+      "Bash(gh run watch:*)",
+      "Bash(gh run:*)",
+      "Bash(cargo fmt:*)"
     ]
   }
 }

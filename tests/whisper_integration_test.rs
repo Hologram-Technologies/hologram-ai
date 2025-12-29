@@ -14,8 +14,7 @@ use std::path::PathBuf;
 use hologram_compiler::ir::IRBuilder;
 use hologram_compiler::shapes::Dim;
 use hologram_onnx_core::{
-    parse_model, validate_model, extract_opset_version,
-    OnnxConfig, SymbolicShape,
+    OnnxConfig, SymbolicShape, extract_opset_version, parse_model, validate_model,
 };
 use hologram_onnx_ops::translate_onnx_op;
 use tempfile::TempDir;
@@ -76,9 +75,11 @@ fn test_whisper_parsing() {
     let graph = model.graph.as_ref().expect("Model should have graph");
     assert!(!graph.node.is_empty(), "Graph should have nodes");
 
-    eprintln!("Whisper parsed: {} nodes, {} initializers",
+    eprintln!(
+        "Whisper parsed: {} nodes, {} initializers",
         graph.node.len(),
-        graph.initializer.len());
+        graph.initializer.len()
+    );
 }
 
 /// Test Whisper model validation.
@@ -92,7 +93,11 @@ fn test_whisper_validation() {
     let model = parse_model(&onnx_bytes).expect("Failed to parse Whisper model");
     let result = validate_model(&model);
 
-    assert!(result.is_ok(), "Whisper validation should pass: {:?}", result.err());
+    assert!(
+        result.is_ok(),
+        "Whisper validation should pass: {:?}",
+        result.err()
+    );
 }
 
 /// Test Whisper opset version.
@@ -160,7 +165,9 @@ fn test_whisper_variable_audio_length() {
     let graph = model.graph.as_ref().expect("Model should have graph");
 
     // Find audio input
-    let audio_input = graph.input.iter()
+    let audio_input = graph
+        .input
+        .iter()
         .filter(|i| !graph.initializer.iter().any(|init| init.name == i.name))
         .find_map(|i| SymbolicShape::from_value_info(i).ok());
 
@@ -190,15 +197,22 @@ fn test_whisper_variable_audio_length() {
             }
         }
 
-        let concrete_shape = SymbolicShape::new(concrete_dims.into_iter().map(|d| {
-            match d {
-                Dim::Concrete(n) => hologram_onnx_core::Dim::Concrete(n),
-                Dim::Var(name) => hologram_onnx_core::Dim::Var(name),
-                Dim::Expr(expr) => hologram_onnx_core::Dim::Expr(expr),
-            }
-        }).collect());
+        let concrete_shape = SymbolicShape::new(
+            concrete_dims
+                .into_iter()
+                .map(|d| match d {
+                    Dim::Concrete(n) => hologram_onnx_core::Dim::Concrete(n),
+                    Dim::Var(name) => hologram_onnx_core::Dim::Var(name),
+                    Dim::Expr(expr) => hologram_onnx_core::Dim::Expr(expr),
+                })
+                .collect(),
+        );
 
-        eprintln!("Whisper with {} audio frames: {:?}", frames, concrete_shape.dims());
+        eprintln!(
+            "Whisper with {} audio frames: {:?}",
+            frames,
+            concrete_shape.dims()
+        );
     }
 }
 
@@ -223,13 +237,7 @@ fn test_whisper_operation_coverage() {
     for node in &graph.node {
         *op_counts.entry(node.op_type.clone()).or_insert(0) += 1;
 
-        let result = translate_onnx_op(
-            &node.op_type,
-            &[],
-            &node.attribute,
-            &shapes,
-            &mut builder,
-        );
+        let result = translate_onnx_op(&node.op_type, &[], &node.attribute, &shapes, &mut builder);
 
         match &result {
             Err(hologram_onnx_core::OnnxError::UnsupportedOp { op_type, .. }) => {
@@ -270,9 +278,7 @@ fn test_whisper_conv1d_operations() {
     let graph = model.graph.as_ref().expect("Model should have graph");
 
     // Count Conv operations
-    let conv_count = graph.node.iter()
-        .filter(|n| n.op_type == "Conv")
-        .count();
+    let conv_count = graph.node.iter().filter(|n| n.op_type == "Conv").count();
 
     eprintln!("Whisper Conv operations: {}", conv_count);
 
@@ -335,9 +341,16 @@ fn test_whisper_full_compilation() {
 
     let holo_content = fs::read(&holo_path).expect("Should read .holo file");
     assert!(!holo_content.is_empty(), ".holo file should not be empty");
-    assert_eq!(&holo_content[0..4], b"HOLO", "Should have HOLO magic header");
+    assert_eq!(
+        &holo_content[0..4],
+        b"HOLO",
+        "Should have HOLO magic header"
+    );
 
-    eprintln!("Whisper compiled successfully: {} bytes", holo_content.len());
+    eprintln!(
+        "Whisper compiled successfully: {} bytes",
+        holo_content.len()
+    );
 }
 
 /// Test Whisper compilation with partitioning.
@@ -346,7 +359,9 @@ fn test_whisper_compilation_with_partitioning() {
     let whisper_path = match find_whisper_model() {
         Some(path) => path,
         None => {
-            eprintln!("Skipping test_whisper_compilation_with_partitioning: Whisper model not found");
+            eprintln!(
+                "Skipping test_whisper_compilation_with_partitioning: Whisper model not found"
+            );
             return;
         }
     };
@@ -369,7 +384,10 @@ fn test_whisper_compilation_with_partitioning() {
         .status()
         .expect("Failed to run hologram-onnx compile");
 
-    assert!(status.success(), "Whisper compilation with partitioning should succeed");
+    assert!(
+        status.success(),
+        "Whisper compilation with partitioning should succeed"
+    );
 
     let holo_path = output.with_extension("holo");
     assert!(holo_path.exists(), ".holo file should be created");
@@ -390,7 +408,9 @@ fn test_whisper_weight_extraction() {
 
     let weight_count = graph.initializer.len();
 
-    let total_weight_bytes: usize = graph.initializer.iter()
+    let total_weight_bytes: usize = graph
+        .initializer
+        .iter()
         .map(|init| {
             if !init.raw_data.is_empty() {
                 init.raw_data.len()
@@ -406,9 +426,11 @@ fn test_whisper_weight_extraction() {
         })
         .sum();
 
-    eprintln!("Whisper weights: {} initializers, {} MB total",
+    eprintln!(
+        "Whisper weights: {} initializers, {} MB total",
         weight_count,
-        total_weight_bytes / (1024 * 1024));
+        total_weight_bytes / (1024 * 1024)
+    );
 
     // Whisper-tiny has ~39M parameters (~156MB float32)
     // Whisper-base has ~74M parameters (~296MB float32)

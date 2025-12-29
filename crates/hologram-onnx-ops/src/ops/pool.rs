@@ -12,10 +12,10 @@
 //! - **LOOP instructions**: Sliding window operations use O(1) space
 //! - **SIMD vectorization**: Reduction operations use SIMD where applicable
 
-use hologram_onnx_core::{OnnxError, Result, SymbolicShape};
-use hologram_onnx_spec::AttributeProto;
 use hologram_compiler::ir::{IRBuilder, NodeId};
 use hologram_compiler::shapes::Dim;
+use hologram_onnx_core::{OnnxError, Result, SymbolicShape};
+use hologram_onnx_spec::AttributeProto;
 use std::collections::HashMap;
 use tracing::{debug, trace};
 
@@ -53,7 +53,7 @@ pub fn translate_max_pool(
 ) -> Result<NodeId> {
     if inputs.is_empty() {
         return Err(OnnxError::InvalidModel(
-            "MaxPool expects 1 input, got 0".to_string()
+            "MaxPool expects 1 input, got 0".to_string(),
         ));
     }
 
@@ -120,7 +120,7 @@ pub fn translate_average_pool(
 ) -> Result<NodeId> {
     if inputs.is_empty() {
         return Err(OnnxError::InvalidModel(
-            "AveragePool expects 1 input, got 0".to_string()
+            "AveragePool expects 1 input, got 0".to_string(),
         ));
     }
 
@@ -187,7 +187,7 @@ pub fn translate_global_average_pool(
 ) -> Result<NodeId> {
     if inputs.is_empty() {
         return Err(OnnxError::InvalidModel(
-            "GlobalAveragePool expects 1 input, got 0".to_string()
+            "GlobalAveragePool expects 1 input, got 0".to_string(),
         ));
     }
 
@@ -227,9 +227,10 @@ pub fn infer_pool_output_shape(
 
     let input_dims = input_shape.dims();
     if input_dims.len() != 4 {
-        return Err(OnnxError::ShapeInferenceError(
-            format!("Pooling input must be 4D, got {}D", input_dims.len())
-        ));
+        return Err(OnnxError::ShapeInferenceError(format!(
+            "Pooling input must be 4D, got {}D",
+            input_dims.len()
+        )));
     }
 
     // Preserve batch and channel dimensions
@@ -264,9 +265,10 @@ fn calculate_pool_output_dim(
     match input_dim {
         Dim::Concrete(i) => {
             if *i + padding < kernel {
-                return Err(OnnxError::ShapeInferenceError(
-                    format!("Input size {} too small for kernel {}", i, kernel)
-                ));
+                return Err(OnnxError::ShapeInferenceError(format!(
+                    "Input size {} too small for kernel {}",
+                    i, kernel
+                )));
             }
             let output = (*i + padding - kernel) / stride + 1;
             Ok(Dim::Concrete(output))
@@ -281,7 +283,7 @@ fn calculate_pool_output_dim(
         Dim::Expr(_) => {
             // Expression dimension - create symbolic output
             Err(OnnxError::ShapeInferenceError(
-                "Pool shape inference for expression dimensions not yet implemented".to_string()
+                "Pool shape inference for expression dimensions not yet implemented".to_string(),
             ))
         }
     }
@@ -340,7 +342,10 @@ mod tests {
 
         let result = translate_max_pool(&vec![input], &[], &HashMap::new(), &mut builder);
         assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), OnnxError::InvalidAttribute { .. }));
+        assert!(matches!(
+            result.unwrap_err(),
+            OnnxError::InvalidAttribute { .. }
+        ));
     }
 
     #[test]
@@ -384,12 +389,8 @@ mod tests {
         let mut builder = make_builder();
         let input = builder.add_input("X", f32_tensor(&[1, 2048, 7, 7]));
 
-        let result = translate_global_average_pool(
-            &vec![input],
-            &[],
-            &HashMap::new(),
-            &mut builder
-        );
+        let result =
+            translate_global_average_pool(&vec![input], &[], &HashMap::new(), &mut builder);
         assert!(result.is_ok());
     }
 

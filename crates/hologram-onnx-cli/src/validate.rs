@@ -7,7 +7,7 @@
 //! - Graph integrity
 
 use anyhow::{Context, Result};
-use hologram_onnx_core::{parse_model, validate_model, extract_opset_version};
+use hologram_onnx_core::{extract_opset_version, parse_model, validate_model};
 use std::collections::HashSet;
 use std::fs;
 use std::path::Path;
@@ -16,22 +16,62 @@ use tracing::{info, warn};
 /// List of supported ONNX operations
 const SUPPORTED_OPS: &[&str] = &[
     // Core operations
-    "MatMul", "Gemm", "Add", "Sub", "Mul", "Div", "Pow",
+    "MatMul",
+    "Gemm",
+    "Add",
+    "Sub",
+    "Mul",
+    "Div",
+    "Pow",
+    "Cast",
     // Activation functions
-    "Relu", "Sigmoid", "Tanh", "Softmax",
-    "Gelu", "Swish", "Elu", "Selu",
+    "Relu",
+    "Sigmoid",
+    "Tanh",
+    "Softmax",
+    "Gelu",
+    "Swish",
+    "Elu",
+    "Selu",
     // Shape operations
-    "Reshape", "Transpose", "Squeeze", "Unsqueeze", "Concat", "Split", "Flatten",
+    "Reshape",
+    "Transpose",
+    "Squeeze",
+    "Unsqueeze",
+    "Concat",
+    "Split",
+    "Flatten",
     // Convolution operations
-    "Conv", "ConvTranspose",
+    "Conv",
+    "ConvTranspose",
     // Normalization operations
-    "BatchNormalization", "LayerNormalization", "InstanceNormalization",
+    "BatchNormalization",
+    "LayerNormalization",
+    "InstanceNormalization",
+    "GroupNormalization",
     // Pooling operations
-    "MaxPool", "AveragePool", "GlobalAveragePool",
+    "MaxPool",
+    "AveragePool",
+    "GlobalAveragePool",
     // Reduction operations
-    "ReduceSum", "ReduceMean", "ReduceMax", "ReduceMin", "ReduceProd",
+    "ReduceSum",
+    "ReduceMean",
+    "ReduceMax",
+    "ReduceMin",
+    "ReduceProd",
     // Advanced operations
-    "Attention", "MultiHeadAttention", "LSTM", "GRU", "RNN",
+    "Attention",
+    "MultiHeadAttention",
+    "LSTM",
+    "GRU",
+    "RNN",
+    // Unary operations
+    "Sqrt",
+    "Exp",
+    "Log",
+    "Neg",
+    "Abs",
+    "Reciprocal",
 ];
 
 /// Validate an ONNX model.
@@ -55,15 +95,14 @@ pub fn validate_command(model_path: &Path, check_ops: bool) -> Result<()> {
 
     // Parse model
     info!("Parsing ONNX protobuf...");
-    let model = parse_model(&onnx_bytes)
-        .context("Failed to parse ONNX model - invalid protobuf format")?;
+    let model =
+        parse_model(&onnx_bytes).context("Failed to parse ONNX model - invalid protobuf format")?;
 
     println!("✓ Protobuf structure is valid");
 
     // Validate model structure
     info!("Validating model structure...");
-    validate_model(&model)
-        .context("Model validation failed")?;
+    validate_model(&model).context("Model validation failed")?;
 
     println!("✓ Model structure is valid");
 
@@ -72,8 +111,7 @@ pub fn validate_command(model_path: &Path, check_ops: bool) -> Result<()> {
     println!("✓ Opset version: {}", opset_version);
 
     // Check graph
-    let graph = model.graph.as_ref()
-        .context("Model has no graph")?;
+    let graph = model.graph.as_ref().context("Model has no graph")?;
 
     println!("✓ Graph: {} ({} nodes)", graph.name, graph.node.len());
 
@@ -109,12 +147,22 @@ pub fn validate_command(model_path: &Path, check_ops: bool) -> Result<()> {
             for op in ops {
                 println!("  - {}", op);
             }
-            println!("\n✗ Model contains {} unsupported operation type(s)", unsupported_ops.len());
+            println!(
+                "\n✗ Model contains {} unsupported operation type(s)",
+                unsupported_ops.len()
+            );
             println!("  Compilation may fail or produce incomplete results.");
             anyhow::bail!("Model contains unsupported operations");
         } else {
-            println!("✓ All operations are supported ({} unique types)",
-                     graph.node.iter().map(|n| &n.op_type).collect::<HashSet<_>>().len());
+            println!(
+                "✓ All operations are supported ({} unique types)",
+                graph
+                    .node
+                    .iter()
+                    .map(|n| &n.op_type)
+                    .collect::<HashSet<_>>()
+                    .len()
+            );
         }
     }
 
@@ -146,7 +194,12 @@ mod tests {
 
         let result = validate_command(&model_path, false);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("Failed to read ONNX model"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("Failed to read ONNX model")
+        );
     }
 
     #[test]
@@ -163,7 +216,7 @@ mod tests {
 
     #[test]
     fn test_supported_ops_count() {
-        // We have 40 operations implemented (including Cast)
-        assert_eq!(SUPPORTED_OPS.len(), 40);
+        // We have 48 operations implemented (including Cast)
+        assert_eq!(SUPPORTED_OPS.len(), 48);
     }
 }

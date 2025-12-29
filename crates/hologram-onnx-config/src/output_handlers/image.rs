@@ -9,7 +9,7 @@
 use crate::config::OutputHandlerConfig;
 use crate::error::ConfigError;
 use crate::output_handlers::{ImageOutput, OutputHandler, ProcessedOutput, TensorData};
-use image::{ImageBuffer, Luma, Rgb, Rgba, RgbImage, RgbaImage, GrayImage};
+use image::{GrayImage, ImageBuffer, Luma, Rgb, RgbImage, Rgba, RgbaImage};
 use std::collections::HashMap;
 use std::path::Path;
 use tracing::{debug, trace};
@@ -32,9 +32,10 @@ impl PixelFormat {
             "grayscale" | "gray" | "grey" => Ok(Self::Grayscale),
             "rgb" => Ok(Self::Rgb),
             "rgba" => Ok(Self::Rgba),
-            _ => Err(ConfigError::InvalidImageFormat(
-                format!("Unknown pixel format: {}", s)
-            )),
+            _ => Err(ConfigError::InvalidImageFormat(format!(
+                "Unknown pixel format: {}",
+                s
+            ))),
         }
     }
 
@@ -63,9 +64,10 @@ impl TensorLayout {
         match s.to_uppercase().as_str() {
             "NCHW" => Ok(Self::NCHW),
             "NHWC" => Ok(Self::NHWC),
-            _ => Err(ConfigError::InvalidImageFormat(
-                format!("Unknown tensor layout: {}", s)
-            )),
+            _ => Err(ConfigError::InvalidImageFormat(format!(
+                "Unknown tensor layout: {}",
+                s
+            ))),
         }
     }
 }
@@ -88,9 +90,10 @@ impl ValueRange {
             "neg_one_one" | "-1_1" | "tanh" => Ok(Self::NegOneOne),
             "zero_one" | "0_1" | "sigmoid" => Ok(Self::ZeroOne),
             "byte" | "uint8" => Ok(Self::Byte),
-            _ => Err(ConfigError::InvalidImageFormat(
-                format!("Unknown value range: {}", s)
-            )),
+            _ => Err(ConfigError::InvalidImageFormat(format!(
+                "Unknown value range: {}",
+                s
+            ))),
         }
     }
 
@@ -142,20 +145,21 @@ impl ImageHandler {
     pub fn from_config(config: &OutputHandlerConfig) -> Result<Self, ConfigError> {
         let output_name = config.output.clone();
 
-        let pixel_format = config.get_string("format")
+        let pixel_format = config
+            .get_string("format")
             .ok_or_else(|| ConfigError::missing_field("format"))
             .and_then(PixelFormat::from_str)?;
 
-        let layout = config.get_string("layout")
-            .unwrap_or("NCHW");
+        let layout = config.get_string("layout").unwrap_or("NCHW");
         let layout = TensorLayout::from_str(layout)?;
 
-        let value_range = config.get_string("value_range")
-            .unwrap_or("neg_one_one");
+        let value_range = config.get_string("value_range").unwrap_or("neg_one_one");
         let value_range = ValueRange::from_str(value_range)?;
 
-        debug!("Created ImageHandler: format={:?}, layout={:?}, range={:?}",
-               pixel_format, layout, value_range);
+        debug!(
+            "Created ImageHandler: format={:?}, layout={:?}, range={:?}",
+            pixel_format, layout, value_range
+        );
 
         Ok(Self {
             output_name,
@@ -208,8 +212,12 @@ impl OutputHandler for ImageHandler {
         "image"
     }
 
-    fn process(&self, outputs: &HashMap<String, TensorData>) -> Result<ProcessedOutput, ConfigError> {
-        let tensor = outputs.get(&self.output_name)
+    fn process(
+        &self,
+        outputs: &HashMap<String, TensorData>,
+    ) -> Result<ProcessedOutput, ConfigError> {
+        let tensor = outputs
+            .get(&self.output_name)
             .ok_or_else(|| ConfigError::missing_output_tensor(&self.output_name))?;
 
         trace!("Processing image tensor: shape={:?}", tensor.shape);
@@ -224,12 +232,18 @@ impl OutputHandler for ImageHandler {
         }
 
         let (batch, channels, height, width) = match self.layout {
-            TensorLayout::NCHW => {
-                (tensor.shape[0], tensor.shape[1], tensor.shape[2], tensor.shape[3])
-            }
-            TensorLayout::NHWC => {
-                (tensor.shape[0], tensor.shape[3], tensor.shape[1], tensor.shape[2])
-            }
+            TensorLayout::NCHW => (
+                tensor.shape[0],
+                tensor.shape[1],
+                tensor.shape[2],
+                tensor.shape[3],
+            ),
+            TensorLayout::NHWC => (
+                tensor.shape[0],
+                tensor.shape[3],
+                tensor.shape[1],
+                tensor.shape[2],
+            ),
         };
 
         // Only process first image in batch
@@ -261,56 +275,61 @@ impl OutputHandler for ImageHandler {
                 trace!("Reordering NCHW → HWC");
                 self.reorder_nchw_to_hwc(image_data, channels, height, width)
             }
-            TensorLayout::NHWC => {
-                image_data.to_vec()
-            }
+            TensorLayout::NHWC => image_data.to_vec(),
         };
 
         // Normalize to bytes
         trace!("Normalizing values: {:?}", self.value_range);
         let bytes = self.normalize_to_bytes(&hwc_data);
 
-        let output = ImageOutput::new(
-            bytes,
-            width as u32,
-            height as u32,
-            channels as u8,
-        );
+        let output = ImageOutput::new(bytes, width as u32, height as u32, channels as u8);
 
         Ok(ProcessedOutput::Image(output))
     }
 
     fn save(&self, output: &ProcessedOutput, path: &Path) -> Result<(), ConfigError> {
         if let ProcessedOutput::Image(img) = output {
-            debug!("Saving image to: {} ({}x{}, {} channels)",
-                   path.display(), img.width, img.height, img.channels);
+            debug!(
+                "Saving image to: {} ({}x{}, {} channels)",
+                path.display(),
+                img.width,
+                img.height,
+                img.channels
+            );
 
             match img.channels {
                 1 => {
                     let gray_img = GrayImage::from_raw(img.width, img.height, img.data.clone())
-                        .ok_or_else(|| ConfigError::InvalidImageFormat(
-                            "Failed to create grayscale image".to_string()
-                        ))?;
+                        .ok_or_else(|| {
+                            ConfigError::InvalidImageFormat(
+                                "Failed to create grayscale image".to_string(),
+                            )
+                        })?;
                     gray_img.save(path)?;
                 }
                 3 => {
                     let rgb_img = RgbImage::from_raw(img.width, img.height, img.data.clone())
-                        .ok_or_else(|| ConfigError::InvalidImageFormat(
-                            "Failed to create RGB image".to_string()
-                        ))?;
+                        .ok_or_else(|| {
+                            ConfigError::InvalidImageFormat(
+                                "Failed to create RGB image".to_string(),
+                            )
+                        })?;
                     rgb_img.save(path)?;
                 }
                 4 => {
                     let rgba_img = RgbaImage::from_raw(img.width, img.height, img.data.clone())
-                        .ok_or_else(|| ConfigError::InvalidImageFormat(
-                            "Failed to create RGBA image".to_string()
-                        ))?;
+                        .ok_or_else(|| {
+                            ConfigError::InvalidImageFormat(
+                                "Failed to create RGBA image".to_string(),
+                            )
+                        })?;
                     rgba_img.save(path)?;
                 }
                 _ => {
-                    return Err(ConfigError::InvalidImageFormat(
-                        format!("Unsupported channel count: {}", img.channels)
-                    ));
+                    return Err(ConfigError::InvalidImageFormat(format!(
+                        "Unsupported channel count: {}",
+                        img.channels
+                    )));
                 }
             }
 
@@ -330,8 +349,14 @@ mod tests {
         assert_eq!(PixelFormat::from_str("rgb").unwrap(), PixelFormat::Rgb);
         assert_eq!(PixelFormat::from_str("RGB").unwrap(), PixelFormat::Rgb);
         assert_eq!(PixelFormat::from_str("rgba").unwrap(), PixelFormat::Rgba);
-        assert_eq!(PixelFormat::from_str("grayscale").unwrap(), PixelFormat::Grayscale);
-        assert_eq!(PixelFormat::from_str("gray").unwrap(), PixelFormat::Grayscale);
+        assert_eq!(
+            PixelFormat::from_str("grayscale").unwrap(),
+            PixelFormat::Grayscale
+        );
+        assert_eq!(
+            PixelFormat::from_str("gray").unwrap(),
+            PixelFormat::Grayscale
+        );
         assert!(PixelFormat::from_str("unknown").is_err());
     }
 
@@ -352,9 +377,15 @@ mod tests {
 
     #[test]
     fn test_value_range_parse() {
-        assert_eq!(ValueRange::from_str("neg_one_one").unwrap(), ValueRange::NegOneOne);
+        assert_eq!(
+            ValueRange::from_str("neg_one_one").unwrap(),
+            ValueRange::NegOneOne
+        );
         assert_eq!(ValueRange::from_str("-1_1").unwrap(), ValueRange::NegOneOne);
-        assert_eq!(ValueRange::from_str("zero_one").unwrap(), ValueRange::ZeroOne);
+        assert_eq!(
+            ValueRange::from_str("zero_one").unwrap(),
+            ValueRange::ZeroOne
+        );
         assert_eq!(ValueRange::from_str("0_1").unwrap(), ValueRange::ZeroOne);
         assert_eq!(ValueRange::from_str("byte").unwrap(), ValueRange::Byte);
         assert!(ValueRange::from_str("unknown").is_err());
@@ -382,8 +413,14 @@ mod tests {
     fn test_image_handler_from_config() {
         let mut config_map = HashMap::new();
         config_map.insert("format".to_string(), toml::Value::String("rgb".to_string()));
-        config_map.insert("layout".to_string(), toml::Value::String("NCHW".to_string()));
-        config_map.insert("value_range".to_string(), toml::Value::String("zero_one".to_string()));
+        config_map.insert(
+            "layout".to_string(),
+            toml::Value::String("NCHW".to_string()),
+        );
+        config_map.insert(
+            "value_range".to_string(),
+            toml::Value::String("zero_one".to_string()),
+        );
 
         let config = OutputHandlerConfig {
             handler_type: "image".to_string(),
@@ -445,9 +482,9 @@ mod tests {
         // G channel: [5, 6, 7, 8]
         // B channel: [9, 10, 11, 12]
         let nchw = vec![
-            1.0, 2.0, 3.0, 4.0,  // R
-            5.0, 6.0, 7.0, 8.0,  // G
-            9.0, 10.0, 11.0, 12.0,  // B
+            1.0, 2.0, 3.0, 4.0, // R
+            5.0, 6.0, 7.0, 8.0, // G
+            9.0, 10.0, 11.0, 12.0, // B
         ];
 
         let hwc = handler.reorder_nchw_to_hwc(&nchw, 3, 2, 2);
@@ -458,10 +495,10 @@ mod tests {
         // Pixel (1,0): R=3, G=7, B=11
         // Pixel (1,1): R=4, G=8, B=12
         let expected = vec![
-            1.0, 5.0, 9.0,   // (0,0)
-            2.0, 6.0, 10.0,  // (0,1)
-            3.0, 7.0, 11.0,  // (1,0)
-            4.0, 8.0, 12.0,  // (1,1)
+            1.0, 5.0, 9.0, // (0,0)
+            2.0, 6.0, 10.0, // (0,1)
+            3.0, 7.0, 11.0, // (1,0)
+            4.0, 8.0, 12.0, // (1,1)
         ];
 
         assert_eq!(hwc, expected);
@@ -471,7 +508,10 @@ mod tests {
     fn test_normalize_to_bytes() {
         let mut config_map = HashMap::new();
         config_map.insert("format".to_string(), toml::Value::String("rgb".to_string()));
-        config_map.insert("value_range".to_string(), toml::Value::String("zero_one".to_string()));
+        config_map.insert(
+            "value_range".to_string(),
+            toml::Value::String("zero_one".to_string()),
+        );
 
         let config = OutputHandlerConfig {
             handler_type: "image".to_string(),
@@ -491,8 +531,14 @@ mod tests {
     fn test_process_rgb_nhwc() {
         let mut config_map = HashMap::new();
         config_map.insert("format".to_string(), toml::Value::String("rgb".to_string()));
-        config_map.insert("layout".to_string(), toml::Value::String("NHWC".to_string()));
-        config_map.insert("value_range".to_string(), toml::Value::String("zero_one".to_string()));
+        config_map.insert(
+            "layout".to_string(),
+            toml::Value::String("NHWC".to_string()),
+        );
+        config_map.insert(
+            "value_range".to_string(),
+            toml::Value::String("zero_one".to_string()),
+        );
 
         let config = OutputHandlerConfig {
             handler_type: "image".to_string(),
@@ -504,10 +550,10 @@ mod tests {
 
         // Create 1x2x2x3 tensor (NHWC)
         let data = vec![
-            0.0, 0.0, 0.0,  // Pixel (0,0)
-            1.0, 1.0, 1.0,  // Pixel (0,1)
-            0.5, 0.5, 0.5,  // Pixel (1,0)
-            0.25, 0.25, 0.25,  // Pixel (1,1)
+            0.0, 0.0, 0.0, // Pixel (0,0)
+            1.0, 1.0, 1.0, // Pixel (0,1)
+            0.5, 0.5, 0.5, // Pixel (1,0)
+            0.25, 0.25, 0.25, // Pixel (1,1)
         ];
 
         let mut outputs = HashMap::new();
@@ -522,8 +568,8 @@ mod tests {
             assert_eq!(img.width, 2);
             assert_eq!(img.height, 2);
             assert_eq!(img.channels, 3);
-            assert_eq!(img.data[0..3], [0, 0, 0]);  // Black
-            assert_eq!(img.data[3..6], [255, 255, 255]);  // White
+            assert_eq!(img.data[0..3], [0, 0, 0]); // Black
+            assert_eq!(img.data[3..6], [255, 255, 255]); // White
         } else {
             panic!("Expected Image output");
         }
@@ -564,7 +610,7 @@ mod tests {
         let mut outputs = HashMap::new();
         outputs.insert(
             "tensor".to_string(),
-            TensorData::new(vec![1.0; 100], vec![10, 10]),  // Wrong ndim
+            TensorData::new(vec![1.0; 100], vec![10, 10]), // Wrong ndim
         );
 
         let result = handler.process(&outputs);
@@ -575,7 +621,10 @@ mod tests {
     fn test_process_channel_mismatch() {
         let mut config_map = HashMap::new();
         config_map.insert("format".to_string(), toml::Value::String("rgb".to_string()));
-        config_map.insert("layout".to_string(), toml::Value::String("NCHW".to_string()));
+        config_map.insert(
+            "layout".to_string(),
+            toml::Value::String("NCHW".to_string()),
+        );
 
         let config = OutputHandlerConfig {
             handler_type: "image".to_string(),
@@ -588,7 +637,7 @@ mod tests {
         let mut outputs = HashMap::new();
         outputs.insert(
             "tensor".to_string(),
-            TensorData::new(vec![1.0; 16], vec![1, 4, 2, 2]),  // 4 channels, expected 3
+            TensorData::new(vec![1.0; 16], vec![1, 4, 2, 2]), // 4 channels, expected 3
         );
 
         let result = handler.process(&outputs);

@@ -6,15 +6,13 @@
 //! - Shape inference for various input sizes
 //! - ResNet-style block compilation
 
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
-use hologram_compiler::ir::{
-    decompose_function, DecomposeConfig, IRBuilder, ScalarType, Type,
-};
+use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
+use hologram_compiler::ir::{DecomposeConfig, IRBuilder, ScalarType, Type, decompose_function};
 use hologram_compiler::shapes::Shape;
 use hologram_onnx_core::SymbolicShape;
 use hologram_onnx_ops::{infer_conv_output_shape, translate_conv};
-use hologram_onnx_spec::attribute_proto::AttributeType;
 use hologram_onnx_spec::AttributeProto;
+use hologram_onnx_spec::attribute_proto::AttributeType;
 use std::collections::HashMap;
 
 // =============================================================================
@@ -51,24 +49,28 @@ fn bench_conv2d_ir_creation(c: &mut Criterion) {
 
     for (name, input_size) in sizes {
         group.throughput(Throughput::Elements(1));
-        group.bench_with_input(BenchmarkId::new("create_node", name), &input_size, |b, size| {
-            b.iter(|| {
-                let mut builder = IRBuilder::new("bench");
-                let input = builder.add_input("X", f32_tensor(size));
-                let kernel = builder.add_input("W", f32_tensor(&[64, size[1], 3, 3]));
-                let result = builder.conv2d(
-                    black_box(input),
-                    black_box(kernel),
-                    None,
-                    (1, 1),
-                    (1, 1),
-                    (1, 1),
-                    1,
-                );
-                builder.set_output(result);
-                builder.build()
-            })
-        });
+        group.bench_with_input(
+            BenchmarkId::new("create_node", name),
+            &input_size,
+            |b, size| {
+                b.iter(|| {
+                    let mut builder = IRBuilder::new("bench");
+                    let input = builder.add_input("X", f32_tensor(size));
+                    let kernel = builder.add_input("W", f32_tensor(&[64, size[1], 3, 3]));
+                    let result = builder.conv2d(
+                        black_box(input),
+                        black_box(kernel),
+                        None,
+                        (1, 1),
+                        (1, 1),
+                        (1, 1),
+                        1,
+                    );
+                    builder.set_output(result);
+                    builder.build()
+                })
+            },
+        );
     }
 
     group.finish();
@@ -100,13 +102,9 @@ fn bench_conv2d_decomposition(c: &mut Criterion) {
         let func = builder.build();
 
         group.throughput(Throughput::Elements(1));
-        group.bench_with_input(
-            BenchmarkId::new("decompose", name),
-            &func,
-            |b, func| {
-                b.iter(|| decompose_function(black_box(func), &config))
-            },
-        );
+        group.bench_with_input(BenchmarkId::new("decompose", name), &func, |b, func| {
+            b.iter(|| decompose_function(black_box(func), &config))
+        });
     }
 
     group.finish();
@@ -158,9 +156,9 @@ fn bench_resnet_block(c: &mut Criterion) {
 
     // Benchmark different block configurations
     let configs = [
-        ("basic_block", 2),   // 2 conv layers
-        ("bottleneck", 3),    // 3 conv layers
-        ("deep_block", 5),    // 5 conv layers
+        ("basic_block", 2), // 2 conv layers
+        ("bottleneck", 3),  // 3 conv layers
+        ("deep_block", 5),  // 5 conv layers
     ];
 
     for (name, num_convs) in configs {
@@ -174,10 +172,8 @@ fn bench_resnet_block(c: &mut Criterion) {
                     let mut current = builder.add_input("X", f32_tensor(&[1, 64, 56, 56]));
 
                     for i in 0..num_convs {
-                        let kernel = builder.add_input(
-                            &format!("W{}", i),
-                            f32_tensor(&[64, 64, 3, 3]),
-                        );
+                        let kernel =
+                            builder.add_input(&format!("W{}", i), f32_tensor(&[64, 64, 3, 3]));
                         current = builder.conv2d(current, kernel, None, (1, 1), (1, 1), (1, 1), 1);
                     }
 
@@ -204,13 +200,9 @@ fn bench_resnet_block(c: &mut Criterion) {
         builder.set_output(current);
         let func = builder.build();
 
-        group.bench_with_input(
-            BenchmarkId::new("decompose", name),
-            &func,
-            |b, func| {
-                b.iter(|| decompose_function(black_box(func), &config))
-            },
-        );
+        group.bench_with_input(BenchmarkId::new("decompose", name), &func, |b, func| {
+            b.iter(|| decompose_function(black_box(func), &config))
+        });
     }
 
     group.finish();
@@ -239,12 +231,9 @@ fn bench_large_conv_chain(c: &mut Criterion) {
                     let mut current = builder.add_input("X", f32_tensor(&[1, 64, 56, 56]));
 
                     for i in 0..num_convs {
-                        let kernel = builder.add_input(
-                            &format!("W{}", i),
-                            f32_tensor(&[64, 64, 3, 3]),
-                        );
-                        current =
-                            builder.conv2d(current, kernel, None, (1, 1), (1, 1), (1, 1), 1);
+                        let kernel =
+                            builder.add_input(&format!("W{}", i), f32_tensor(&[64, 64, 3, 3]));
+                        current = builder.conv2d(current, kernel, None, (1, 1), (1, 1), (1, 1), 1);
                     }
 
                     builder.set_output(current);
@@ -273,9 +262,7 @@ fn bench_large_conv_chain(c: &mut Criterion) {
         group.bench_with_input(
             BenchmarkId::new("decompose", num_convs),
             &func,
-            |b, func| {
-                b.iter(|| decompose_function(black_box(func), &config))
-            },
+            |b, func| b.iter(|| decompose_function(black_box(func), &config)),
         );
     }
 
@@ -311,12 +298,7 @@ fn bench_onnx_translation(c: &mut Criterion) {
                     let mut builder = IRBuilder::new("bench");
                     let input = builder.add_input("X", f32_tensor(size));
                     let kernel = builder.add_input("W", f32_tensor(&[64, size[1], 3, 3]));
-                    translate_conv(
-                        &[input, kernel],
-                        attrs,
-                        &HashMap::new(),
-                        &mut builder,
-                    )
+                    translate_conv(&[input, kernel], attrs, &HashMap::new(), &mut builder)
                 })
             },
         );

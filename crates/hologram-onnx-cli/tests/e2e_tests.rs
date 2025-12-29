@@ -108,7 +108,11 @@ fn test_compile_mnist() {
     assert!(!holo_content.is_empty(), ".holo file should not be empty");
 
     // Verify magic header
-    assert_eq!(&holo_content[0..4], b"HOLO", ".holo file should have HOLO magic header");
+    assert_eq!(
+        &holo_content[0..4],
+        b"HOLO",
+        ".holo file should have HOLO magic header"
+    );
 
     eprintln!("MNIST compiled: {} bytes", holo_content.len());
 }
@@ -192,7 +196,10 @@ fn test_compile_with_memory_budget() {
 #[test]
 fn test_compile_resnet() {
     if !has_resnet_model() {
-        eprintln!("Skipping test_compile_resnet: ResNet model not found at {:?}", resnet_model_path());
+        eprintln!(
+            "Skipping test_compile_resnet: ResNet model not found at {:?}",
+            resnet_model_path()
+        );
         return;
     }
 
@@ -227,8 +234,7 @@ fn test_compile_resnet() {
 #[test]
 fn test_info_missing_file() {
     let mut cmd = Command::cargo_bin("hologram-onnx").unwrap();
-    cmd.arg("info")
-        .arg("nonexistent.onnx");
+    cmd.arg("info").arg("nonexistent.onnx");
 
     cmd.assert()
         .failure()
@@ -244,8 +250,7 @@ fn test_info_mnist() {
     }
 
     let mut cmd = Command::cargo_bin("hologram-onnx").unwrap();
-    cmd.arg("info")
-        .arg(mnist_model_path());
+    cmd.arg("info").arg(mnist_model_path());
 
     cmd.assert()
         .success()
@@ -261,9 +266,7 @@ fn test_info_detailed() {
     }
 
     let mut cmd = Command::cargo_bin("hologram-onnx").unwrap();
-    cmd.arg("info")
-        .arg(mnist_model_path())
-        .arg("--detailed");
+    cmd.arg("info").arg(mnist_model_path()).arg("--detailed");
 
     cmd.assert()
         .success()
@@ -279,9 +282,7 @@ fn test_info_resnet() {
     }
 
     let mut cmd = Command::cargo_bin("hologram-onnx").unwrap();
-    cmd.arg("info")
-        .arg(resnet_model_path())
-        .arg("--detailed");
+    cmd.arg("info").arg(resnet_model_path()).arg("--detailed");
 
     cmd.assert()
         .success()
@@ -296,8 +297,7 @@ fn test_info_resnet() {
 #[test]
 fn test_validate_missing_file() {
     let mut cmd = Command::cargo_bin("hologram-onnx").unwrap();
-    cmd.arg("validate")
-        .arg("nonexistent.onnx");
+    cmd.arg("validate").arg("nonexistent.onnx");
 
     cmd.assert()
         .failure()
@@ -313,8 +313,7 @@ fn test_validate_mnist() {
     }
 
     let mut cmd = Command::cargo_bin("hologram-onnx").unwrap();
-    cmd.arg("validate")
-        .arg(mnist_model_path());
+    cmd.arg("validate").arg(mnist_model_path());
 
     cmd.assert()
         .success()
@@ -334,8 +333,7 @@ fn test_validate_check_ops() {
         .arg(mnist_model_path())
         .arg("--check-ops");
 
-    cmd.assert()
-        .success();
+    cmd.assert().success();
 }
 
 /// Test validate command with ResNet model.
@@ -351,8 +349,7 @@ fn test_validate_resnet() {
         .arg(resnet_model_path())
         .arg("--check-ops");
 
-    cmd.assert()
-        .success();
+    cmd.assert().success();
 }
 
 // ============================================================================
@@ -394,7 +391,11 @@ fn test_holo_file_format() {
     let name_len = u32::from_le_bytes([content[8], content[9], content[10], content[11]]) as usize;
     assert!(name_len < 1000, "Function name length should be reasonable");
 
-    eprintln!(".holo file format verified: {} bytes, version {}", content.len(), version);
+    eprintln!(
+        ".holo file format verified: {} bytes, version {}",
+        content.len(),
+        version
+    );
 }
 
 /// Test that multiple compiles produce consistent output.
@@ -425,9 +426,16 @@ fn test_compile_consistency() {
     let content2 = fs::read(output2.with_extension("holo")).unwrap();
 
     // Verify they're the same size (content may differ due to timestamps, but size should match)
-    assert_eq!(content1.len(), content2.len(), "Consistent compiles should produce same size output");
+    assert_eq!(
+        content1.len(),
+        content2.len(),
+        "Consistent compiles should produce same size output"
+    );
 
-    eprintln!("Compile consistency verified: {} bytes each", content1.len());
+    eprintln!(
+        "Compile consistency verified: {} bytes each",
+        content1.len()
+    );
 }
 
 // ============================================================================
@@ -510,10 +518,7 @@ fn test_compile_invalid_onnx() {
     fs::write(&invalid_onnx, b"not a valid onnx file").unwrap();
 
     let mut cmd = Command::cargo_bin("hologram-onnx").unwrap();
-    cmd.arg("compile")
-        .arg(&invalid_onnx)
-        .arg("-o")
-        .arg(&output);
+    cmd.arg("compile").arg(&invalid_onnx).arg("-o").arg(&output);
 
     cmd.assert()
         .failure()
@@ -530,11 +535,9 @@ fn test_info_invalid_onnx() {
     fs::write(&invalid_onnx, b"not a valid onnx file").unwrap();
 
     let mut cmd = Command::cargo_bin("hologram-onnx").unwrap();
-    cmd.arg("info")
-        .arg(&invalid_onnx);
+    cmd.arg("info").arg(&invalid_onnx);
 
-    cmd.assert()
-        .failure();
+    cmd.assert().failure();
 }
 
 /// Test validate with invalid ONNX file.
@@ -547,9 +550,7 @@ fn test_validate_invalid_onnx() {
     fs::write(&invalid_onnx, b"not a valid onnx file").unwrap();
 
     let mut cmd = Command::cargo_bin("hologram-onnx").unwrap();
-    cmd.arg("validate")
-        .arg(&invalid_onnx);
+    cmd.arg("validate").arg(&invalid_onnx);
 
-    cmd.assert()
-        .failure();
+    cmd.assert().failure();
 }

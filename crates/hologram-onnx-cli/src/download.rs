@@ -10,7 +10,7 @@ use serde::Deserialize;
 use std::fs::{self, File};
 use std::io::Write;
 use std::path::Path;
-use tracing::{info, debug, warn};
+use tracing::{debug, info, warn};
 
 /// File information from Hugging Face API
 #[derive(Debug, Deserialize)]
@@ -48,11 +48,7 @@ struct FileInfo {
 /// # Ok(())
 /// # }
 /// ```
-pub fn download_command(
-    model_id: &str,
-    output_dir: &Path,
-    revision: Option<&str>,
-) -> Result<()> {
+pub fn download_command(model_id: &str, output_dir: &Path, revision: Option<&str>) -> Result<()> {
     let revision = revision.unwrap_or("main");
 
     info!("Downloading model: {}", model_id);
@@ -60,8 +56,12 @@ pub fn download_command(
     info!("Output directory: {}", output_dir.display());
 
     // Create output directory
-    fs::create_dir_all(output_dir)
-        .with_context(|| format!("Failed to create output directory: {}", output_dir.display()))?;
+    fs::create_dir_all(output_dir).with_context(|| {
+        format!(
+            "Failed to create output directory: {}",
+            output_dir.display()
+        )
+    })?;
 
     // Create HTTP client
     let client = Client::builder()
@@ -78,7 +78,8 @@ pub fn download_command(
     info!("Fetching file list from Hugging Face...");
     debug!("API URL: {}", api_url);
 
-    let response = client.get(&api_url)
+    let response = client
+        .get(&api_url)
         .send()
         .context("Failed to fetch model file list from Hugging Face")?;
 
@@ -86,17 +87,18 @@ pub fn download_command(
         anyhow::bail!(
             "Failed to fetch model info: HTTP {} - {}",
             response.status(),
-            response.text().unwrap_or_else(|_| "Unknown error".to_string())
+            response
+                .text()
+                .unwrap_or_else(|_| "Unknown error".to_string())
         );
     }
 
-    let files: Vec<FileInfo> = response.json()
+    let files: Vec<FileInfo> = response
+        .json()
         .context("Failed to parse Hugging Face API response")?;
 
     // Filter for ONNX files
-    let onnx_files: Vec<&FileInfo> = files.iter()
-        .filter(|f| f.path.ends_with(".onnx"))
-        .collect();
+    let onnx_files: Vec<&FileInfo> = files.iter().filter(|f| f.path.ends_with(".onnx")).collect();
 
     if onnx_files.is_empty() {
         warn!("No ONNX files found in model repository: {}", model_id);
@@ -112,7 +114,8 @@ pub fn download_command(
 
     info!("Found {} ONNX file(s):", onnx_files.len());
     for file in &onnx_files {
-        let size_str = file.size
+        let size_str = file
+            .size
             .map(|s| format!(" ({} bytes)", s))
             .unwrap_or_default();
         info!("  - {}{}", file.path, size_str);
@@ -120,7 +123,9 @@ pub fn download_command(
 
     // Download each ONNX file
     for file in onnx_files {
-        download_file(&client, model_id, revision, &file.path, output_dir, file.size)?;
+        download_file(
+            &client, model_id, revision, &file.path, output_dir, file.size,
+        )?;
     }
 
     info!("✓ Download complete!");
@@ -155,7 +160,8 @@ fn download_file(
     debug!("URL: {}", download_url);
 
     // Start download
-    let mut response = client.get(&download_url)
+    let mut response = client
+        .get(&download_url)
         .send()
         .with_context(|| format!("Failed to download file: {}", file_path))?;
 
@@ -177,7 +183,7 @@ fn download_file(
             ProgressStyle::default_bar()
                 .template("{spinner:.green} [{bar:40.cyan/blue}] {bytes}/{total_bytes} ({eta})")
                 .expect("Failed to create progress bar template")
-                .progress_chars("#>-")
+                .progress_chars("#>-"),
         );
         Some(pb)
     } else {
@@ -193,7 +199,8 @@ fn download_file(
 
     loop {
         use std::io::Read;
-        let n = response.read(&mut buffer)
+        let n = response
+            .read(&mut buffer)
             .context("Failed to read from download stream")?;
 
         if n == 0 {

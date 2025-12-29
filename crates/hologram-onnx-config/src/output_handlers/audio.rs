@@ -29,9 +29,10 @@ impl SampleFormat {
         match s.to_lowercase().as_str() {
             "float32" | "f32" | "float" => Ok(Self::Float32),
             "int16" | "i16" | "pcm16" => Ok(Self::Int16),
-            _ => Err(ConfigError::InvalidAudioFormat(
-                format!("Unknown sample format: {}", s)
-            )),
+            _ => Err(ConfigError::InvalidAudioFormat(format!(
+                "Unknown sample format: {}",
+                s
+            ))),
         }
     }
 }
@@ -70,7 +71,8 @@ impl AudioHandler {
     pub fn from_config(config: &OutputHandlerConfig) -> Result<Self, ConfigError> {
         let output_name = config.output.clone();
 
-        let sample_rate = config.get_int("sample_rate")
+        let sample_rate = config
+            .get_int("sample_rate")
             .ok_or_else(|| ConfigError::missing_field("sample_rate"))?;
         if sample_rate <= 0 || sample_rate > 192000 {
             return Err(ConfigError::invalid_value(
@@ -79,8 +81,7 @@ impl AudioHandler {
             ));
         }
 
-        let channels = config.get_int("channels")
-            .unwrap_or(1);
+        let channels = config.get_int("channels").unwrap_or(1);
         if channels <= 0 || channels > 16 {
             return Err(ConfigError::invalid_value(
                 "channels",
@@ -88,12 +89,13 @@ impl AudioHandler {
             ));
         }
 
-        let sample_format = config.get_string("sample_format")
-            .unwrap_or("float32");
+        let sample_format = config.get_string("sample_format").unwrap_or("float32");
         let sample_format = SampleFormat::from_str(sample_format)?;
 
-        debug!("Created AudioHandler: rate={}Hz, channels={}, format={:?}",
-               sample_rate, channels, sample_format);
+        debug!(
+            "Created AudioHandler: rate={}Hz, channels={}, format={:?}",
+            sample_rate, channels, sample_format
+        );
 
         Ok(Self {
             output_name,
@@ -109,7 +111,8 @@ impl AudioHandler {
     ///
     /// Assumes input is in [-1.0, 1.0] range.
     fn convert_to_i16(&self, samples: &[f32]) -> Vec<i16> {
-        samples.iter()
+        samples
+            .iter()
             .map(|&s| {
                 let clamped = s.clamp(-1.0, 1.0);
                 (clamped * 32767.0) as i16
@@ -123,8 +126,12 @@ impl OutputHandler for AudioHandler {
         "audio"
     }
 
-    fn process(&self, outputs: &HashMap<String, TensorData>) -> Result<ProcessedOutput, ConfigError> {
-        let tensor = outputs.get(&self.output_name)
+    fn process(
+        &self,
+        outputs: &HashMap<String, TensorData>,
+    ) -> Result<ProcessedOutput, ConfigError> {
+        let tensor = outputs
+            .get(&self.output_name)
             .ok_or_else(|| ConfigError::missing_output_tensor(&self.output_name))?;
 
         trace!("Processing audio tensor: shape={:?}", tensor.shape);
@@ -171,19 +178,20 @@ impl OutputHandler for AudioHandler {
             ));
         }
 
-        let output = AudioOutput::new(
-            samples,
-            self.sample_rate,
-            self.channels,
-        );
+        let output = AudioOutput::new(samples, self.sample_rate, self.channels);
 
         Ok(ProcessedOutput::Audio(output))
     }
 
     fn save(&self, output: &ProcessedOutput, path: &Path) -> Result<(), ConfigError> {
         if let ProcessedOutput::Audio(audio) = output {
-            debug!("Saving audio to: {} ({}Hz, {} channels, {} samples)",
-                   path.display(), audio.sample_rate, audio.channels, audio.samples.len());
+            debug!(
+                "Saving audio to: {} ({}Hz, {} channels, {} samples)",
+                path.display(),
+                audio.sample_rate,
+                audio.channels,
+                audio.samples.len()
+            );
 
             let spec = WavSpec {
                 channels: audio.channels,
@@ -229,9 +237,18 @@ mod tests {
 
     #[test]
     fn test_sample_format_parse() {
-        assert_eq!(SampleFormat::from_str("float32").unwrap(), SampleFormat::Float32);
-        assert_eq!(SampleFormat::from_str("f32").unwrap(), SampleFormat::Float32);
-        assert_eq!(SampleFormat::from_str("int16").unwrap(), SampleFormat::Int16);
+        assert_eq!(
+            SampleFormat::from_str("float32").unwrap(),
+            SampleFormat::Float32
+        );
+        assert_eq!(
+            SampleFormat::from_str("f32").unwrap(),
+            SampleFormat::Float32
+        );
+        assert_eq!(
+            SampleFormat::from_str("int16").unwrap(),
+            SampleFormat::Int16
+        );
         assert_eq!(SampleFormat::from_str("i16").unwrap(), SampleFormat::Int16);
         assert!(SampleFormat::from_str("unknown").is_err());
     }
@@ -241,7 +258,10 @@ mod tests {
         let mut config_map = HashMap::new();
         config_map.insert("sample_rate".to_string(), toml::Value::Integer(16000));
         config_map.insert("channels".to_string(), toml::Value::Integer(1));
-        config_map.insert("sample_format".to_string(), toml::Value::String("float32".to_string()));
+        config_map.insert(
+            "sample_format".to_string(),
+            toml::Value::String("float32".to_string()),
+        );
 
         let config = OutputHandlerConfig {
             handler_type: "audio".to_string(),
@@ -419,8 +439,8 @@ mod tests {
         // Create batched waveform [batch=2, channels=1, samples=3]
         // Should take first batch only
         let all_samples = vec![
-            0.0, 0.1, 0.2,  // Batch 0
-            0.5, 0.6, 0.7,  // Batch 1
+            0.0, 0.1, 0.2, // Batch 0
+            0.5, 0.6, 0.7, // Batch 1
         ];
         let mut outputs = HashMap::new();
         outputs.insert(
@@ -472,7 +492,7 @@ mod tests {
         let mut outputs = HashMap::new();
         outputs.insert(
             "tensor".to_string(),
-            TensorData::new(vec![1.0; 100], vec![2, 5, 5, 2]),  // 4D is invalid
+            TensorData::new(vec![1.0; 100], vec![2, 5, 5, 2]), // 4D is invalid
         );
 
         let result = handler.process(&outputs);
@@ -496,7 +516,7 @@ mod tests {
         let mut outputs = HashMap::new();
         outputs.insert(
             "tensor".to_string(),
-            TensorData::new(vec![1.0; 8], vec![2, 4]),  // 2 channels, expected 1
+            TensorData::new(vec![1.0; 8], vec![2, 4]), // 2 channels, expected 1
         );
 
         let result = handler.process(&outputs);
@@ -511,7 +531,10 @@ mod tests {
         let mut config_map = HashMap::new();
         config_map.insert("sample_rate".to_string(), toml::Value::Integer(16000));
         config_map.insert("channels".to_string(), toml::Value::Integer(1));
-        config_map.insert("sample_format".to_string(), toml::Value::String("float32".to_string()));
+        config_map.insert(
+            "sample_format".to_string(),
+            toml::Value::String("float32".to_string()),
+        );
 
         let config = OutputHandlerConfig {
             handler_type: "audio".to_string(),
@@ -523,8 +546,8 @@ mod tests {
 
         // Generate simple sine wave
         let sample_rate = 16000.0;
-        let frequency = 440.0;  // A4 note
-        let duration = 0.1;  // 100ms
+        let frequency = 440.0; // A4 note
+        let duration = 0.1; // 100ms
         let num_samples = (sample_rate * duration) as usize;
 
         let mut samples = Vec::with_capacity(num_samples);

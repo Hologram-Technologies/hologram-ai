@@ -39,8 +39,8 @@
 use crate::error::{OnnxError, Result};
 use ahash::{AHashMap, AHashSet};
 use hologram_onnx_spec::{GraphProto, NodeProto};
-use petgraph::graph::{DiGraph, NodeIndex};
 use petgraph::algo::toposort;
+use petgraph::graph::{DiGraph, NodeIndex};
 use tracing::{debug, trace};
 
 /// Graph partitioner for large ONNX models.
@@ -77,13 +77,17 @@ impl GraphPartitioner {
         let node_count = graph.node.len();
 
         if node_count <= self.partition_size {
-            debug!("Graph has {} nodes (<= {}), no partitioning needed",
-                   node_count, self.partition_size);
+            debug!(
+                "Graph has {} nodes (<= {}), no partitioning needed",
+                node_count, self.partition_size
+            );
             return Ok(vec![GraphPartition::from_full_graph(graph)]);
         }
 
-        debug!("Partitioning graph with {} nodes into chunks of {}",
-               node_count, self.partition_size);
+        debug!(
+            "Partitioning graph with {} nodes into chunks of {}",
+            node_count, self.partition_size
+        );
 
         // 1. Build petgraph DiGraph from ONNX graph
         trace!("Building dependency graph");
@@ -91,15 +95,13 @@ impl GraphPartitioner {
 
         // 2. Topological sort using petgraph
         trace!("Performing topological sort");
-        let sorted_node_indices = toposort(&pg_graph, None)
-            .map_err(|cycle| {
-                OnnxError::InvalidModel(
-                    format!("Graph has cycles at node: {:?}", cycle.node_id())
-                )
-            })?;
+        let sorted_node_indices = toposort(&pg_graph, None).map_err(|cycle| {
+            OnnxError::InvalidModel(format!("Graph has cycles at node: {:?}", cycle.node_id()))
+        })?;
 
         // Convert NodeIndex back to original node indices
-        let sorted_indices: Vec<usize> = sorted_node_indices.iter()
+        let sorted_indices: Vec<usize> = sorted_node_indices
+            .iter()
             .map(|&pg_idx| node_index_map[&pg_idx])
             .collect();
 
@@ -215,9 +217,14 @@ impl GraphPartitioner {
         for &idx in node_indices {
             let node = &graph.node[idx];
             for input in &node.input {
-                if !internal_tensors.contains(input.as_str()) && !boundary_inputs.contains_key(input.as_str()) {
+                if !internal_tensors.contains(input.as_str())
+                    && !boundary_inputs.contains_key(input.as_str())
+                {
                     // This is an external tensor - create virtual input
-                    let virtual_name = format!("partition_{}_input_{}", partition_idx, boundary_input_counter);
+                    let virtual_name = format!(
+                        "partition_{}_input_{}",
+                        partition_idx, boundary_input_counter
+                    );
                     boundary_inputs.insert(input.to_string(), virtual_name);
                     boundary_input_counter += 1;
                 }
@@ -246,7 +253,8 @@ impl GraphPartitioner {
         }
 
         // Clone nodes for subgraph
-        let partition_nodes: Vec<NodeProto> = node_indices.iter()
+        let partition_nodes: Vec<NodeProto> = node_indices
+            .iter()
             .map(|&idx| graph.node[idx].clone())
             .collect();
 
@@ -483,7 +491,11 @@ mod tests {
         assert_eq!(partitions[0].partition_idx, 0);
         // Should have 1 boundary output (tensor1 needed by node2)
         assert_eq!(partitions[0].boundary_outputs.len(), 1);
-        assert!(partitions[0].boundary_outputs.contains(&"tensor1".to_string()));
+        assert!(
+            partitions[0]
+                .boundary_outputs
+                .contains(&"tensor1".to_string())
+        );
 
         // Second partition: nodes 2, 3
         assert_eq!(partitions[1].node_count(), 2);
@@ -536,7 +548,7 @@ mod tests {
         }
 
         // Each partition (except last) should have boundary outputs
-        for i in 0..partitions.len()-1 {
+        for i in 0..partitions.len() - 1 {
             assert!(partitions[i].has_boundary_outputs());
         }
     }

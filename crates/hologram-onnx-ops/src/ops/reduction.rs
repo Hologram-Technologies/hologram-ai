@@ -11,13 +11,13 @@
 //! - **SIMD**: Parallel processing of reduction operations
 //! - **Zero runtime overhead**: All axes resolved at compile time
 
+use hologram_compiler::ir::{IRBuilder, NodeId};
 use hologram_onnx_core::{OnnxError, Result, SymbolicShape};
 use hologram_onnx_spec::AttributeProto;
-use hologram_compiler::ir::{IRBuilder, NodeId};
 use std::collections::HashMap;
 use tracing::{debug, trace};
 
-use crate::utils::{parse_attr_ints, parse_attr_int};
+use crate::utils::{parse_attr_int, parse_attr_ints};
 
 /// Translate ONNX ReduceSum operation.
 ///
@@ -41,7 +41,7 @@ pub fn translate_reduce_sum(
 ) -> Result<NodeId> {
     if inputs.is_empty() {
         return Err(OnnxError::InvalidModel(
-            "ReduceSum expects 1 input, got 0".to_string()
+            "ReduceSum expects 1 input, got 0".to_string(),
         ));
     }
 
@@ -53,7 +53,10 @@ pub fn translate_reduce_sum(
     // Parse keepdims attribute (default: 1)
     let keepdims = parse_attr_int(attrs, "keepdims", 1)? != 0;
 
-    debug!("Translating ReduceSum operation (axes={:?}, keepdims={})", axes, keepdims);
+    debug!(
+        "Translating ReduceSum operation (axes={:?}, keepdims={})",
+        axes, keepdims
+    );
     trace!("ReduceSum input: {:?}", input);
 
     // Convert axes to isize for builder
@@ -88,7 +91,7 @@ pub fn translate_reduce_mean(
 ) -> Result<NodeId> {
     if inputs.is_empty() {
         return Err(OnnxError::InvalidModel(
-            "ReduceMean expects 1 input, got 0".to_string()
+            "ReduceMean expects 1 input, got 0".to_string(),
         ));
     }
 
@@ -97,7 +100,10 @@ pub fn translate_reduce_mean(
     let axes = parse_attr_ints(attrs, "axes", vec![])?;
     let keepdims = parse_attr_int(attrs, "keepdims", 1)? != 0;
 
-    debug!("Translating ReduceMean operation (axes={:?}, keepdims={})", axes, keepdims);
+    debug!(
+        "Translating ReduceMean operation (axes={:?}, keepdims={})",
+        axes, keepdims
+    );
     trace!("ReduceMean input: {:?}", input);
 
     // Convert axes to isize for builder
@@ -132,7 +138,7 @@ pub fn translate_reduce_max(
 ) -> Result<NodeId> {
     if inputs.is_empty() {
         return Err(OnnxError::InvalidModel(
-            "ReduceMax expects 1 input, got 0".to_string()
+            "ReduceMax expects 1 input, got 0".to_string(),
         ));
     }
 
@@ -141,7 +147,10 @@ pub fn translate_reduce_max(
     let axes = parse_attr_ints(attrs, "axes", vec![])?;
     let keepdims = parse_attr_int(attrs, "keepdims", 1)? != 0;
 
-    debug!("Translating ReduceMax operation (axes={:?}, keepdims={})", axes, keepdims);
+    debug!(
+        "Translating ReduceMax operation (axes={:?}, keepdims={})",
+        axes, keepdims
+    );
     trace!("ReduceMax input: {:?}", input);
 
     // Convert axes to isize for builder
@@ -176,7 +185,7 @@ pub fn translate_reduce_min(
 ) -> Result<NodeId> {
     if inputs.is_empty() {
         return Err(OnnxError::InvalidModel(
-            "ReduceMin expects 1 input, got 0".to_string()
+            "ReduceMin expects 1 input, got 0".to_string(),
         ));
     }
 
@@ -185,14 +194,17 @@ pub fn translate_reduce_min(
     let axes = parse_attr_ints(attrs, "axes", vec![])?;
     let keepdims = parse_attr_int(attrs, "keepdims", 1)? != 0;
 
-    debug!("Translating ReduceMin operation (axes={:?}, keepdims={})", axes, keepdims);
+    debug!(
+        "Translating ReduceMin operation (axes={:?}, keepdims={})",
+        axes, keepdims
+    );
     trace!("ReduceMin input: {:?}", input);
 
     // IRBuilder doesn't have min reduction, need to decompose
     // For now, return not-implemented error
     let _ = (builder, input, axes, keepdims);
     Err(OnnxError::IrTranslationError(
-        "ReduceMin operation not yet implemented".to_string()
+        "ReduceMin operation not yet implemented".to_string(),
     ))
 }
 
@@ -218,7 +230,7 @@ pub fn translate_reduce_prod(
 ) -> Result<NodeId> {
     if inputs.is_empty() {
         return Err(OnnxError::InvalidModel(
-            "ReduceProd expects 1 input, got 0".to_string()
+            "ReduceProd expects 1 input, got 0".to_string(),
         ));
     }
 
@@ -227,14 +239,17 @@ pub fn translate_reduce_prod(
     let axes = parse_attr_ints(attrs, "axes", vec![])?;
     let keepdims = parse_attr_int(attrs, "keepdims", 1)? != 0;
 
-    debug!("Translating ReduceProd operation (axes={:?}, keepdims={})", axes, keepdims);
+    debug!(
+        "Translating ReduceProd operation (axes={:?}, keepdims={})",
+        axes, keepdims
+    );
     trace!("ReduceProd input: {:?}", input);
 
     // IRBuilder doesn't have prod reduction, need to decompose
     // For now, return not-implemented error
     let _ = (builder, input, axes, keepdims);
     Err(OnnxError::IrTranslationError(
-        "ReduceProd operation not yet implemented".to_string()
+        "ReduceProd operation not yet implemented".to_string(),
     ))
 }
 
@@ -265,14 +280,12 @@ mod tests {
         let mut builder = make_builder();
         let input = builder.add_input("X", f32_tensor(&[2, 3, 4]));
 
-        let attrs = vec![
-            AttributeProto {
-                name: "axes".to_string(),
-                ints: vec![0, 2],
-                r#type: AttributeType::Ints as i32,
-                ..Default::default()
-            },
-        ];
+        let attrs = vec![AttributeProto {
+            name: "axes".to_string(),
+            ints: vec![0, 2],
+            r#type: AttributeType::Ints as i32,
+            ..Default::default()
+        }];
 
         let result = translate_reduce_sum(&vec![input], &attrs, &HashMap::new(), &mut builder);
         assert!(result.is_ok());
@@ -283,14 +296,12 @@ mod tests {
         let mut builder = make_builder();
         let input = builder.add_input("X", f32_tensor(&[2, 3, 4]));
 
-        let attrs = vec![
-            AttributeProto {
-                name: "keepdims".to_string(),
-                i: 0,
-                r#type: AttributeType::Int as i32,
-                ..Default::default()
-            },
-        ];
+        let attrs = vec![AttributeProto {
+            name: "keepdims".to_string(),
+            i: 0,
+            r#type: AttributeType::Int as i32,
+            ..Default::default()
+        }];
 
         let result = translate_reduce_sum(&vec![input], &attrs, &HashMap::new(), &mut builder);
         assert!(result.is_ok());
@@ -320,14 +331,12 @@ mod tests {
         let mut builder = make_builder();
         let input = builder.add_input("X", f32_tensor(&[2, 3, 4]));
 
-        let attrs = vec![
-            AttributeProto {
-                name: "axes".to_string(),
-                ints: vec![1],
-                r#type: AttributeType::Ints as i32,
-                ..Default::default()
-            },
-        ];
+        let attrs = vec![AttributeProto {
+            name: "axes".to_string(),
+            ints: vec![1],
+            r#type: AttributeType::Ints as i32,
+            ..Default::default()
+        }];
 
         let result = translate_reduce_mean(&vec![input], &attrs, &HashMap::new(), &mut builder);
         assert!(result.is_ok());
@@ -368,7 +377,10 @@ mod tests {
         let result = translate_reduce_min(&vec![input], &[], &HashMap::new(), &mut builder);
         // ReduceMin not yet implemented
         assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), OnnxError::IrTranslationError(_)));
+        assert!(matches!(
+            result.unwrap_err(),
+            OnnxError::IrTranslationError(_)
+        ));
     }
 
     #[test]
@@ -389,7 +401,10 @@ mod tests {
         let result = translate_reduce_prod(&vec![input], &[], &HashMap::new(), &mut builder);
         // ReduceProd not yet implemented
         assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), OnnxError::IrTranslationError(_)));
+        assert!(matches!(
+            result.unwrap_err(),
+            OnnxError::IrTranslationError(_)
+        ));
     }
 
     #[test]
@@ -405,7 +420,7 @@ mod tests {
     #[test]
     fn test_implemented_reductions_symbolic_shapes() {
         let mut builder = make_builder();
-        let input = builder.add_input("X", f32_tensor(&[]));  // Symbolic shape
+        let input = builder.add_input("X", f32_tensor(&[])); // Symbolic shape
 
         let shapes = HashMap::new();
 
@@ -418,7 +433,7 @@ mod tests {
     #[test]
     fn test_not_implemented_reductions_symbolic_shapes() {
         let mut builder = make_builder();
-        let input = builder.add_input("X", f32_tensor(&[]));  // Symbolic shape
+        let input = builder.add_input("X", f32_tensor(&[])); // Symbolic shape
 
         let shapes = HashMap::new();
 
@@ -441,7 +456,7 @@ mod tests {
         let attrs = vec![
             AttributeProto {
                 name: "axes".to_string(),
-                ints: vec![1, 3],  // Reduce axes 1 and 3
+                ints: vec![1, 3], // Reduce axes 1 and 3
                 r#type: AttributeType::Ints as i32,
                 ..Default::default()
             },

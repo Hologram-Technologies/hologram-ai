@@ -11,9 +11,9 @@
 //! - **SIMD**: All element-wise operations vectorized
 //! - **Zero runtime overhead**: All decisions made at compile time
 
+use hologram_compiler::ir::{IRBuilder, NodeId};
 use hologram_onnx_core::{OnnxError, Result, SymbolicShape};
 use hologram_onnx_spec::AttributeProto;
-use hologram_compiler::ir::{IRBuilder, NodeId};
 use std::collections::HashMap;
 use tracing::{debug, trace};
 
@@ -36,7 +36,7 @@ pub fn translate_relu(
 ) -> Result<NodeId> {
     if inputs.is_empty() {
         return Err(OnnxError::InvalidModel(
-            "ReLU expects 1 input, got 0".to_string()
+            "ReLU expects 1 input, got 0".to_string(),
         ));
     }
 
@@ -70,7 +70,7 @@ pub fn translate_sigmoid(
 ) -> Result<NodeId> {
     if inputs.is_empty() {
         return Err(OnnxError::InvalidModel(
-            "Sigmoid expects 1 input, got 0".to_string()
+            "Sigmoid expects 1 input, got 0".to_string(),
         ));
     }
 
@@ -102,7 +102,7 @@ pub fn translate_tanh(
 ) -> Result<NodeId> {
     if inputs.is_empty() {
         return Err(OnnxError::InvalidModel(
-            "Tanh expects 1 input, got 0".to_string()
+            "Tanh expects 1 input, got 0".to_string(),
         ));
     }
 
@@ -142,7 +142,7 @@ pub fn translate_softmax(
 ) -> Result<NodeId> {
     if inputs.is_empty() {
         return Err(OnnxError::InvalidModel(
-            "Softmax expects 1 input, got 0".to_string()
+            "Softmax expects 1 input, got 0".to_string(),
         ));
     }
 
@@ -181,7 +181,7 @@ pub fn translate_gelu(
 ) -> Result<NodeId> {
     if inputs.is_empty() {
         return Err(OnnxError::InvalidModel(
-            "GELU expects 1 input, got 0".to_string()
+            "GELU expects 1 input, got 0".to_string(),
         ));
     }
 
@@ -215,7 +215,7 @@ pub fn translate_swish(
 ) -> Result<NodeId> {
     if inputs.is_empty() {
         return Err(OnnxError::InvalidModel(
-            "Swish expects 1 input, got 0".to_string()
+            "Swish expects 1 input, got 0".to_string(),
         ));
     }
 
@@ -228,7 +228,7 @@ pub fn translate_swish(
     // For now, return not-implemented error
     let _ = (builder, input);
     Err(OnnxError::IrTranslationError(
-        "Swish operation not yet implemented".to_string()
+        "Swish operation not yet implemented".to_string(),
     ))
 }
 
@@ -255,7 +255,7 @@ pub fn translate_elu(
 ) -> Result<NodeId> {
     if inputs.is_empty() {
         return Err(OnnxError::InvalidModel(
-            "ELU expects 1 input, got 0".to_string()
+            "ELU expects 1 input, got 0".to_string(),
         ));
     }
 
@@ -271,7 +271,7 @@ pub fn translate_elu(
     // For now, return not-implemented error
     let _ = (builder, input, alpha);
     Err(OnnxError::IrTranslationError(
-        "ELU operation not yet implemented".to_string()
+        "ELU operation not yet implemented".to_string(),
     ))
 }
 
@@ -301,7 +301,7 @@ pub fn translate_selu(
 ) -> Result<NodeId> {
     if inputs.is_empty() {
         return Err(OnnxError::InvalidModel(
-            "SELU expects 1 input, got 0".to_string()
+            "SELU expects 1 input, got 0".to_string(),
         ));
     }
 
@@ -311,14 +311,17 @@ pub fn translate_selu(
     let alpha = crate::utils::parse_attr_float(attrs, "alpha", 1.673_263_2)?;
     let gamma = crate::utils::parse_attr_float(attrs, "gamma", 1.050_701)?;
 
-    debug!("Translating SELU operation (alpha={}, gamma={})", alpha, gamma);
+    debug!(
+        "Translating SELU operation (alpha={}, gamma={})",
+        alpha, gamma
+    );
     trace!("SELU input: {:?}", input);
 
     // IRBuilder doesn't have SELU, need to decompose
     // For now, return not-implemented error
     let _ = (builder, input, alpha, gamma);
     Err(OnnxError::IrTranslationError(
-        "SELU operation not yet implemented".to_string()
+        "SELU operation not yet implemented".to_string(),
     ))
 }
 
@@ -397,14 +400,12 @@ mod tests {
         let mut builder = make_builder();
         let input = builder.add_input("X", f32_tensor(&[2, 3, 4]));
 
-        let attrs = vec![
-            AttributeProto {
-                name: "axis".to_string(),
-                i: 1, // Softmax along axis 1
-                r#type: AttributeType::Int as i32,
-                ..Default::default()
-            },
-        ];
+        let attrs = vec![AttributeProto {
+            name: "axis".to_string(),
+            i: 1, // Softmax along axis 1
+            r#type: AttributeType::Int as i32,
+            ..Default::default()
+        }];
 
         let result = translate_softmax(&vec![input], &attrs, &HashMap::new(), &mut builder);
         assert!(result.is_ok());
@@ -440,12 +441,8 @@ mod tests {
 
         // Create chain: ReLU -> Sigmoid (tests ClassMap fusion potential)
         let relu_out = translate_relu(&vec![input], &[], &HashMap::new(), &mut builder).unwrap();
-        let sigmoid_out = translate_sigmoid(
-            &vec![relu_out],
-            &[],
-            &HashMap::new(),
-            &mut builder
-        ).unwrap();
+        let sigmoid_out =
+            translate_sigmoid(&vec![relu_out], &[], &HashMap::new(), &mut builder).unwrap();
 
         // Should successfully create chain
         assert!(sigmoid_out != input);
@@ -479,7 +476,10 @@ mod tests {
         let result = translate_swish(&vec![input], &[], &HashMap::new(), &mut builder);
         // Swish not yet implemented
         assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), OnnxError::IrTranslationError(_)));
+        assert!(matches!(
+            result.unwrap_err(),
+            OnnxError::IrTranslationError(_)
+        ));
     }
 
     #[test]
@@ -498,7 +498,10 @@ mod tests {
         let result = translate_elu(&vec![input], &[], &HashMap::new(), &mut builder);
         // ELU not yet implemented
         assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), OnnxError::IrTranslationError(_)));
+        assert!(matches!(
+            result.unwrap_err(),
+            OnnxError::IrTranslationError(_)
+        ));
     }
 
     #[test]
@@ -517,7 +520,10 @@ mod tests {
         let result = translate_selu(&vec![input], &[], &HashMap::new(), &mut builder);
         // SELU not yet implemented
         assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), OnnxError::IrTranslationError(_)));
+        assert!(matches!(
+            result.unwrap_err(),
+            OnnxError::IrTranslationError(_)
+        ));
     }
 
     #[test]
@@ -531,7 +537,7 @@ mod tests {
     #[test]
     fn test_not_implemented_activations_symbolic_shapes() {
         let mut builder = make_builder();
-        let input = builder.add_input("X", f32_tensor(&[]));  // Symbolic shape
+        let input = builder.add_input("X", f32_tensor(&[])); // Symbolic shape
 
         let shapes = HashMap::new();
 

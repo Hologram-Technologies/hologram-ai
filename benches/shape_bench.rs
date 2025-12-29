@@ -6,11 +6,11 @@
 //! - Broadcasting shape calculations
 //! - MatMul shape inference
 
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
 use hologram_onnx_core::{Dim, SymbolicShape};
 use hologram_onnx_ops::{infer_conv_output_shape, infer_pool_output_shape};
-use hologram_onnx_spec::attribute_proto::AttributeType;
 use hologram_onnx_spec::AttributeProto;
+use hologram_onnx_spec::attribute_proto::AttributeType;
 
 // =============================================================================
 // Helper Functions
@@ -38,13 +38,9 @@ fn bench_shape_creation(c: &mut Criterion) {
         let dims: Vec<usize> = (0..rank).map(|i| (i + 1) * 64).collect();
 
         group.throughput(Throughput::Elements(rank as u64));
-        group.bench_with_input(
-            BenchmarkId::new("concrete", rank),
-            &dims,
-            |b, dims| {
-                b.iter(|| SymbolicShape::concrete(black_box(dims.clone())))
-            },
-        );
+        group.bench_with_input(BenchmarkId::new("concrete", rank), &dims, |b, dims| {
+            b.iter(|| SymbolicShape::concrete(black_box(dims.clone())))
+        });
     }
 
     // Symbolic shape creation
@@ -57,13 +53,9 @@ fn bench_shape_creation(c: &mut Criterion) {
             _ => vec![],
         };
 
-        group.bench_with_input(
-            BenchmarkId::new("symbolic", rank),
-            &names,
-            |b, names| {
-                b.iter(|| SymbolicShape::symbolic(black_box(names.clone())))
-            },
-        );
+        group.bench_with_input(BenchmarkId::new("symbolic", rank), &names, |b, names| {
+            b.iter(|| SymbolicShape::symbolic(black_box(names.clone())))
+        });
     }
 
     group.finish();
@@ -90,9 +82,7 @@ fn bench_binary_op_inference(c: &mut Criterion) {
         group.bench_with_input(
             BenchmarkId::new("same_shape", name),
             &(&shape1, &shape2),
-            |b, (s1, s2)| {
-                b.iter(|| s1.infer_binary_op(black_box(s2)))
-            },
+            |b, (s1, s2)| b.iter(|| s1.infer_binary_op(black_box(s2))),
         );
     }
 
@@ -110,9 +100,7 @@ fn bench_binary_op_inference(c: &mut Criterion) {
         group.bench_with_input(
             BenchmarkId::new("broadcast", name),
             &(&shape1, &shape2),
-            |b, (s1, s2)| {
-                b.iter(|| s1.infer_binary_op(black_box(s2)))
-            },
+            |b, (s1, s2)| b.iter(|| s1.infer_binary_op(black_box(s2))),
         );
     }
 
@@ -141,16 +129,18 @@ fn bench_matmul_inference(c: &mut Criterion) {
         group.bench_with_input(
             BenchmarkId::new("infer", name),
             &(&shape1, &shape2),
-            |b, (s1, s2)| {
-                b.iter(|| s1.infer_matmul(black_box(s2)))
-            },
+            |b, (s1, s2)| b.iter(|| s1.infer_matmul(black_box(s2))),
         );
     }
 
     // Symbolic batch dimension
     let symbolic_shapes = [
         ("symbolic_batch_2d", vec!["batch", "64"], vec!["64", "128"]),
-        ("symbolic_batch_3d", vec!["batch", "seq", "64"], vec!["batch", "64", "128"]),
+        (
+            "symbolic_batch_3d",
+            vec!["batch", "seq", "64"],
+            vec!["batch", "64", "128"],
+        ),
     ];
 
     for (name, names1, names2) in symbolic_shapes {
@@ -160,9 +150,7 @@ fn bench_matmul_inference(c: &mut Criterion) {
         group.bench_with_input(
             BenchmarkId::new("symbolic", name),
             &(&shape1, &shape2),
-            |b, (s1, s2)| {
-                b.iter(|| s1.infer_matmul(black_box(s2)))
-            },
+            |b, (s1, s2)| b.iter(|| s1.infer_matmul(black_box(s2))),
         );
     }
 
@@ -183,9 +171,9 @@ fn bench_transpose_inference(c: &mut Criterion) {
     ];
 
     let perms: [Option<&[i64]>; 3] = [
-        None,                        // Default reverse
-        Some(&[0, 2, 3, 1]),        // NCHW to NHWC
-        Some(&[4, 3, 2, 1, 0]),     // Full reverse
+        None,                   // Default reverse
+        Some(&[0, 2, 3, 1]),    // NCHW to NHWC
+        Some(&[4, 3, 2, 1, 0]), // Full reverse
     ];
 
     for ((name, dims), perm) in shapes.iter().zip(perms.iter()) {
@@ -193,13 +181,9 @@ fn bench_transpose_inference(c: &mut Criterion) {
         let perm_owned = *perm;
 
         group.throughput(Throughput::Elements(1));
-        group.bench_with_input(
-            BenchmarkId::new("infer", name),
-            &shape,
-            |b, shape| {
-                b.iter(|| shape.infer_transpose(black_box(perm_owned)))
-            },
-        );
+        group.bench_with_input(BenchmarkId::new("infer", name), &shape, |b, shape| {
+            b.iter(|| shape.infer_transpose(black_box(perm_owned)))
+        });
     }
 
     group.finish();
@@ -213,9 +197,26 @@ fn bench_reshape_inference(c: &mut Criterion) {
     let mut group = c.benchmark_group("reshape_inference");
 
     let reshape_cases = [
-        ("flatten", vec![1, 64, 7, 7], vec![Dim::Concrete(1), Dim::Concrete(3136)]),
-        ("expand", vec![1, 3136], vec![Dim::Concrete(1), Dim::Concrete(64), Dim::Concrete(7), Dim::Concrete(7)]),
-        ("infer_dim", vec![2, 3, 4], vec![Dim::Concrete(6), Dim::Concrete(0)]), // 0 means infer
+        (
+            "flatten",
+            vec![1, 64, 7, 7],
+            vec![Dim::Concrete(1), Dim::Concrete(3136)],
+        ),
+        (
+            "expand",
+            vec![1, 3136],
+            vec![
+                Dim::Concrete(1),
+                Dim::Concrete(64),
+                Dim::Concrete(7),
+                Dim::Concrete(7),
+            ],
+        ),
+        (
+            "infer_dim",
+            vec![2, 3, 4],
+            vec![Dim::Concrete(6), Dim::Concrete(0)],
+        ), // 0 means infer
     ];
 
     for (name, input_dims, target_dims) in reshape_cases {
@@ -226,9 +227,7 @@ fn bench_reshape_inference(c: &mut Criterion) {
         group.bench_with_input(
             BenchmarkId::new("infer", name),
             &(&input_shape, &target_shape),
-            |b, (input, target)| {
-                b.iter(|| input.infer_reshape(black_box(target.dims())))
-            },
+            |b, (input, target)| b.iter(|| input.infer_reshape(black_box(target.dims()))),
         );
     }
 
@@ -318,9 +317,7 @@ fn bench_pool_shape_inference(c: &mut Criterion) {
         group.bench_with_input(
             BenchmarkId::new("infer", name),
             &(&input_shape, &attrs),
-            |b, (input, attrs)| {
-                b.iter(|| infer_pool_output_shape(black_box(input), attrs))
-            },
+            |b, (input, attrs)| b.iter(|| infer_pool_output_shape(black_box(input), attrs)),
         );
     }
 
@@ -336,8 +333,14 @@ fn bench_shape_comparison(c: &mut Criterion) {
 
     let shapes = [
         ("2D_concrete", SymbolicShape::concrete(vec![32, 64])),
-        ("4D_concrete", SymbolicShape::concrete(vec![1, 64, 112, 112])),
-        ("4D_symbolic", SymbolicShape::symbolic(vec!["batch", "64", "112", "112"])),
+        (
+            "4D_concrete",
+            SymbolicShape::concrete(vec![1, 64, 112, 112]),
+        ),
+        (
+            "4D_symbolic",
+            SymbolicShape::symbolic(vec!["batch", "64", "112", "112"]),
+        ),
     ];
 
     for (name, shape) in &shapes {
@@ -346,26 +349,18 @@ fn bench_shape_comparison(c: &mut Criterion) {
         group.bench_with_input(
             BenchmarkId::new("is_fully_concrete", name),
             shape,
-            |b, shape| {
-                b.iter(|| shape.is_fully_concrete())
-            },
+            |b, shape| b.iter(|| shape.is_fully_concrete()),
         );
 
         group.bench_with_input(
             BenchmarkId::new("is_partially_symbolic", name),
             shape,
-            |b, shape| {
-                b.iter(|| shape.is_partially_symbolic())
-            },
+            |b, shape| b.iter(|| shape.is_partially_symbolic()),
         );
 
-        group.bench_with_input(
-            BenchmarkId::new("rank", name),
-            shape,
-            |b, shape| {
-                b.iter(|| shape.rank())
-            },
-        );
+        group.bench_with_input(BenchmarkId::new("rank", name), shape, |b, shape| {
+            b.iter(|| shape.rank())
+        });
     }
 
     group.finish();

@@ -6,7 +6,7 @@
 //! - Attention mechanism IR creation
 //! - Element-wise operation IR creation
 
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
 use hologram_compiler::ir::{IRBuilder, ScalarType, Type};
 use hologram_compiler::shapes::Shape;
 
@@ -36,8 +36,13 @@ fn bench_conv2d_execution(c: &mut Criterion) {
         // Calculate total FLOPs for throughput measurement
         let output_h = input_size[2] - kernel_size[2] + 1;
         let output_w = input_size[3] - kernel_size[3] + 1;
-        let flops =
-            2 * output_h * output_w * kernel_size[0] * kernel_size[1] * kernel_size[2] * kernel_size[3];
+        let flops = 2
+            * output_h
+            * output_w
+            * kernel_size[0]
+            * kernel_size[1]
+            * kernel_size[2]
+            * kernel_size[3];
 
         group.throughput(Throughput::Elements(flops as u64));
 
@@ -50,15 +55,8 @@ fn bench_conv2d_execution(c: &mut Criterion) {
                     let mut builder = IRBuilder::new("bench");
                     let x = builder.add_input("X", f32_tensor(input));
                     let w = builder.add_input("W", f32_tensor(kernel));
-                    let result = builder.conv2d(
-                        black_box(x),
-                        black_box(w),
-                        None,
-                        (1, 1),
-                        (0, 0),
-                        (1, 1),
-                        1,
-                    );
+                    let result =
+                        builder.conv2d(black_box(x), black_box(w), None, (1, 1), (0, 0), (1, 1), 1);
                     builder.set_output(result);
                     black_box(builder.build())
                 });
@@ -90,16 +88,20 @@ fn bench_matmul_execution(c: &mut Criterion) {
         let flops = 2 * m * n * k;
         group.throughput(Throughput::Elements(flops as u64));
 
-        group.bench_with_input(BenchmarkId::new("matmul_ir", name), &(m, n, k), |b, &(m, n, k)| {
-            b.iter(|| {
-                let mut builder = IRBuilder::new("bench");
-                let a = builder.add_input("A", f32_tensor(&[m, k]));
-                let b_val = builder.add_input("B", f32_tensor(&[k, n]));
-                let result = builder.matmul(black_box(a), black_box(b_val));
-                builder.set_output(result);
-                black_box(builder.build())
-            });
-        });
+        group.bench_with_input(
+            BenchmarkId::new("matmul_ir", name),
+            &(m, n, k),
+            |b, &(m, n, k)| {
+                b.iter(|| {
+                    let mut builder = IRBuilder::new("bench");
+                    let a = builder.add_input("A", f32_tensor(&[m, k]));
+                    let b_val = builder.add_input("B", f32_tensor(&[k, n]));
+                    let result = builder.matmul(black_box(a), black_box(b_val));
+                    builder.set_output(result);
+                    black_box(builder.build())
+                });
+            },
+        );
     }
 
     group.finish();
@@ -238,10 +240,10 @@ fn bench_softmax(c: &mut Criterion) {
     let mut group = c.benchmark_group("softmax");
 
     let configs = [
-        ("small_vocab", 1, 100, 1000),       // Small vocabulary
-        ("bert_vocab", 1, 512, 30522),       // BERT vocabulary size
-        ("gpt2_vocab", 1, 1024, 50257),      // GPT-2 vocabulary size
-        ("attention", 1, 512, 512),          // Attention scores
+        ("small_vocab", 1, 100, 1000),  // Small vocabulary
+        ("bert_vocab", 1, 512, 30522),  // BERT vocabulary size
+        ("gpt2_vocab", 1, 1024, 50257), // GPT-2 vocabulary size
+        ("attention", 1, 512, 512),     // Attention scores
     ];
 
     for (name, batch, seq_len, vocab_size) in configs {

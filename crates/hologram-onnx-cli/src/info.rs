@@ -4,11 +4,11 @@
 //! their structure, inputs, outputs, and operations.
 
 use anyhow::{Context, Result};
-use hologram_onnx_core::{parse_model, extract_opset_version};
+use hologram_onnx_core::{extract_opset_version, parse_model};
 use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
-use tracing::{info, debug};
+use tracing::{debug, info};
 
 /// Display information about an ONNX model.
 ///
@@ -31,13 +31,11 @@ pub fn info_command(model_path: &Path, detailed: bool) -> Result<()> {
 
     // Parse model
     debug!("Parsing ONNX protobuf...");
-    let model = parse_model(&onnx_bytes)
-        .context("Failed to parse ONNX model")?;
+    let model = parse_model(&onnx_bytes).context("Failed to parse ONNX model")?;
 
     // Extract metadata
     let opset_version = extract_opset_version(&model);
-    let graph = model.graph.as_ref()
-        .context("Model has no graph")?;
+    let graph = model.graph.as_ref().context("Model has no graph")?;
 
     // Display model information
     println!("\n╔════════════════════════════════════════════════════════════╗");
@@ -131,17 +129,21 @@ fn get_tensor_shape_string(value_info: &hologram_onnx_spec::ValueInfoProto) -> S
         && let Some(Value::TensorType(tensor_type)) = &type_proto.value
         && let Some(shape) = &tensor_type.shape
     {
-        let dims: Vec<String> = shape.dim.iter().map(|d| {
-            if let Some(value) = &d.value {
-                use hologram_onnx_spec::tensor_shape_proto::dimension::Value as DimValue;
-                match value {
-                    DimValue::DimValue(v) => v.to_string(),
-                    DimValue::DimParam(p) => p.clone(),
+        let dims: Vec<String> = shape
+            .dim
+            .iter()
+            .map(|d| {
+                if let Some(value) = &d.value {
+                    use hologram_onnx_spec::tensor_shape_proto::dimension::Value as DimValue;
+                    match value {
+                        DimValue::DimValue(v) => v.to_string(),
+                        DimValue::DimParam(p) => p.clone(),
+                    }
+                } else {
+                    "?".to_string()
                 }
-            } else {
-                "?".to_string()
-            }
-        }).collect();
+            })
+            .collect();
         return format!("[{}]", dims.join(", "));
     }
     "[]".to_string()
@@ -176,7 +178,8 @@ fn get_tensor_type_string(value_info: &hologram_onnx_spec::ValueInfoProto) -> St
                     Ok(DataType::Complex128) => "complex128",
                     Ok(DataType::Bfloat16) => "bfloat16",
                     _ => "unknown",
-                }.to_string()
+                }
+                .to_string()
             }
             _ => "tensor".to_string(),
         };
@@ -196,6 +199,11 @@ mod tests {
 
         let result = info_command(&model_path, false);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("Failed to read ONNX model"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("Failed to read ONNX model")
+        );
     }
 }

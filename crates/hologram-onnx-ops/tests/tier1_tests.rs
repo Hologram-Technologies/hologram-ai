@@ -10,17 +10,15 @@
 //! 3. **Symbolic Batch Size**: Variable batch dimension support
 //! 4. **ISA Optimizations**: Verify LOOP, ClassMap, SIMD annotations
 
-use hologram_onnx_core::SymbolicShape;
-use hologram_onnx_ops::{
-    translate_onnx_op, infer_op_output_shape,
-    translate_matmul, translate_add, translate_relu, translate_softmax,
-    translate_reshape, translate_sigmoid, translate_tanh,
-    translate_mul, translate_div, translate_pow,
-    translate_gemm, translate_transpose,
-};
-use hologram_onnx_spec::{AttributeProto, attribute_proto::AttributeType};
 use hologram_compiler::ir::IRBuilder;
 use hologram_compiler::ir::types::{ScalarType, TensorType, Type};
+use hologram_onnx_core::SymbolicShape;
+use hologram_onnx_ops::{
+    infer_op_output_shape, translate_add, translate_div, translate_gemm, translate_matmul,
+    translate_mul, translate_onnx_op, translate_pow, translate_relu, translate_reshape,
+    translate_sigmoid, translate_softmax, translate_tanh, translate_transpose,
+};
+use hologram_onnx_spec::{AttributeProto, attribute_proto::AttributeType};
 use std::collections::HashMap;
 
 // ============================================================================
@@ -97,7 +95,10 @@ fn test_matmul_translation() {
     assert!(result.is_ok(), "MatMul translation should succeed");
 
     let node_id = result.unwrap();
-    assert!(node_id.0 > 0 || node_id.0 == 0, "Result should be a valid node ID");
+    assert!(
+        node_id.0 > 0 || node_id.0 == 0,
+        "Result should be a valid node ID"
+    );
 }
 
 /// Test Add operation (bias addition in MNIST).
@@ -157,17 +158,26 @@ fn test_reshape_translation() {
 
     // Flatten from [1, 28, 28] to [1, 784]
     let x = builder.add_input("X", f32_tensor(&[1, 28, 28]));
-    let shape = builder.add_input("shape", Type::Tensor(TensorType::concrete(ScalarType::I64, vec![2])));
+    let shape = builder.add_input(
+        "shape",
+        Type::Tensor(TensorType::concrete(ScalarType::I64, vec![2])),
+    );
 
     let mut shapes = HashMap::new();
     shapes.insert("X".to_string(), concrete_shape(&[1, 28, 28]));
 
     let result = translate_reshape(&[x, shape], &[], &shapes, &mut builder);
     // Dynamic reshape is not yet implemented - verify it fails gracefully
-    assert!(result.is_err(), "Dynamic reshape should return error (not yet implemented)");
+    assert!(
+        result.is_err(),
+        "Dynamic reshape should return error (not yet implemented)"
+    );
 
     let err = result.unwrap_err();
-    assert!(!err.is_unsupported_op(), "Reshape is a supported op, just not fully implemented");
+    assert!(
+        !err.is_unsupported_op(),
+        "Reshape is a supported op, just not fully implemented"
+    );
 }
 
 // ============================================================================
@@ -195,7 +205,10 @@ fn test_linear_layer_pipeline() {
 
     // Step 1: MatMul
     let matmul_result = translate_matmul(&[x, w], &[], &shapes, &mut builder);
-    assert!(matmul_result.is_ok(), "MatMul in linear layer should succeed");
+    assert!(
+        matmul_result.is_ok(),
+        "MatMul in linear layer should succeed"
+    );
     let xw = matmul_result.unwrap();
 
     // Step 2: Add bias
@@ -264,7 +277,10 @@ fn test_add_symbolic_broadcast() {
     shapes.insert("B".to_string(), concrete_shape(&[10]));
 
     let result = translate_add(&[x, b], &[], &shapes, &mut builder);
-    assert!(result.is_ok(), "Add with symbolic batch broadcast should succeed");
+    assert!(
+        result.is_ok(),
+        "Add with symbolic batch broadcast should succeed"
+    );
 }
 
 /// Test shape inference with symbolic dimensions.
@@ -278,7 +294,10 @@ fn test_shape_inference_symbolic() {
     let shape_refs: Vec<&SymbolicShape> = input_shapes.iter().collect();
 
     let result = infer_op_output_shape("MatMul", &shape_refs, &[]);
-    assert!(result.is_ok(), "Shape inference with symbolic batch should succeed");
+    assert!(
+        result.is_ok(),
+        "Shape inference with symbolic batch should succeed"
+    );
 
     let output_shape = result.unwrap();
     // Output should be [batch, 10]
@@ -441,8 +460,12 @@ fn test_dispatcher_mnist_ops() {
         // Some ops need specific input counts/types
         if result.is_err() {
             let err = result.unwrap_err();
-            assert!(!err.is_unsupported_op(),
-                "Op '{}' should be supported (got: {:?})", op, err);
+            assert!(
+                !err.is_unsupported_op(),
+                "Op '{}' should be supported (got: {:?})",
+                op,
+                err
+            );
         }
     }
 }
@@ -513,7 +536,10 @@ fn test_isa_simd_matmul_design() {
     shapes.insert("B".to_string(), concrete_shape(&[512, 256]));
 
     let result = translate_matmul(&[a, b], &[], &shapes, &mut builder);
-    assert!(result.is_ok(), "Large MatMul should produce SIMD-compatible IR");
+    assert!(
+        result.is_ok(),
+        "Large MatMul should produce SIMD-compatible IR"
+    );
 }
 
 /// Test that broadcasting operations are LOOP-compatible.
@@ -530,7 +556,10 @@ fn test_isa_broadcast_loop() {
     shapes.insert("B".to_string(), concrete_shape(&[256]));
 
     let result = translate_add(&[x, b], &[], &shapes, &mut builder);
-    assert!(result.is_ok(), "Broadcasting should produce LOOP-compatible IR");
+    assert!(
+        result.is_ok(),
+        "Broadcasting should produce LOOP-compatible IR"
+    );
 }
 
 // ============================================================================
@@ -562,10 +591,7 @@ fn test_shape_mismatch() {
     shapes.insert("B".to_string(), concrete_shape(&[3, 2]));
 
     // Shape inference should catch this
-    let input_shapes = vec![
-        concrete_shape(&[1, 4]),
-        concrete_shape(&[3, 2]),
-    ];
+    let input_shapes = vec![concrete_shape(&[1, 4]), concrete_shape(&[3, 2])];
     let shape_refs: Vec<&SymbolicShape> = input_shapes.iter().collect();
 
     let result = infer_op_output_shape("MatMul", &shape_refs, &[]);

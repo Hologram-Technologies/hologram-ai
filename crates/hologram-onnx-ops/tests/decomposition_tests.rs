@@ -15,15 +15,15 @@
 //! - ClassMap fusion for element-wise operations
 
 use hologram_compiler::ir::{
-    decompose_function, DecomposeConfig, IRBuilder, IRFunction, IRNode, ScalarType, Type,
+    DecomposeConfig, IRBuilder, IRFunction, IRNode, ScalarType, Type, decompose_function,
 };
 use hologram_compiler::shapes::Shape;
 use hologram_onnx_core::{Dim, OnnxConfig, SymbolicShape};
 use hologram_onnx_ops::{
     infer_conv_output_shape, infer_pool_output_shape, translate_conv, translate_max_pool,
 };
-use hologram_onnx_spec::attribute_proto::AttributeType;
 use hologram_onnx_spec::AttributeProto;
+use hologram_onnx_spec::attribute_proto::AttributeType;
 use std::collections::HashMap;
 
 // =============================================================================
@@ -457,7 +457,7 @@ fn test_resnet_block_symbolic_batch() {
 
 #[test]
 fn test_decomposed_passes_complexity_validation() {
-    use hologram_compiler::ir::{validate_complexity, IRModule};
+    use hologram_compiler::ir::{IRModule, validate_complexity};
 
     // Create a function with Conv2D and MaxPool
     let mut builder = IRBuilder::new("complexity_test");

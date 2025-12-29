@@ -14,8 +14,8 @@
 //! Run ignored tests: `cargo test -- --ignored`
 
 use hologram_onnx_core::{
-    extract_opset_version, parse_model, validate_model, GraphPartitioner,
-    OnnxConfig, SymbolicShape, WeightData,
+    GraphPartitioner, OnnxConfig, SymbolicShape, WeightData, extract_opset_version, parse_model,
+    validate_model,
 };
 use hologram_onnx_spec::{
     AttributeProto, GraphProto, ModelProto, NodeProto, TensorProto, TensorShapeProto, TypeProto,
@@ -48,7 +48,9 @@ fn create_unet_graph(depth: usize, nodes_per_level: usize) -> GraphProto {
     graph.name = format!("unet_d{}_n{}", depth, nodes_per_level);
 
     // Input: batch, channels, height, width (NCHW)
-    graph.input.push(make_value_info("input", &[1, 3, 512, 512]));
+    graph
+        .input
+        .push(make_value_info("input", &[1, 3, 512, 512]));
 
     let mut encoder_skip_outputs = Vec::new();
     let mut current_tensor = "input".to_string();
@@ -60,12 +62,18 @@ fn create_unet_graph(depth: usize, nodes_per_level: usize) -> GraphProto {
 
         for block in 0..nodes_per_level {
             let is_first = block == 0;
-            let in_ch = if is_first { current_channels } else { out_channels };
+            let in_ch = if is_first {
+                current_channels
+            } else {
+                out_channels
+            };
 
             // Conv
             let conv_out = format!("enc_l{}_conv{}", level, block);
             let weight_name = format!("enc_l{}_conv{}_weight", level, block);
-            graph.initializer.push(make_conv_weight(&weight_name, out_channels, in_ch, 3, 3));
+            graph
+                .initializer
+                .push(make_conv_weight(&weight_name, out_channels, in_ch, 3, 3));
 
             let mut conv = NodeProto::default();
             conv.name = conv_out.clone();
@@ -73,8 +81,10 @@ fn create_unet_graph(depth: usize, nodes_per_level: usize) -> GraphProto {
             conv.input.push(current_tensor.clone());
             conv.input.push(weight_name);
             conv.output.push(conv_out.clone());
-            conv.attribute.push(make_ints_attr("kernel_shape", vec![3, 3]));
-            conv.attribute.push(make_ints_attr("pads", vec![1, 1, 1, 1]));
+            conv.attribute
+                .push(make_ints_attr("kernel_shape", vec![3, 3]));
+            conv.attribute
+                .push(make_ints_attr("pads", vec![1, 1, 1, 1]));
             graph.node.push(conv);
 
             // BatchNorm
@@ -84,10 +94,18 @@ fn create_unet_graph(depth: usize, nodes_per_level: usize) -> GraphProto {
             let bn_mean = format!("enc_l{}_bn{}_mean", level, block);
             let bn_var = format!("enc_l{}_bn{}_var", level, block);
 
-            graph.initializer.push(make_1d_weight(&bn_scale, out_channels, 1.0));
-            graph.initializer.push(make_1d_weight(&bn_bias, out_channels, 0.0));
-            graph.initializer.push(make_1d_weight(&bn_mean, out_channels, 0.0));
-            graph.initializer.push(make_1d_weight(&bn_var, out_channels, 1.0));
+            graph
+                .initializer
+                .push(make_1d_weight(&bn_scale, out_channels, 1.0));
+            graph
+                .initializer
+                .push(make_1d_weight(&bn_bias, out_channels, 0.0));
+            graph
+                .initializer
+                .push(make_1d_weight(&bn_mean, out_channels, 0.0));
+            graph
+                .initializer
+                .push(make_1d_weight(&bn_var, out_channels, 1.0));
 
             let mut bn = NodeProto::default();
             bn.name = bn_out.clone();
@@ -123,7 +141,8 @@ fn create_unet_graph(depth: usize, nodes_per_level: usize) -> GraphProto {
             pool.op_type = "MaxPool".to_string();
             pool.input.push(current_tensor.clone());
             pool.output.push(pool_out.clone());
-            pool.attribute.push(make_ints_attr("kernel_shape", vec![2, 2]));
+            pool.attribute
+                .push(make_ints_attr("kernel_shape", vec![2, 2]));
             pool.attribute.push(make_ints_attr("strides", vec![2, 2]));
             graph.node.push(pool);
             current_tensor = pool_out;
@@ -137,7 +156,13 @@ fn create_unet_graph(depth: usize, nodes_per_level: usize) -> GraphProto {
         // Upsample (ConvTranspose)
         let upsample_out = format!("dec_upsample_{}", level);
         let upsample_weight = format!("dec_upsample_{}_weight", level);
-        graph.initializer.push(make_conv_weight(&upsample_weight, current_channels, current_channels, 2, 2));
+        graph.initializer.push(make_conv_weight(
+            &upsample_weight,
+            current_channels,
+            current_channels,
+            2,
+            2,
+        ));
 
         let mut upsample = NodeProto::default();
         upsample.name = upsample_out.clone();
@@ -145,8 +170,12 @@ fn create_unet_graph(depth: usize, nodes_per_level: usize) -> GraphProto {
         upsample.input.push(current_tensor.clone());
         upsample.input.push(upsample_weight);
         upsample.output.push(upsample_out.clone());
-        upsample.attribute.push(make_ints_attr("kernel_shape", vec![2, 2]));
-        upsample.attribute.push(make_ints_attr("strides", vec![2, 2]));
+        upsample
+            .attribute
+            .push(make_ints_attr("kernel_shape", vec![2, 2]));
+        upsample
+            .attribute
+            .push(make_ints_attr("strides", vec![2, 2]));
         graph.node.push(upsample);
 
         // Concat with skip connection
@@ -166,12 +195,18 @@ fn create_unet_graph(depth: usize, nodes_per_level: usize) -> GraphProto {
         // Decoder conv blocks
         for block in 0..nodes_per_level {
             let is_first = block == 0;
-            let in_ch = if is_first { concat_channels } else { out_channels };
+            let in_ch = if is_first {
+                concat_channels
+            } else {
+                out_channels
+            };
 
             // Conv
             let conv_out = format!("dec_l{}_conv{}", level, block);
             let weight_name = format!("dec_l{}_conv{}_weight", level, block);
-            graph.initializer.push(make_conv_weight(&weight_name, out_channels, in_ch, 3, 3));
+            graph
+                .initializer
+                .push(make_conv_weight(&weight_name, out_channels, in_ch, 3, 3));
 
             let mut conv = NodeProto::default();
             conv.name = conv_out.clone();
@@ -179,8 +214,10 @@ fn create_unet_graph(depth: usize, nodes_per_level: usize) -> GraphProto {
             conv.input.push(current_tensor.clone());
             conv.input.push(weight_name);
             conv.output.push(conv_out.clone());
-            conv.attribute.push(make_ints_attr("kernel_shape", vec![3, 3]));
-            conv.attribute.push(make_ints_attr("pads", vec![1, 1, 1, 1]));
+            conv.attribute
+                .push(make_ints_attr("kernel_shape", vec![3, 3]));
+            conv.attribute
+                .push(make_ints_attr("pads", vec![1, 1, 1, 1]));
             graph.node.push(conv);
 
             // BatchNorm
@@ -190,10 +227,18 @@ fn create_unet_graph(depth: usize, nodes_per_level: usize) -> GraphProto {
             let bn_mean = format!("dec_l{}_bn{}_mean", level, block);
             let bn_var = format!("dec_l{}_bn{}_var", level, block);
 
-            graph.initializer.push(make_1d_weight(&bn_scale, out_channels, 1.0));
-            graph.initializer.push(make_1d_weight(&bn_bias, out_channels, 0.0));
-            graph.initializer.push(make_1d_weight(&bn_mean, out_channels, 0.0));
-            graph.initializer.push(make_1d_weight(&bn_var, out_channels, 1.0));
+            graph
+                .initializer
+                .push(make_1d_weight(&bn_scale, out_channels, 1.0));
+            graph
+                .initializer
+                .push(make_1d_weight(&bn_bias, out_channels, 0.0));
+            graph
+                .initializer
+                .push(make_1d_weight(&bn_mean, out_channels, 0.0));
+            graph
+                .initializer
+                .push(make_1d_weight(&bn_var, out_channels, 1.0));
 
             let mut bn = NodeProto::default();
             bn.name = bn_out.clone();
@@ -223,7 +268,9 @@ fn create_unet_graph(depth: usize, nodes_per_level: usize) -> GraphProto {
 
     // Final 1x1 conv to output classes
     let final_weight = "final_conv_weight".to_string();
-    graph.initializer.push(make_conv_weight(&final_weight, 1, current_channels, 1, 1));
+    graph
+        .initializer
+        .push(make_conv_weight(&final_weight, 1, current_channels, 1, 1));
 
     let mut final_conv = NodeProto::default();
     final_conv.name = "final_conv".to_string();
@@ -231,7 +278,9 @@ fn create_unet_graph(depth: usize, nodes_per_level: usize) -> GraphProto {
     final_conv.input.push(current_tensor);
     final_conv.input.push(final_weight);
     final_conv.output.push("logits".to_string());
-    final_conv.attribute.push(make_ints_attr("kernel_shape", vec![1, 1]));
+    final_conv
+        .attribute
+        .push(make_ints_attr("kernel_shape", vec![1, 1]));
     graph.node.push(final_conv);
 
     // Sigmoid for segmentation output
@@ -242,7 +291,9 @@ fn create_unet_graph(depth: usize, nodes_per_level: usize) -> GraphProto {
     sigmoid.output.push("output".to_string());
     graph.node.push(sigmoid);
 
-    graph.output.push(make_value_info("output", &[1, 1, 512, 512]));
+    graph
+        .output
+        .push(make_value_info("output", &[1, 1, 512, 512]));
 
     graph
 }
@@ -315,7 +366,9 @@ fn make_ints_attr(name: &str, values: Vec<i64>) -> AttributeProto {
 
 fn make_conv_weight(name: &str, out_ch: i64, in_ch: i64, kh: i64, kw: i64) -> TensorProto {
     let size = (out_ch * in_ch * kh * kw) as usize;
-    let data: Vec<f32> = (0..size).map(|i| ((i % 100) as f32 - 50.0) * 0.01).collect();
+    let data: Vec<f32> = (0..size)
+        .map(|i| ((i % 100) as f32 - 50.0) * 0.01)
+        .collect();
 
     TensorProto {
         name: name.to_string(),
@@ -437,7 +490,9 @@ fn test_unet_weight_file_output() {
     }
 
     let temp_file = NamedTempFile::new().unwrap();
-    weights.write_to_file(temp_file.path()).expect("Write failed");
+    weights
+        .write_to_file(temp_file.path())
+        .expect("Write failed");
 
     let metadata = std::fs::metadata(temp_file.path()).unwrap();
     assert_eq!(metadata.len() as usize, weights.buffer_size());
@@ -468,10 +523,15 @@ fn test_unet_partitioning_path() {
 
     // Test partitioning directly with configured size
     let partitioner = GraphPartitioner::with_partition_size(config.partition_size);
-    let partitions = partitioner.partition(graph).expect("Partitioning should succeed");
+    let partitions = partitioner
+        .partition(graph)
+        .expect("Partitioning should succeed");
 
     // Should create multiple partitions for a graph > 500 nodes with partition_size=200
-    assert!(partitions.len() > 1, "Expected multiple partitions for large graph");
+    assert!(
+        partitions.len() > 1,
+        "Expected multiple partitions for large graph"
+    );
 
     // All partitions should be reasonably sized (partition_size * 1.5 as tolerance)
     let max_allowed = (config.partition_size as f64 * 1.5) as usize;
@@ -528,11 +588,14 @@ fn test_unet_skip_connection_boundaries() {
     let partitions = partitioner.partition(graph).unwrap();
 
     // UNet has skip connections → some partitions should have boundary tensors
-    let has_boundaries = partitions.iter().any(|p| {
-        !p.boundary_inputs.is_empty() || !p.boundary_outputs.is_empty()
-    });
+    let has_boundaries = partitions
+        .iter()
+        .any(|p| !p.boundary_inputs.is_empty() || !p.boundary_outputs.is_empty());
 
-    assert!(has_boundaries, "UNet should have cross-partition boundaries");
+    assert!(
+        has_boundaries,
+        "UNet should have cross-partition boundaries"
+    );
 }
 
 #[test]

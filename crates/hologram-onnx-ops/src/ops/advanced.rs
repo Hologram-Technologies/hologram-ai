@@ -12,9 +12,9 @@
 //! - **SIMD**: Parallel processing of attention computations
 //! - **Zero runtime overhead**: All dimensions resolved at compile time
 
+use hologram_compiler::ir::{IRBuilder, NodeId};
 use hologram_onnx_core::{OnnxError, Result, SymbolicShape};
 use hologram_onnx_spec::AttributeProto;
-use hologram_compiler::ir::{IRBuilder, NodeId};
 use std::collections::HashMap;
 use tracing::{debug, trace};
 
@@ -61,9 +61,10 @@ pub fn translate_attention(
     builder: &mut IRBuilder,
 ) -> Result<NodeId> {
     if inputs.len() < 3 {
-        return Err(OnnxError::InvalidModel(
-            format!("Attention expects 3+ inputs (Q, K, V), got {}", inputs.len())
-        ));
+        return Err(OnnxError::InvalidModel(format!(
+            "Attention expects 3+ inputs (Q, K, V), got {}",
+            inputs.len()
+        )));
     }
 
     let query = inputs[0];
@@ -74,7 +75,10 @@ pub fn translate_attention(
     let num_heads = parse_attr_int(attrs, "num_heads", 1)? as usize;
 
     debug!("Translating Attention operation (num_heads={})", num_heads);
-    trace!("Attention inputs: Q={:?}, K={:?}, V={:?}, mask={:?}", query, key, value, mask);
+    trace!(
+        "Attention inputs: Q={:?}, K={:?}, V={:?}, mask={:?}",
+        query, key, value, mask
+    );
 
     // Decompose Attention into primitive operations:
     // scores = (Q @ K^T) / sqrt(d_k)
@@ -170,9 +174,10 @@ pub fn translate_multi_head_attention(
     builder: &mut IRBuilder,
 ) -> Result<NodeId> {
     if inputs.len() < 5 {
-        return Err(OnnxError::InvalidModel(
-            format!("MultiHeadAttention expects 5+ inputs (Q, K, V, Q_weight, K_weight, V_weight, ...), got {}", inputs.len())
-        ));
+        return Err(OnnxError::InvalidModel(format!(
+            "MultiHeadAttention expects 5+ inputs (Q, K, V, Q_weight, K_weight, V_weight, ...), got {}",
+            inputs.len()
+        )));
     }
 
     let query = inputs[0];
@@ -196,8 +201,14 @@ pub fn translate_multi_head_attention(
 
     let num_heads = parse_attr_int(attrs, "num_heads", 1)? as usize;
 
-    debug!("Translating MultiHeadAttention operation (num_heads={})", num_heads);
-    trace!("MultiHeadAttention inputs: Q={:?}, K={:?}, V={:?}", query, key, value);
+    debug!(
+        "Translating MultiHeadAttention operation (num_heads={})",
+        num_heads
+    );
+    trace!(
+        "MultiHeadAttention inputs: Q={:?}, K={:?}, V={:?}",
+        query, key, value
+    );
 
     // Decompose MultiHeadAttention into primitive operations
     // This is a simplified decomposition that performs the attention computation
@@ -287,7 +298,10 @@ pub fn translate_multi_head_attention(
     // would require reshape operations that aren't fully supported yet
     let _ = num_heads;
 
-    trace!("Created MultiHeadAttention decomposition ending at: {:?}", output);
+    trace!(
+        "Created MultiHeadAttention decomposition ending at: {:?}",
+        output
+    );
     Ok(output)
 }
 
@@ -338,31 +352,35 @@ pub fn translate_lstm(
     builder: &mut IRBuilder,
 ) -> Result<NodeId> {
     if inputs.len() < 3 {
-        return Err(OnnxError::InvalidModel(
-            format!("LSTM expects 3+ inputs (X, W, R), got {}", inputs.len())
-        ));
+        return Err(OnnxError::InvalidModel(format!(
+            "LSTM expects 3+ inputs (X, W, R), got {}",
+            inputs.len()
+        )));
     }
 
-    let x = inputs[0];          // Input sequence [seq_len, batch, input_size]
-    let w = inputs[1];          // Input weights [num_directions, 4*hidden_size, input_size]
-    let r = inputs[2];          // Recurrence weights [num_directions, 4*hidden_size, hidden_size]
-    let b = inputs.get(3).copied();              // Optional bias [num_directions, 8*hidden_size]
-    let _sequence_lens = inputs.get(4).copied();  // Optional sequence lengths
-    let initial_h = inputs.get(5).copied();       // Optional initial hidden state
-    let _initial_c = inputs.get(6).copied();      // Optional initial cell state
+    let x = inputs[0]; // Input sequence [seq_len, batch, input_size]
+    let w = inputs[1]; // Input weights [num_directions, 4*hidden_size, input_size]
+    let r = inputs[2]; // Recurrence weights [num_directions, 4*hidden_size, hidden_size]
+    let b = inputs.get(3).copied(); // Optional bias [num_directions, 8*hidden_size]
+    let _sequence_lens = inputs.get(4).copied(); // Optional sequence lengths
+    let initial_h = inputs.get(5).copied(); // Optional initial hidden state
+    let _initial_c = inputs.get(6).copied(); // Optional initial cell state
 
     let hidden_size = parse_attr_int(attrs, "hidden_size", 0)? as usize;
     if hidden_size == 0 {
         return Err(OnnxError::invalid_attribute(
             "hidden_size",
-            "LSTM requires hidden_size attribute"
+            "LSTM requires hidden_size attribute",
         ));
     }
 
     // Parse direction attribute
     let direction = crate::utils::parse_attr_string_or(attrs, "direction", "forward")?;
 
-    debug!("Translating LSTM operation (hidden_size={}, direction={})", hidden_size, direction);
+    debug!(
+        "Translating LSTM operation (hidden_size={}, direction={})",
+        hidden_size, direction
+    );
     trace!("LSTM inputs: X={:?}, W={:?}, R={:?}", x, w, r);
 
     // Decompose LSTM into primitive operations
@@ -457,29 +475,33 @@ pub fn translate_gru(
     builder: &mut IRBuilder,
 ) -> Result<NodeId> {
     if inputs.len() < 3 {
-        return Err(OnnxError::InvalidModel(
-            format!("GRU expects 3+ inputs (X, W, R), got {}", inputs.len())
-        ));
+        return Err(OnnxError::InvalidModel(format!(
+            "GRU expects 3+ inputs (X, W, R), got {}",
+            inputs.len()
+        )));
     }
 
-    let x = inputs[0];          // Input sequence [seq_len, batch, input_size]
-    let w = inputs[1];          // Input weights [num_directions, 3*hidden_size, input_size]
-    let r = inputs[2];          // Recurrence weights [num_directions, 3*hidden_size, hidden_size]
-    let b = inputs.get(3).copied();              // Optional bias [num_directions, 6*hidden_size]
-    let _sequence_lens = inputs.get(4).copied();  // Optional sequence lengths
-    let initial_h = inputs.get(5).copied();       // Optional initial hidden state
+    let x = inputs[0]; // Input sequence [seq_len, batch, input_size]
+    let w = inputs[1]; // Input weights [num_directions, 3*hidden_size, input_size]
+    let r = inputs[2]; // Recurrence weights [num_directions, 3*hidden_size, hidden_size]
+    let b = inputs.get(3).copied(); // Optional bias [num_directions, 6*hidden_size]
+    let _sequence_lens = inputs.get(4).copied(); // Optional sequence lengths
+    let initial_h = inputs.get(5).copied(); // Optional initial hidden state
 
     let hidden_size = parse_attr_int(attrs, "hidden_size", 0)? as usize;
     if hidden_size == 0 {
         return Err(OnnxError::invalid_attribute(
             "hidden_size",
-            "GRU requires hidden_size attribute"
+            "GRU requires hidden_size attribute",
         ));
     }
 
     let direction = crate::utils::parse_attr_string_or(attrs, "direction", "forward")?;
 
-    debug!("Translating GRU operation (hidden_size={}, direction={})", hidden_size, direction);
+    debug!(
+        "Translating GRU operation (hidden_size={}, direction={})",
+        hidden_size, direction
+    );
     trace!("GRU inputs: X={:?}, W={:?}, R={:?}", x, w, r);
 
     // Decompose GRU into primitive operations
@@ -571,29 +593,33 @@ pub fn translate_rnn(
     builder: &mut IRBuilder,
 ) -> Result<NodeId> {
     if inputs.len() < 3 {
-        return Err(OnnxError::InvalidModel(
-            format!("RNN expects 3+ inputs (X, W, R), got {}", inputs.len())
-        ));
+        return Err(OnnxError::InvalidModel(format!(
+            "RNN expects 3+ inputs (X, W, R), got {}",
+            inputs.len()
+        )));
     }
 
-    let x = inputs[0];          // Input sequence [seq_len, batch, input_size]
-    let w = inputs[1];          // Input weights [num_directions, hidden_size, input_size]
-    let r = inputs[2];          // Recurrence weights [num_directions, hidden_size, hidden_size]
-    let b = inputs.get(3).copied();              // Optional bias [num_directions, 2*hidden_size]
-    let _sequence_lens = inputs.get(4).copied();  // Optional sequence lengths
-    let initial_h = inputs.get(5).copied();       // Optional initial hidden state
+    let x = inputs[0]; // Input sequence [seq_len, batch, input_size]
+    let w = inputs[1]; // Input weights [num_directions, hidden_size, input_size]
+    let r = inputs[2]; // Recurrence weights [num_directions, hidden_size, hidden_size]
+    let b = inputs.get(3).copied(); // Optional bias [num_directions, 2*hidden_size]
+    let _sequence_lens = inputs.get(4).copied(); // Optional sequence lengths
+    let initial_h = inputs.get(5).copied(); // Optional initial hidden state
 
     let hidden_size = parse_attr_int(attrs, "hidden_size", 0)? as usize;
     if hidden_size == 0 {
         return Err(OnnxError::invalid_attribute(
             "hidden_size",
-            "RNN requires hidden_size attribute"
+            "RNN requires hidden_size attribute",
         ));
     }
 
     let direction = crate::utils::parse_attr_string_or(attrs, "direction", "forward")?;
 
-    debug!("Translating RNN operation (hidden_size={}, direction={})", hidden_size, direction);
+    debug!(
+        "Translating RNN operation (hidden_size={}, direction={})",
+        hidden_size, direction
+    );
     trace!("RNN inputs: X={:?}, W={:?}, R={:?}", x, w, r);
 
     // Decompose RNN into primitive operations
@@ -668,16 +694,12 @@ mod tests {
     #[test]
     fn test_translate_attention_default() {
         let mut builder = make_builder();
-        let query = builder.add_input("Q", f32_tensor(&[2, 10, 64]));  // [batch, seq_len, hidden]
+        let query = builder.add_input("Q", f32_tensor(&[2, 10, 64])); // [batch, seq_len, hidden]
         let key = builder.add_input("K", f32_tensor(&[2, 10, 64]));
         let value = builder.add_input("V", f32_tensor(&[2, 10, 64]));
 
-        let result = translate_attention(
-            &vec![query, key, value],
-            &[],
-            &HashMap::new(),
-            &mut builder,
-        );
+        let result =
+            translate_attention(&vec![query, key, value], &[], &HashMap::new(), &mut builder);
         assert!(result.is_ok());
     }
 
@@ -688,14 +710,12 @@ mod tests {
         let key = builder.add_input("K", f32_tensor(&[2, 10, 64]));
         let value = builder.add_input("V", f32_tensor(&[2, 10, 64]));
 
-        let attrs = vec![
-            AttributeProto {
-                name: "num_heads".to_string(),
-                i: 8,
-                r#type: AttributeType::Int as i32,
-                ..Default::default()
-            },
-        ];
+        let attrs = vec![AttributeProto {
+            name: "num_heads".to_string(),
+            i: 8,
+            r#type: AttributeType::Int as i32,
+            ..Default::default()
+        }];
 
         let result = translate_attention(
             &vec![query, key, value],
@@ -729,12 +749,7 @@ mod tests {
         let query = builder.add_input("Q", f32_tensor(&[2, 10, 64]));
         let key = builder.add_input("K", f32_tensor(&[2, 10, 64]));
 
-        let result = translate_attention(
-            &vec![query, key],
-            &[],
-            &HashMap::new(),
-            &mut builder,
-        );
+        let result = translate_attention(&vec![query, key], &[], &HashMap::new(), &mut builder);
         assert!(result.is_err());
         assert!(matches!(result.unwrap_err(), OnnxError::InvalidModel(_)));
     }
@@ -743,16 +758,12 @@ mod tests {
     fn test_translate_attention_symbolic_seq_len() {
         let mut builder = make_builder();
         // Variable sequence length (symbolic shape)
-        let query = builder.add_input("Q", f32_tensor(&[]));  // Symbolic shape
+        let query = builder.add_input("Q", f32_tensor(&[])); // Symbolic shape
         let key = builder.add_input("K", f32_tensor(&[]));
         let value = builder.add_input("V", f32_tensor(&[]));
 
-        let result = translate_attention(
-            &vec![query, key, value],
-            &[],
-            &HashMap::new(),
-            &mut builder,
-        );
+        let result =
+            translate_attention(&vec![query, key, value], &[], &HashMap::new(), &mut builder);
         assert!(result.is_ok());
     }
 
@@ -768,14 +779,12 @@ mod tests {
         let k_weight = builder.add_input("K_weight", f32_tensor(&[512, 512]));
         let v_weight = builder.add_input("V_weight", f32_tensor(&[512, 512]));
 
-        let attrs = vec![
-            AttributeProto {
-                name: "num_heads".to_string(),
-                i: 8,
-                r#type: AttributeType::Int as i32,
-                ..Default::default()
-            },
-        ];
+        let attrs = vec![AttributeProto {
+            name: "num_heads".to_string(),
+            i: 8,
+            r#type: AttributeType::Int as i32,
+            ..Default::default()
+        }];
 
         let result = translate_multi_head_attention(
             &vec![query, key, value, q_weight, k_weight, v_weight],
@@ -802,22 +811,17 @@ mod tests {
         let out_bias = builder.add_input("out_bias", f32_tensor(&[512]));
         let mask = builder.add_input("mask", f32_tensor(&[2, 10, 10]));
 
-        let attrs = vec![
-            AttributeProto {
-                name: "num_heads".to_string(),
-                i: 8,
-                r#type: AttributeType::Int as i32,
-                ..Default::default()
-            },
-        ];
+        let attrs = vec![AttributeProto {
+            name: "num_heads".to_string(),
+            i: 8,
+            r#type: AttributeType::Int as i32,
+            ..Default::default()
+        }];
 
         let result = translate_multi_head_attention(
             &vec![
-                query, key, value,
-                q_weight, k_weight, v_weight,
-                q_bias, k_bias, v_bias,
-                out_weight, out_bias,
-                mask,
+                query, key, value, q_weight, k_weight, v_weight, q_bias, k_bias, v_bias,
+                out_weight, out_bias, mask,
             ],
             &attrs,
             &HashMap::new(),
@@ -832,14 +836,12 @@ mod tests {
         let query = builder.add_input("Q", f32_tensor(&[2, 10, 512]));
         let key = builder.add_input("K", f32_tensor(&[2, 10, 512]));
 
-        let attrs = vec![
-            AttributeProto {
-                name: "num_heads".to_string(),
-                i: 8,
-                r#type: AttributeType::Int as i32,
-                ..Default::default()
-            },
-        ];
+        let attrs = vec![AttributeProto {
+            name: "num_heads".to_string(),
+            i: 8,
+            r#type: AttributeType::Int as i32,
+            ..Default::default()
+        }];
 
         let result = translate_multi_head_attention(
             &vec![query, key],
@@ -855,21 +857,19 @@ mod tests {
     fn test_translate_multi_head_attention_symbolic_seq_len() {
         let mut builder = make_builder();
         // Variable sequence length (symbolic shape)
-        let query = builder.add_input("Q", f32_tensor(&[]));  // Symbolic
+        let query = builder.add_input("Q", f32_tensor(&[])); // Symbolic
         let key = builder.add_input("K", f32_tensor(&[]));
         let value = builder.add_input("V", f32_tensor(&[]));
         let q_weight = builder.add_input("Q_weight", f32_tensor(&[512, 512]));
         let k_weight = builder.add_input("K_weight", f32_tensor(&[512, 512]));
         let v_weight = builder.add_input("V_weight", f32_tensor(&[512, 512]));
 
-        let attrs = vec![
-            AttributeProto {
-                name: "num_heads".to_string(),
-                i: 8,
-                r#type: AttributeType::Int as i32,
-                ..Default::default()
-            },
-        ];
+        let attrs = vec![AttributeProto {
+            name: "num_heads".to_string(),
+            i: 8,
+            r#type: AttributeType::Int as i32,
+            ..Default::default()
+        }];
 
         let result = translate_multi_head_attention(
             &vec![query, key, value, q_weight, k_weight, v_weight],
@@ -891,14 +891,12 @@ mod tests {
         let v_weight = builder.add_input("V_weight", f32_tensor(&[512, 512]));
 
         for num_heads in [1, 2, 4, 8, 16] {
-            let attrs = vec![
-                AttributeProto {
-                    name: "num_heads".to_string(),
-                    i: num_heads,
-                    r#type: AttributeType::Int as i32,
-                    ..Default::default()
-                },
-            ];
+            let attrs = vec![AttributeProto {
+                name: "num_heads".to_string(),
+                i: num_heads,
+                r#type: AttributeType::Int as i32,
+                ..Default::default()
+            }];
 
             let result = translate_multi_head_attention(
                 &vec![query, key, value, q_weight, k_weight, v_weight],
@@ -906,7 +904,11 @@ mod tests {
                 &HashMap::new(),
                 &mut builder,
             );
-            assert!(result.is_ok(), "Expected success for num_heads={}", num_heads);
+            assert!(
+                result.is_ok(),
+                "Expected success for num_heads={}",
+                num_heads
+            );
         }
     }
 
@@ -915,25 +917,18 @@ mod tests {
     #[test]
     fn test_translate_lstm_minimal() {
         let mut builder = make_builder();
-        let x = builder.add_input("X", f32_tensor(&[10, 2, 128]));  // [seq_len, batch, input_size]
+        let x = builder.add_input("X", f32_tensor(&[10, 2, 128])); // [seq_len, batch, input_size]
         let w = builder.add_input("W", f32_tensor(&[4, 256, 128])); // [num_directions*4, hidden_size, input_size]
         let r = builder.add_input("R", f32_tensor(&[4, 256, 256])); // [num_directions*4, hidden_size, hidden_size]
 
-        let attrs = vec![
-            AttributeProto {
-                name: "hidden_size".to_string(),
-                i: 256,
-                r#type: AttributeType::Int as i32,
-                ..Default::default()
-            },
-        ];
+        let attrs = vec![AttributeProto {
+            name: "hidden_size".to_string(),
+            i: 256,
+            r#type: AttributeType::Int as i32,
+            ..Default::default()
+        }];
 
-        let result = translate_lstm(
-            &vec![x, w, r],
-            &attrs,
-            &HashMap::new(),
-            &mut builder,
-        );
+        let result = translate_lstm(&vec![x, w, r], &attrs, &HashMap::new(), &mut builder);
         assert!(result.is_ok());
     }
 
@@ -994,12 +989,7 @@ mod tests {
             },
         ];
 
-        let result = translate_lstm(
-            &vec![x, w, r],
-            &attrs,
-            &HashMap::new(),
-            &mut builder,
-        );
+        let result = translate_lstm(&vec![x, w, r], &attrs, &HashMap::new(), &mut builder);
         assert!(result.is_ok());
     }
 
@@ -1012,12 +1002,15 @@ mod tests {
 
         let result = translate_lstm(
             &vec![x, w, r],
-            &[],  // No attributes
+            &[], // No attributes
             &HashMap::new(),
             &mut builder,
         );
         assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), OnnxError::InvalidAttribute { .. }));
+        assert!(matches!(
+            result.unwrap_err(),
+            OnnxError::InvalidAttribute { .. }
+        ));
     }
 
     #[test]
@@ -1026,21 +1019,14 @@ mod tests {
         let x = builder.add_input("X", f32_tensor(&[10, 2, 128]));
         let w = builder.add_input("W", f32_tensor(&[4, 256, 128]));
 
-        let attrs = vec![
-            AttributeProto {
-                name: "hidden_size".to_string(),
-                i: 256,
-                r#type: AttributeType::Int as i32,
-                ..Default::default()
-            },
-        ];
+        let attrs = vec![AttributeProto {
+            name: "hidden_size".to_string(),
+            i: 256,
+            r#type: AttributeType::Int as i32,
+            ..Default::default()
+        }];
 
-        let result = translate_lstm(
-            &vec![x, w],
-            &attrs,
-            &HashMap::new(),
-            &mut builder,
-        );
+        let result = translate_lstm(&vec![x, w], &attrs, &HashMap::new(), &mut builder);
         assert!(result.is_err());
         assert!(matches!(result.unwrap_err(), OnnxError::InvalidModel(_)));
     }
@@ -1048,25 +1034,18 @@ mod tests {
     #[test]
     fn test_translate_lstm_symbolic_seq_len() {
         let mut builder = make_builder();
-        let x = builder.add_input("X", f32_tensor(&[]));  // Symbolic shape
+        let x = builder.add_input("X", f32_tensor(&[])); // Symbolic shape
         let w = builder.add_input("W", f32_tensor(&[4, 256, 128]));
         let r = builder.add_input("R", f32_tensor(&[4, 256, 256]));
 
-        let attrs = vec![
-            AttributeProto {
-                name: "hidden_size".to_string(),
-                i: 256,
-                r#type: AttributeType::Int as i32,
-                ..Default::default()
-            },
-        ];
+        let attrs = vec![AttributeProto {
+            name: "hidden_size".to_string(),
+            i: 256,
+            r#type: AttributeType::Int as i32,
+            ..Default::default()
+        }];
 
-        let result = translate_lstm(
-            &vec![x, w, r],
-            &attrs,
-            &HashMap::new(),
-            &mut builder,
-        );
+        let result = translate_lstm(&vec![x, w, r], &attrs, &HashMap::new(), &mut builder);
         assert!(result.is_ok());
     }
 
@@ -1079,21 +1058,14 @@ mod tests {
         let w = builder.add_input("W", f32_tensor(&[3, 256, 128])); // [num_directions*3, hidden_size, input_size]
         let r = builder.add_input("R", f32_tensor(&[3, 256, 256]));
 
-        let attrs = vec![
-            AttributeProto {
-                name: "hidden_size".to_string(),
-                i: 256,
-                r#type: AttributeType::Int as i32,
-                ..Default::default()
-            },
-        ];
+        let attrs = vec![AttributeProto {
+            name: "hidden_size".to_string(),
+            i: 256,
+            r#type: AttributeType::Int as i32,
+            ..Default::default()
+        }];
 
-        let result = translate_gru(
-            &vec![x, w, r],
-            &attrs,
-            &HashMap::new(),
-            &mut builder,
-        );
+        let result = translate_gru(&vec![x, w, r], &attrs, &HashMap::new(), &mut builder);
         assert!(result.is_ok());
     }
 
@@ -1136,21 +1108,14 @@ mod tests {
         let mut builder = make_builder();
         let x = builder.add_input("X", f32_tensor(&[10, 2, 128]));
 
-        let attrs = vec![
-            AttributeProto {
-                name: "hidden_size".to_string(),
-                i: 256,
-                r#type: AttributeType::Int as i32,
-                ..Default::default()
-            },
-        ];
+        let attrs = vec![AttributeProto {
+            name: "hidden_size".to_string(),
+            i: 256,
+            r#type: AttributeType::Int as i32,
+            ..Default::default()
+        }];
 
-        let result = translate_gru(
-            &vec![x],
-            &attrs,
-            &HashMap::new(),
-            &mut builder,
-        );
+        let result = translate_gru(&vec![x], &attrs, &HashMap::new(), &mut builder);
         assert!(result.is_err());
         assert!(matches!(result.unwrap_err(), OnnxError::InvalidModel(_)));
     }
@@ -1158,25 +1123,18 @@ mod tests {
     #[test]
     fn test_translate_gru_symbolic_seq_len() {
         let mut builder = make_builder();
-        let x = builder.add_input("X", f32_tensor(&[]));  // Symbolic
+        let x = builder.add_input("X", f32_tensor(&[])); // Symbolic
         let w = builder.add_input("W", f32_tensor(&[3, 256, 128]));
         let r = builder.add_input("R", f32_tensor(&[3, 256, 256]));
 
-        let attrs = vec![
-            AttributeProto {
-                name: "hidden_size".to_string(),
-                i: 256,
-                r#type: AttributeType::Int as i32,
-                ..Default::default()
-            },
-        ];
+        let attrs = vec![AttributeProto {
+            name: "hidden_size".to_string(),
+            i: 256,
+            r#type: AttributeType::Int as i32,
+            ..Default::default()
+        }];
 
-        let result = translate_gru(
-            &vec![x, w, r],
-            &attrs,
-            &HashMap::new(),
-            &mut builder,
-        );
+        let result = translate_gru(&vec![x, w, r], &attrs, &HashMap::new(), &mut builder);
         assert!(result.is_ok());
     }
 
@@ -1189,21 +1147,14 @@ mod tests {
         let w = builder.add_input("W", f32_tensor(&[1, 256, 128])); // [num_directions, hidden_size, input_size]
         let r = builder.add_input("R", f32_tensor(&[1, 256, 256]));
 
-        let attrs = vec![
-            AttributeProto {
-                name: "hidden_size".to_string(),
-                i: 256,
-                r#type: AttributeType::Int as i32,
-                ..Default::default()
-            },
-        ];
+        let attrs = vec![AttributeProto {
+            name: "hidden_size".to_string(),
+            i: 256,
+            r#type: AttributeType::Int as i32,
+            ..Default::default()
+        }];
 
-        let result = translate_rnn(
-            &vec![x, w, r],
-            &attrs,
-            &HashMap::new(),
-            &mut builder,
-        );
+        let result = translate_rnn(&vec![x, w, r], &attrs, &HashMap::new(), &mut builder);
         assert!(result.is_ok());
     }
 
@@ -1263,12 +1214,7 @@ mod tests {
             },
         ];
 
-        let result = translate_rnn(
-            &vec![x, w, r],
-            &attrs,
-            &HashMap::new(),
-            &mut builder,
-        );
+        let result = translate_rnn(&vec![x, w, r], &attrs, &HashMap::new(), &mut builder);
         assert!(result.is_ok());
     }
 
@@ -1278,21 +1224,14 @@ mod tests {
         let x = builder.add_input("X", f32_tensor(&[10, 2, 128]));
         let w = builder.add_input("W", f32_tensor(&[1, 256, 128]));
 
-        let attrs = vec![
-            AttributeProto {
-                name: "hidden_size".to_string(),
-                i: 256,
-                r#type: AttributeType::Int as i32,
-                ..Default::default()
-            },
-        ];
+        let attrs = vec![AttributeProto {
+            name: "hidden_size".to_string(),
+            i: 256,
+            r#type: AttributeType::Int as i32,
+            ..Default::default()
+        }];
 
-        let result = translate_rnn(
-            &vec![x, w],
-            &attrs,
-            &HashMap::new(),
-            &mut builder,
-        );
+        let result = translate_rnn(&vec![x, w], &attrs, &HashMap::new(), &mut builder);
         assert!(result.is_err());
         assert!(matches!(result.unwrap_err(), OnnxError::InvalidModel(_)));
     }
@@ -1300,25 +1239,18 @@ mod tests {
     #[test]
     fn test_translate_rnn_symbolic_seq_len() {
         let mut builder = make_builder();
-        let x = builder.add_input("X", f32_tensor(&[]));  // Symbolic
+        let x = builder.add_input("X", f32_tensor(&[])); // Symbolic
         let w = builder.add_input("W", f32_tensor(&[1, 256, 128]));
         let r = builder.add_input("R", f32_tensor(&[1, 256, 256]));
 
-        let attrs = vec![
-            AttributeProto {
-                name: "hidden_size".to_string(),
-                i: 256,
-                r#type: AttributeType::Int as i32,
-                ..Default::default()
-            },
-        ];
+        let attrs = vec![AttributeProto {
+            name: "hidden_size".to_string(),
+            i: 256,
+            r#type: AttributeType::Int as i32,
+            ..Default::default()
+        }];
 
-        let result = translate_rnn(
-            &vec![x, w, r],
-            &attrs,
-            &HashMap::new(),
-            &mut builder,
-        );
+        let result = translate_rnn(&vec![x, w, r], &attrs, &HashMap::new(), &mut builder);
         assert!(result.is_ok());
     }
 
@@ -1331,22 +1263,19 @@ mod tests {
             let w = builder.add_input("W", f32_tensor(&[1, hidden_size, 128]));
             let r = builder.add_input("R", f32_tensor(&[1, hidden_size, hidden_size]));
 
-            let attrs = vec![
-                AttributeProto {
-                    name: "hidden_size".to_string(),
-                    i: hidden_size as i64,
-                    r#type: AttributeType::Int as i32,
-                    ..Default::default()
-                },
-            ];
+            let attrs = vec![AttributeProto {
+                name: "hidden_size".to_string(),
+                i: hidden_size as i64,
+                r#type: AttributeType::Int as i32,
+                ..Default::default()
+            }];
 
-            let result = translate_rnn(
-                &vec![x, w, r],
-                &attrs,
-                &HashMap::new(),
-                &mut builder,
+            let result = translate_rnn(&vec![x, w, r], &attrs, &HashMap::new(), &mut builder);
+            assert!(
+                result.is_ok(),
+                "Expected success for hidden_size={}",
+                hidden_size
             );
-            assert!(result.is_ok(), "Expected success for hidden_size={}", hidden_size);
         }
     }
 }

@@ -131,7 +131,7 @@
 mod translator;
 
 // Re-export translator functions
-pub use translator::{translate_graph_to_ir, apply_ir_decomposition};
+pub use translator::{apply_ir_decomposition, translate_graph_to_ir};
 
 // Re-export ONNX protobuf types
 pub use hologram_onnx_spec as spec;
@@ -301,18 +301,12 @@ impl OnnxCompiler {
         // Step 2: Translate ONNX → IR with symbolic shapes (uses real translator)
         debug!("Translating ONNX to IR");
         let mut ir_func = translate_graph_to_ir(graph, opset_version)?;
-        info!(
-            "IR translation complete: {} operations",
-            ir_func.body.len()
-        );
+        info!("IR translation complete: {} operations", ir_func.body.len());
 
         // Step 3: Apply decomposition pass (Conv2D → Im2col+GEMM, etc.)
         debug!("Applying decomposition pass");
         ir_func = apply_ir_decomposition(ir_func, &self.config)?;
-        info!(
-            "Decomposition complete: {} operations",
-            ir_func.body.len()
-        );
+        info!("Decomposition complete: {} operations", ir_func.body.len());
 
         // Step 4: Lower IR → OperationGraph using hologram ISA
         debug!("Lowering to OperationGraph");
@@ -347,8 +341,8 @@ impl OnnxCompiler {
     /// in chunks, then merging the results.
     pub fn compile_partitioned(&self, onnx_bytes: &[u8]) -> Result<(Vec<u8>, Vec<u8>)> {
         use hologram_onnx_core::{
-            extract_opset_version, lower_to_operation_graph, parse_model, validate_model,
-            GraphPartitioner,
+            GraphPartitioner, extract_opset_version, lower_to_operation_graph, parse_model,
+            validate_model,
         };
         use tracing::{debug, info};
 

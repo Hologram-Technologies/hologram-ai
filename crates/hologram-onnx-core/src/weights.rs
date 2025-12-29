@@ -329,14 +329,17 @@ impl WeightData {
                 // f16 → f32 conversion
                 if !tensor.raw_data.is_empty() {
                     let u16_data: &[u16] = bytemuck::cast_slice(&tensor.raw_data);
-                    Ok(u16_data.iter().map(|&bits| {
-                        half::f16::from_bits(bits).to_f32()
-                    }).collect())
+                    Ok(u16_data
+                        .iter()
+                        .map(|&bits| half::f16::from_bits(bits).to_f32())
+                        .collect())
                 } else {
                     // int32_data contains f16 as uint16
-                    Ok(tensor.int32_data.iter().map(|&bits| {
-                        half::f16::from_bits(bits as u16).to_f32()
-                    }).collect())
+                    Ok(tensor
+                        .int32_data
+                        .iter()
+                        .map(|&bits| half::f16::from_bits(bits as u16).to_f32())
+                        .collect())
                 }
             }
 
@@ -379,9 +382,10 @@ impl WeightData {
                 }
             }
 
-            _ => Err(OnnxError::UnsupportedDataType(
-                format!("Data type {} not supported", tensor.data_type)
-            )),
+            _ => Err(OnnxError::UnsupportedDataType(format!(
+                "Data type {} not supported",
+                tensor.data_type
+            ))),
         }
     }
 
@@ -561,6 +565,9 @@ mod tests {
 
         let result = WeightData::extract_tensor_data(&tensor);
         assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), OnnxError::UnsupportedDataType(_)));
+        assert!(matches!(
+            result.unwrap_err(),
+            OnnxError::UnsupportedDataType(_)
+        ));
     }
 }

@@ -42,16 +42,16 @@ use std::path::Path;
 
 // Module declarations
 mod config;
-mod output_handlers;
 mod error;
+mod output_handlers;
 
 // Public exports
-pub use config::{PipelineConfig, ExecutionConfig, StageConfig, OutputHandlerConfig};
-pub use output_handlers::{
-    OutputHandler, OutputHandlerRegistry, ProcessedOutput,
-    ImageOutput, AudioOutput, TensorOutput, TensorData,
-};
+pub use config::{ExecutionConfig, OutputHandlerConfig, PipelineConfig, StageConfig};
 pub use error::ConfigError;
+pub use output_handlers::{
+    AudioOutput, ImageOutput, OutputHandler, OutputHandlerRegistry, ProcessedOutput, TensorData,
+    TensorOutput,
+};
 
 // Feature-gated handler exports
 #[cfg(feature = "image-output")]

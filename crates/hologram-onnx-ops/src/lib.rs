@@ -35,8 +35,8 @@
 //! ```
 
 // Module declarations
-mod translator;
 mod ops;
+mod translator;
 mod utils;
 
 /// Test utilities for creating types in tests.
@@ -44,46 +44,45 @@ mod utils;
 pub(crate) mod test_utils;
 
 // Public exports
-pub use translator::{translate_onnx_op, infer_op_output_shape, OpTranslator};
+pub use translator::{OpTranslator, infer_op_output_shape, translate_onnx_op};
 
 // Export operation translators
-pub use ops::core::{
-    translate_matmul, translate_gemm, translate_add, translate_sub,
-    translate_mul, translate_div, translate_pow,
-};
 pub use ops::activation::{
-    translate_relu, translate_sigmoid, translate_tanh, translate_softmax,
-    translate_gelu, translate_swish, translate_elu, translate_selu,
-};
-pub use ops::shape::{
-    translate_reshape, translate_transpose, translate_squeeze,
-    translate_unsqueeze, translate_concat, translate_split, translate_flatten,
-};
-pub use ops::conv::{
-    translate_conv, translate_conv_transpose,
-    infer_conv_output_shape, infer_conv_transpose_output_shape,
-};
-pub use ops::norm::{
-    translate_batch_normalization, translate_layer_normalization,
-    translate_instance_normalization,
-};
-pub use ops::pool::{
-    translate_max_pool, translate_average_pool, translate_global_average_pool,
-    infer_pool_output_shape,
-};
-pub use ops::reduction::{
-    translate_reduce_sum, translate_reduce_mean, translate_reduce_max,
-    translate_reduce_min, translate_reduce_prod,
+    translate_elu, translate_gelu, translate_relu, translate_selu, translate_sigmoid,
+    translate_softmax, translate_swish, translate_tanh,
 };
 pub use ops::advanced::{
-    translate_attention, translate_multi_head_attention,
-    translate_lstm, translate_gru, translate_rnn,
+    translate_attention, translate_gru, translate_lstm, translate_multi_head_attention,
+    translate_rnn,
+};
+pub use ops::conv::{
+    infer_conv_output_shape, infer_conv_transpose_output_shape, translate_conv,
+    translate_conv_transpose,
+};
+pub use ops::core::{
+    translate_add, translate_div, translate_gemm, translate_matmul, translate_mul, translate_pow,
+    translate_sub,
+};
+pub use ops::norm::{
+    translate_batch_normalization, translate_instance_normalization, translate_layer_normalization,
+};
+pub use ops::pool::{
+    infer_pool_output_shape, translate_average_pool, translate_global_average_pool,
+    translate_max_pool,
+};
+pub use ops::reduction::{
+    translate_reduce_max, translate_reduce_mean, translate_reduce_min, translate_reduce_prod,
+    translate_reduce_sum,
+};
+pub use ops::shape::{
+    translate_concat, translate_flatten, translate_reshape, translate_split, translate_squeeze,
+    translate_transpose, translate_unsqueeze,
 };
 
 // Export utilities
 pub use utils::{
-    parse_attr_int, parse_attr_ints, parse_attr_float,
-    parse_attr_floats, parse_attr_string, parse_attr_tensor,
+    parse_attr_float, parse_attr_floats, parse_attr_int, parse_attr_ints, parse_attr_string,
+    parse_attr_tensor,
 };
 
 // Re-export types from hologram for convenience

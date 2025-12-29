@@ -80,10 +80,7 @@ fn test_mixed_var_concrete() {
 #[test]
 fn test_binary_op_with_var() {
     // [batch, 64] + [64] should broadcast to [batch, 64]
-    let a = SymbolicShape::new(vec![
-        Dim::Var("batch".into()),
-        Dim::Concrete(64),
-    ]);
+    let a = SymbolicShape::new(vec![Dim::Var("batch".into()), Dim::Concrete(64)]);
     let b = SymbolicShape::concrete(vec![64]);
 
     let result = a.infer_binary_op(&b).unwrap();
@@ -96,14 +93,8 @@ fn test_binary_op_with_var() {
 #[test]
 fn test_binary_op_matching_vars() {
     // [batch, seq] + [batch, seq] should work
-    let a = SymbolicShape::new(vec![
-        Dim::Var("batch".into()),
-        Dim::Var("seq".into()),
-    ]);
-    let b = SymbolicShape::new(vec![
-        Dim::Var("batch".into()),
-        Dim::Var("seq".into()),
-    ]);
+    let a = SymbolicShape::new(vec![Dim::Var("batch".into()), Dim::Var("seq".into())]);
+    let b = SymbolicShape::new(vec![Dim::Var("batch".into()), Dim::Var("seq".into())]);
 
     let result = a.infer_binary_op(&b).unwrap();
     assert_eq!(result.rank(), 2);
@@ -187,11 +178,7 @@ fn test_dim_expr_creation() {
     let dim = Dim::Expr(Box::new(result_expr));
 
     // Create shape with this expression
-    let shape = SymbolicShape::new(vec![
-        Dim::Var("batch".into()),
-        Dim::Concrete(64),
-        dim,
-    ]);
+    let shape = SymbolicShape::new(vec![Dim::Var("batch".into()), Dim::Concrete(64), dim]);
 
     assert_eq!(shape.rank(), 3);
     assert!(shape.is_partially_symbolic());
@@ -221,11 +208,7 @@ fn test_dim_expr_add() {
     let seq_plus_1 = DimExpr::Add(Box::new(seq), Box::new(one));
 
     let dim = Dim::Expr(Box::new(seq_plus_1));
-    let shape = SymbolicShape::new(vec![
-        Dim::Var("batch".into()),
-        dim,
-        Dim::Concrete(768),
-    ]);
+    let shape = SymbolicShape::new(vec![Dim::Var("batch".into()), dim, Dim::Concrete(768)]);
 
     assert_eq!(shape.rank(), 3);
 }
@@ -288,10 +271,7 @@ fn test_dim_expr_nested() {
 /// Test shape propagation through Add chain.
 #[test]
 fn test_propagation_add_chain() {
-    let x = SymbolicShape::new(vec![
-        Dim::Var("batch".into()),
-        Dim::Concrete(64),
-    ]);
+    let x = SymbolicShape::new(vec![Dim::Var("batch".into()), Dim::Concrete(64)]);
     let bias = SymbolicShape::concrete(vec![64]);
 
     // x + bias -> [batch, 64]
@@ -308,10 +288,7 @@ fn test_propagation_add_chain() {
 #[test]
 fn test_propagation_matmul_chain() {
     // MLP: [batch, 768] -> [batch, 3072] -> [batch, 768]
-    let x = SymbolicShape::new(vec![
-        Dim::Var("batch".into()),
-        Dim::Concrete(768),
-    ]);
+    let x = SymbolicShape::new(vec![Dim::Var("batch".into()), Dim::Concrete(768)]);
     let w1 = SymbolicShape::concrete(vec![768, 3072]);
     let w2 = SymbolicShape::concrete(vec![3072, 768]);
 
@@ -396,10 +373,7 @@ fn test_propagation_transpose_matmul() {
 /// Test all core operations preserve variable batch.
 #[test]
 fn test_batch_preservation_core_ops() {
-    let batch_shape = SymbolicShape::new(vec![
-        Dim::Var("N".into()),
-        Dim::Concrete(768),
-    ]);
+    let batch_shape = SymbolicShape::new(vec![Dim::Var("N".into()), Dim::Concrete(768)]);
 
     // Add: [N, 768] + [768] -> [N, 768]
     let bias = SymbolicShape::concrete(vec![768]);
@@ -457,10 +431,7 @@ fn test_batch_preservation_3d() {
 #[test]
 fn test_batch_broadcasting() {
     // [N, 768] + [1, 768] should broadcast to [N, 768]
-    let batched = SymbolicShape::new(vec![
-        Dim::Var("N".into()),
-        Dim::Concrete(768),
-    ]);
+    let batched = SymbolicShape::new(vec![Dim::Var("N".into()), Dim::Concrete(768)]);
     let single = SymbolicShape::concrete(vec![1, 768]);
 
     let result = batched.infer_binary_op(&single).unwrap();
@@ -525,10 +496,7 @@ fn test_seq_len_embeddings() {
     ]);
 
     // Position embeddings: [1, max_seq, hidden] or [seq_len, hidden]
-    let pos = SymbolicShape::new(vec![
-        Dim::Var("seq_len".into()),
-        Dim::Concrete(768),
-    ]);
+    let pos = SymbolicShape::new(vec![Dim::Var("seq_len".into()), Dim::Concrete(768)]);
 
     // tokens + pos: broadcasting should work
     let result = tokens.infer_binary_op(&pos).unwrap();
@@ -563,10 +531,7 @@ fn test_seq_len_rnn() {
 #[test]
 fn test_seq_len_causal_mask() {
     // Causal mask: [seq_len, seq_len]
-    let mask = SymbolicShape::new(vec![
-        Dim::Var("seq".into()),
-        Dim::Var("seq".into()),
-    ]);
+    let mask = SymbolicShape::new(vec![Dim::Var("seq".into()), Dim::Var("seq".into())]);
 
     // Broadcast to [batch, heads, seq, seq]
     let full_mask = SymbolicShape::new(vec![
@@ -607,7 +572,11 @@ fn test_translate_matmul_symbolic() {
     if let Err(e) = result {
         // Should be input error, not shape error
         let msg = format!("{:?}", e);
-        assert!(!msg.contains("Shape"), "Should not be a shape error: {}", msg);
+        assert!(
+            !msg.contains("Shape"),
+            "Should not be a shape error: {}",
+            msg
+        );
     }
 }
 
@@ -618,19 +587,13 @@ fn test_translate_add_symbolic_in_map() {
     let mut shapes: HashMap<String, SymbolicShape> = HashMap::new();
 
     // Add symbolic shape to map
-    shapes.insert("input".to_string(), SymbolicShape::new(vec![
-        Dim::Var("batch".into()),
-        Dim::Concrete(768),
-    ]));
+    shapes.insert(
+        "input".to_string(),
+        SymbolicShape::new(vec![Dim::Var("batch".into()), Dim::Concrete(768)]),
+    );
 
     // Translation should handle symbolic shapes in the map
-    let result = translate_onnx_op(
-        "Add",
-        &[],
-        &[],
-        &shapes,
-        &mut builder,
-    );
+    let result = translate_onnx_op("Add", &[], &[], &shapes, &mut builder);
 
     // Expected to fail due to missing inputs
     assert!(result.is_err());
@@ -642,19 +605,16 @@ fn test_translate_softmax_symbolic() {
     let mut builder = IRBuilder::new("test_softmax");
     let mut shapes: HashMap<String, SymbolicShape> = HashMap::new();
 
-    shapes.insert("logits".to_string(), SymbolicShape::new(vec![
-        Dim::Var("batch".into()),
-        Dim::Var("seq".into()),
-        Dim::Concrete(50000), // vocab size
-    ]));
-
-    let result = translate_onnx_op(
-        "Softmax",
-        &[],
-        &[],
-        &shapes,
-        &mut builder,
+    shapes.insert(
+        "logits".to_string(),
+        SymbolicShape::new(vec![
+            Dim::Var("batch".into()),
+            Dim::Var("seq".into()),
+            Dim::Concrete(50000), // vocab size
+        ]),
     );
+
+    let result = translate_onnx_op("Softmax", &[], &[], &shapes, &mut builder);
 
     // Softmax preserves shape
     assert!(result.is_err()); // Due to missing inputs
@@ -668,14 +628,8 @@ fn test_translate_softmax_symbolic() {
 #[test]
 fn test_broadcast_incompatible_vars() {
     // [batch, 64] + [other_batch, 64] - different variable names
-    let a = SymbolicShape::new(vec![
-        Dim::Var("batch".into()),
-        Dim::Concrete(64),
-    ]);
-    let b = SymbolicShape::new(vec![
-        Dim::Var("other".into()),
-        Dim::Concrete(64),
-    ]);
+    let a = SymbolicShape::new(vec![Dim::Var("batch".into()), Dim::Concrete(64)]);
+    let b = SymbolicShape::new(vec![Dim::Var("other".into()), Dim::Concrete(64)]);
 
     // This should succeed but preserve one of the variables
     // (broadcasting rules say one or both must be 1, or they must match)

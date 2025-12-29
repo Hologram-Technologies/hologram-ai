@@ -14,8 +14,7 @@ use std::path::PathBuf;
 use hologram_compiler::ir::IRBuilder;
 use hologram_compiler::shapes::Dim;
 use hologram_onnx_core::{
-    parse_model, validate_model, extract_opset_version,
-    OnnxConfig, SymbolicShape,
+    OnnxConfig, SymbolicShape, extract_opset_version, parse_model, validate_model,
 };
 use hologram_onnx_ops::translate_onnx_op;
 use tempfile::TempDir;
@@ -74,9 +73,11 @@ fn test_bert_parsing() {
     assert!(!graph.input.is_empty(), "Graph should have inputs");
     assert!(!graph.output.is_empty(), "Graph should have outputs");
 
-    eprintln!("BERT parsed: {} nodes, {} initializers",
+    eprintln!(
+        "BERT parsed: {} nodes, {} initializers",
         graph.node.len(),
-        graph.initializer.len());
+        graph.initializer.len()
+    );
 }
 
 /// Test BERT model validation.
@@ -90,7 +91,11 @@ fn test_bert_validation() {
     let model = parse_model(&onnx_bytes).expect("Failed to parse BERT model");
     let result = validate_model(&model);
 
-    assert!(result.is_ok(), "BERT validation should pass: {:?}", result.err());
+    assert!(
+        result.is_ok(),
+        "BERT validation should pass: {:?}",
+        result.err()
+    );
 }
 
 /// Test BERT opset version.
@@ -160,7 +165,9 @@ fn test_bert_variable_sequence_lengths() {
     let graph = model.graph.as_ref().expect("Model should have graph");
 
     // Find input_ids input
-    let input_ids = graph.input.iter()
+    let input_ids = graph
+        .input
+        .iter()
         .find(|i| i.name.contains("input") || i.name.contains("ids"))
         .and_then(|i| SymbolicShape::from_value_info(i).ok());
 
@@ -188,13 +195,16 @@ fn test_bert_variable_sequence_lengths() {
             }
         }
 
-        let concrete_shape = SymbolicShape::new(concrete_dims.into_iter().map(|d| {
-            match d {
-                Dim::Concrete(n) => hologram_onnx_core::Dim::Concrete(n),
-                Dim::Var(name) => hologram_onnx_core::Dim::Var(name),
-                Dim::Expr(expr) => hologram_onnx_core::Dim::Expr(expr),
-            }
-        }).collect());
+        let concrete_shape = SymbolicShape::new(
+            concrete_dims
+                .into_iter()
+                .map(|d| match d {
+                    Dim::Concrete(n) => hologram_onnx_core::Dim::Concrete(n),
+                    Dim::Var(name) => hologram_onnx_core::Dim::Var(name),
+                    Dim::Expr(expr) => hologram_onnx_core::Dim::Expr(expr),
+                })
+                .collect(),
+        );
 
         eprintln!("BERT with seq_len {}: {:?}", seq_len, concrete_shape.dims());
     }
@@ -221,13 +231,7 @@ fn test_bert_operation_coverage() {
     for node in &graph.node {
         *op_counts.entry(node.op_type.clone()).or_insert(0) += 1;
 
-        let result = translate_onnx_op(
-            &node.op_type,
-            &[],
-            &node.attribute,
-            &shapes,
-            &mut builder,
-        );
+        let result = translate_onnx_op(&node.op_type, &[], &node.attribute, &shapes, &mut builder);
 
         match &result {
             Err(hologram_onnx_core::OnnxError::UnsupportedOp { op_type, .. }) => {
@@ -270,7 +274,11 @@ fn test_bert_attention_operations() {
     // Count attention-related operations
     let matmul_count = graph.node.iter().filter(|n| n.op_type == "MatMul").count();
     let softmax_count = graph.node.iter().filter(|n| n.op_type == "Softmax").count();
-    let attention_count = graph.node.iter().filter(|n| n.op_type == "Attention").count();
+    let attention_count = graph
+        .node
+        .iter()
+        .filter(|n| n.op_type == "Attention")
+        .count();
 
     eprintln!("BERT attention metrics:");
     eprintln!("  MatMul operations: {}", matmul_count);
@@ -281,7 +289,10 @@ fn test_bert_attention_operations() {
     // That's at least 12 * 4 = 48 MatMuls for attention alone
     if attention_count == 0 {
         // Decomposed BERT (no fused Attention op)
-        assert!(matmul_count >= 24, "BERT should have many MatMul ops for attention");
+        assert!(
+            matmul_count >= 24,
+            "BERT should have many MatMul ops for attention"
+        );
         assert!(softmax_count >= 12, "BERT should have 12+ Softmax ops");
     }
 }
@@ -298,7 +309,9 @@ fn test_bert_layer_normalization() {
     let graph = model.graph.as_ref().expect("Model should have graph");
 
     // Count LayerNormalization operations
-    let layer_norm_count = graph.node.iter()
+    let layer_norm_count = graph
+        .node
+        .iter()
         .filter(|n| n.op_type == "LayerNormalization")
         .count();
 
@@ -341,8 +354,12 @@ fn test_bert_hidden_dimension() {
     if !hidden_dims.is_empty() {
         eprintln!("Detected BERT hidden dimensions: {:?}", hidden_dims);
         // Most common is 768 for BERT-base
-        assert!(hidden_dims.iter().any(|&d| d == 768 || d == 1024 || d == 512),
-            "BERT should have standard hidden dimension");
+        assert!(
+            hidden_dims
+                .iter()
+                .any(|&d| d == 768 || d == 1024 || d == 512),
+            "BERT should have standard hidden dimension"
+        );
     }
 }
 
@@ -379,7 +396,11 @@ fn test_bert_full_compilation() {
 
     let holo_content = fs::read(&holo_path).expect("Should read .holo file");
     assert!(!holo_content.is_empty(), ".holo file should not be empty");
-    assert_eq!(&holo_content[0..4], b"HOLO", "Should have HOLO magic header");
+    assert_eq!(
+        &holo_content[0..4],
+        b"HOLO",
+        "Should have HOLO magic header"
+    );
 
     eprintln!("BERT compiled successfully: {} bytes", holo_content.len());
 }
@@ -422,7 +443,10 @@ fn test_bert_attention_decomposition() {
         .status()
         .expect("Failed to run hologram-onnx compile");
 
-    assert!(status.success(), "BERT compilation with attention decomposition should succeed");
+    assert!(
+        status.success(),
+        "BERT compilation with attention decomposition should succeed"
+    );
 
     let holo_path = output.with_extension("holo");
     let holo_content = fs::read(&holo_path).expect("Should read .holo file");
@@ -443,7 +467,9 @@ fn test_bert_weight_extraction() {
 
     let weight_count = graph.initializer.len();
 
-    let total_weight_bytes: usize = graph.initializer.iter()
+    let total_weight_bytes: usize = graph
+        .initializer
+        .iter()
         .map(|init| {
             if !init.raw_data.is_empty() {
                 init.raw_data.len()
@@ -459,9 +485,11 @@ fn test_bert_weight_extraction() {
         })
         .sum();
 
-    eprintln!("BERT weights: {} initializers, {} MB total",
+    eprintln!(
+        "BERT weights: {} initializers, {} MB total",
         weight_count,
-        total_weight_bytes / (1024 * 1024));
+        total_weight_bytes / (1024 * 1024)
+    );
 
     // BERT-base has ~110M parameters
     // This is just informational, no strict assertion

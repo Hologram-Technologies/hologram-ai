@@ -9,8 +9,7 @@
 
 use hologram_onnx_core::{GraphPartition, GraphPartitioner};
 use hologram_onnx_spec::{
-    AttributeProto, GraphProto, NodeProto, TensorShapeProto,
-    TypeProto, ValueInfoProto,
+    AttributeProto, GraphProto, NodeProto, TensorShapeProto, TypeProto, ValueInfoProto,
 };
 use std::collections::HashSet;
 
@@ -24,7 +23,9 @@ fn create_linear_graph(node_count: usize) -> GraphProto {
     graph.name = format!("linear_graph_{}", node_count);
 
     // Add input
-    graph.input.push(make_value_info("input", &[1, 3, 224, 224]));
+    graph
+        .input
+        .push(make_value_info("input", &[1, 3, 224, 224]));
 
     for i in 0..node_count {
         let mut node = NodeProto::default();
@@ -65,7 +66,9 @@ fn create_wide_graph(branch_count: usize, nodes_per_branch: usize) -> GraphProto
     graph.name = format!("wide_graph_{}x{}", branch_count, nodes_per_branch);
 
     // Add input
-    graph.input.push(make_value_info("input", &[1, 3, 224, 224]));
+    graph
+        .input
+        .push(make_value_info("input", &[1, 3, 224, 224]));
 
     let mut branch_outputs = Vec::new();
 
@@ -111,7 +114,10 @@ fn create_wide_graph(branch_count: usize, nodes_per_branch: usize) -> GraphProto
     graph.node.push(concat_node);
 
     // Add output
-    graph.output.push(make_value_info("output", &[1, 3 * branch_count as i64, 224, 224]));
+    graph.output.push(make_value_info(
+        "output",
+        &[1, 3 * branch_count as i64, 224, 224],
+    ));
 
     graph
 }
@@ -272,7 +278,9 @@ fn create_resnet_block_graph(num_blocks: usize) -> GraphProto {
         current_input = relu2_out;
     }
 
-    graph.output.push(make_value_info(&current_input, &[1, 64, 56, 56]));
+    graph
+        .output
+        .push(make_value_info(&current_input, &[1, 64, 56, 56]));
 
     graph
 }
@@ -282,7 +290,9 @@ fn create_unet_style_graph(depth: usize, nodes_per_level: usize) -> GraphProto {
     let mut graph = GraphProto::default();
     graph.name = format!("unet_style_d{}_n{}", depth, nodes_per_level);
 
-    graph.input.push(make_value_info("input", &[1, 3, 256, 256]));
+    graph
+        .input
+        .push(make_value_info("input", &[1, 3, 256, 256]));
 
     let mut encoder_outputs = Vec::new();
     let mut current_tensor = "input".to_string();
@@ -370,7 +380,9 @@ fn create_unet_style_graph(depth: usize, nodes_per_level: usize) -> GraphProto {
     final_conv.output.push("output".to_string());
     graph.node.push(final_conv);
 
-    graph.output.push(make_value_info("output", &[1, 1, 256, 256]));
+    graph
+        .output
+        .push(make_value_info("output", &[1, 1, 256, 256]));
 
     graph
 }
@@ -478,7 +490,11 @@ fn test_partitioning_preserves_all_nodes() {
     // Check each original node is present
     for i in 0..750 {
         let expected_name = format!("node_{}", i);
-        assert!(all_nodes.contains(&expected_name), "Missing node: {}", expected_name);
+        assert!(
+            all_nodes.contains(&expected_name),
+            "Missing node: {}",
+            expected_name
+        );
     }
 }
 

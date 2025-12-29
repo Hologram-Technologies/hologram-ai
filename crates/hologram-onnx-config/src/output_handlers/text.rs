@@ -45,20 +45,20 @@ impl TextHandler {
     pub fn from_config(config: &OutputHandlerConfig) -> Result<Self, ConfigError> {
         let output_name = config.output.clone();
 
-        let tokenizer_path = config.get_string("tokenizer_path")
+        let tokenizer_path = config
+            .get_string("tokenizer_path")
             .ok_or_else(|| ConfigError::missing_field("tokenizer_path"))?;
 
         // Load tokenizer
         let tokenizer = Tokenizer::from_file(tokenizer_path)
-            .map_err(|e| ConfigError::TokenizerError(
-                format!("Failed to load tokenizer: {}", e)
-            ))?;
+            .map_err(|e| ConfigError::TokenizerError(format!("Failed to load tokenizer: {}", e)))?;
 
-        let skip_special_tokens = config.get_bool("skip_special_tokens")
-            .unwrap_or(true);
+        let skip_special_tokens = config.get_bool("skip_special_tokens").unwrap_or(true);
 
-        debug!("Created TextHandler: tokenizer={}, skip_special={}",
-               tokenizer_path, skip_special_tokens);
+        debug!(
+            "Created TextHandler: tokenizer={}, skip_special={}",
+            tokenizer_path, skip_special_tokens
+        );
 
         Ok(Self {
             output_name,
@@ -73,9 +73,7 @@ impl TextHandler {
     fn decode_tokens(&self, token_ids: &[u32]) -> Result<String, ConfigError> {
         self.tokenizer
             .decode(token_ids, self.skip_special_tokens)
-            .map_err(|e| ConfigError::TokenizerError(
-                format!("Failed to decode tokens: {}", e)
-            ))
+            .map_err(|e| ConfigError::TokenizerError(format!("Failed to decode tokens: {}", e)))
     }
 
     /// Extract token IDs from tensor.
@@ -90,23 +88,17 @@ impl TextHandler {
         let token_ids: Vec<u32> = match tensor.shape.len() {
             1 => {
                 // [seq_len] - Single sequence
-                tensor.data.iter()
-                    .map(|&f| f as u32)
-                    .collect()
+                tensor.data.iter().map(|&f| f as u32).collect()
             }
             2 => {
                 // [batch, seq_len] - Take first batch
                 let seq_len = tensor.shape[1];
-                tensor.data[0..seq_len].iter()
-                    .map(|&f| f as u32)
-                    .collect()
+                tensor.data[0..seq_len].iter().map(|&f| f as u32).collect()
             }
             3 => {
                 // [batch, beam, seq_len] - Take first batch, first beam
                 let seq_len = tensor.shape[2];
-                tensor.data[0..seq_len].iter()
-                    .map(|&f| f as u32)
-                    .collect()
+                tensor.data[0..seq_len].iter().map(|&f| f as u32).collect()
             }
             _ => {
                 return Err(ConfigError::invalid_tensor_shape(
@@ -126,8 +118,12 @@ impl OutputHandler for TextHandler {
         "text"
     }
 
-    fn process(&self, outputs: &HashMap<String, TensorData>) -> Result<ProcessedOutput, ConfigError> {
-        let tensor = outputs.get(&self.output_name)
+    fn process(
+        &self,
+        outputs: &HashMap<String, TensorData>,
+    ) -> Result<ProcessedOutput, ConfigError> {
+        let tensor = outputs
+            .get(&self.output_name)
             .ok_or_else(|| ConfigError::missing_output_tensor(&self.output_name))?;
 
         trace!("Processing text tensor: shape={:?}", tensor.shape);
@@ -138,7 +134,11 @@ impl OutputHandler for TextHandler {
         // Decode to text
         let text = self.decode_tokens(&token_ids)?;
 
-        debug!("Decoded {} tokens to text ({} chars)", token_ids.len(), text.len());
+        debug!(
+            "Decoded {} tokens to text ({} chars)",
+            token_ids.len(),
+            text.len()
+        );
 
         Ok(ProcessedOutput::Text(text))
     }
@@ -213,7 +213,10 @@ mod tests {
             "tokenizer_path".to_string(),
             toml::Value::String(tokenizer_path.to_str().unwrap().to_string()),
         );
-        config_map.insert("skip_special_tokens".to_string(), toml::Value::Boolean(true));
+        config_map.insert(
+            "skip_special_tokens".to_string(),
+            toml::Value::Boolean(true),
+        );
 
         let config = OutputHandlerConfig {
             handler_type: "text".to_string(),
@@ -297,10 +300,7 @@ mod tests {
         let handler = TextHandler::from_config(&config).unwrap();
 
         // [seq_len=5]
-        let tensor = TensorData::new(
-            vec![2.0, 5.0, 3.0, 1.0, 0.0],
-            vec![5],
-        );
+        let tensor = TensorData::new(vec![2.0, 5.0, 3.0, 1.0, 0.0], vec![5]);
 
         let token_ids = handler.extract_token_ids(&tensor).unwrap();
         assert_eq!(token_ids, vec![2, 5, 3, 1, 0]);
@@ -327,8 +327,8 @@ mod tests {
         // [batch=2, seq_len=3] - should take first batch
         let tensor = TensorData::new(
             vec![
-                2.0, 5.0, 3.0,  // Batch 0: "hello world"
-                4.0, 1.0, 0.0,  // Batch 1: "test <eos> <pad>"
+                2.0, 5.0, 3.0, // Batch 0: "hello world"
+                4.0, 1.0, 0.0, // Batch 1: "test <eos> <pad>"
             ],
             vec![2, 3],
         );
@@ -358,8 +358,8 @@ mod tests {
         // [batch=1, beam=2, seq_len=3] - should take first batch, first beam
         let tensor = TensorData::new(
             vec![
-                2.0, 5.0, 3.0,  // Batch 0, Beam 0
-                4.0, 1.0, 0.0,  // Batch 0, Beam 1
+                2.0, 5.0, 3.0, // Batch 0, Beam 0
+                4.0, 1.0, 0.0, // Batch 0, Beam 1
             ],
             vec![1, 2, 3],
         );
@@ -387,10 +387,7 @@ mod tests {
         let handler = TextHandler::from_config(&config).unwrap();
 
         // 4D tensor is invalid
-        let tensor = TensorData::new(
-            vec![1.0; 24],
-            vec![2, 3, 2, 2],
-        );
+        let tensor = TensorData::new(vec![1.0; 24], vec![2, 3, 2, 2]);
 
         let result = handler.extract_token_ids(&tensor);
         assert!(result.is_err());

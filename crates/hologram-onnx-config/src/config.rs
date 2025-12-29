@@ -79,13 +79,13 @@ impl PipelineConfig {
             if exec.inputs.is_empty() {
                 return Err(ConfigError::invalid_value(
                     "pipeline.execution.inputs",
-                    "must not be empty"
+                    "must not be empty",
                 ));
             }
             if exec.outputs.is_empty() {
                 return Err(ConfigError::invalid_value(
                     "pipeline.execution.outputs",
-                    "must not be empty"
+                    "must not be empty",
                 ));
             }
         }
@@ -100,7 +100,9 @@ impl PipelineConfig {
 
     /// Get output handler configs.
     pub fn output_handlers(&self) -> HashMap<String, &OutputHandlerConfig> {
-        self.pipeline.execution.as_ref()
+        self.pipeline
+            .execution
+            .as_ref()
             .and_then(|e| e.output_handlers.as_ref())
             .map(|h| h.iter().map(|(k, v)| (k.clone(), v)).collect())
             .unwrap_or_default()
@@ -177,32 +179,27 @@ pub struct OutputHandlerConfig {
 impl OutputHandlerConfig {
     /// Get string config value.
     pub fn get_string(&self, key: &str) -> Option<&str> {
-        self.config.get(key)
-            .and_then(|v| v.as_str())
+        self.config.get(key).and_then(|v| v.as_str())
     }
 
     /// Get integer config value.
     pub fn get_int(&self, key: &str) -> Option<i64> {
-        self.config.get(key)
-            .and_then(|v| v.as_integer())
+        self.config.get(key).and_then(|v| v.as_integer())
     }
 
     /// Get float config value.
     pub fn get_float(&self, key: &str) -> Option<f64> {
-        self.config.get(key)
-            .and_then(|v| v.as_float())
+        self.config.get(key).and_then(|v| v.as_float())
     }
 
     /// Get boolean config value.
     pub fn get_bool(&self, key: &str) -> Option<bool> {
-        self.config.get(key)
-            .and_then(|v| v.as_bool())
+        self.config.get(key).and_then(|v| v.as_bool())
     }
 
     /// Get array config value.
     pub fn get_array(&self, key: &str) -> Option<&Vec<toml::Value>> {
-        self.config.get(key)
-            .and_then(|v| v.as_array())
+        self.config.get(key).and_then(|v| v.as_array())
     }
 }
 
@@ -259,7 +256,10 @@ mod tests {
         "#;
 
         let config = PipelineConfig::from_str(toml).unwrap();
-        assert_eq!(config.pipeline.description, Some("Test pipeline".to_string()));
+        assert_eq!(
+            config.pipeline.description,
+            Some("Test pipeline".to_string())
+        );
     }
 
     #[test]
