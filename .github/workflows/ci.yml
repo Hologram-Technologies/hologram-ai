@@ -24,8 +24,14 @@ jobs:
           components: clippy, rustfmt
 
       - name: Clone hologram dependencies
-        run: |
-          sudo git clone --depth 1 https://github.com/UOR-Foundation/hologram.git /hologram
+        uses: actions/checkout@v4
+        with:
+          repository: UOR-Foundation/hologram
+          path: hologram-repo
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Setup hologram at /hologram
+        run: sudo mv hologram-repo /hologram
 
       - name: Cache cargo registry
         uses: actions/cache@v4
@@ -56,8 +62,14 @@ jobs:
         uses: dtolnay/rust-toolchain@nightly
 
       - name: Clone hologram dependencies
-        run: |
-          sudo git clone --depth 1 https://github.com/UOR-Foundation/hologram.git /hologram
+        uses: actions/checkout@v4
+        with:
+          repository: UOR-Foundation/hologram
+          path: hologram-repo
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Setup hologram at /hologram
+        run: sudo mv hologram-repo /hologram
 
       - name: Cache cargo registry
         uses: actions/cache@v4
@@ -86,8 +98,14 @@ jobs:
         uses: dtolnay/rust-toolchain@nightly
 
       - name: Clone hologram dependencies
-        run: |
-          sudo git clone --depth 1 https://github.com/UOR-Foundation/hologram.git /hologram
+        uses: actions/checkout@v4
+        with:
+          repository: UOR-Foundation/hologram
+          path: hologram-repo
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Setup hologram at /hologram
+        run: sudo mv hologram-repo /hologram
 
       - name: Cache cargo registry
         uses: actions/cache@v4
@@ -116,8 +134,14 @@ jobs:
         uses: dtolnay/rust-toolchain@nightly
 
       - name: Clone hologram dependencies
-        run: |
-          sudo git clone --depth 1 https://github.com/UOR-Foundation/hologram.git /hologram
+        uses: actions/checkout@v4
+        with:
+          repository: UOR-Foundation/hologram
+          path: hologram-repo
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Setup hologram at /hologram
+        run: sudo mv hologram-repo /hologram
 
       - name: Cache cargo registry
         uses: actions/cache@v4
@@ -146,8 +170,14 @@ jobs:
         uses: dtolnay/rust-toolchain@nightly
 
       - name: Clone hologram dependencies
-        run: |
-          sudo git clone --depth 1 https://github.com/UOR-Foundation/hologram.git /hologram
+        uses: actions/checkout@v4
+        with:
+          repository: UOR-Foundation/hologram
+          path: hologram-repo
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Setup hologram at /hologram
+        run: sudo mv hologram-repo /hologram
 
       - name: Cache cargo registry
         uses: actions/cache@v4
@@ -177,8 +207,14 @@ jobs:
         uses: dtolnay/rust-toolchain@nightly
 
       - name: Clone hologram dependencies
-        run: |
-          sudo git clone --depth 1 https://github.com/UOR-Foundation/hologram.git /hologram
+        uses: actions/checkout@v4
+        with:
+          repository: UOR-Foundation/hologram
+          path: hologram-repo
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Setup hologram at /hologram
+        run: sudo mv hologram-repo /hologram
 
       - name: Cache cargo registry
         uses: actions/cache@v4
@@ -209,8 +245,14 @@ jobs:
         uses: dtolnay/rust-toolchain@nightly
 
       - name: Clone hologram dependencies
-        run: |
-          sudo git clone --depth 1 https://github.com/UOR-Foundation/hologram.git /hologram
+        uses: actions/checkout@v4
+        with:
+          repository: UOR-Foundation/hologram
+          path: hologram-repo
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Setup hologram at /hologram
+        run: sudo mv hologram-repo /hologram
 
       - name: Cache cargo registry
         uses: actions/cache@v4
@@ -246,8 +288,14 @@ jobs:
         uses: dtolnay/rust-toolchain@nightly
 
       - name: Clone hologram dependencies
-        run: |
-          sudo git clone --depth 1 https://github.com/UOR-Foundation/hologram.git /hologram
+        uses: actions/checkout@v4
+        with:
+          repository: UOR-Foundation/hologram
+          path: hologram-repo
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Setup hologram at /hologram
+        run: sudo mv hologram-repo /hologram
 
       - name: Cache cargo registry
         uses: actions/cache@v4
