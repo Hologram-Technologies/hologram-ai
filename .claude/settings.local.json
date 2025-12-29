@@ -16,7 +16,9 @@
       "Bash(cargo run:*)",
       "Bash(git add:*)",
       "Bash(cargo update:*)",
-      "Bash(git commit:*)"
+      "Bash(git commit:*)",
+      "Bash(CARGO_NET_OFFLINE=true cargo test:*)",
+      "Bash(CARGO_NET_GIT_FETCH_WITH_CLI=true cargo test:*)"
     ]
   }
 }
