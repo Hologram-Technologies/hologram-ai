@@ -1,0 +1,271 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  # Quick checks that fail fast
+  check:
+    name: Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-action@stable
+        with:
+          toolchain: nightly
+          components: clippy, rustfmt
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-check-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-check-
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Clippy (libraries)
+        run: cargo clippy --lib -p hologram-onnx -p hologram-onnx-core -p hologram-onnx-ops -p hologram-onnx-config -- -D warnings
+
+  # Test each crate independently to avoid linker memory issues
+  test-core:
+    name: Test hologram-onnx-core
+    runs-on: ubuntu-latest
+    needs: check
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-action@stable
+        with:
+          toolchain: nightly
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-test-core-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-test-core-
+
+      - name: Run tests
+        run: cargo test -p hologram-onnx-core --lib
+        env:
+          CARGO_NET_GIT_FETCH_WITH_CLI: true
+
+  test-ops:
+    name: Test hologram-onnx-ops
+    runs-on: ubuntu-latest
+    needs: check
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-action@stable
+        with:
+          toolchain: nightly
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-test-ops-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-test-ops-
+
+      - name: Run tests
+        run: cargo test -p hologram-onnx-ops --lib
+        env:
+          CARGO_NET_GIT_FETCH_WITH_CLI: true
+
+  test-config:
+    name: Test hologram-onnx-config
+    runs-on: ubuntu-latest
+    needs: check
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-action@stable
+        with:
+          toolchain: nightly
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-test-config-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-test-config-
+
+      - name: Run tests
+        run: cargo test -p hologram-onnx-config --lib
+        env:
+          CARGO_NET_GIT_FETCH_WITH_CLI: true
+
+  test-main:
+    name: Test hologram-onnx
+    runs-on: ubuntu-latest
+    needs: check
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-action@stable
+        with:
+          toolchain: nightly
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-test-main-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-test-main-
+
+      - name: Run tests
+        run: cargo test -p hologram-onnx --lib
+        env:
+          CARGO_NET_GIT_FETCH_WITH_CLI: true
+
+  # Documentation generation
+  docs:
+    name: Documentation
+    runs-on: ubuntu-latest
+    needs: check
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-action@stable
+        with:
+          toolchain: nightly
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-docs-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-docs-
+
+      - name: Generate documentation
+        run: cargo doc --no-deps
+        env:
+          CARGO_NET_GIT_FETCH_WITH_CLI: true
+          RUSTDOCFLAGS: "-D warnings"
+
+  # Integration tests with MNIST model
+  integration:
+    name: Integration Tests
+    runs-on: ubuntu-latest
+    needs: [test-core, test-ops, test-config, test-main]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-action@stable
+        with:
+          toolchain: nightly
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-integration-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-integration-
+
+      - name: Download MNIST model
+        run: |
+          mkdir -p crates/hologram-onnx-core/tests/fixtures
+          curl -L https://github.com/onnx/models/raw/main/validated/vision/classification/mnist/model/mnist-12.onnx \
+            -o crates/hologram-onnx-core/tests/fixtures/mnist-12.onnx
+
+      - name: Run decomposition tests
+        run: cargo test -p hologram-onnx-ops --test decomposition_tests
+        env:
+          CARGO_NET_GIT_FETCH_WITH_CLI: true
+
+  # Build release binary
+  build:
+    name: Build Release
+    runs-on: ubuntu-latest
+    needs: [test-core, test-ops, test-config, test-main]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-action@stable
+        with:
+          toolchain: nightly
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-build-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-build-
+
+      - name: Build release
+        run: cargo build --release -p hologram-onnx
+        env:
+          CARGO_NET_GIT_FETCH_WITH_CLI: true
+
+  # Summary job that depends on all others
+  ci-success:
+    name: CI Success
+    runs-on: ubuntu-latest
+    needs: [check, test-core, test-ops, test-config, test-main, docs, integration, build]
+    if: always()
+    steps:
+      - name: Check all jobs passed
+        run: |
+          if [ "${{ needs.check.result }}" != "success" ] || \
+             [ "${{ needs.test-core.result }}" != "success" ] || \
+             [ "${{ needs.test-ops.result }}" != "success" ] || \
+             [ "${{ needs.test-config.result }}" != "success" ] || \
+             [ "${{ needs.test-main.result }}" != "success" ] || \
+             [ "${{ needs.docs.result }}" != "success" ] || \
+             [ "${{ needs.integration.result }}" != "success" ] || \
+             [ "${{ needs.build.result }}" != "success" ]; then
+            echo "One or more jobs failed"
+            exit 1
+          fi
+          echo "All CI checks passed!"
