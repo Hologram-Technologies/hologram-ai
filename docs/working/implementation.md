@@ -1,8 +1,8 @@
 # hologram-onnx Implementation Status
 
-**Last Updated**: 2024-12-29 (Phase 8.1 Model Test Suite COMPLETE ✅)
+**Last Updated**: 2024-12-29 (Phase 8.2 Symbolic Shape Test Suite COMPLETE ✅)
 
-**Current Status**: Phase 8 - Testing & Benchmarking (**8.1 COMPLETE** ✅)
+**Current Status**: Phase 8 - Testing & Benchmarking (**8.1 + 8.2 COMPLETE** ✅)
 - ✅ Phase 1: 6 modules fully implemented (60 tests + 40 integration tests with real ONNX models)
 - ✅ Phase 2: 6 modules fully implemented (50 tests)
 - ✅ Phase 3: 3 modules fully implemented (36 tests) + 2 benchmark files
@@ -11,7 +11,8 @@
 - ✅ Phase 6: 1 module fully implemented (57 tests) - Advanced activations + Reductions + Attention + RNNs
 - ✅ Phase 7: 5 modules fully implemented (32 tests) - CLI with compile, download, info, validate commands + e2e tests
 - ✅ Phase 8.1: 5 model test suites (64 tests) - MNIST, ResNet, BERT, Whisper, Stable Diffusion
-- ✅ **Total: 30 modules, 331 unit tests + 136 integration tests** (100% passing)
+- ✅ Phase 8.2: Symbolic shape test suite (35 tests) - Dim::Var, Dim::Expr, propagation, batch/seq_len
+- ✅ **Total: 30 modules, 331 unit tests + 171 integration tests** (100% passing)
 - ✅ **2 benchmark suites**: conv_bench.rs (6 benchmark groups) + shape_bench.rs (8 benchmark groups)
 - ✅ **40 ONNX operations** fully implemented with symbolic shape support
 - ✅ **Conv2D with Im2col+GEMM decomposition** (CRITICAL for ISA optimization)
@@ -868,7 +869,7 @@ model.holo + model.weights
 
 ## Phase 8: Testing & Benchmarking
 
-### Status: 8.1 COMPLETE ✅
+### Status: 8.1 + 8.2 COMPLETE ✅
 ### Priority: HIGH
 ### Dependencies: Phase 7 complete
 
@@ -903,13 +904,17 @@ model.holo + model.weights
 
 **Total: 5 test suites, 64 integration tests**
 
-#### 8.2 Symbolic Shape Test Suite
-- [ ] Create `/workspace/tests/symbolic_shapes/`
-  - [ ] Test all operations with Dim::Var
-  - [ ] Test all operations with Dim::Expr
-  - [ ] Test shape inference propagation
-  - [ ] Test variable batch size
-  - [ ] Test variable seq_len
+#### 8.2 Symbolic Shape Test Suite ✅ COMPLETE
+- [x] Create `/workspace/tests/symbolic_shapes_test.rs` (35 tests)
+  - [x] Test Dim::Var creation and operations (7 tests)
+  - [x] Test Dim::Expr with Add, Sub, Mul, Div, nested expressions (5 tests)
+  - [x] Test shape inference propagation through operation chains (4 tests)
+  - [x] Test variable batch size across all operation types (5 tests)
+  - [x] Test variable seq_len for transformer operations (4 tests)
+  - [x] Test operation translation with symbolic shapes (3 tests)
+  - [x] Test edge cases and error handling (7 tests)
+
+**Total: 1 test suite, 35 tests**
 
 #### 8.3 Memory Profiling
 - [ ] Create `/workspace/docs/working/memory-analysis.md`
