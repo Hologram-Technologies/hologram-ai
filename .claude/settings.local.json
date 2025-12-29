@@ -15,7 +15,8 @@
       "Bash(cargo doc:*)",
       "Bash(cargo run:*)",
       "Bash(git add:*)",
-      "Bash(cargo update:*)"
+      "Bash(cargo update:*)",
+      "Bash(git commit:*)"
     ]
   }
 }
