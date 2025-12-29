@@ -25,9 +25,13 @@ jobs:
 
       - name: Configure git for private repos
         run: |
-          git config --global url."https://x-access-token:${{ secrets.HOLOGRAM_PAT }}@github.com/".insteadOf "https://github.com/"
-          git config --global url."https://x-access-token:${{ secrets.HOLOGRAM_PAT }}@github.com/".insteadOf "ssh://git@github.com/"
-          git config --global url."https://x-access-token:${{ secrets.HOLOGRAM_PAT }}@github.com/".insteadOf "git@github.com:"
+          # Configure git credential helper with token
+          echo "https://x-access-token:${{ secrets.HOLOGRAM_PAT }}@github.com" >> ~/.git-credentials
+          git config --global credential.helper 'store --file ~/.git-credentials'
+          # Also set URL rewrite for SSH
+          git config --global url."https://github.com/".insteadOf "ssh://git@github.com/"
+          git config --global url."https://github.com/".insteadOf "git@github.com:"
+          # Configure cargo to use git CLI
           mkdir -p ~/.cargo
           echo '[net]' >> ~/.cargo/config.toml
           echo 'git-fetch-with-cli = true' >> ~/.cargo/config.toml
@@ -82,9 +86,13 @@ jobs:
 
       - name: Configure git for private repos
         run: |
-          git config --global url."https://x-access-token:${{ secrets.HOLOGRAM_PAT }}@github.com/".insteadOf "https://github.com/"
-          git config --global url."https://x-access-token:${{ secrets.HOLOGRAM_PAT }}@github.com/".insteadOf "ssh://git@github.com/"
-          git config --global url."https://x-access-token:${{ secrets.HOLOGRAM_PAT }}@github.com/".insteadOf "git@github.com:"
+          # Configure git credential helper with token
+          echo "https://x-access-token:${{ secrets.HOLOGRAM_PAT }}@github.com" >> ~/.git-credentials
+          git config --global credential.helper 'store --file ~/.git-credentials'
+          # Also set URL rewrite for SSH
+          git config --global url."https://github.com/".insteadOf "ssh://git@github.com/"
+          git config --global url."https://github.com/".insteadOf "git@github.com:"
+          # Configure cargo to use git CLI
           mkdir -p ~/.cargo
           echo '[net]' >> ~/.cargo/config.toml
           echo 'git-fetch-with-cli = true' >> ~/.cargo/config.toml
@@ -137,9 +145,13 @@ jobs:
 
       - name: Configure git for private repos
         run: |
-          git config --global url."https://x-access-token:${{ secrets.HOLOGRAM_PAT }}@github.com/".insteadOf "https://github.com/"
-          git config --global url."https://x-access-token:${{ secrets.HOLOGRAM_PAT }}@github.com/".insteadOf "ssh://git@github.com/"
-          git config --global url."https://x-access-token:${{ secrets.HOLOGRAM_PAT }}@github.com/".insteadOf "git@github.com:"
+          # Configure git credential helper with token
+          echo "https://x-access-token:${{ secrets.HOLOGRAM_PAT }}@github.com" >> ~/.git-credentials
+          git config --global credential.helper 'store --file ~/.git-credentials'
+          # Also set URL rewrite for SSH
+          git config --global url."https://github.com/".insteadOf "ssh://git@github.com/"
+          git config --global url."https://github.com/".insteadOf "git@github.com:"
+          # Configure cargo to use git CLI
           mkdir -p ~/.cargo
           echo '[net]' >> ~/.cargo/config.toml
           echo 'git-fetch-with-cli = true' >> ~/.cargo/config.toml
@@ -192,9 +204,13 @@ jobs:
 
       - name: Configure git for private repos
         run: |
-          git config --global url."https://x-access-token:${{ secrets.HOLOGRAM_PAT }}@github.com/".insteadOf "https://github.com/"
-          git config --global url."https://x-access-token:${{ secrets.HOLOGRAM_PAT }}@github.com/".insteadOf "ssh://git@github.com/"
-          git config --global url."https://x-access-token:${{ secrets.HOLOGRAM_PAT }}@github.com/".insteadOf "git@github.com:"
+          # Configure git credential helper with token
+          echo "https://x-access-token:${{ secrets.HOLOGRAM_PAT }}@github.com" >> ~/.git-credentials
+          git config --global credential.helper 'store --file ~/.git-credentials'
+          # Also set URL rewrite for SSH
+          git config --global url."https://github.com/".insteadOf "ssh://git@github.com/"
+          git config --global url."https://github.com/".insteadOf "git@github.com:"
+          # Configure cargo to use git CLI
           mkdir -p ~/.cargo
           echo '[net]' >> ~/.cargo/config.toml
           echo 'git-fetch-with-cli = true' >> ~/.cargo/config.toml
@@ -247,9 +263,13 @@ jobs:
 
       - name: Configure git for private repos
         run: |
-          git config --global url."https://x-access-token:${{ secrets.HOLOGRAM_PAT }}@github.com/".insteadOf "https://github.com/"
-          git config --global url."https://x-access-token:${{ secrets.HOLOGRAM_PAT }}@github.com/".insteadOf "ssh://git@github.com/"
-          git config --global url."https://x-access-token:${{ secrets.HOLOGRAM_PAT }}@github.com/".insteadOf "git@github.com:"
+          # Configure git credential helper with token
+          echo "https://x-access-token:${{ secrets.HOLOGRAM_PAT }}@github.com" >> ~/.git-credentials
+          git config --global credential.helper 'store --file ~/.git-credentials'
+          # Also set URL rewrite for SSH
+          git config --global url."https://github.com/".insteadOf "ssh://git@github.com/"
+          git config --global url."https://github.com/".insteadOf "git@github.com:"
+          # Configure cargo to use git CLI
           mkdir -p ~/.cargo
           echo '[net]' >> ~/.cargo/config.toml
           echo 'git-fetch-with-cli = true' >> ~/.cargo/config.toml
@@ -303,9 +323,13 @@ jobs:
 
       - name: Configure git for private repos
         run: |
-          git config --global url."https://x-access-token:${{ secrets.HOLOGRAM_PAT }}@github.com/".insteadOf "https://github.com/"
-          git config --global url."https://x-access-token:${{ secrets.HOLOGRAM_PAT }}@github.com/".insteadOf "ssh://git@github.com/"
-          git config --global url."https://x-access-token:${{ secrets.HOLOGRAM_PAT }}@github.com/".insteadOf "git@github.com:"
+          # Configure git credential helper with token
+          echo "https://x-access-token:${{ secrets.HOLOGRAM_PAT }}@github.com" >> ~/.git-credentials
+          git config --global credential.helper 'store --file ~/.git-credentials'
+          # Also set URL rewrite for SSH
+          git config --global url."https://github.com/".insteadOf "ssh://git@github.com/"
+          git config --global url."https://github.com/".insteadOf "git@github.com:"
+          # Configure cargo to use git CLI
           mkdir -p ~/.cargo
           echo '[net]' >> ~/.cargo/config.toml
           echo 'git-fetch-with-cli = true' >> ~/.cargo/config.toml
@@ -360,9 +384,13 @@ jobs:
 
       - name: Configure git for private repos
         run: |
-          git config --global url."https://x-access-token:${{ secrets.HOLOGRAM_PAT }}@github.com/".insteadOf "https://github.com/"
-          git config --global url."https://x-access-token:${{ secrets.HOLOGRAM_PAT }}@github.com/".insteadOf "ssh://git@github.com/"
-          git config --global url."https://x-access-token:${{ secrets.HOLOGRAM_PAT }}@github.com/".insteadOf "git@github.com:"
+          # Configure git credential helper with token
+          echo "https://x-access-token:${{ secrets.HOLOGRAM_PAT }}@github.com" >> ~/.git-credentials
+          git config --global credential.helper 'store --file ~/.git-credentials'
+          # Also set URL rewrite for SSH
+          git config --global url."https://github.com/".insteadOf "ssh://git@github.com/"
+          git config --global url."https://github.com/".insteadOf "git@github.com:"
+          # Configure cargo to use git CLI
           mkdir -p ~/.cargo
           echo '[net]' >> ~/.cargo/config.toml
           echo 'git-fetch-with-cli = true' >> ~/.cargo/config.toml
@@ -422,9 +450,13 @@ jobs:
 
       - name: Configure git for private repos
         run: |
-          git config --global url."https://x-access-token:${{ secrets.HOLOGRAM_PAT }}@github.com/".insteadOf "https://github.com/"
-          git config --global url."https://x-access-token:${{ secrets.HOLOGRAM_PAT }}@github.com/".insteadOf "ssh://git@github.com/"
-          git config --global url."https://x-access-token:${{ secrets.HOLOGRAM_PAT }}@github.com/".insteadOf "git@github.com:"
+          # Configure git credential helper with token
+          echo "https://x-access-token:${{ secrets.HOLOGRAM_PAT }}@github.com" >> ~/.git-credentials
+          git config --global credential.helper 'store --file ~/.git-credentials'
+          # Also set URL rewrite for SSH
+          git config --global url."https://github.com/".insteadOf "ssh://git@github.com/"
+          git config --global url."https://github.com/".insteadOf "git@github.com:"
+          # Configure cargo to use git CLI
           mkdir -p ~/.cargo
           echo '[net]' >> ~/.cargo/config.toml
           echo 'git-fetch-with-cli = true' >> ~/.cargo/config.toml
