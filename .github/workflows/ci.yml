@@ -19,9 +19,8 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-action@stable
+        uses: dtolnay/rust-toolchain@nightly
         with:
-          toolchain: nightly
           components: clippy, rustfmt
 
       - name: Cache cargo registry
@@ -50,9 +49,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-action@stable
-        with:
-          toolchain: nightly
+        uses: dtolnay/rust-toolchain@nightly
 
       - name: Cache cargo registry
         uses: actions/cache@v4
@@ -78,9 +75,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-action@stable
-        with:
-          toolchain: nightly
+        uses: dtolnay/rust-toolchain@nightly
 
       - name: Cache cargo registry
         uses: actions/cache@v4
@@ -106,9 +101,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-action@stable
-        with:
-          toolchain: nightly
+        uses: dtolnay/rust-toolchain@nightly
 
       - name: Cache cargo registry
         uses: actions/cache@v4
@@ -134,9 +127,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-action@stable
-        with:
-          toolchain: nightly
+        uses: dtolnay/rust-toolchain@nightly
 
       - name: Cache cargo registry
         uses: actions/cache@v4
@@ -163,9 +154,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-action@stable
-        with:
-          toolchain: nightly
+        uses: dtolnay/rust-toolchain@nightly
 
       - name: Cache cargo registry
         uses: actions/cache@v4
@@ -193,9 +182,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-action@stable
-        with:
-          toolchain: nightly
+        uses: dtolnay/rust-toolchain@nightly
 
       - name: Cache cargo registry
         uses: actions/cache@v4
@@ -228,9 +215,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-action@stable
-        with:
-          toolchain: nightly
+        uses: dtolnay/rust-toolchain@nightly
 
       - name: Cache cargo registry
         uses: actions/cache@v4
