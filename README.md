@@ -94,11 +94,77 @@ let (holo_bytes, weight_bytes) = compiler.compile(&model_bytes)?;
 - **Attention**: Attention, MultiHeadAttention
 - **RNN**: LSTM, GRU, RNN
 
+## ISA Optimizations
+
+hologram-onnx leverages Hologram's ISA-level optimizations for high performance:
+
+### LOOP Instructions
+- **O(1) instruction space**: Tensor operations expressed as single LOOP instructions
+- **Hardware loop support**: Efficient iteration without branch overhead
+- **Example**: 1M element ReLU = 1 LOOP instruction, not 1M separate operations
+
+### PhiCoordinate Addressing
+- **Zero-copy transpose**: Virtual memory layout changes without data movement
+- **Stride-based access**: Efficient multi-dimensional array traversal
+- **Example**: NCHW↔NHWC conversion with zero copy overhead
+
+### ClassMap Fusion
+- **Single-pass element-wise chains**: Fuse Add+ReLU, Mul+Add+Sigmoid, etc.
+- **Reduced memory bandwidth**: One read/write pass for multiple operations
+- **Example**: BatchNorm+ReLU fused into single kernel
+
+### Im2Col + GEMM Decomposition
+- **Optimal Conv2D**: Convolutions decomposed to matrix multiplication
+- **SIMD vectorization**: 4-wide SIMD for matrix operations
+- **Cache efficiency**: Tile-based GEMM with optimal memory access patterns
+
+## Performance
+
+### Compilation Performance
+
+| Model | Nodes | Compilation Time | Output Size |
+|-------|-------|------------------|-------------|
+| MNIST | 26 | 13ms | 304 B |
+| ResNet50 | 122 | 263ms | 6.8 KB |
+| ResNet50 (partitioned) | 122 | 168ms | 6.8 KB |
+
+### Memory Efficiency
+
+- **MNIST (26 KB)**: < 10 MB peak memory
+- **ResNet50 (98 MB)**: ~400 MB peak memory
+- **ResNet50 + partitioning**: ~200 MB peak memory (50% reduction)
+
+### Graph Partitioning
+
+For large models (3000+ nodes), enable partitioning:
+
+```bash
+hologram-onnx compile large_model.onnx -o output.holo \
+    --partition --partition-size 100
+```
+
+## Benchmarks
+
+Run performance benchmarks with:
+
+```bash
+# All benchmarks
+cargo bench
+
+# Compilation benchmarks (parsing, decomposition, full pipeline)
+cargo bench --bench compilation_bench
+
+# Execution benchmarks (Conv2D, MatMul, attention, elementwise)
+cargo bench --bench execution_bench
+```
+
+See [docs/working/benchmarks.md](docs/working/benchmarks.md) for detailed benchmark documentation.
+
 ## Development
 
 ```bash
 # Build all crates
-cargo build
+cargo build --release
 
 # Run all tests
 CARGO_NET_GIT_FETCH_WITH_CLI=true cargo test
@@ -111,6 +177,9 @@ cargo clippy --all-targets
 
 # Generate documentation
 cargo doc --no-deps --open
+
+# Run benchmarks
+cargo bench
 ```
 
 ## License

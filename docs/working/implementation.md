@@ -1038,24 +1038,24 @@ model.holo + model.weights
   - [x] Document PhiCoordinate addressing
   - [x] Document ClassMap fusion
 
-#### 8.5 Documentation
+#### 8.5 Documentation ✅
 
-- [ ] Update `/workspace/README.md`
-  - [ ] Project overview
-  - [ ] Installation instructions
-  - [ ] Usage examples
-  - [ ] Architecture overview
-  - [ ] ISA optimization details
-  - [ ] Performance results
-- [ ] Create `/workspace/docs/working/tutorial.md`
-  - [ ] Step-by-step guide for compiling models
-  - [ ] Pipeline config examples
-  - [ ] Output handler examples
-  - [ ] Troubleshooting guide
-- [ ] Generate rustdoc for all crates
-  - [ ] Verify all public APIs documented
-  - [ ] Add examples to docs
-  - [ ] `cargo doc --no-deps --open`
+- [x] Update `/workspace/README.md`
+  - [x] Project overview
+  - [x] Installation instructions
+  - [x] Usage examples
+  - [x] Architecture overview
+  - [x] ISA optimization details
+  - [x] Performance results
+- [x] Create `/workspace/docs/working/tutorial.md`
+  - [x] Step-by-step guide for compiling models
+  - [x] Pipeline config examples
+  - [x] Output handler examples
+  - [x] Troubleshooting guide
+- [x] Generate rustdoc for all crates
+  - [x] Verify all public APIs documented
+  - [x] No missing_docs warnings
+  - [x] `cargo doc --no-deps` successful
 
 ### Success Criteria
 
