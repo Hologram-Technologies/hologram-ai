@@ -26,6 +26,8 @@ jobs:
       - name: Configure git for private repos
         run: |
           git config --global url."https://x-access-token:${{ secrets.HOLOGRAM_PAT }}@github.com/".insteadOf "https://github.com/"
+          git config --global url."https://x-access-token:${{ secrets.HOLOGRAM_PAT }}@github.com/".insteadOf "ssh://git@github.com/"
+          git config --global url."https://x-access-token:${{ secrets.HOLOGRAM_PAT }}@github.com/".insteadOf "git@github.com:"
 
       - name: Clone hologram dependencies
         uses: actions/checkout@v4
@@ -78,6 +80,8 @@ jobs:
       - name: Configure git for private repos
         run: |
           git config --global url."https://x-access-token:${{ secrets.HOLOGRAM_PAT }}@github.com/".insteadOf "https://github.com/"
+          git config --global url."https://x-access-token:${{ secrets.HOLOGRAM_PAT }}@github.com/".insteadOf "ssh://git@github.com/"
+          git config --global url."https://x-access-token:${{ secrets.HOLOGRAM_PAT }}@github.com/".insteadOf "git@github.com:"
 
       - name: Clone hologram dependencies
         uses: actions/checkout@v4
@@ -128,6 +132,8 @@ jobs:
       - name: Configure git for private repos
         run: |
           git config --global url."https://x-access-token:${{ secrets.HOLOGRAM_PAT }}@github.com/".insteadOf "https://github.com/"
+          git config --global url."https://x-access-token:${{ secrets.HOLOGRAM_PAT }}@github.com/".insteadOf "ssh://git@github.com/"
+          git config --global url."https://x-access-token:${{ secrets.HOLOGRAM_PAT }}@github.com/".insteadOf "git@github.com:"
 
       - name: Clone hologram dependencies
         uses: actions/checkout@v4
@@ -178,6 +184,8 @@ jobs:
       - name: Configure git for private repos
         run: |
           git config --global url."https://x-access-token:${{ secrets.HOLOGRAM_PAT }}@github.com/".insteadOf "https://github.com/"
+          git config --global url."https://x-access-token:${{ secrets.HOLOGRAM_PAT }}@github.com/".insteadOf "ssh://git@github.com/"
+          git config --global url."https://x-access-token:${{ secrets.HOLOGRAM_PAT }}@github.com/".insteadOf "git@github.com:"
 
       - name: Clone hologram dependencies
         uses: actions/checkout@v4
@@ -228,6 +236,8 @@ jobs:
       - name: Configure git for private repos
         run: |
           git config --global url."https://x-access-token:${{ secrets.HOLOGRAM_PAT }}@github.com/".insteadOf "https://github.com/"
+          git config --global url."https://x-access-token:${{ secrets.HOLOGRAM_PAT }}@github.com/".insteadOf "ssh://git@github.com/"
+          git config --global url."https://x-access-token:${{ secrets.HOLOGRAM_PAT }}@github.com/".insteadOf "git@github.com:"
 
       - name: Clone hologram dependencies
         uses: actions/checkout@v4
@@ -279,6 +289,8 @@ jobs:
       - name: Configure git for private repos
         run: |
           git config --global url."https://x-access-token:${{ secrets.HOLOGRAM_PAT }}@github.com/".insteadOf "https://github.com/"
+          git config --global url."https://x-access-token:${{ secrets.HOLOGRAM_PAT }}@github.com/".insteadOf "ssh://git@github.com/"
+          git config --global url."https://x-access-token:${{ secrets.HOLOGRAM_PAT }}@github.com/".insteadOf "git@github.com:"
 
       - name: Clone hologram dependencies
         uses: actions/checkout@v4
@@ -331,6 +343,8 @@ jobs:
       - name: Configure git for private repos
         run: |
           git config --global url."https://x-access-token:${{ secrets.HOLOGRAM_PAT }}@github.com/".insteadOf "https://github.com/"
+          git config --global url."https://x-access-token:${{ secrets.HOLOGRAM_PAT }}@github.com/".insteadOf "ssh://git@github.com/"
+          git config --global url."https://x-access-token:${{ secrets.HOLOGRAM_PAT }}@github.com/".insteadOf "git@github.com:"
 
       - name: Clone hologram dependencies
         uses: actions/checkout@v4
@@ -388,6 +402,8 @@ jobs:
       - name: Configure git for private repos
         run: |
           git config --global url."https://x-access-token:${{ secrets.HOLOGRAM_PAT }}@github.com/".insteadOf "https://github.com/"
+          git config --global url."https://x-access-token:${{ secrets.HOLOGRAM_PAT }}@github.com/".insteadOf "ssh://git@github.com/"
+          git config --global url."https://x-access-token:${{ secrets.HOLOGRAM_PAT }}@github.com/".insteadOf "git@github.com:"
 
       - name: Clone hologram dependencies
         uses: actions/checkout@v4
