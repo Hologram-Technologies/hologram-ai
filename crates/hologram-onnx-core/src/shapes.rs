@@ -17,8 +17,8 @@
 //!
 //! # Examples
 //!
-//! ```no_run
-//! use hologram_onnx_core::shapes::{Dim, Shape, SymbolicShape};
+//! ```
+//! use hologram_onnx_core::{Dim, SymbolicShape};
 //!
 //! // Concrete shape (fixed batch size)
 //! let shape = SymbolicShape::concrete(vec![1, 224, 224, 3]);
@@ -63,7 +63,7 @@ impl SymbolicShape {
     /// # Examples
     ///
     /// ```
-    /// use hologram_onnx_core::shapes::{Dim, SymbolicShape};
+    /// use hologram_onnx_core::{Dim, SymbolicShape};
     ///
     /// let shape = SymbolicShape::new(vec![
     ///     Dim::Var("batch".into()),
@@ -88,7 +88,7 @@ impl SymbolicShape {
     /// # Examples
     ///
     /// ```
-    /// use hologram_onnx_core::shapes::SymbolicShape;
+    /// use hologram_onnx_core::SymbolicShape;
     ///
     /// let shape = SymbolicShape::concrete(vec![1, 784]);
     /// assert!(shape.is_fully_concrete());
@@ -112,7 +112,7 @@ impl SymbolicShape {
     /// # Examples
     ///
     /// ```
-    /// use hologram_onnx_core::shapes::{Dim, SymbolicShape};
+    /// use hologram_onnx_core::{Dim, SymbolicShape};
     ///
     /// let shape = SymbolicShape::symbolic(vec!["batch", "224", "224", "3"]);
     /// assert_eq!(shape.rank(), 4);
@@ -153,7 +153,7 @@ impl SymbolicShape {
     /// # Examples
     ///
     /// ```no_run
-    /// use hologram_onnx_core::shapes::SymbolicShape;
+    /// use hologram_onnx_core::SymbolicShape;
     /// use hologram_onnx_core::parse_model;
     ///
     /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -217,7 +217,7 @@ impl SymbolicShape {
     /// # Examples
     ///
     /// ```
-    /// use hologram_onnx_core::shapes::SymbolicShape;
+    /// use hologram_onnx_core::SymbolicShape;
     ///
     /// let shape = SymbolicShape::concrete(vec![2, 3, 4]);
     /// assert_eq!(shape.rank(), 3);
@@ -231,7 +231,7 @@ impl SymbolicShape {
     /// # Examples
     ///
     /// ```
-    /// use hologram_onnx_core::shapes::{Dim, SymbolicShape};
+    /// use hologram_onnx_core::{Dim, SymbolicShape};
     ///
     /// let shape = SymbolicShape::concrete(vec![2, 3]);
     /// assert_eq!(shape.dims()[0], Dim::Concrete(2));
@@ -246,7 +246,7 @@ impl SymbolicShape {
     /// # Examples
     ///
     /// ```
-    /// use hologram_onnx_core::shapes::{Dim, SymbolicShape};
+    /// use hologram_onnx_core::{Dim, SymbolicShape};
     ///
     /// let concrete = SymbolicShape::concrete(vec![2, 3]);
     /// assert!(concrete.is_fully_concrete());
@@ -263,7 +263,7 @@ impl SymbolicShape {
     /// # Examples
     ///
     /// ```
-    /// use hologram_onnx_core::shapes::{Dim, SymbolicShape};
+    /// use hologram_onnx_core::{Dim, SymbolicShape};
     ///
     /// let concrete = SymbolicShape::concrete(vec![2, 3]);
     /// assert!(!concrete.is_partially_symbolic());
@@ -305,7 +305,7 @@ impl SymbolicShape {
     /// # Examples
     ///
     /// ```
-    /// use hologram_onnx_core::shapes::SymbolicShape;
+    /// use hologram_onnx_core::SymbolicShape;
     ///
     /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
     /// let a = SymbolicShape::concrete(vec![2, 1, 4]);
@@ -376,7 +376,7 @@ impl SymbolicShape {
     /// # Examples
     ///
     /// ```
-    /// use hologram_onnx_core::shapes::SymbolicShape;
+    /// use hologram_onnx_core::SymbolicShape;
     ///
     /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
     /// let a = SymbolicShape::concrete(vec![32, 64]);
@@ -478,7 +478,7 @@ impl SymbolicShape {
     /// # Examples
     ///
     /// ```
-    /// use hologram_onnx_core::shapes::SymbolicShape;
+    /// use hologram_onnx_core::SymbolicShape;
     ///
     /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
     /// let shape = SymbolicShape::concrete(vec![2, 3, 4]);
@@ -536,7 +536,7 @@ impl SymbolicShape {
     /// # Examples
     ///
     /// ```
-    /// use hologram_onnx_core::shapes::{Dim, SymbolicShape};
+    /// use hologram_onnx_core::{Dim, SymbolicShape};
     ///
     /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
     /// let shape = SymbolicShape::concrete(vec![2, 3, 4]);

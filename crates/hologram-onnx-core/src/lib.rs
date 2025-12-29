@@ -48,9 +48,9 @@ mod weights;
 // Re-export public API
 pub use config::OnnxConfig;
 pub use error::{OnnxError, Result};
-pub use parser::{extract_opset_version, parse_model, validate_model};
+pub use parser::{extract_opset_version, get_tensor_shape, parse_model, validate_model};
 pub use partitioning::{GraphPartition, GraphPartitioner};
-pub use shapes::{Dim, SymbolicShape};
+pub use shapes::{Dim, Shape, SymbolicShape};
 pub use translator::{apply_decomposition, lower_to_operation_graph, translate_onnx_to_ir};
 pub use weights::WeightData;
 
