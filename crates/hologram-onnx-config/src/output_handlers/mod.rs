@@ -176,7 +176,7 @@ impl OutputHandlerRegistry {
     ///
     /// Handlers are registered based on enabled features.
     pub fn new() -> Self {
-        let registry = Self {
+        let mut registry = Self {
             factories: AHashMap::new(),
         };
 

@@ -49,7 +49,7 @@ mod error;
 pub use config::{PipelineConfig, ExecutionConfig, StageConfig, OutputHandlerConfig};
 pub use output_handlers::{
     OutputHandler, OutputHandlerRegistry, ProcessedOutput,
-    ImageOutput, AudioOutput, TensorOutput,
+    ImageOutput, AudioOutput, TensorOutput, TensorData,
 };
 pub use error::ConfigError;
 

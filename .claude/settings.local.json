@@ -26,7 +26,8 @@
       "Bash(CARGO_NET_GIT_FETCH_WITH_CLI=true cargo clippy:*)",
       "Bash(./target/release/hologram-onnx info:*)",
       "Bash(./target/release/hologram-onnx validate:*)",
-      "Bash(./target/release/hologram-onnx:*)"
+      "Bash(./target/release/hologram-onnx:*)",
+      "Bash(mkdir:*)"
     ]
   }
 }
