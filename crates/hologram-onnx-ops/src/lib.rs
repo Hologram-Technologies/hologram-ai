@@ -57,7 +57,7 @@ pub use ops::activation::{
 };
 pub use ops::shape::{
     translate_reshape, translate_transpose, translate_squeeze,
-    translate_unsqueeze, translate_concat, translate_split,
+    translate_unsqueeze, translate_concat, translate_split, translate_flatten,
 };
 pub use ops::conv::{
     translate_conv, translate_conv_transpose,

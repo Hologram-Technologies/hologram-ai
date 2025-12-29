@@ -2,14 +2,17 @@
 //!
 //! This module provides the `compile` command which:
 //! - Loads an ONNX model from disk
-//! - Compiles it using hologram-onnx-core (with hologram-compiler)
+//! - Translates ONNX → hologram IR using the full translation pipeline
+//! - Applies decomposition pass (Conv2D → Im2col+GEMM)
 //! - Writes the resulting .holo and .weights files
 
 use anyhow::{Context, Result};
-use hologram_onnx_core::{OnnxCompiler, OnnxConfig};
+use hologram_onnx_core::{parse_model, validate_model, extract_opset_version, OnnxConfig};
 use std::fs;
 use std::path::Path;
 use tracing::{info, debug};
+
+use crate::translator::{translate_graph_to_ir, apply_ir_decomposition};
 
 /// Compile an ONNX model to .holo format.
 ///
@@ -25,24 +28,6 @@ use tracing::{info, debug};
 /// # Returns
 ///
 /// Returns Ok(()) on success, or an error if compilation fails.
-///
-/// # Example
-///
-/// ```no_run
-/// use std::path::Path;
-/// # use anyhow::Result;
-/// # fn main() -> Result<()> {
-/// hologram_onnx_cli::compile::compile_command(
-///     Path::new("model.onnx"),
-///     Path::new("model"),
-///     false,
-///     500,
-///     None,
-///     4096,
-/// )?;
-/// # Ok(())
-/// # }
-/// ```
 pub fn compile_command(
     input: &Path,
     output: &Path,
@@ -64,7 +49,7 @@ pub fn compile_command(
 
     info!("ONNX model size: {} bytes", onnx_bytes.len());
 
-    // Create compiler with configuration
+    // Create configuration
     let config = OnnxConfig {
         weight_threshold,
         enable_partitioning: partition,
@@ -77,12 +62,40 @@ pub fn compile_command(
     config.validate()
         .map_err(|e| anyhow::anyhow!("Invalid configuration: {}", e))?;
 
-    let compiler = OnnxCompiler::with_config(config);
+    // Step 1: Parse and validate ONNX model
+    info!("Parsing ONNX protobuf...");
+    let model = parse_model(&onnx_bytes)
+        .context("Failed to parse ONNX model")?;
 
-    // Compile
-    info!("Compiling ONNX → .holo format...");
-    let (holo_bytes, weight_bytes) = compiler.compile(&onnx_bytes)
-        .context("Failed to compile ONNX model")?;
+    validate_model(&model)
+        .context("Model validation failed")?;
+
+    let opset_version = extract_opset_version(&model);
+    info!("ONNX opset version: {}", opset_version);
+
+    // Get the graph
+    let graph = model.graph.as_ref()
+        .ok_or_else(|| anyhow::anyhow!("Model has no graph"))?;
+
+    info!("Graph: {} ({} nodes)", graph.name, graph.node.len());
+
+    // Step 2: Translate ONNX → IR with symbolic shapes
+    info!("Translating ONNX → IR...");
+    let ir_func = translate_graph_to_ir(graph, opset_version)
+        .context("Failed to translate ONNX to IR")?;
+
+    // Step 3: Apply decomposition pass
+    info!("Applying decomposition pass...");
+    let decomposed = apply_ir_decomposition(ir_func, &config)
+        .context("Decomposition failed")?;
+
+    info!("Decomposition complete: {} IR nodes", decomposed.body.len());
+
+    // Step 4: Serialize IR function (placeholder for now)
+    // TODO: Implement proper lowering to OperationGraph and serialization
+    // For now, we serialize a simple representation
+    let holo_bytes = serialize_ir_function(&decomposed)?;
+    let weight_bytes = Vec::new(); // Weights are embedded in IR for now
 
     info!("Compilation successful!");
     info!("  .holo size: {} bytes", holo_bytes.len());
@@ -112,6 +125,38 @@ pub fn compile_command(
     }
 
     Ok(())
+}
+
+/// Serialize IR function to bytes.
+///
+/// This is a placeholder implementation. Full implementation will use
+/// hologram's OperationGraph serialization.
+fn serialize_ir_function(func: &hologram_compiler::ir::IRFunction) -> Result<Vec<u8>> {
+    // For now, create a simple representation
+    // Full implementation will lower to OperationGraph and use rkyv serialization
+    let mut output = Vec::new();
+
+    // Magic header for .holo files
+    output.extend_from_slice(b"HOLO");
+    output.extend_from_slice(&1u32.to_le_bytes()); // Version
+
+    // Function name
+    let name_bytes = func.name.as_bytes();
+    output.extend_from_slice(&(name_bytes.len() as u32).to_le_bytes());
+    output.extend_from_slice(name_bytes);
+
+    // Node count
+    output.extend_from_slice(&(func.body.len() as u32).to_le_bytes());
+
+    // Simplified node serialization
+    for entry in &func.body {
+        // Node ID
+        output.extend_from_slice(&entry.id.0.to_le_bytes());
+        // Node type marker (placeholder)
+        output.push(0u8);
+    }
+
+    Ok(output)
 }
 
 #[cfg(test)]

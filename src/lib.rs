@@ -127,6 +127,12 @@
 #![deny(missing_docs)]
 #![warn(clippy::all)]
 
+// Translation pipeline module
+mod translator;
+
+// Re-export translator functions
+pub use translator::{translate_graph_to_ir, apply_ir_decomposition};
+
 // Re-export ONNX protobuf types
 pub use hologram_onnx_spec as spec;
 

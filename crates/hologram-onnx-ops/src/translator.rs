@@ -101,6 +101,7 @@ pub fn translate_onnx_op(
         "Unsqueeze" => translate_unsqueeze(inputs, attrs, shapes, builder),
         "Concat" => translate_concat(inputs, attrs, shapes, builder),
         "Split" => translate_split(inputs, attrs, shapes, builder),
+        "Flatten" => translate_flatten(inputs, attrs, shapes, builder),
 
         // Convolution operations
         "Conv" => translate_conv(inputs, attrs, shapes, builder),

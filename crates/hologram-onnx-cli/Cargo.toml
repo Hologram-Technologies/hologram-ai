@@ -12,6 +12,10 @@ path = "src/main.rs"
 # Workspace crates
 hologram-onnx-core.workspace = true
 hologram-onnx-spec.workspace = true
+hologram-onnx-ops.workspace = true
+
+# Hologram compiler
+hologram-compiler.workspace = true
 
 # CLI dependencies
 clap.workspace = true

@@ -21,7 +21,7 @@ const SUPPORTED_OPS: &[&str] = &[
     "Relu", "Sigmoid", "Tanh", "Softmax",
     "Gelu", "Swish", "Elu", "Selu",
     // Shape operations
-    "Reshape", "Transpose", "Squeeze", "Unsqueeze", "Concat", "Split",
+    "Reshape", "Transpose", "Squeeze", "Unsqueeze", "Concat", "Split", "Flatten",
     // Convolution operations
     "Conv", "ConvTranspose",
     // Normalization operations

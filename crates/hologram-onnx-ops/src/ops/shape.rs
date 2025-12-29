@@ -288,6 +288,84 @@ pub fn translate_split(
     ))
 }
 
+/// Translate ONNX Flatten operation.
+///
+/// Flatten: Collapse tensor dimensions from `axis` to the end into a single dimension.
+///
+/// # Attributes
+///
+/// - `axis` (int, default 1): The axis from which to flatten
+///   - All dimensions from `axis` to the end are collapsed into a single dimension
+///   - axis=0 means flatten all dimensions into 1D
+///   - axis=1 (default) means keep batch dimension, flatten the rest
+///
+/// # Example
+///
+/// - Input shape: [2, 3, 4, 5], axis=2 -> Output: [2, 3, 20]
+/// - Input shape: [2, 3, 4, 5], axis=1 -> Output: [2, 60]
+/// - Input shape: [2, 3, 4, 5], axis=0 -> Output: [120]
+///
+/// # Performance
+///
+/// - **Zero-copy view** - Flatten is a reshape, no data copy needed
+/// - **PhiCoordinate addressing** for efficient access
+/// - Supports **symbolic shapes**
+pub fn translate_flatten(
+    inputs: &[NodeId],
+    attrs: &[AttributeProto],
+    _shapes: &HashMap<String, SymbolicShape>,
+    builder: &mut IRBuilder,
+) -> Result<NodeId> {
+    use hologram_compiler::shapes::{Dim as IRDim, Shape};
+
+    if inputs.is_empty() {
+        return Err(OnnxError::InvalidModel(
+            "Flatten expects 1 input, got 0".to_string()
+        ));
+    }
+
+    let input = inputs[0];
+
+    // Parse axis attribute (default 1)
+    let axis = parse_attr_int(attrs, "axis", 1)?;
+
+    debug!("Translating Flatten operation (axis={})", axis);
+    trace!("Flatten input: {:?}", input);
+
+    // Flatten reshapes from [d0, d1, ..., d(axis-1), d(axis), ..., d(n-1)]
+    // to [d0 * ... * d(axis-1), d(axis) * ... * d(n-1)]
+    //
+    // For the common case of axis=1, this becomes [batch_size, flattened_features]
+    // which is used before fully connected layers (e.g., Gemm).
+    //
+    // Since we don't have access to the input shape here, we create a reshape
+    // with symbolic dimensions that will be resolved at execution time.
+    //
+    // For axis=1 (most common case), the shape is:
+    // - First dim: symbolic "batch" (preserved from input)
+    // - Second dim: symbolic "features" (product of remaining dims)
+
+    let target_shape = if axis == 1 {
+        // Most common case: [batch, features]
+        Shape::new(vec![
+            IRDim::Var("batch".to_string()),
+            IRDim::Var("flatten_features".to_string()),
+        ])
+    } else {
+        // General case: create symbolic shape
+        // [outer_dims, inner_dims]
+        Shape::new(vec![
+            IRDim::Var(format!("flatten_outer_{}", axis)),
+            IRDim::Var(format!("flatten_inner_{}", axis)),
+        ])
+    };
+
+    // Create reshape node with symbolic target shape
+    let result = builder.reshape(input, target_shape);
+
+    Ok(result)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

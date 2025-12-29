@@ -66,6 +66,7 @@ hologram-onnx-spec.workspace = true
 hologram-onnx-core.workspace = true
 hologram-onnx-ops.workspace = true
 hologram-onnx-config.workspace = true
+hologram-compiler.workspace = true
 anyhow.workspace = true
 
 # CLI dependencies

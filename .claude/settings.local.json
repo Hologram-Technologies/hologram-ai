@@ -18,7 +18,15 @@
       "Bash(cargo update:*)",
       "Bash(git commit:*)",
       "Bash(CARGO_NET_OFFLINE=true cargo test:*)",
-      "Bash(CARGO_NET_GIT_FETCH_WITH_CLI=true cargo test:*)"
+      "Bash(CARGO_NET_GIT_FETCH_WITH_CLI=true cargo test:*)",
+      "Bash(git push:*)",
+      "Bash(CARGO_NET_GIT_FETCH_WITH_CLI=true cargo bench:*)",
+      "Bash(CARGO_NET_GIT_FETCH_WITH_CLI=true cargo build:*)",
+      "Bash(CARGO_NET_GIT_FETCH_WITH_CLI=true cargo check:*)",
+      "Bash(CARGO_NET_GIT_FETCH_WITH_CLI=true cargo clippy:*)",
+      "Bash(./target/release/hologram-onnx info:*)",
+      "Bash(./target/release/hologram-onnx validate:*)",
+      "Bash(./target/release/hologram-onnx:*)"
     ]
   }
 }

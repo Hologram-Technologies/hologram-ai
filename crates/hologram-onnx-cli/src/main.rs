@@ -9,6 +9,7 @@ use std::path::PathBuf;
 mod compile;
 mod download;
 mod info;
+mod translator;
 mod validate;
 
 use compile::compile_command;
