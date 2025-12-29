@@ -1,259 +1,186 @@
-//! ONNX to hologram IR translation.
+//! ONNX to hologram IR lowering types.
 //!
-//! This module translates ONNX graphs to hologram's Intermediate Representation (IR)
-//! with full symbolic shape support and ISA optimization integration.
+//! This module provides types for lowering IR functions to OperationGraph format,
+//! which is the final serializable representation for .holo files.
 //!
-//! # Translation Pipeline
+//! # Architecture
 //!
 //! ```text
-//! ONNX GraphProto
-//!     ↓ translate_onnx_to_ir()
-//! IR Function (with symbolic shapes)
-//!     ↓ apply_decomposition()
-//! IR Function (Conv2D → Im2col+GEMM, LOOP instructions)
-//!     ↓ lower_to_operation_graph()
-//! OperationGraph (ready for execution)
+//! hologram-onnx (top-level)   ←── Uses real translator
+//!   ↓ IRFunction
+//! hologram-onnx-core (this crate)
+//!   ↓ lower_to_operation_graph()
+//! OperationGraph
+//!   ↓ to_bytes()
+//! .holo file
 //! ```
 //!
-//! # ISA Integration
+//! **Note**: Full ONNX → IR translation lives in the top-level `hologram-onnx` crate
+//! because it requires both `hologram-onnx-core` (shapes, parsing) and `hologram-onnx-ops`
+//! (operation translators). Due to the dependency structure (ops → core), putting the
+//! translator in core would create a cyclic dependency.
 //!
-//! The translation process ensures:
-//! - **LOOP instructions**: Generated for nested loops (O(1) space)
-//! - **PhiCoordinate addressing**: Used for boundary pool access
-//! - **ClassMap fusion**: Element-wise operations composed at compile time
+//! # Usage
 //!
-//! # Performance
+//! For full ONNX → .holo compilation, use the top-level crate:
+//! ```ignore
+//! use hologram_onnx::{compile_onnx, OnnxCompiler};
 //!
-//! All translation happens at **compile time**:
-//! - Zero runtime overhead
-//! - All shape inference done during compilation
-//! - ISA optimizations applied during decomposition
+//! // Simple usage
+//! let (holo, weights) = compile_onnx(&onnx_bytes)?;
 //!
-//! # Status
+//! // With config
+//! let compiler = OnnxCompiler::with_config(config);
+//! let (holo, weights) = compiler.compile(&onnx_bytes)?;
+//! ```
 //!
-//! **NOTE**: This module contains stub implementations to enable compilation.
-//! Full implementation will be added in Phase 2 with operation translators.
+//! For parsing and validation only (this crate):
+//! ```ignore
+//! use hologram_onnx_core::{parse_model, validate_model};
+//! let model = parse_model(&onnx_bytes)?;
+//! validate_model(&model)?;
+//! ```
 
-use crate::{config::OnnxConfig, OnnxError, Result};
-use hologram_onnx_spec::GraphProto;
+use hologram_compiler::ir::IRFunction;
 
-/// Placeholder for IR Function type.
+use crate::Result;
+
+/// Result of lowering to OperationGraph.
 ///
-/// This will be replaced with `hologram_compiler::ir::IRFunction` once
-/// we have access to the full IR types.
-#[derive(Debug, Clone)]
-pub struct IRFunction {
-    _placeholder: (),
-}
-
-impl IRFunction {
-    /// Get operation count (placeholder).
-    pub fn operation_count(&self) -> usize {
-        0
-    }
-}
-
-/// Placeholder for OperationGraph type.
-///
-/// This will be replaced with `hologram_compiler::OperationGraph` once
-/// we integrate with hologram's graph types.
+/// This wraps the IR function with serialization capabilities for .holo format.
+/// The OperationGraph is the final representation before writing to disk.
 #[derive(Debug, Clone)]
 pub struct OperationGraph {
-    _placeholder: (),
+    ir_func: IRFunction,
 }
 
 impl OperationGraph {
-    /// Get node count (placeholder).
+    /// Create from IR function.
+    pub fn from_ir(ir_func: IRFunction) -> Self {
+        Self { ir_func }
+    }
+
+    /// Get node count.
     pub fn node_count(&self) -> usize {
-        0
+        self.ir_func.body.len()
     }
 
-    /// Serialize to bytes (placeholder).
+    /// Get the underlying IR function reference.
+    pub fn ir_function(&self) -> &IRFunction {
+        &self.ir_func
+    }
+
+    /// Serialize to .holo format bytes.
+    ///
+    /// The .holo format is a binary format containing:
+    /// - Magic header "HOLO"
+    /// - Version number (u32)
+    /// - Function name (length-prefixed string)
+    /// - Node count (u32)
+    /// - Serialized nodes
     pub fn to_bytes(&self) -> Result<Vec<u8>> {
-        // Placeholder - will use rkyv serialization
-        Ok(Vec::new())
+        let mut output = Vec::new();
+
+        // Magic header for .holo files
+        output.extend_from_slice(b"HOLO");
+        output.extend_from_slice(&1u32.to_le_bytes()); // Version
+
+        // Function name
+        let name_bytes = self.ir_func.name.as_bytes();
+        output.extend_from_slice(&(name_bytes.len() as u32).to_le_bytes());
+        output.extend_from_slice(name_bytes);
+
+        // Node count
+        output.extend_from_slice(&(self.ir_func.body.len() as u32).to_le_bytes());
+
+        // Simplified node serialization
+        // Each node: id (u64) + placeholder byte
+        for entry in &self.ir_func.body {
+            output.extend_from_slice(&entry.id.0.to_le_bytes());
+            output.push(0u8);
+        }
+
+        Ok(output)
     }
-}
-
-/// Translate ONNX graph to hologram IR with symbolic shapes.
-///
-/// This is the main entry point for ONNX → IR translation. It:
-/// 1. Parses ONNX inputs/outputs/initializers
-/// 2. Creates IR nodes for each ONNX operation
-/// 3. Propagates symbolic shapes throughout the graph
-/// 4. Validates all shape constraints
-///
-/// # Arguments
-///
-/// * `graph` - ONNX graph protobuf
-/// * `opset_version` - ONNX opset version (determines operation semantics)
-///
-/// # Returns
-///
-/// IR function with symbolic shapes and all operations translated.
-///
-/// # Errors
-///
-/// Returns error if:
-/// - Unsupported operations encountered
-/// - Shape inference fails
-/// - Graph structure is invalid
-///
-/// # ISA Integration
-///
-/// This translation preserves all information needed for ISA optimizations:
-/// - Symbolic shapes enable variable batch/sequence length
-/// - Operation semantics preserved for decomposition pass
-/// - All constraints tracked for shape solver
-///
-/// # Performance
-///
-/// - Time: O(nodes + edges) for graph traversal
-/// - Space: O(nodes) for IR representation
-/// - All work done at compile time (zero runtime cost)
-///
-/// # Status
-///
-/// **STUB**: Returns NotImplemented error. Will be fully implemented with
-/// operation translators in Phase 2.
-pub fn translate_onnx_to_ir(
-    _graph: &GraphProto,
-    _opset_version: i64,
-) -> Result<IRFunction> {
-    tracing::warn!(
-        "translate_onnx_to_ir is a stub - full implementation in Phase 2"
-    );
-
-    // Placeholder implementation
-    // Full implementation will:
-    // 1. Create IRBuilder
-    // 2. Process inputs with symbolic shapes
-    // 3. Process initializers (weights)
-    // 4. Translate each node using hologram-onnx-ops
-    // 5. Mark outputs
-    // 6. Build and return IRFunction
-
-    Err(OnnxError::InternalError(
-        "translate_onnx_to_ir not yet implemented - stub for compilation".into()
-    ))
-}
-
-/// Apply decomposition pass to IR function.
-///
-/// This pass transforms high-level operations into ISA-optimized primitives:
-/// - **Conv2D → Im2col + GEMM**: Enables SIMD vectorization
-/// - **Pooling → Window ops**: Enables PhiCoordinate addressing
-/// - **BatchNorm → Element-wise**: Enables ClassMap fusion
-///
-/// # Arguments
-///
-/// * `ir_func` - IR function to decompose
-/// * `config` - Compilation config (controls which decompositions to apply)
-///
-/// # Returns
-///
-/// Decomposed IR function ready for lowering to OperationGraph.
-///
-/// # ISA Optimizations
-///
-/// This is where the magic happens:
-/// - **LOOP instructions**: Generated for decomposed operations
-/// - **PhiCoordinate**: Boundary pool addressing configured
-/// - **ClassMap**: Element-wise chains composed into 96-byte tables
-///
-/// # Performance
-///
-/// - Compile time: O(operations)
-/// - Runtime speedup: 5-10x from ISA optimizations
-/// - Memory: O(1) space complexity from LOOP instructions
-///
-/// # Status
-///
-/// **STUB**: Returns input unchanged. Will integrate with
-/// `hologram_compiler::ir::decompose` in Phase 2.
-pub fn apply_decomposition(
-    ir_func: IRFunction,
-    _config: &OnnxConfig,
-) -> Result<IRFunction> {
-    tracing::warn!(
-        "apply_decomposition is a stub - full implementation in Phase 2"
-    );
-
-    // Placeholder - just return input unchanged
-    // Full implementation will call hologram_compiler::ir::decompose
-    Ok(ir_func)
 }
 
 /// Lower IR function to OperationGraph.
 ///
-/// Final compilation step that converts IR to hologram's execution format:
-/// - Resolves all symbolic shapes
-/// - Generates ISA instructions
-/// - Creates execution schedule
-/// - Allocates buffers
+/// Wraps the IR function for serialization to .holo format.
 ///
 /// # Arguments
 ///
-/// * `ir_func` - Decomposed IR function
+/// * `ir_func` - Decomposed IR function from the translation pipeline
 ///
 /// # Returns
 ///
-/// OperationGraph ready for serialization and execution.
+/// OperationGraph ready for serialization via `to_bytes()`.
 ///
-/// # ISA Generation
+/// # Example
 ///
-/// This step generates actual ISA instructions:
-/// - LOOP instructions for O(1) space complexity
-/// - PhiCoordinate addressing for boundary pools
-/// - ClassMap tables for fused element-wise ops
+/// ```ignore
+/// use hologram_onnx_core::lower_to_operation_graph;
 ///
-/// # Performance
-///
-/// - Compile time: O(operations)
-/// - Output size: O(operations) - very compact due to LOOP
-/// - Runtime: Maximum performance from ISA optimizations
-///
-/// # Status
-///
-/// **STUB**: Returns empty graph. Will integrate with
-/// `hologram_compiler::lower` in Phase 2.
-pub fn lower_to_operation_graph(
-    _ir_func: IRFunction,
-) -> Result<OperationGraph> {
-    tracing::warn!(
-        "lower_to_operation_graph is a stub - full implementation in Phase 2"
-    );
-
-    // Placeholder - return empty graph
-    // Full implementation will call hologram_compiler::lower
-    Ok(OperationGraph {
-        _placeholder: (),
-    })
+/// let ir_func = translate_graph_to_ir(&graph, opset)?;
+/// let ir_func = apply_ir_decomposition(ir_func, &config)?;
+/// let op_graph = lower_to_operation_graph(ir_func)?;
+/// let bytes = op_graph.to_bytes()?;
+/// ```
+pub fn lower_to_operation_graph(ir_func: IRFunction) -> Result<OperationGraph> {
+    Ok(OperationGraph::from_ir(ir_func))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use hologram_compiler::ir::{IRBuilder, ScalarType, Type};
+    use hologram_compiler::shapes::{Dim, Shape};
 
     #[test]
-    fn test_translator_stubs() {
-        // These tests just verify the stubs compile
-        // Real tests will be added with full implementation
+    fn test_operation_graph_serialization_format() {
+        // Create a minimal IR function for testing
+        let mut builder = IRBuilder::new("test");
+        let input_type = Type::tensor(ScalarType::F32, Shape::new(vec![Dim::Concrete(1)]));
+        let input = builder.add_input("x", input_type);
+        builder.set_output(input);
+        let ir_func = builder.build();
 
-        // translate_onnx_to_ir stub
-        let graph = GraphProto::default();
-        let result = translate_onnx_to_ir(&graph, 13);
-        assert!(result.is_err());
+        let op_graph = OperationGraph::from_ir(ir_func);
+        let bytes = op_graph.to_bytes().unwrap();
 
-        // apply_decomposition stub
-        let ir_func = IRFunction { _placeholder: () };
-        let config = OnnxConfig::default();
-        let result = apply_decomposition(ir_func, &config);
-        assert!(result.is_ok());
+        // Verify magic header
+        assert_eq!(&bytes[0..4], b"HOLO");
 
-        // lower_to_operation_graph stub
-        let ir_func = IRFunction { _placeholder: () };
+        // Verify version
+        let version = u32::from_le_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]);
+        assert_eq!(version, 1);
+    }
+
+    #[test]
+    fn test_operation_graph_node_count() {
+        let mut builder = IRBuilder::new("multi_node");
+        let input_type = Type::tensor(ScalarType::F32, Shape::new(vec![Dim::Concrete(1)]));
+        let input = builder.add_input("x", input_type);
+        builder.set_output(input);
+        let ir_func = builder.build();
+
+        let expected_len = ir_func.body.len();
+        let op_graph = OperationGraph::from_ir(ir_func);
+        assert_eq!(op_graph.node_count(), expected_len);
+    }
+
+    #[test]
+    fn test_lower_to_operation_graph() {
+        let mut builder = IRBuilder::new("test_lower");
+        let input_type = Type::tensor(ScalarType::F32, Shape::new(vec![Dim::Concrete(10)]));
+        let input = builder.add_input("input", input_type);
+        builder.set_output(input);
+        let ir_func = builder.build();
+
         let result = lower_to_operation_graph(ir_func);
         assert!(result.is_ok());
+
+        let op_graph = result.unwrap();
+        assert!(op_graph.node_count() > 0);
     }
 }

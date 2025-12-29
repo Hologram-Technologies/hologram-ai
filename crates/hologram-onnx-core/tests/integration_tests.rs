@@ -4,7 +4,7 @@
 //! through weight extraction and validation.
 
 use hologram_onnx_core::{
-    extract_opset_version, parse_model, validate_model, OnnxCompiler, OnnxConfig, OnnxError,
+    extract_opset_version, parse_model, validate_model, OnnxConfig, OnnxError,
     SymbolicShape, WeightData,
 };
 use hologram_onnx_spec::{
@@ -678,24 +678,24 @@ fn test_concrete_shape_from_model() {
 }
 
 // =============================================================================
-// Test: OnnxCompiler Integration
+// Test: Parse and Validate Integration
 // =============================================================================
+// Note: OnnxCompiler integration tests are in the top-level hologram-onnx crate
+// since OnnxCompiler requires both core (parsing) and ops (translation).
 
 #[test]
-fn test_compiler_parse_and_validate() {
+fn test_core_parse_and_validate() {
     let model = create_linear_model();
     let bytes = encode_model(&model);
 
-    // Compiler should successfully parse and validate
-    let _compiler = OnnxCompiler::new();
-
-    // Parsing works
+    // Core provides parsing and validation
     let parsed = parse_model(&bytes).unwrap();
     validate_model(&parsed).unwrap();
 }
 
 #[test]
-fn test_compiler_with_config() {
+fn test_config_structure() {
+    // Verify OnnxConfig can be created and accessed
     let config = OnnxConfig {
         weight_threshold: 8192,
         enable_partitioning: true,
@@ -705,37 +705,28 @@ fn test_compiler_with_config() {
         memory_budget: Some(1024),
     };
 
-    let compiler = OnnxCompiler::with_config(config);
-    let model = create_minimal_model();
-    let bytes = encode_model(&model);
-
-    // Should parse and validate even with custom config
-    let parsed = parse_model(&bytes).unwrap();
-    validate_model(&parsed).unwrap();
-
-    // Note: Full compilation currently returns error because translator is a stub
-    let result = compiler.compile(&bytes);
-    assert!(result.is_err(), "Expected error from stub translator");
+    assert_eq!(config.weight_threshold, 8192);
+    assert!(config.enable_partitioning);
+    assert_eq!(config.partition_size, 100);
+    assert!(config.decompose_conv2d);
+    assert!(config.decompose_pooling);
+    assert_eq!(config.memory_budget, Some(1024));
 }
 
 #[test]
-fn test_compiler_compile_returns_expected_error() {
-    // The translator is currently a stub, so compile() should return a specific error
-    let compiler = OnnxCompiler::new();
-    let model = create_linear_model();
+fn test_parse_validates_model_structure() {
+    let model = create_minimal_model();
     let bytes = encode_model(&model);
 
-    let result = compiler.compile(&bytes);
+    // Parse should succeed for valid model
+    let parsed = parse_model(&bytes).unwrap();
 
-    // Should fail at the translation step (stub)
-    assert!(result.is_err());
-    // The error should indicate translation failed (internal error from stub)
-    let err = result.unwrap_err();
-    assert!(
-        matches!(err, OnnxError::InternalError(_)),
-        "Expected InternalError from stub translator, got: {:?}",
-        err
-    );
+    // Validate should succeed for well-formed model
+    validate_model(&parsed).unwrap();
+
+    // Extract opset version
+    let opset = extract_opset_version(&parsed);
+    assert!(opset >= 1, "Opset version should be at least 1");
 }
 
 // =============================================================================

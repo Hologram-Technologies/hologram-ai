@@ -1603,7 +1603,6 @@ dependencies = [
  "hologram-backend 0.1.0",
  "hologram-compiler",
  "hologram-core",
- "hologram-onnx-ops",
  "hologram-onnx-spec",
  "petgraph 0.6.5",
  "prost",
