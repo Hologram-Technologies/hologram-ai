@@ -1,0 +1,30 @@
+# Phi-2 Language Model Pipeline Configuration
+#
+# This config demonstrates text generation with Microsoft Phi-2.
+# Requires: hologram-onnx with --features text-output
+
+[pipeline]
+name = "phi-2"
+version = "1.0"
+description = "Microsoft Phi-2 - 2.7B parameter language model"
+
+[pipeline.execution]
+inputs = ["input_ids", "attention_mask"]
+outputs = ["generated_text"]
+
+# Text output handler configuration
+[pipeline.execution.output_handlers.generated_text]
+type = "text"
+output = "output_ids"                  # Generated token IDs
+tokenizer_path = "tokenizer.json"      # Phi-2 tokenizer
+skip_special_tokens = true             # Skip <pad>, <eos>, etc.
+
+# Single-stage pipeline (Phi-2 is a single model)
+[[pipeline.execution.stages]]
+name = "phi2_model"
+model = "phi2.holo"
+inputs = {
+    input_ids = "input_ids",
+    attention_mask = "attention_mask"
+}
+outputs = ["output_ids"]

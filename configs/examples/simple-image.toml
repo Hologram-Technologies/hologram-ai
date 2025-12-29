@@ -1,0 +1,28 @@
+# Simple Image Pipeline Configuration (for testing)
+#
+# This is a minimal config for testing image output handlers.
+# Requires: hologram-onnx with --features image-output
+
+[pipeline]
+name = "simple-image-test"
+version = "1.0"
+description = "Simple single-model image generation for testing"
+
+[pipeline.execution]
+inputs = ["input"]
+outputs = ["image"]
+
+# Image output handler configuration
+[pipeline.execution.output_handlers.image]
+type = "image"
+output = "output_tensor"               # Output tensor name
+format = "rgb"                         # RGB image
+layout = "NHWC"                        # Channels-last (common for simple models)
+value_range = "zero_one"               # Outputs in [0, 1] range
+
+# Single-stage pipeline
+[[pipeline.execution.stages]]
+name = "model"
+model = "model.holo"
+inputs = { input = "input" }
+outputs = ["output_tensor"]

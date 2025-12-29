@@ -127,3 +127,93 @@ Proto compilation errors:
 Type errors in generated code:
 1. Check prost version compatibility
 2. Verify clippy allows are in place
+
+## Documentation Guidelines
+
+### Working Documents Location
+- **ALL working markdown files MUST go in `/workspace/docs/working/`** unless otherwise specified
+- Keep `/workspace/docs/working/implementation.md` as the active TODO tracker
+- Example config files go in `/workspace/configs/examples/`
+- Planning documents should reference implementation docs from `docs/working/`
+
+### Code Quality Standards
+
+**CRITICAL: These standards are MANDATORY and NON-NEGOTIABLE**
+
+1. **NO TODOs, Placeholders, or Stubs**
+   - Every function MUST be fully implemented
+   - No `unimplemented!()` macros
+   - No `todo!()` macros
+   - No `panic!("not implemented")` or similar
+   - All edge cases must be handled
+
+2. **Complete Implementations**
+   - Functions must do what they claim to do
+   - No shortcuts or partial implementations
+   - All error paths must be handled
+   - No temporary workarounds
+
+3. **Tests Required**
+   - Write tests for EVERY module and function
+   - Unit tests in module files or `tests/` subdirectory
+   - Integration tests in top-level `tests/` directory
+   - Include edge cases and error conditions
+   - Test symbolic shapes with variable dimensions
+
+4. **Documentation**
+   - All public APIs MUST have rustdoc comments
+   - Include examples in rustdoc for non-trivial functions
+   - Document panics, errors, and safety considerations
+   - Explain symbolic shape handling where applicable
+
+5. **Error Handling**
+   - Use proper error types (thiserror, anyhow)
+   - No `unwrap()` in production code (use `?` or proper error handling)
+   - No `expect()` unless truly impossible conditions
+   - Provide helpful error messages
+
+### Testing Requirements
+
+**Unit Tests**:
+- For every module in `src/`
+- Test all public functions
+- Test error conditions
+- Test edge cases (empty inputs, large inputs, etc.)
+- Test with symbolic shapes (variable batch, seq_len)
+
+**Integration Tests**:
+- In `tests/` directory for each crate
+- Test full compilation pipelines
+- Test multi-operation graphs
+- Test with real ONNX models (MNIST, ResNet, etc.)
+
+**Symbolic Shape Tests**:
+- CRITICAL: Validate variable batch sizes
+- CRITICAL: Validate variable sequence lengths
+- Test shape inference propagation
+- Test dimension expressions (Conv output dims)
+
+**Memory Tests**:
+- Ensure no OOM with large models
+- Profile memory usage during compilation
+- Test graph partitioning with 3000+ node graphs
+
+**E2E Tests**:
+- Full workflow: ONNX → .holo → execution
+- Compile with hologram-onnx CLI
+- Run with hologram CLI
+- Verify output correctness
+
+### Implementation Workflow
+
+1. **Read existing code first** - Never modify without understanding
+2. **Write tests first** - TDD approach preferred
+3. **Implement fully** - No TODOs or stubs
+4. **Verify with tests** - All tests must pass
+5. **Document public APIs** - Rustdoc for all public items
+6. **Fix all warnings and errors** - Before completing any task:
+   - Run `cargo check --all` to verify no compilation errors
+   - Run `cargo clippy --all-targets` to fix all warnings
+   - No unused imports, variables, or dead code without explicit `#[allow(...)]`
+   - All warnings must be addressed before marking a task complete
+7. **Update TODO tracker** - Mark items complete in `docs/working/implementation.md`

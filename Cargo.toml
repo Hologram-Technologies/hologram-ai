@@ -9,6 +9,82 @@ license = "MIT OR Apache-2.0"
 repository = "https://github.com/uor-framework/hologram-onnx"
 
 [workspace.dependencies]
+# Hologram dependencies (local paths)
+hologram-compiler = { path = "/hologram/crates/compiler" }
+hologram-core = { path = "/hologram/crates/core" }
+hologram-backend = { path = "/hologram/externals/hologram-backend" }
+
+# Protobuf (existing)
 prost = "0.13"
 prost-types = "0.13"
 bytes = "1"
+
+# Core dependencies
+thiserror = "2.0"
+anyhow = "1.0"
+bytemuck = { version = "1.14", features = ["derive"] }
+ahash = "0.8"
+tracing = "0.1"
+serde = { version = "1.0", features = ["derive"] }
+toml = "0.8"
+petgraph = "0.6"
+
+# CLI dependencies
+clap = { version = "4.5", features = ["derive"] }
+reqwest = { version = "0.12", features = ["blocking", "json"] }
+indicatif = "0.17"
+
+# Output handlers (these will be made optional at package level)
+image = "0.25"
+hound = "3.5"
+tokenizers = "0.20"
+
+# Internal workspace crates
+hologram-onnx-spec = { path = "crates/hologram-onnx-spec" }
+hologram-onnx-core = { path = "crates/hologram-onnx-core" }
+hologram-onnx-ops = { path = "crates/hologram-onnx-ops" }
+hologram-onnx-config = { path = "crates/hologram-onnx-config" }
+
+# Build dependencies
+[workspace.dependencies.prost-build]
+version = "0.13"
+
+# Top-level package
+[package]
+name = "hologram-onnx"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Production ONNX runtime for hologram with full ISA optimization support"
+readme = "README.md"
+keywords = ["onnx", "hologram", "machine-learning", "neural-network", "compiler"]
+categories = ["science", "machine-learning"]
+
+[dependencies]
+hologram-onnx-spec.workspace = true
+hologram-onnx-core.workspace = true
+hologram-onnx-ops.workspace = true
+hologram-onnx-config.workspace = true
+anyhow.workspace = true
+
+# CLI dependencies
+clap.workspace = true
+thiserror.workspace = true
+reqwest.workspace = true
+indicatif.workspace = true
+serde.workspace = true
+serde_json = "1.0"
+tracing.workspace = true
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[[bin]]
+name = "hologram-onnx"
+path = "crates/hologram-onnx-cli/src/main.rs"
+
+[features]
+default = []
+image-output = ["hologram-onnx-config/image-output"]
+audio-output = ["hologram-onnx-config/audio-output"]
+text-output = ["hologram-onnx-config/text-output"]
+all-outputs = ["image-output", "audio-output", "text-output"]

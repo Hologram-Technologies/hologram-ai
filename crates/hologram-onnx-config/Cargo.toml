@@ -1,0 +1,35 @@
+[package]
+name = "hologram-onnx-config"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Config-driven output handlers for multi-modal ONNX pipelines"
+
+[dependencies]
+# Internal crates
+hologram-onnx-core.workspace = true
+
+# Core dependencies
+thiserror.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+serde = { workspace = true, features = ["derive"] }
+toml.workspace = true
+ahash.workspace = true
+
+# Feature-gated output handlers
+image = { workspace = true, optional = true }
+hound = { workspace = true, optional = true }
+tokenizers = { workspace = true, optional = true }
+
+[features]
+default = []
+image-output = ["dep:image"]
+audio-output = ["dep:hound"]
+text-output = ["dep:tokenizers"]
+all-outputs = ["image-output", "audio-output", "text-output"]
+
+[dev-dependencies]
+# For testing
+tempfile = "3.8"

@@ -33,5 +33,8 @@ RUN mkdir -p -m 755 /etc/apt/keyrings && \
 # Set the default user (if not already set in base image)
 USER vscode
 
+# Install Claude Code CLI
+RUN curl -fsSL https://claude.ai/install.sh | bash
+
 # Set the working directory
 WORKDIR /workspace

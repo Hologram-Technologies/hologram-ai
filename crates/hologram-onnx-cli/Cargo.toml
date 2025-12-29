@@ -1,0 +1,32 @@
+[package]
+name = "hologram-onnx-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "hologram-onnx"
+path = "src/main.rs"
+
+[dependencies]
+# Workspace crates
+hologram-onnx-core.workspace = true
+hologram-onnx-spec.workspace = true
+
+# CLI dependencies
+clap.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+
+# HTTP for model download
+reqwest.workspace = true
+indicatif.workspace = true
+serde.workspace = true
+serde_json = "1.0"
+
+# Logging
+tracing.workspace = true
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[dev-dependencies]
+tempfile = "3.8"

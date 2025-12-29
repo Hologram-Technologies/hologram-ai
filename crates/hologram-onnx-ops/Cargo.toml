@@ -1,0 +1,25 @@
+[package]
+name = "hologram-onnx-ops"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "ONNX operation translators with symbolic shape inference"
+
+[dependencies]
+# Internal crates
+hologram-onnx-spec.workspace = true
+hologram-onnx-core.workspace = true
+
+# Hologram dependencies
+hologram-compiler.workspace = true
+hologram-core.workspace = true
+
+# Core dependencies
+thiserror.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+ahash.workspace = true
+
+[dev-dependencies]
+# Testing dependencies

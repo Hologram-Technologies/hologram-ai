@@ -1,0 +1,44 @@
+# AudioCraft (MusicGen) Pipeline Configuration
+#
+# This config demonstrates music generation from text prompts.
+# Requires: hologram-onnx with --features audio-output,text-output
+
+[pipeline]
+name = "musicgen-small"
+version = "1.0"
+description = "Meta AudioCraft MusicGen - Text-to-music generation"
+
+[pipeline.execution]
+inputs = ["text_prompt", "duration"]
+outputs = ["audio", "metadata"]
+
+# Audio output handler configuration
+[pipeline.execution.output_handlers.audio]
+type = "audio"
+output = "audio_values"                # Generated audio waveform
+sample_rate = 32000                    # MusicGen output rate
+channels = 1                           # Mono output
+sample_format = "float32"              # 32-bit float samples
+
+# Text output handler for metadata
+[pipeline.execution.output_handlers.metadata]
+type = "text"
+output = "generation_info"             # Model metadata
+tokenizer_path = "tokenizer.json"
+skip_special_tokens = false            # Keep all tokens
+
+# Multi-stage pipeline
+[[pipeline.execution.stages]]
+name = "text_encoder"
+model = "text_encoder.holo"
+inputs = { input_ids = "tokenized_prompt" }
+outputs = ["text_embeddings"]
+
+[[pipeline.execution.stages]]
+name = "audio_generator"
+model = "musicgen.holo"
+inputs = {
+    encoder_hidden_states = "text_embeddings",
+    duration = "duration"
+}
+outputs = ["audio_values", "generation_info"]

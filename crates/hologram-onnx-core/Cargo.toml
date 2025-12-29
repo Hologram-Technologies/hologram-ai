@@ -1,0 +1,33 @@
+[package]
+name = "hologram-onnx-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Core ONNX parsing, translation, and compilation for hologram"
+keywords = ["onnx", "hologram", "compiler", "parser"]
+
+[dependencies]
+# Hologram dependencies - ISA integration
+hologram-compiler.workspace = true
+hologram-core.workspace = true
+hologram-backend.workspace = true
+
+# ONNX protobuf
+hologram-onnx-spec.workspace = true
+prost.workspace = true
+prost-types.workspace = true
+bytes.workspace = true
+
+# Core dependencies
+thiserror.workspace = true
+anyhow.workspace = true
+bytemuck.workspace = true
+ahash.workspace = true
+tracing.workspace = true
+petgraph.workspace = true
+half = "2.3" # f16 support for weight extraction
+
+[dev-dependencies]
+tempfile = "3"
+bytemuck = { version = "1", features = ["derive"] }
