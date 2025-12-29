@@ -23,43 +23,9 @@ jobs:
         with:
           components: clippy, rustfmt
 
-      - name: Create stub dependencies
+      - name: Clone hologram dependencies
         run: |
-          # Create hologram-compiler stub
-          mkdir -p /hologram/crates/compiler/src
-          cat > /hologram/crates/compiler/Cargo.toml << 'TOML'
-          [package]
-          name = "hologram-compiler"
-          version = "0.1.0"
-          edition = "2024"
-
-          [dependencies]
-          TOML
-          echo "pub mod ir { pub struct Program; pub struct LoopIr; pub struct LoweredProgram; }" > /hologram/crates/compiler/src/lib.rs
-
-          # Create hologram-core stub
-          mkdir -p /hologram/crates/core/src
-          cat > /hologram/crates/core/Cargo.toml << 'TOML'
-          [package]
-          name = "hologram-core"
-          version = "0.1.0"
-          edition = "2024"
-
-          [dependencies]
-          TOML
-          echo "// stub" > /hologram/crates/core/src/lib.rs
-
-          # Create hologram-backend stub
-          mkdir -p /hologram/externals/hologram-backend/src
-          cat > /hologram/externals/hologram-backend/Cargo.toml << 'TOML'
-          [package]
-          name = "hologram-backend"
-          version = "0.1.0"
-          edition = "2024"
-
-          [dependencies]
-          TOML
-          echo "// stub" > /hologram/externals/hologram-backend/src/lib.rs
+          sudo git clone --depth 1 https://github.com/UOR-Foundation/hologram.git /hologram
 
       - name: Cache cargo registry
         uses: actions/cache@v4
@@ -89,32 +55,9 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@nightly
 
-      - name: Create stub dependencies
+      - name: Clone hologram dependencies
         run: |
-          mkdir -p /hologram/crates/compiler/src
-          cat > /hologram/crates/compiler/Cargo.toml << 'TOML'
-          [package]
-          name = "hologram-compiler"
-          version = "0.1.0"
-          edition = "2024"
-          TOML
-          echo "pub mod ir { pub struct Program; pub struct LoopIr; pub struct LoweredProgram; }" > /hologram/crates/compiler/src/lib.rs
-          mkdir -p /hologram/crates/core/src
-          cat > /hologram/crates/core/Cargo.toml << 'TOML'
-          [package]
-          name = "hologram-core"
-          version = "0.1.0"
-          edition = "2024"
-          TOML
-          echo "// stub" > /hologram/crates/core/src/lib.rs
-          mkdir -p /hologram/externals/hologram-backend/src
-          cat > /hologram/externals/hologram-backend/Cargo.toml << 'TOML'
-          [package]
-          name = "hologram-backend"
-          version = "0.1.0"
-          edition = "2024"
-          TOML
-          echo "// stub" > /hologram/externals/hologram-backend/src/lib.rs
+          sudo git clone --depth 1 https://github.com/UOR-Foundation/hologram.git /hologram
 
       - name: Cache cargo registry
         uses: actions/cache@v4
@@ -142,32 +85,9 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@nightly
 
-      - name: Create stub dependencies
+      - name: Clone hologram dependencies
         run: |
-          mkdir -p /hologram/crates/compiler/src
-          cat > /hologram/crates/compiler/Cargo.toml << 'TOML'
-          [package]
-          name = "hologram-compiler"
-          version = "0.1.0"
-          edition = "2024"
-          TOML
-          echo "pub mod ir { pub struct Program; pub struct LoopIr; pub struct LoweredProgram; }" > /hologram/crates/compiler/src/lib.rs
-          mkdir -p /hologram/crates/core/src
-          cat > /hologram/crates/core/Cargo.toml << 'TOML'
-          [package]
-          name = "hologram-core"
-          version = "0.1.0"
-          edition = "2024"
-          TOML
-          echo "// stub" > /hologram/crates/core/src/lib.rs
-          mkdir -p /hologram/externals/hologram-backend/src
-          cat > /hologram/externals/hologram-backend/Cargo.toml << 'TOML'
-          [package]
-          name = "hologram-backend"
-          version = "0.1.0"
-          edition = "2024"
-          TOML
-          echo "// stub" > /hologram/externals/hologram-backend/src/lib.rs
+          sudo git clone --depth 1 https://github.com/UOR-Foundation/hologram.git /hologram
 
       - name: Cache cargo registry
         uses: actions/cache@v4
@@ -195,32 +115,9 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@nightly
 
-      - name: Create stub dependencies
+      - name: Clone hologram dependencies
         run: |
-          mkdir -p /hologram/crates/compiler/src
-          cat > /hologram/crates/compiler/Cargo.toml << 'TOML'
-          [package]
-          name = "hologram-compiler"
-          version = "0.1.0"
-          edition = "2024"
-          TOML
-          echo "pub mod ir { pub struct Program; pub struct LoopIr; pub struct LoweredProgram; }" > /hologram/crates/compiler/src/lib.rs
-          mkdir -p /hologram/crates/core/src
-          cat > /hologram/crates/core/Cargo.toml << 'TOML'
-          [package]
-          name = "hologram-core"
-          version = "0.1.0"
-          edition = "2024"
-          TOML
-          echo "// stub" > /hologram/crates/core/src/lib.rs
-          mkdir -p /hologram/externals/hologram-backend/src
-          cat > /hologram/externals/hologram-backend/Cargo.toml << 'TOML'
-          [package]
-          name = "hologram-backend"
-          version = "0.1.0"
-          edition = "2024"
-          TOML
-          echo "// stub" > /hologram/externals/hologram-backend/src/lib.rs
+          sudo git clone --depth 1 https://github.com/UOR-Foundation/hologram.git /hologram
 
       - name: Cache cargo registry
         uses: actions/cache@v4
@@ -248,32 +145,9 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@nightly
 
-      - name: Create stub dependencies
+      - name: Clone hologram dependencies
         run: |
-          mkdir -p /hologram/crates/compiler/src
-          cat > /hologram/crates/compiler/Cargo.toml << 'TOML'
-          [package]
-          name = "hologram-compiler"
-          version = "0.1.0"
-          edition = "2024"
-          TOML
-          echo "pub mod ir { pub struct Program; pub struct LoopIr; pub struct LoweredProgram; }" > /hologram/crates/compiler/src/lib.rs
-          mkdir -p /hologram/crates/core/src
-          cat > /hologram/crates/core/Cargo.toml << 'TOML'
-          [package]
-          name = "hologram-core"
-          version = "0.1.0"
-          edition = "2024"
-          TOML
-          echo "// stub" > /hologram/crates/core/src/lib.rs
-          mkdir -p /hologram/externals/hologram-backend/src
-          cat > /hologram/externals/hologram-backend/Cargo.toml << 'TOML'
-          [package]
-          name = "hologram-backend"
-          version = "0.1.0"
-          edition = "2024"
-          TOML
-          echo "// stub" > /hologram/externals/hologram-backend/src/lib.rs
+          sudo git clone --depth 1 https://github.com/UOR-Foundation/hologram.git /hologram
 
       - name: Cache cargo registry
         uses: actions/cache@v4
@@ -302,32 +176,9 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@nightly
 
-      - name: Create stub dependencies
+      - name: Clone hologram dependencies
         run: |
-          mkdir -p /hologram/crates/compiler/src
-          cat > /hologram/crates/compiler/Cargo.toml << 'TOML'
-          [package]
-          name = "hologram-compiler"
-          version = "0.1.0"
-          edition = "2024"
-          TOML
-          echo "pub mod ir { pub struct Program; pub struct LoopIr; pub struct LoweredProgram; }" > /hologram/crates/compiler/src/lib.rs
-          mkdir -p /hologram/crates/core/src
-          cat > /hologram/crates/core/Cargo.toml << 'TOML'
-          [package]
-          name = "hologram-core"
-          version = "0.1.0"
-          edition = "2024"
-          TOML
-          echo "// stub" > /hologram/crates/core/src/lib.rs
-          mkdir -p /hologram/externals/hologram-backend/src
-          cat > /hologram/externals/hologram-backend/Cargo.toml << 'TOML'
-          [package]
-          name = "hologram-backend"
-          version = "0.1.0"
-          edition = "2024"
-          TOML
-          echo "// stub" > /hologram/externals/hologram-backend/src/lib.rs
+          sudo git clone --depth 1 https://github.com/UOR-Foundation/hologram.git /hologram
 
       - name: Cache cargo registry
         uses: actions/cache@v4
@@ -357,32 +208,9 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@nightly
 
-      - name: Create stub dependencies
+      - name: Clone hologram dependencies
         run: |
-          mkdir -p /hologram/crates/compiler/src
-          cat > /hologram/crates/compiler/Cargo.toml << 'TOML'
-          [package]
-          name = "hologram-compiler"
-          version = "0.1.0"
-          edition = "2024"
-          TOML
-          echo "pub mod ir { pub struct Program; pub struct LoopIr; pub struct LoweredProgram; }" > /hologram/crates/compiler/src/lib.rs
-          mkdir -p /hologram/crates/core/src
-          cat > /hologram/crates/core/Cargo.toml << 'TOML'
-          [package]
-          name = "hologram-core"
-          version = "0.1.0"
-          edition = "2024"
-          TOML
-          echo "// stub" > /hologram/crates/core/src/lib.rs
-          mkdir -p /hologram/externals/hologram-backend/src
-          cat > /hologram/externals/hologram-backend/Cargo.toml << 'TOML'
-          [package]
-          name = "hologram-backend"
-          version = "0.1.0"
-          edition = "2024"
-          TOML
-          echo "// stub" > /hologram/externals/hologram-backend/src/lib.rs
+          sudo git clone --depth 1 https://github.com/UOR-Foundation/hologram.git /hologram
 
       - name: Cache cargo registry
         uses: actions/cache@v4
@@ -417,32 +245,9 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@nightly
 
-      - name: Create stub dependencies
+      - name: Clone hologram dependencies
         run: |
-          mkdir -p /hologram/crates/compiler/src
-          cat > /hologram/crates/compiler/Cargo.toml << 'TOML'
-          [package]
-          name = "hologram-compiler"
-          version = "0.1.0"
-          edition = "2024"
-          TOML
-          echo "pub mod ir { pub struct Program; pub struct LoopIr; pub struct LoweredProgram; }" > /hologram/crates/compiler/src/lib.rs
-          mkdir -p /hologram/crates/core/src
-          cat > /hologram/crates/core/Cargo.toml << 'TOML'
-          [package]
-          name = "hologram-core"
-          version = "0.1.0"
-          edition = "2024"
-          TOML
-          echo "// stub" > /hologram/crates/core/src/lib.rs
-          mkdir -p /hologram/externals/hologram-backend/src
-          cat > /hologram/externals/hologram-backend/Cargo.toml << 'TOML'
-          [package]
-          name = "hologram-backend"
-          version = "0.1.0"
-          edition = "2024"
-          TOML
-          echo "// stub" > /hologram/externals/hologram-backend/src/lib.rs
+          sudo git clone --depth 1 https://github.com/UOR-Foundation/hologram.git /hologram
 
       - name: Cache cargo registry
         uses: actions/cache@v4
