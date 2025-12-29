@@ -4,7 +4,18 @@
       "Bash(cat:*)",
       "Bash(curl:*)",
       "Bash(cargo build:*)",
-      "Bash(cargo clippy:*)"
+      "Bash(cargo clippy:*)",
+      "Bash(find:*)",
+      "Bash(ls:*)",
+      "Bash(cargo test:*)",
+      "Bash(grep:*)",
+      "Bash(tree:*)",
+      "Bash(cargo check:*)",
+      "Bash(cargo clean:*)",
+      "Bash(cargo doc:*)",
+      "Bash(cargo run:*)",
+      "Bash(git add:*)",
+      "Bash(cargo update:*)"
     ]
   }
 }

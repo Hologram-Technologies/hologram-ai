@@ -15,3 +15,9 @@ We need to support symbolic shapes as we want to make sure we support any size a
 We have a @docs/graph-partitioning.md doc that describes how we can nest large graphs into multiple nodes.
 
 For the `hologram-onnx-cli` can we have a download model as well?
+
+---
+
+We updated the `hologram` crate with a LOT of new isa operations that cover some of the numpy work you've added here. Can you rexamine the `hologram` library and rexamine what we're doing in this library that can utilize that work.
+
+We've made more ISA and `hologram` implementations that might reduce the work our ops have to do.

@@ -370,7 +370,8 @@ mod tests {
 
         let result = registry.create_handler(&config);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("unknown"));
+        let err = result.err().unwrap();
+        assert!(err.to_string().contains("unknown"));
     }
 
     #[test]
@@ -388,7 +389,7 @@ mod tests {
 
             let result = registry.create_handler(&config);
             assert!(result.is_err());
-            let err = result.unwrap_err();
+            let err = result.err().unwrap();
             assert!(err.to_string().contains("image-output"));
         }
 
@@ -402,7 +403,7 @@ mod tests {
 
             let result = registry.create_handler(&config);
             assert!(result.is_err());
-            let err = result.unwrap_err();
+            let err = result.err().unwrap();
             assert!(err.to_string().contains("audio-output"));
         }
 
@@ -416,7 +417,7 @@ mod tests {
 
             let result = registry.create_handler(&config);
             assert!(result.is_err());
-            let err = result.unwrap_err();
+            let err = result.err().unwrap();
             assert!(err.to_string().contains("text-output"));
         }
     }

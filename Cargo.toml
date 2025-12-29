@@ -82,6 +82,9 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 name = "hologram-onnx"
 path = "crates/hologram-onnx-cli/src/main.rs"
 
+[dev-dependencies]
+tempfile = "3.8"
+
 [features]
 default = []
 image-output = ["hologram-onnx-config/image-output"]
