@@ -31,3 +31,4 @@ half = "2.3" # f16 support for weight extraction
 [dev-dependencies]
 tempfile = "3"
 bytemuck = { version = "1", features = ["derive"] }
+hologram-onnx-ops.workspace = true

@@ -1284,8 +1284,28 @@ dependencies = [
  "blake3",
  "bytecheck",
  "bytemuck",
- "hologram-backend-core",
- "hologram-backend-cpu",
+ "hologram-backend-core 0.1.0",
+ "hologram-backend-cpu 0.1.0",
+ "libm",
+ "rayon",
+ "rkyv",
+ "serde",
+ "stats_alloc",
+ "thiserror 2.0.17",
+]
+
+[[package]]
+name = "hologram-backend"
+version = "0.1.0"
+source = "git+https://github.com/UOR-Foundation/hologram-backend.git?branch=main#ead8eba61757245f4268c0020b3fd498595bd224"
+dependencies = [
+ "arrayvec",
+ "atlas",
+ "blake3",
+ "bytecheck",
+ "bytemuck",
+ "hologram-backend-core 0.1.0 (git+https://github.com/UOR-Foundation/hologram-backend.git?branch=main)",
+ "hologram-backend-cpu 0.1.0 (git+https://github.com/UOR-Foundation/hologram-backend.git?branch=main)",
  "libm",
  "rayon",
  "rkyv",
@@ -1299,6 +1319,11 @@ name = "hologram-backend-core"
 version = "0.1.0"
 
 [[package]]
+name = "hologram-backend-core"
+version = "0.1.0"
+source = "git+https://github.com/UOR-Foundation/hologram-backend.git?branch=main#ead8eba61757245f4268c0020b3fd498595bd224"
+
+[[package]]
 name = "hologram-backend-cpu"
 version = "0.1.0"
 dependencies = [
@@ -1307,7 +1332,22 @@ dependencies = [
  "blake3",
  "bytemuck",
  "crossbeam-queue",
- "hologram-backend-core",
+ "hologram-backend-core 0.1.0",
+ "libm",
+ "rayon",
+]
+
+[[package]]
+name = "hologram-backend-cpu"
+version = "0.1.0"
+source = "git+https://github.com/UOR-Foundation/hologram-backend.git?branch=main#ead8eba61757245f4268c0020b3fd498595bd224"
+dependencies = [
+ "arrayvec",
+ "atlas",
+ "blake3",
+ "bytemuck",
+ "crossbeam-queue",
+ "hologram-backend-core 0.1.0 (git+https://github.com/UOR-Foundation/hologram-backend.git?branch=main)",
  "libm",
  "rayon",
 ]
@@ -1356,7 +1396,7 @@ dependencies = [
  "ed25519-dalek",
  "flate2",
  "hex",
- "hologram-backend",
+ "hologram-backend 0.1.0 (git+https://github.com/UOR-Foundation/hologram-backend.git?branch=main)",
  "hologram-common",
  "hologram-core",
  "memmap2",
@@ -1390,7 +1430,7 @@ dependencies = [
  "bytemuck",
  "getrandom 0.2.16",
  "half",
- "hologram-backend",
+ "hologram-backend 0.1.0 (git+https://github.com/UOR-Foundation/hologram-backend.git?branch=main)",
  "hologram-codegen",
  "hologram-common",
  "lazy_static",
@@ -1475,9 +1515,10 @@ dependencies = [
  "bytemuck",
  "bytes",
  "half",
- "hologram-backend",
+ "hologram-backend 0.1.0",
  "hologram-compiler",
  "hologram-core",
+ "hologram-onnx-ops",
  "hologram-onnx-spec",
  "petgraph 0.6.5",
  "prost",
