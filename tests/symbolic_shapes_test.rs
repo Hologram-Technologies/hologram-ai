@@ -683,8 +683,7 @@ fn test_broadcast_incompatible_vars() {
     let result = a.infer_binary_op(&b);
     // The result depends on how the implementation handles different variable names
     // Some implementations may error, others may pick one
-    if result.is_err() {
-        let err = result.unwrap_err();
+    if let Err(err) = result {
         assert!(matches!(err, OnnxError::ShapeInferenceError(_)));
     }
 }

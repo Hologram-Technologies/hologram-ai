@@ -260,10 +260,10 @@ impl OnnxConfig {
             return Err("partition_size too large (must be <= 10000)".into());
         }
 
-        if let Some(budget) = self.memory_budget {
-            if budget < 100 {
-                return Err("memory_budget too small (must be >= 100 MB)".into());
-            }
+        if let Some(budget) = self.memory_budget
+            && budget < 100
+        {
+            return Err("memory_budget too small (must be >= 100 MB)".into());
         }
 
         Ok(())

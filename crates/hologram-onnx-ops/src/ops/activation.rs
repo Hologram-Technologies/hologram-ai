@@ -308,8 +308,8 @@ pub fn translate_selu(
     let input = inputs[0];
 
     // Parse attributes (ONNX standard values for SELU)
-    let alpha = crate::utils::parse_attr_float(attrs, "alpha", 1.67326324)?;
-    let gamma = crate::utils::parse_attr_float(attrs, "gamma", 1.05070098)?;
+    let alpha = crate::utils::parse_attr_float(attrs, "alpha", 1.673_263_2)?;
+    let gamma = crate::utils::parse_attr_float(attrs, "gamma", 1.050_701)?;
 
     debug!("Translating SELU operation (alpha={}, gamma={})", alpha, gamma);
     trace!("SELU input: {:?}", input);

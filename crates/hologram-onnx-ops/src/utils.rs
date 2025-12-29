@@ -33,12 +33,10 @@ pub fn parse_attr_ints(
     default: Vec<i64>,
 ) -> Result<Vec<i64>> {
     for attr in attrs {
-        if attr.name == name {
-            if !attr.ints.is_empty() {
-                trace!("Found attribute '{}' with {} values", name, attr.ints.len());
-                // Clone is necessary here as we need owned data
-                return Ok(attr.ints.clone());
-            }
+        if attr.name == name && !attr.ints.is_empty() {
+            trace!("Found attribute '{}' with {} values", name, attr.ints.len());
+            // Clone is necessary here as we need owned data
+            return Ok(attr.ints.clone());
         }
     }
     trace!("Attribute '{}' not found, using default", name);

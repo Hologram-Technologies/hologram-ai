@@ -175,6 +175,7 @@ impl OutputHandlerRegistry {
     /// Create new registry with all available handlers.
     ///
     /// Handlers are registered based on enabled features.
+    #[allow(unused_mut)] // mut is needed when feature flags are enabled
     pub fn new() -> Self {
         let mut registry = Self {
             factories: AHashMap::new(),

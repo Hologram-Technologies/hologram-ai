@@ -27,7 +27,9 @@
       "Bash(./target/release/hologram-onnx info:*)",
       "Bash(./target/release/hologram-onnx validate:*)",
       "Bash(./target/release/hologram-onnx:*)",
-      "Bash(mkdir:*)"
+      "Bash(mkdir:*)",
+      "Bash(/usr/bin/time:*)",
+      "Bash(time ./target/release/hologram-onnx compile:*)"
     ]
   }
 }
