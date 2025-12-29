@@ -156,6 +156,7 @@ pub fn parse_attr_tensor<'a>(
 /// Validate attribute type matches expected type.
 ///
 /// **Performance**: O(1)
+#[allow(dead_code)] // Utility function for downstream use
 pub fn validate_attr_type(
     attr: &AttributeProto,
     expected: AttributeType,

@@ -84,6 +84,16 @@ path = "crates/hologram-onnx-cli/src/main.rs"
 
 [dev-dependencies]
 tempfile = "3.8"
+criterion = { version = "0.5", features = ["html_reports"] }
+hologram-compiler.workspace = true
+
+[[bench]]
+name = "conv_bench"
+harness = false
+
+[[bench]]
+name = "shape_bench"
+harness = false
 
 [features]
 default = []
