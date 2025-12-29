@@ -93,6 +93,15 @@ pub fn translate_batch_normalization(
 /// - **SIMD vectorization**: Mean/variance calculations
 /// - **LOOP instructions**: Reduction operations use O(1) space
 /// - **Symbolic shapes**: Works with variable sequence lengths
+///
+/// # Decomposition
+///
+/// LayerNorm is decomposed into primitive operations:
+/// 1. mean = ReduceMean(X, axes=[axis:])
+/// 2. diff = X - mean
+/// 3. variance = ReduceMean(diff^2, axes=[axis:])
+/// 4. normalized = diff / sqrt(variance + epsilon)
+/// 5. Y = normalized * scale + bias
 pub fn translate_layer_normalization(
     inputs: &[NodeId],
     attrs: &[AttributeProto],
@@ -115,12 +124,49 @@ pub fn translate_layer_normalization(
     debug!("Translating LayerNormalization (axis={}, epsilon={})", axis, epsilon);
     trace!("LayerNorm inputs: {:?}, {:?}, {:?}", input, scale, bias);
 
-    // IRBuilder doesn't have layer_norm, need to decompose
-    // For now, return not-implemented error
-    let _ = (builder, input, scale, bias, axis, epsilon);
-    Err(OnnxError::IrTranslationError(
-        "LayerNormalization operation not yet implemented".to_string()
-    ))
+    // Decompose LayerNormalization into primitive operations:
+    // Y = (X - mean) / sqrt(variance + epsilon) * scale + bias
+
+    // Step 1: Compute mean along normalization axis
+    // For LayerNorm, we normalize along axis and all dimensions after it
+    // axis=-1 means normalize along last dimension
+    let axes = vec![axis as isize];
+    let mean = builder.mean(input, axes.clone(), true);
+    trace!("LayerNorm mean: {:?}", mean);
+
+    // Step 2: Compute X - mean (centered input)
+    let centered = builder.sub(input, mean);
+    trace!("LayerNorm centered: {:?}", centered);
+
+    // Step 3: Compute variance = mean((X - mean)^2)
+    let centered_sq = builder.mul(centered, centered);
+    let variance = builder.mean(centered_sq, axes, true);
+    trace!("LayerNorm variance: {:?}", variance);
+
+    // Step 4: Compute sqrt(variance + epsilon)
+    let epsilon_const = builder.add_f32(epsilon);
+    let var_eps = builder.add(variance, epsilon_const);
+    let half = builder.add_f32(0.5);
+    let std = builder.pow(var_eps, half); // sqrt(x) = x^0.5
+    trace!("LayerNorm std: {:?}", std);
+
+    // Step 5: Normalize: (X - mean) / std
+    let normalized = builder.div(centered, std);
+    trace!("LayerNorm normalized: {:?}", normalized);
+
+    // Step 6: Scale: normalized * scale
+    let scaled = builder.mul(normalized, scale);
+    trace!("LayerNorm scaled: {:?}", scaled);
+
+    // Step 7: Shift: scaled + bias (if bias is provided)
+    let result = if let Some(b) = bias {
+        builder.add(scaled, b)
+    } else {
+        scaled
+    };
+
+    trace!("Created LayerNorm decomposition ending at: {:?}", result);
+    Ok(result)
 }
 
 /// Translate ONNX InstanceNormalization operation.
@@ -142,6 +188,15 @@ pub fn translate_layer_normalization(
 /// - **SIMD vectorization**: All operations
 /// - **Per-instance normalization**: Each instance normalized independently
 /// - **Symbolic shapes**: Variable batch sizes supported
+///
+/// # Decomposition
+///
+/// InstanceNorm is decomposed into primitive operations:
+/// For input shape [N, C, H, W, ...]:
+/// 1. mean = ReduceMean(X, axes=[2, 3, ...]) per instance and channel
+/// 2. variance = ReduceMean((X - mean)^2, axes=[2, 3, ...])
+/// 3. normalized = (X - mean) / sqrt(variance + epsilon)
+/// 4. Y = normalized * scale + bias
 pub fn translate_instance_normalization(
     inputs: &[NodeId],
     attrs: &[AttributeProto],
@@ -163,12 +218,46 @@ pub fn translate_instance_normalization(
     debug!("Translating InstanceNormalization (epsilon={})", epsilon);
     trace!("InstanceNorm inputs: {:?}, {:?}, {:?}", input, scale, bias);
 
-    // IRBuilder doesn't have instance_norm, need to decompose
-    // For now, return not-implemented error
-    let _ = (builder, input, scale, bias, epsilon);
-    Err(OnnxError::IrTranslationError(
-        "InstanceNormalization operation not yet implemented".to_string()
-    ))
+    // Decompose InstanceNormalization into primitive operations:
+    // Y = (X - mean) / sqrt(variance + epsilon) * scale + bias
+    //
+    // For InstanceNorm, we normalize over spatial dimensions (H, W, ...)
+    // keeping N (batch) and C (channel) dimensions fixed.
+    // Standard assumption: input is [N, C, H, W] so we reduce over axes [2, 3]
+
+    // Step 1: Compute mean along spatial dimensions
+    // Using axes [2, 3] for standard 4D input [N, C, H, W]
+    let spatial_axes = vec![2_isize, 3_isize];
+    let mean = builder.mean(input, spatial_axes.clone(), true);
+    trace!("InstanceNorm mean: {:?}", mean);
+
+    // Step 2: Compute X - mean (centered input)
+    let centered = builder.sub(input, mean);
+    trace!("InstanceNorm centered: {:?}", centered);
+
+    // Step 3: Compute variance = mean((X - mean)^2) over spatial dimensions
+    let centered_sq = builder.mul(centered, centered);
+    let variance = builder.mean(centered_sq, spatial_axes, true);
+    trace!("InstanceNorm variance: {:?}", variance);
+
+    // Step 4: Compute sqrt(variance + epsilon)
+    let epsilon_const = builder.add_f32(epsilon);
+    let var_eps = builder.add(variance, epsilon_const);
+    let half = builder.add_f32(0.5);
+    let std = builder.pow(var_eps, half); // sqrt(x) = x^0.5
+    trace!("InstanceNorm std: {:?}", std);
+
+    // Step 5: Normalize: (X - mean) / std
+    let normalized = builder.div(centered, std);
+    trace!("InstanceNorm normalized: {:?}", normalized);
+
+    // Step 6: Scale and shift: normalized * scale + bias
+    // Note: scale and bias have shape [C] and need broadcasting
+    let scaled = builder.mul(normalized, scale);
+    let result = builder.add(scaled, bias);
+
+    trace!("Created InstanceNorm decomposition ending at: {:?}", result);
+    Ok(result)
 }
 
 #[cfg(test)]
@@ -256,7 +345,7 @@ mod tests {
     }
 
     #[test]
-    fn test_translate_layer_normalization_returns_not_implemented() {
+    fn test_translate_layer_normalization() {
         let mut builder = make_builder();
         let input = builder.add_input("X", f32_tensor(&[1, 512, 768]));
         let scale = builder.add_input("scale", f32_tensor(&[768]));
@@ -267,9 +356,61 @@ mod tests {
             &HashMap::new(),
             &mut builder
         );
-        // LayerNorm not yet implemented
-        assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), OnnxError::IrTranslationError(_)));
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_translate_layer_normalization_with_bias() {
+        let mut builder = make_builder();
+        let input = builder.add_input("X", f32_tensor(&[1, 512, 768]));
+        let scale = builder.add_input("scale", f32_tensor(&[768]));
+        let bias = builder.add_input("bias", f32_tensor(&[768]));
+
+        let result = translate_layer_normalization(
+            &vec![input, scale, bias],
+            &[],
+            &HashMap::new(),
+            &mut builder
+        );
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_translate_layer_normalization_with_attrs() {
+        let mut builder = make_builder();
+        let input = builder.add_input("X", f32_tensor(&[2, 10, 512]));
+        let scale = builder.add_input("scale", f32_tensor(&[512]));
+        let bias = builder.add_input("bias", f32_tensor(&[512]));
+
+        let attrs = vec![
+            make_int_attr("axis", -1),
+            make_float_attr("epsilon", 1e-6),
+        ];
+
+        let result = translate_layer_normalization(
+            &vec![input, scale, bias],
+            &attrs,
+            &HashMap::new(),
+            &mut builder
+        );
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_translate_layer_normalization_symbolic_shapes() {
+        let mut builder = make_builder();
+        // Variable batch and sequence length
+        let input = builder.add_input("X", f32_tensor(&[]));
+        let scale = builder.add_input("scale", f32_tensor(&[]));
+        let bias = builder.add_input("bias", f32_tensor(&[]));
+
+        let result = translate_layer_normalization(
+            &vec![input, scale, bias],
+            &[],
+            &HashMap::new(),
+            &mut builder
+        );
+        assert!(result.is_ok());
     }
 
     #[test]
@@ -289,7 +430,7 @@ mod tests {
     }
 
     #[test]
-    fn test_translate_instance_normalization_returns_not_implemented() {
+    fn test_translate_instance_normalization() {
         let mut builder = make_builder();
         let input = builder.add_input("X", f32_tensor(&[1, 64, 224, 224]));
         let scale = builder.add_input("scale", f32_tensor(&[64]));
@@ -301,9 +442,42 @@ mod tests {
             &HashMap::new(),
             &mut builder
         );
-        // InstanceNorm not yet implemented
-        assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), OnnxError::IrTranslationError(_)));
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_translate_instance_normalization_with_epsilon() {
+        let mut builder = make_builder();
+        let input = builder.add_input("X", f32_tensor(&[2, 32, 56, 56]));
+        let scale = builder.add_input("scale", f32_tensor(&[32]));
+        let bias = builder.add_input("bias", f32_tensor(&[32]));
+
+        let attrs = vec![make_float_attr("epsilon", 1e-6)];
+
+        let result = translate_instance_normalization(
+            &vec![input, scale, bias],
+            &attrs,
+            &HashMap::new(),
+            &mut builder
+        );
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_translate_instance_normalization_symbolic_batch() {
+        let mut builder = make_builder();
+        // Symbolic batch dimension
+        let input = builder.add_input("X", f32_tensor(&[]));
+        let scale = builder.add_input("scale", f32_tensor(&[]));
+        let bias = builder.add_input("bias", f32_tensor(&[]));
+
+        let result = translate_instance_normalization(
+            &vec![input, scale, bias],
+            &[],
+            &HashMap::new(),
+            &mut builder
+        );
+        assert!(result.is_ok());
     }
 
     #[test]
