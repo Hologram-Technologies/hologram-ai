@@ -1042,19 +1042,15 @@ fn test_real_mnist_model_shape_parsing() {
     let graph = model.graph.as_ref().unwrap();
 
     // Parse input shape
-    if let Some(input) = graph.input.first() {
-        if let Ok(shape) = SymbolicShape::from_value_info(input) {
-            // MNIST input is typically [batch, 1, 28, 28] or similar
-            assert!(shape.rank() >= 3, "MNIST input should have at least 3 dimensions");
-        }
+    if let Some(shape) = graph.input.first().and_then(|i| SymbolicShape::from_value_info(i).ok()) {
+        // MNIST input is typically [batch, 1, 28, 28] or similar
+        assert!(shape.rank() >= 3, "MNIST input should have at least 3 dimensions");
     }
 
     // Parse output shape
-    if let Some(output) = graph.output.first() {
-        if let Ok(shape) = SymbolicShape::from_value_info(output) {
-            // MNIST output is typically [batch, 10] (10 digit classes)
-            assert!(shape.rank() >= 1, "MNIST output should have at least 1 dimension");
-        }
+    if let Some(shape) = graph.output.first().and_then(|o| SymbolicShape::from_value_info(o).ok()) {
+        // MNIST output is typically [batch, 10] (10 digit classes)
+        assert!(shape.rank() >= 1, "MNIST output should have at least 1 dimension");
     }
 }
 
@@ -1139,5 +1135,274 @@ fn test_real_mnist_full_pipeline() {
         graph.node.len(),
         weights.len(),
         file_size
+    );
+}
+
+// =============================================================================
+// Test: ResNet Model from Model Zoo
+// =============================================================================
+
+/// Load ResNet50 model from workspace models directory
+fn load_resnet_model() -> Option<Vec<u8>> {
+    // ResNet is in workspace root/models directory
+    let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(|p| p.parent())
+        .map(|p| p.join("models/resnet50-v1-7.onnx"));
+
+    path.filter(|p| p.exists())
+        .and_then(|p| std::fs::read(p).ok())
+}
+
+#[test]
+fn test_real_resnet_model_parsing() {
+    let bytes = match load_resnet_model() {
+        Some(b) => b,
+        None => {
+            eprintln!("ResNet model not found, skipping test");
+            return;
+        }
+    };
+
+    // Parse the real ResNet50 model
+    let model = parse_model(&bytes).expect("ResNet model should parse successfully");
+
+    // Verify basic structure
+    assert!(model.graph.is_some());
+    let graph = model.graph.as_ref().unwrap();
+
+    // ResNet should have inputs and outputs
+    assert!(!graph.input.is_empty(), "ResNet should have inputs");
+    assert!(!graph.output.is_empty(), "ResNet should have outputs");
+
+    // Should have many nodes (ResNet50 has ~120+ operations)
+    assert!(graph.node.len() > 50, "ResNet should have many operations, got {}", graph.node.len());
+
+    // Should have many weights (initializers) - ResNet50 has ~100+ weight tensors
+    assert!(graph.initializer.len() > 50, "ResNet should have many weights, got {}", graph.initializer.len());
+
+    eprintln!("ResNet parsing: {} nodes, {} initializers", graph.node.len(), graph.initializer.len());
+}
+
+#[test]
+fn test_real_resnet_model_validation() {
+    let bytes = match load_resnet_model() {
+        Some(b) => b,
+        None => {
+            eprintln!("ResNet model not found, skipping test");
+            return;
+        }
+    };
+
+    let model = parse_model(&bytes).expect("Failed to parse model");
+
+    // Validation should pass for a valid model from the ONNX model zoo
+    validate_model(&model).expect("ResNet model validation should succeed");
+}
+
+#[test]
+fn test_real_resnet_model_opset() {
+    let bytes = match load_resnet_model() {
+        Some(b) => b,
+        None => {
+            eprintln!("ResNet model not found, skipping test");
+            return;
+        }
+    };
+
+    let model = parse_model(&bytes).expect("Failed to parse model");
+    let opset = extract_opset_version(&model);
+
+    // ResNet model should have a valid opset version
+    assert!(opset >= 7, "ResNet opset should be >= 7, got {}", opset);
+    eprintln!("ResNet opset version: {}", opset);
+}
+
+#[test]
+fn test_real_resnet_model_weight_extraction() {
+    let bytes = match load_resnet_model() {
+        Some(b) => b,
+        None => {
+            eprintln!("ResNet model not found, skipping test");
+            return;
+        }
+    };
+
+    let model = parse_model(&bytes).expect("Failed to parse model");
+    let graph = model.graph.as_ref().unwrap();
+
+    // Extract all weights
+    let mut weights = WeightData::new();
+    let mut extracted_count = 0;
+    let mut failed_count = 0;
+
+    for init in &graph.initializer {
+        match WeightData::extract_tensor_data(init) {
+            Ok(data) => {
+                weights.add_weight(&init.name, data);
+                extracted_count += 1;
+            }
+            Err(e) => {
+                eprintln!("Warning: Failed to extract tensor '{}': {}", init.name, e);
+                failed_count += 1;
+            }
+        }
+    }
+
+    // Should have extracted most weights successfully
+    assert!(extracted_count > 50, "Should extract at least 50 weights, got {}", extracted_count);
+    assert!(
+        failed_count == 0,
+        "All weights should be extractable, but {} failed",
+        failed_count
+    );
+
+    // ResNet50 weights should be substantial (>90MB)
+    assert!(weights.buffer_size() > 90_000_000, "ResNet weights should be >90MB, got {} bytes", weights.buffer_size());
+
+    eprintln!("ResNet weight extraction: {} weights, {} MB",
+              extracted_count, weights.buffer_size() / (1024 * 1024));
+}
+
+#[test]
+fn test_real_resnet_model_shape_parsing() {
+    let bytes = match load_resnet_model() {
+        Some(b) => b,
+        None => {
+            eprintln!("ResNet model not found, skipping test");
+            return;
+        }
+    };
+
+    let model = parse_model(&bytes).expect("Failed to parse model");
+    let graph = model.graph.as_ref().unwrap();
+
+    // Parse input shape
+    if let Some(shape) = graph.input.first().and_then(|i| SymbolicShape::from_value_info(i).ok()) {
+        // ResNet input is typically [batch, 3, 224, 224] (NCHW format)
+        assert_eq!(shape.rank(), 4, "ResNet input should have 4 dimensions");
+        eprintln!("ResNet input shape: {:?}", shape.dims());
+    }
+
+    // Parse output shape
+    if let Some(shape) = graph.output.first().and_then(|o| SymbolicShape::from_value_info(o).ok()) {
+        // ResNet output is typically [batch, 1000] (1000 ImageNet classes)
+        assert!(shape.rank() >= 1, "ResNet output should have at least 1 dimension");
+        eprintln!("ResNet output shape: {:?}", shape.dims());
+    }
+}
+
+#[test]
+fn test_real_resnet_model_operation_types() {
+    let bytes = match load_resnet_model() {
+        Some(b) => b,
+        None => {
+            eprintln!("ResNet model not found, skipping test");
+            return;
+        }
+    };
+
+    let model = parse_model(&bytes).expect("Failed to parse model");
+    let graph = model.graph.as_ref().unwrap();
+
+    // Collect operation types with counts
+    let mut op_counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    for node in &graph.node {
+        *op_counts.entry(node.op_type.clone()).or_insert(0) += 1;
+    }
+
+    // ResNet should contain these operations
+    let expected_ops = ["Conv", "Relu", "BatchNormalization", "Add", "GlobalAveragePool", "MaxPool"];
+
+    let mut found_count = 0;
+    for op in &expected_ops {
+        if op_counts.contains_key(*op) {
+            found_count += 1;
+        }
+    }
+
+    // Should have most of the expected operations
+    assert!(
+        found_count >= 4,
+        "ResNet should have at least 4 of the expected ops. Found ops: {:?}",
+        op_counts.keys().collect::<Vec<_>>()
+    );
+
+    // Print operation breakdown
+    eprintln!("ResNet operation types:");
+    for (op, count) in &op_counts {
+        eprintln!("  {}: {}", op, count);
+    }
+}
+
+#[test]
+fn test_real_resnet_model_residual_connections() {
+    let bytes = match load_resnet_model() {
+        Some(b) => b,
+        None => {
+            eprintln!("ResNet model not found, skipping test");
+            return;
+        }
+    };
+
+    let model = parse_model(&bytes).expect("Failed to parse model");
+    let graph = model.graph.as_ref().unwrap();
+
+    // Count Add operations (residual connections)
+    let add_count = graph.node.iter().filter(|n| n.op_type == "Add").count();
+
+    // ResNet50 should have many residual connections (Add operations)
+    // ResNet50 has 16 bottleneck blocks, each with an Add for the skip connection
+    assert!(add_count >= 10, "ResNet should have residual Add operations, got {}", add_count);
+
+    eprintln!("ResNet residual connections (Add ops): {}", add_count);
+}
+
+#[test]
+fn test_real_resnet_full_pipeline() {
+    let bytes = match load_resnet_model() {
+        Some(b) => b,
+        None => {
+            eprintln!("ResNet model not found, skipping test");
+            return;
+        }
+    };
+
+    // Full pipeline test: parse -> validate -> extract opset -> extract weights -> write files
+
+    // Step 1: Parse
+    let model = parse_model(&bytes).expect("Parse failed");
+
+    // Step 2: Validate
+    validate_model(&model).expect("Validation failed");
+
+    // Step 3: Extract opset
+    let opset = extract_opset_version(&model);
+    assert!(opset >= 7, "Opset too old: {}", opset);
+
+    // Step 4: Extract weights
+    let graph = model.graph.as_ref().unwrap();
+    let mut weights = WeightData::new();
+    for init in &graph.initializer {
+        if let Ok(data) = WeightData::extract_tensor_data(init) {
+            weights.add_weight(&init.name, data);
+        }
+    }
+
+    // Step 5: Write weights file
+    let temp_file = NamedTempFile::new().expect("Temp file creation failed");
+    weights
+        .write_to_file(temp_file.path())
+        .expect("Weight file writing failed");
+
+    // Verify
+    let file_size = std::fs::metadata(temp_file.path()).unwrap().len();
+    assert!(file_size > 90_000_000, "ResNet weight file should be >90MB, got {} bytes", file_size);
+
+    eprintln!(
+        "ResNet full pipeline test passed: {} nodes, {} weights, {} MB",
+        graph.node.len(),
+        weights.len(),
+        file_size / (1024 * 1024)
     );
 }

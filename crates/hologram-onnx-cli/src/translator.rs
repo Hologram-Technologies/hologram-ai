@@ -15,6 +15,16 @@ use hologram_onnx_ops::translate_onnx_op;
 use hologram_onnx_spec::{GraphProto, TensorProto, tensor_proto::DataType};
 use tracing::{debug, info, trace, warn};
 
+/// Constant tensor data extracted from initializers.
+/// Maps tensor name to its raw data and shape.
+#[derive(Debug, Clone)]
+struct ConstantData {
+    data: Vec<u8>,
+    #[allow(dead_code)]
+    dims: Vec<i64>,
+    data_type: i32,
+}
+
 type Result<T> = std::result::Result<T, OnnxError>;
 
 /// Translate ONNX graph to hologram IR with symbolic shapes.
@@ -38,12 +48,24 @@ pub fn translate_graph_to_ir(
     // Map from ONNX tensor names to symbolic shapes
     let mut shape_map: HashMap<String, SymbolicShape> = HashMap::new();
 
+    // Map from tensor names to constant data (for Reshape shape extraction)
+    let mut constant_map: HashMap<String, ConstantData> = HashMap::new();
+
     // Step 1: Process initializers (weights/constants)
     info!("Processing {} initializers", graph.initializer.len());
     for initializer in &graph.initializer {
         let (node_id, shape) = process_initializer(initializer, &mut builder)?;
         tensor_map.insert(initializer.name.clone(), node_id);
         shape_map.insert(initializer.name.clone(), shape);
+
+        // Store constant data for operations that need it (e.g., Reshape)
+        let constant_data = ConstantData {
+            data: extract_tensor_data(initializer)?,
+            dims: initializer.dims.clone(),
+            data_type: initializer.data_type,
+        };
+        constant_map.insert(initializer.name.clone(), constant_data);
+
         trace!("Processed initializer: {}", initializer.name);
     }
 
@@ -81,13 +103,25 @@ pub fn translate_graph_to_ir(
             .collect::<Result<Vec<_>>>()?;
 
         // Translate the operation
-        let output_id = translate_onnx_op(
-            &node.op_type,
-            &input_ids,
-            &node.attribute,
-            &shape_map,
-            &mut builder,
-        )?;
+        // Special handling for operations that need constant tensor values
+        let output_id = if node.op_type == "Reshape" && node.input.len() >= 2 {
+            // Reshape with shape from second input - try to get constant shape
+            translate_reshape_with_constants(
+                &input_ids,
+                &node.input,
+                &node.attribute,
+                &constant_map,
+                &mut builder,
+            )?
+        } else {
+            translate_onnx_op(
+                &node.op_type,
+                &input_ids,
+                &node.attribute,
+                &shape_map,
+                &mut builder,
+            )?
+        };
 
         // Map outputs (most ops have single output)
         if !node.output.is_empty() {
@@ -137,7 +171,6 @@ pub fn apply_ir_decomposition(
     let decompose_config = DecomposeConfig {
         decompose_conv2d: config.decompose_conv2d,
         decompose_pooling: config.decompose_pooling,
-        ..Default::default()
     };
 
     let decomposed = decompose_function(&ir_func, &decompose_config)
@@ -287,6 +320,99 @@ fn extract_tensor_data(tensor: &TensorProto) -> Result<Vec<u8>> {
             Ok(bytes)
         }
         _ => Err(OnnxError::UnsupportedDataType(format!("{:?}", data_type))),
+    }
+}
+
+/// Translate Reshape operation with constant shape extraction.
+///
+/// This function handles the ONNX Reshape operation by extracting the target
+/// shape from a constant initializer (second input).
+fn translate_reshape_with_constants(
+    input_ids: &[NodeId],
+    input_names: &[String],
+    _attrs: &[hologram_onnx_spec::AttributeProto],
+    constant_map: &HashMap<String, ConstantData>,
+    builder: &mut IRBuilder,
+) -> Result<NodeId> {
+    if input_ids.is_empty() {
+        return Err(OnnxError::InvalidModel(
+            "Reshape expects at least 1 input, got 0".to_string()
+        ));
+    }
+
+    let data = input_ids[0];
+
+    // Get shape tensor name (second input)
+    let shape_name = input_names.get(1)
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| OnnxError::InvalidModel(
+            "Reshape requires shape input".to_string()
+        ))?;
+
+    // Look up constant shape data
+    let shape_const = constant_map.get(shape_name)
+        .ok_or_else(|| OnnxError::IrTranslationError(
+            format!("Reshape shape input '{}' is not a constant - dynamic shapes not supported", shape_name)
+        ))?;
+
+    // Extract shape values from constant
+    let target_dims = extract_shape_values(shape_const)?;
+
+    debug!("Reshape with constant shape: {:?}", target_dims);
+
+    // Convert to IR shape
+    // Handle -1 (inferred dimension) by using symbolic variable
+    let ir_dims: Vec<IRDim> = target_dims.iter().enumerate().map(|(i, &dim)| {
+        if dim == -1 {
+            // Use symbolic dimension for inferred size
+            IRDim::Var(format!("reshape_inferred_{}", i))
+        } else {
+            IRDim::Concrete(dim as usize)
+        }
+    }).collect();
+
+    let target_shape = Shape::new(ir_dims);
+
+    // Create reshape node
+    let result = builder.reshape(data, target_shape);
+    Ok(result)
+}
+
+/// Extract i64 shape values from constant tensor data.
+fn extract_shape_values(constant: &ConstantData) -> Result<Vec<i64>> {
+    let data_type = DataType::try_from(constant.data_type)
+        .map_err(|_| OnnxError::UnsupportedDataType(format!("type {}", constant.data_type)))?;
+
+    match data_type {
+        DataType::Int64 => {
+            // Read as i64 values
+            if !constant.data.len().is_multiple_of(8) {
+                return Err(OnnxError::InvalidModel(
+                    "Invalid int64 tensor data length".to_string()
+                ));
+            }
+            let values: Vec<i64> = constant.data
+                .chunks_exact(8)
+                .map(|chunk| i64::from_le_bytes(chunk.try_into().unwrap()))
+                .collect();
+            Ok(values)
+        }
+        DataType::Int32 => {
+            // Read as i32 and convert to i64
+            if !constant.data.len().is_multiple_of(4) {
+                return Err(OnnxError::InvalidModel(
+                    "Invalid int32 tensor data length".to_string()
+                ));
+            }
+            let values: Vec<i64> = constant.data
+                .chunks_exact(4)
+                .map(|chunk| i32::from_le_bytes(chunk.try_into().unwrap()) as i64)
+                .collect();
+            Ok(values)
+        }
+        _ => Err(OnnxError::UnsupportedDataType(
+            format!("Shape tensor must be int64 or int32, got {:?}", data_type)
+        )),
     }
 }
 
