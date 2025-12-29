@@ -23,6 +23,10 @@ jobs:
         with:
           components: clippy, rustfmt
 
+      - name: Configure git for private repos
+        run: |
+          git config --global url."https://x-access-token:${{ secrets.HOLOGRAM_PAT }}@github.com/".insteadOf "https://github.com/"
+
       - name: Clone hologram dependencies
         uses: actions/checkout@v4
         with:
@@ -71,6 +75,10 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@nightly
 
+      - name: Configure git for private repos
+        run: |
+          git config --global url."https://x-access-token:${{ secrets.HOLOGRAM_PAT }}@github.com/".insteadOf "https://github.com/"
+
       - name: Clone hologram dependencies
         uses: actions/checkout@v4
         with:
@@ -116,6 +124,10 @@ jobs:
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@nightly
+
+      - name: Configure git for private repos
+        run: |
+          git config --global url."https://x-access-token:${{ secrets.HOLOGRAM_PAT }}@github.com/".insteadOf "https://github.com/"
 
       - name: Clone hologram dependencies
         uses: actions/checkout@v4
@@ -163,6 +175,10 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@nightly
 
+      - name: Configure git for private repos
+        run: |
+          git config --global url."https://x-access-token:${{ secrets.HOLOGRAM_PAT }}@github.com/".insteadOf "https://github.com/"
+
       - name: Clone hologram dependencies
         uses: actions/checkout@v4
         with:
@@ -208,6 +224,10 @@ jobs:
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@nightly
+
+      - name: Configure git for private repos
+        run: |
+          git config --global url."https://x-access-token:${{ secrets.HOLOGRAM_PAT }}@github.com/".insteadOf "https://github.com/"
 
       - name: Clone hologram dependencies
         uses: actions/checkout@v4
@@ -256,6 +276,10 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@nightly
 
+      - name: Configure git for private repos
+        run: |
+          git config --global url."https://x-access-token:${{ secrets.HOLOGRAM_PAT }}@github.com/".insteadOf "https://github.com/"
+
       - name: Clone hologram dependencies
         uses: actions/checkout@v4
         with:
@@ -303,6 +327,10 @@ jobs:
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@nightly
+
+      - name: Configure git for private repos
+        run: |
+          git config --global url."https://x-access-token:${{ secrets.HOLOGRAM_PAT }}@github.com/".insteadOf "https://github.com/"
 
       - name: Clone hologram dependencies
         uses: actions/checkout@v4
@@ -356,6 +384,10 @@ jobs:
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@nightly
+
+      - name: Configure git for private repos
+        run: |
+          git config --global url."https://x-access-token:${{ secrets.HOLOGRAM_PAT }}@github.com/".insteadOf "https://github.com/"
 
       - name: Clone hologram dependencies
         uses: actions/checkout@v4
