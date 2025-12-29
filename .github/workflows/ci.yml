@@ -30,8 +30,18 @@ jobs:
           path: hologram-repo
           token: ${{ secrets.HOLOGRAM_PAT }}
 
+      - name: Clone hologram-backend
+        uses: actions/checkout@v4
+        with:
+          repository: UOR-Foundation/hologram-backend
+          path: hologram-backend-repo
+          token: ${{ secrets.HOLOGRAM_PAT }}
+
       - name: Setup hologram at /hologram
-        run: sudo mv hologram-repo /hologram
+        run: |
+          sudo mv hologram-repo /hologram
+          sudo mkdir -p /hologram/externals
+          sudo mv hologram-backend-repo /hologram/externals/hologram-backend
 
       - name: Cache cargo registry
         uses: actions/cache@v4
@@ -68,8 +78,18 @@ jobs:
           path: hologram-repo
           token: ${{ secrets.HOLOGRAM_PAT }}
 
+      - name: Clone hologram-backend
+        uses: actions/checkout@v4
+        with:
+          repository: UOR-Foundation/hologram-backend
+          path: hologram-backend-repo
+          token: ${{ secrets.HOLOGRAM_PAT }}
+
       - name: Setup hologram at /hologram
-        run: sudo mv hologram-repo /hologram
+        run: |
+          sudo mv hologram-repo /hologram
+          sudo mkdir -p /hologram/externals
+          sudo mv hologram-backend-repo /hologram/externals/hologram-backend
 
       - name: Cache cargo registry
         uses: actions/cache@v4
@@ -104,8 +124,18 @@ jobs:
           path: hologram-repo
           token: ${{ secrets.HOLOGRAM_PAT }}
 
+      - name: Clone hologram-backend
+        uses: actions/checkout@v4
+        with:
+          repository: UOR-Foundation/hologram-backend
+          path: hologram-backend-repo
+          token: ${{ secrets.HOLOGRAM_PAT }}
+
       - name: Setup hologram at /hologram
-        run: sudo mv hologram-repo /hologram
+        run: |
+          sudo mv hologram-repo /hologram
+          sudo mkdir -p /hologram/externals
+          sudo mv hologram-backend-repo /hologram/externals/hologram-backend
 
       - name: Cache cargo registry
         uses: actions/cache@v4
@@ -140,8 +170,18 @@ jobs:
           path: hologram-repo
           token: ${{ secrets.HOLOGRAM_PAT }}
 
+      - name: Clone hologram-backend
+        uses: actions/checkout@v4
+        with:
+          repository: UOR-Foundation/hologram-backend
+          path: hologram-backend-repo
+          token: ${{ secrets.HOLOGRAM_PAT }}
+
       - name: Setup hologram at /hologram
-        run: sudo mv hologram-repo /hologram
+        run: |
+          sudo mv hologram-repo /hologram
+          sudo mkdir -p /hologram/externals
+          sudo mv hologram-backend-repo /hologram/externals/hologram-backend
 
       - name: Cache cargo registry
         uses: actions/cache@v4
@@ -176,8 +216,18 @@ jobs:
           path: hologram-repo
           token: ${{ secrets.HOLOGRAM_PAT }}
 
+      - name: Clone hologram-backend
+        uses: actions/checkout@v4
+        with:
+          repository: UOR-Foundation/hologram-backend
+          path: hologram-backend-repo
+          token: ${{ secrets.HOLOGRAM_PAT }}
+
       - name: Setup hologram at /hologram
-        run: sudo mv hologram-repo /hologram
+        run: |
+          sudo mv hologram-repo /hologram
+          sudo mkdir -p /hologram/externals
+          sudo mv hologram-backend-repo /hologram/externals/hologram-backend
 
       - name: Cache cargo registry
         uses: actions/cache@v4
@@ -213,8 +263,18 @@ jobs:
           path: hologram-repo
           token: ${{ secrets.HOLOGRAM_PAT }}
 
+      - name: Clone hologram-backend
+        uses: actions/checkout@v4
+        with:
+          repository: UOR-Foundation/hologram-backend
+          path: hologram-backend-repo
+          token: ${{ secrets.HOLOGRAM_PAT }}
+
       - name: Setup hologram at /hologram
-        run: sudo mv hologram-repo /hologram
+        run: |
+          sudo mv hologram-repo /hologram
+          sudo mkdir -p /hologram/externals
+          sudo mv hologram-backend-repo /hologram/externals/hologram-backend
 
       - name: Cache cargo registry
         uses: actions/cache@v4
@@ -251,8 +311,18 @@ jobs:
           path: hologram-repo
           token: ${{ secrets.HOLOGRAM_PAT }}
 
+      - name: Clone hologram-backend
+        uses: actions/checkout@v4
+        with:
+          repository: UOR-Foundation/hologram-backend
+          path: hologram-backend-repo
+          token: ${{ secrets.HOLOGRAM_PAT }}
+
       - name: Setup hologram at /hologram
-        run: sudo mv hologram-repo /hologram
+        run: |
+          sudo mv hologram-repo /hologram
+          sudo mkdir -p /hologram/externals
+          sudo mv hologram-backend-repo /hologram/externals/hologram-backend
 
       - name: Cache cargo registry
         uses: actions/cache@v4
@@ -294,8 +364,18 @@ jobs:
           path: hologram-repo
           token: ${{ secrets.HOLOGRAM_PAT }}
 
+      - name: Clone hologram-backend
+        uses: actions/checkout@v4
+        with:
+          repository: UOR-Foundation/hologram-backend
+          path: hologram-backend-repo
+          token: ${{ secrets.HOLOGRAM_PAT }}
+
       - name: Setup hologram at /hologram
-        run: sudo mv hologram-repo /hologram
+        run: |
+          sudo mv hologram-repo /hologram
+          sudo mkdir -p /hologram/externals
+          sudo mv hologram-backend-repo /hologram/externals/hologram-backend
 
       - name: Cache cargo registry
         uses: actions/cache@v4
