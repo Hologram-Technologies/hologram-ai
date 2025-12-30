@@ -1,7 +1,8 @@
 //! Download ONNX models from Hugging Face.
 //!
 //! This module provides functionality to download ONNX models from Hugging Face
-//! Model Hub, with progress indication.
+//! Model Hub, with progress indication. Supports recursive directory scanning
+//! to find ONNX files in subdirectories (e.g., for Stable Diffusion models).
 
 use anyhow::{Context, Result};
 use indicatif::{ProgressBar, ProgressStyle};
@@ -13,13 +14,19 @@ use std::path::Path;
 use tracing::{debug, info, warn};
 
 /// File information from Hugging Face API
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 struct FileInfo {
+    /// File or directory path
     #[serde(rename = "path")]
     path: String,
 
+    /// File size in bytes (None for directories)
     #[serde(rename = "size")]
     size: Option<u64>,
+
+    /// Entry type: "file" or "directory"
+    #[serde(rename = "type", default)]
+    entry_type: String,
 }
 
 /// Download an ONNX model from Hugging Face.
@@ -69,19 +76,109 @@ pub fn download_command(model_id: &str, output_dir: &Path, revision: Option<&str
         .build()
         .context("Failed to create HTTP client")?;
 
-    // Fetch file list from Hugging Face API
-    let api_url = format!(
-        "https://huggingface.co/api/models/{}/tree/{}",
-        model_id, revision
-    );
+    info!("Fetching file list from Hugging Face (scanning subdirectories)...");
 
-    info!("Fetching file list from Hugging Face...");
-    debug!("API URL: {}", api_url);
+    // Recursively fetch all files including subdirectories
+    let all_files = fetch_files_recursive(&client, model_id, revision, "")?;
+
+    // Filter for ONNX files
+    let onnx_files: Vec<&FileInfo> = all_files
+        .iter()
+        .filter(|f| f.path.ends_with(".onnx"))
+        .collect();
+
+    if onnx_files.is_empty() {
+        warn!("No ONNX files found in model repository: {}", model_id);
+        info!("Available files (showing first 20):");
+        for file in all_files.iter().take(20) {
+            let type_marker = if file.entry_type == "directory" {
+                "📁"
+            } else {
+                "📄"
+            };
+            info!("  {} {}", type_marker, file.path);
+        }
+        if all_files.len() > 20 {
+            info!("  ... and {} more files", all_files.len() - 20);
+        }
+        anyhow::bail!("No ONNX files found in repository");
+    }
+
+    info!("Found {} ONNX file(s):", onnx_files.len());
+    let mut total_size: u64 = 0;
+    for file in &onnx_files {
+        let size_str = file
+            .size
+            .map(|s| {
+                total_size += s;
+                format_size(s)
+            })
+            .unwrap_or_else(|| "unknown size".to_string());
+        info!("  - {} ({})", file.path, size_str);
+    }
+    if total_size > 0 {
+        info!("Total download size: {}", format_size(total_size));
+    }
+
+    // Download each ONNX file
+    for (idx, file) in onnx_files.iter().enumerate() {
+        info!(
+            "[{}/{}] Downloading: {}",
+            idx + 1,
+            onnx_files.len(),
+            file.path
+        );
+        download_file(&client, model_id, revision, &file.path, output_dir, file.size)?;
+    }
+
+    info!("✓ Download complete!");
+    info!("  Files saved to: {}", output_dir.display());
+
+    Ok(())
+}
+
+/// Format file size in human-readable form
+fn format_size(bytes: u64) -> String {
+    const KB: u64 = 1024;
+    const MB: u64 = KB * 1024;
+    const GB: u64 = MB * 1024;
+
+    if bytes >= GB {
+        format!("{:.2} GB", bytes as f64 / GB as f64)
+    } else if bytes >= MB {
+        format!("{:.2} MB", bytes as f64 / MB as f64)
+    } else if bytes >= KB {
+        format!("{:.2} KB", bytes as f64 / KB as f64)
+    } else {
+        format!("{} bytes", bytes)
+    }
+}
+
+/// Recursively fetch all files from a HuggingFace repository
+fn fetch_files_recursive(
+    client: &Client,
+    model_id: &str,
+    revision: &str,
+    path: &str,
+) -> Result<Vec<FileInfo>> {
+    let api_url = if path.is_empty() {
+        format!(
+            "https://huggingface.co/api/models/{}/tree/{}",
+            model_id, revision
+        )
+    } else {
+        format!(
+            "https://huggingface.co/api/models/{}/tree/{}/{}",
+            model_id, revision, path
+        )
+    };
+
+    debug!("Fetching: {}", api_url);
 
     let response = client
         .get(&api_url)
         .send()
-        .context("Failed to fetch model file list from Hugging Face")?;
+        .with_context(|| format!("Failed to fetch file list from: {}", api_url))?;
 
     if !response.status().is_success() {
         anyhow::bail!(
@@ -93,45 +190,24 @@ pub fn download_command(model_id: &str, output_dir: &Path, revision: Option<&str
         );
     }
 
-    let files: Vec<FileInfo> = response
+    let entries: Vec<FileInfo> = response
         .json()
         .context("Failed to parse Hugging Face API response")?;
 
-    // Filter for ONNX files
-    let onnx_files: Vec<&FileInfo> = files.iter().filter(|f| f.path.ends_with(".onnx")).collect();
+    let mut all_files = Vec::new();
 
-    if onnx_files.is_empty() {
-        warn!("No ONNX files found in model repository: {}", model_id);
-        info!("Available files:");
-        for file in files.iter().take(10) {
-            info!("  - {}", file.path);
+    for entry in entries {
+        if entry.entry_type == "directory" {
+            // Recursively fetch files from subdirectory
+            debug!("Scanning subdirectory: {}", entry.path);
+            let subdir_files = fetch_files_recursive(client, model_id, revision, &entry.path)?;
+            all_files.extend(subdir_files);
+        } else {
+            all_files.push(entry);
         }
-        if files.len() > 10 {
-            info!("  ... and {} more files", files.len() - 10);
-        }
-        anyhow::bail!("No ONNX files found in repository");
     }
 
-    info!("Found {} ONNX file(s):", onnx_files.len());
-    for file in &onnx_files {
-        let size_str = file
-            .size
-            .map(|s| format!(" ({} bytes)", s))
-            .unwrap_or_default();
-        info!("  - {}{}", file.path, size_str);
-    }
-
-    // Download each ONNX file
-    for file in onnx_files {
-        download_file(
-            &client, model_id, revision, &file.path, output_dir, file.size,
-        )?;
-    }
-
-    info!("✓ Download complete!");
-    info!("  Files saved to: {}", output_dir.display());
-
-    Ok(())
+    Ok(all_files)
 }
 
 /// Download a single file from Hugging Face

@@ -95,10 +95,11 @@ pub fn translate_gather(
 /// - **Zero-copy slicing**: Uses view when possible
 /// - Common in attention mechanisms for masking
 ///
-/// # Note
+/// # Implementation
 ///
-/// For now, we implement a simplified version that handles constant slicing.
-/// Dynamic slicing requires runtime index calculation.
+/// ONNX Slice uses tensor inputs for slice indices, which can be dynamic.
+/// We represent this as a Call node to `onnx.Slice` which the runtime
+/// handles by extracting the constant values from the parameter tensors.
 pub fn translate_slice(
     inputs: &[NodeId],
     _attrs: &[AttributeProto],
@@ -106,26 +107,43 @@ pub fn translate_slice(
     builder: &mut IRBuilder,
 ) -> Result<NodeId> {
     if inputs.len() < 3 || inputs.len() > 5 {
-        return Err(OnnxError::InvalidModel(
-            format!("Slice expects 3-5 inputs, got {}", inputs.len())
-        ));
+        return Err(OnnxError::InvalidModel(format!(
+            "Slice expects 3-5 inputs, got {}",
+            inputs.len()
+        )));
     }
 
     let data = inputs[0];
     let starts = inputs[1];
     let ends = inputs[2];
-    let axes = inputs.get(3).copied();
-    let steps = inputs.get(4).copied();
 
     debug!("Translating Slice operation");
-    trace!("Slice inputs: data={:?}, starts={:?}, ends={:?}, axes={:?}, steps={:?}",
-           data, starts, ends, axes, steps);
+    trace!(
+        "Slice inputs: data={:?}, starts={:?}, ends={:?}",
+        data,
+        starts,
+        ends
+    );
 
-    // Use builder's slice operation
-    // For now, axes and steps are optional IR inputs
-    let result = builder.slice(data, starts, ends, axes, steps);
+    // Build the argument list for the dynamic slice call
+    // Arguments: [data, starts, ends, axes?, steps?]
+    let mut args = vec![data, starts, ends];
 
-    trace!("Created Slice node: {:?}", result);
+    // Add optional axes input
+    if inputs.len() >= 4 {
+        args.push(inputs[3]);
+    }
+
+    // Add optional steps input
+    if inputs.len() >= 5 {
+        args.push(inputs[4]);
+    }
+
+    // Use a Call node to represent dynamic slicing
+    // The runtime will handle this by extracting constant values from the parameter tensors
+    let result = builder.call("onnx.Slice", args);
+
+    trace!("Created Slice call node: {:?}", result);
     Ok(result)
 }
 

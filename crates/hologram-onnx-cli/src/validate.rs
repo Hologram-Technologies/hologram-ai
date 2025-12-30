@@ -33,6 +33,9 @@ const SUPPORTED_OPS: &[&str] = &[
     "Swish",
     "Elu",
     "Selu",
+    "Clip",
+    "LeakyRelu",
+    "PRelu",
     // Shape operations
     "Reshape",
     "Transpose",
@@ -72,6 +75,32 @@ const SUPPORTED_OPS: &[&str] = &[
     "Neg",
     "Abs",
     "Reciprocal",
+    // Indexing operations
+    "Gather",
+    "Slice",
+    "GatherElements",
+    // Resize operations
+    "Resize",
+    "Upsample",
+    "DepthToSpace",
+    "SpaceToDepth",
+    // Logical and comparison operations
+    "Where",
+    "Equal",
+    "Less",
+    "Greater",
+    "LessOrEqual",
+    "GreaterOrEqual",
+    "Not",
+    "And",
+    "Or",
+    // Constant and identity operations
+    "Constant",
+    "Identity",
+    "ConstantOfShape",
+    "Shape",
+    // Padding operations
+    "Pad",
 ];
 
 /// Validate an ONNX model.

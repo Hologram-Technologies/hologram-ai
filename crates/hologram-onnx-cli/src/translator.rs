@@ -110,13 +110,21 @@ pub fn translate_graph_to_ir(graph: &GraphProto, opset_version: i64) -> Result<I
         // Special handling for operations that need constant tensor values
         let output_id = if node.op_type == "Reshape" && node.input.len() >= 2 {
             // Reshape with shape from second input - try to get constant shape
-            translate_reshape_with_constants(
+            // If shape is not constant, fall back to dynamic Call node
+            match translate_reshape_with_constants(
                 &input_ids,
                 &node.input,
                 &node.attribute,
                 &constant_map,
                 &mut builder,
-            )?
+            ) {
+                Ok(id) => id,
+                Err(_) => {
+                    // Fall back to dynamic reshape using Call node
+                    debug!("Reshape shape is dynamic, using Call node");
+                    builder.call("onnx.Reshape", input_ids.clone())
+                }
+            }
         } else {
             translate_onnx_op(
                 &node.op_type,

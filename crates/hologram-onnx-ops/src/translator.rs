@@ -10,8 +10,8 @@ use std::collections::HashMap;
 use tracing::{debug, trace};
 
 use crate::ops::{
-    activation::*, advanced::*, conv::*, core::*, norm::*, pool::*, reduction::*, shape::*,
-    unary::*,
+    activation::*, advanced::*, constant::*, conv::*, core::*, indexing::*, logical::*, norm::*,
+    pad::*, pool::*, reduction::*, resize::*, shape::*, unary::*,
 };
 
 /// Trait for operation translators.
@@ -99,6 +99,9 @@ pub fn translate_onnx_op(
         "Swish" => translate_swish(inputs, attrs, shapes, builder),
         "Elu" => translate_elu(inputs, attrs, shapes, builder),
         "Selu" => translate_selu(inputs, attrs, shapes, builder),
+        "Clip" => translate_clip(inputs, attrs, shapes, builder),
+        "LeakyRelu" => translate_leaky_relu(inputs, attrs, shapes, builder),
+        "PRelu" => translate_prelu(inputs, attrs, shapes, builder),
 
         // Shape operations
         "Reshape" => translate_reshape(inputs, attrs, shapes, builder),
@@ -145,6 +148,37 @@ pub fn translate_onnx_op(
         "Neg" => translate_neg(inputs, attrs, shapes, builder),
         "Abs" => translate_abs(inputs, attrs, shapes, builder),
         "Reciprocal" => translate_reciprocal(inputs, attrs, shapes, builder),
+
+        // Indexing operations
+        "Gather" => translate_gather(inputs, attrs, shapes, builder),
+        "Slice" => translate_slice(inputs, attrs, shapes, builder),
+        "GatherElements" => translate_gather_elements(inputs, attrs, shapes, builder),
+
+        // Resize operations
+        "Resize" => translate_resize(inputs, attrs, shapes, builder),
+        "Upsample" => translate_upsample(inputs, attrs, shapes, builder),
+        "DepthToSpace" => translate_depth_to_space(inputs, attrs, shapes, builder),
+        "SpaceToDepth" => translate_space_to_depth(inputs, attrs, shapes, builder),
+
+        // Logical and comparison operations
+        "Where" => translate_where(inputs, attrs, shapes, builder),
+        "Equal" => translate_equal(inputs, attrs, shapes, builder),
+        "Less" => translate_less(inputs, attrs, shapes, builder),
+        "Greater" => translate_greater(inputs, attrs, shapes, builder),
+        "LessOrEqual" => translate_less_or_equal(inputs, attrs, shapes, builder),
+        "GreaterOrEqual" => translate_greater_or_equal(inputs, attrs, shapes, builder),
+        "Not" => translate_not(inputs, attrs, shapes, builder),
+        "And" => translate_and(inputs, attrs, shapes, builder),
+        "Or" => translate_or(inputs, attrs, shapes, builder),
+
+        // Constant and identity operations
+        "Constant" => translate_constant(inputs, attrs, shapes, builder),
+        "Identity" => translate_identity(inputs, attrs, shapes, builder),
+        "ConstantOfShape" => translate_constant_of_shape(inputs, attrs, shapes, builder),
+        "Shape" => translate_shape_op(inputs, attrs, shapes, builder),
+
+        // Padding operations
+        "Pad" => translate_pad(inputs, attrs, shapes, builder),
 
         // Unsupported operation
         _ => {

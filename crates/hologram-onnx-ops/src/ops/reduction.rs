@@ -185,11 +185,9 @@ pub fn translate_reduce_min(
 ) -> Result<NodeId> {
     if inputs.is_empty() {
         return Err(OnnxError::InvalidModel(
-            "ReduceMin expects 1 input, got 0".to_string(),
+            "ReduceMin expects at least 1 input, got 0".to_string(),
         ));
     }
-
-    let input = inputs[0];
 
     let axes = parse_attr_ints(attrs, "axes", vec![])?;
     let keepdims = parse_attr_int(attrs, "keepdims", 1)? != 0;
@@ -198,14 +196,13 @@ pub fn translate_reduce_min(
         "Translating ReduceMin operation (axes={:?}, keepdims={})",
         axes, keepdims
     );
-    trace!("ReduceMin input: {:?}", input);
+    trace!("ReduceMin inputs: {:?}", inputs);
 
-    // IRBuilder doesn't have min reduction, need to decompose
-    // For now, return not-implemented error
-    let _ = (builder, input, axes, keepdims);
-    Err(OnnxError::IrTranslationError(
-        "ReduceMin operation not yet implemented".to_string(),
-    ))
+    // Use Call node for ReduceMin - runtime handles min reduction
+    let result = builder.call("onnx.ReduceMin", inputs.to_vec());
+
+    trace!("Created ReduceMin call node: {:?}", result);
+    Ok(result)
 }
 
 /// Translate ONNX ReduceProd operation.
@@ -222,6 +219,10 @@ pub fn translate_reduce_min(
 /// - **LOOP instructions**: O(1) space complexity
 /// - **SIMD vectorization**: Parallel product computation
 /// - Supports **symbolic shapes**
+///
+/// # Implementation
+///
+/// Uses a Call node to `onnx.ReduceProd` which the runtime handles.
 pub fn translate_reduce_prod(
     inputs: &[NodeId],
     attrs: &[AttributeProto],
@@ -230,11 +231,9 @@ pub fn translate_reduce_prod(
 ) -> Result<NodeId> {
     if inputs.is_empty() {
         return Err(OnnxError::InvalidModel(
-            "ReduceProd expects 1 input, got 0".to_string(),
+            "ReduceProd expects at least 1 input, got 0".to_string(),
         ));
     }
-
-    let input = inputs[0];
 
     let axes = parse_attr_ints(attrs, "axes", vec![])?;
     let keepdims = parse_attr_int(attrs, "keepdims", 1)? != 0;
@@ -243,14 +242,13 @@ pub fn translate_reduce_prod(
         "Translating ReduceProd operation (axes={:?}, keepdims={})",
         axes, keepdims
     );
-    trace!("ReduceProd input: {:?}", input);
+    trace!("ReduceProd inputs: {:?}", inputs);
 
-    // IRBuilder doesn't have prod reduction, need to decompose
-    // For now, return not-implemented error
-    let _ = (builder, input, axes, keepdims);
-    Err(OnnxError::IrTranslationError(
-        "ReduceProd operation not yet implemented".to_string(),
-    ))
+    // Use Call node for ReduceProd - runtime handles product reduction
+    let result = builder.call("onnx.ReduceProd", inputs.to_vec());
+
+    trace!("Created ReduceProd call node: {:?}", result);
+    Ok(result)
 }
 
 #[cfg(test)]
@@ -370,17 +368,12 @@ mod tests {
     // ReduceMin tests
 
     #[test]
-    fn test_translate_reduce_min_returns_not_implemented() {
+    fn test_translate_reduce_min() {
         let mut builder = make_builder();
         let input = builder.add_input("X", f32_tensor(&[2, 3, 4]));
 
         let result = translate_reduce_min(&vec![input], &[], &HashMap::new(), &mut builder);
-        // ReduceMin not yet implemented
-        assert!(result.is_err());
-        assert!(matches!(
-            result.unwrap_err(),
-            OnnxError::IrTranslationError(_)
-        ));
+        assert!(result.is_ok());
     }
 
     #[test]
@@ -394,17 +387,12 @@ mod tests {
     // ReduceProd tests
 
     #[test]
-    fn test_translate_reduce_prod_returns_not_implemented() {
+    fn test_translate_reduce_prod() {
         let mut builder = make_builder();
         let input = builder.add_input("X", f32_tensor(&[2, 3, 4]));
 
         let result = translate_reduce_prod(&vec![input], &[], &HashMap::new(), &mut builder);
-        // ReduceProd not yet implemented
-        assert!(result.is_err());
-        assert!(matches!(
-            result.unwrap_err(),
-            OnnxError::IrTranslationError(_)
-        ));
+        assert!(result.is_ok());
     }
 
     #[test]
@@ -431,21 +419,15 @@ mod tests {
     }
 
     #[test]
-    fn test_not_implemented_reductions_symbolic_shapes() {
+    fn test_all_reductions_symbolic_shapes() {
         let mut builder = make_builder();
         let input = builder.add_input("X", f32_tensor(&[])); // Symbolic shape
 
         let shapes = HashMap::new();
 
-        // Not-implemented reductions should return IrTranslationError
-        assert!(matches!(
-            translate_reduce_min(&vec![input], &[], &shapes, &mut builder).unwrap_err(),
-            OnnxError::IrTranslationError(_)
-        ));
-        assert!(matches!(
-            translate_reduce_prod(&vec![input], &[], &shapes, &mut builder).unwrap_err(),
-            OnnxError::IrTranslationError(_)
-        ));
+        // All reductions should work with symbolic shapes
+        assert!(translate_reduce_min(&vec![input], &[], &shapes, &mut builder).is_ok());
+        assert!(translate_reduce_prod(&vec![input], &[], &shapes, &mut builder).is_ok());
     }
 
     #[test]

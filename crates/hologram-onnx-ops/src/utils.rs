@@ -62,8 +62,8 @@ pub fn parse_attr_floats(
     default: Vec<f32>,
 ) -> Result<Vec<f32>> {
     for attr in attrs {
-        if attr.name == name {
-            if !attr.floats.is_empty() {
+        if attr.name == name
+            && !attr.floats.is_empty() {
                 trace!(
                     "Found attribute '{}' with {} values",
                     name,
@@ -71,7 +71,6 @@ pub fn parse_attr_floats(
                 );
                 return Ok(attr.floats.clone());
             }
-        }
     }
     trace!("Attribute '{}' not found, using default", name);
     Ok(default)
@@ -125,12 +124,11 @@ pub fn parse_attr_string_or(attrs: &[AttributeProto], name: &str, default: &str)
 /// **Performance**: O(1) - single linear scan of attributes
 pub fn parse_attr_tensor<'a>(attrs: &'a [AttributeProto], name: &str) -> Result<&'a TensorProto> {
     for attr in attrs {
-        if attr.name == name {
-            if let Some(ref tensor) = attr.t {
+        if attr.name == name
+            && let Some(ref tensor) = attr.t {
                 trace!("Found attribute '{}' with tensor", name);
                 return Ok(tensor);
             }
-        }
     }
     Err(OnnxError::InvalidAttribute {
         name: name.to_string(),

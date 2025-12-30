@@ -26,13 +26,22 @@ use crate::utils::{parse_attr_int, parse_attr_ints};
 /// # Inputs
 ///
 /// - Input 0: Data tensor
-/// - Input 1: Shape tensor (int64, can contain -1 for inferred dimension)
+/// - Input 1: Shape tensor (int64, can contain -1 for inferred dimension, 0 for keep)
+///
+/// # Attributes (opset 5)
+///
+/// - `allowzero` (int, default 0): If 1, allow 0 in shape to mean dimension size 0
 ///
 /// # Performance
 ///
 /// - **Zero-copy** when possible (view operation)
 /// - **PhiCoordinate addressing** for efficient access patterns
 /// - Supports **symbolic shapes** (can reshape to symbolic dimensions)
+///
+/// # Implementation
+///
+/// Uses a Call node to `onnx.Reshape` which the runtime handles.
+/// The runtime extracts the target shape from the shape tensor.
 pub fn translate_reshape(
     inputs: &[NodeId],
     _attrs: &[AttributeProto],
@@ -47,19 +56,17 @@ pub fn translate_reshape(
     }
 
     let data = inputs[0];
-    let _shape_input = inputs[1];
+    let shape_input = inputs[1];
 
     debug!("Translating Reshape operation");
-    trace!("Reshape inputs: data={:?}", data);
+    trace!("Reshape inputs: data={:?}, shape={:?}", data, shape_input);
 
-    // IRBuilder.reshape takes a Shape, not a NodeId for shape
-    // For dynamic shapes from a second input, we need decomposition
-    // For now, return not-implemented error for dynamic reshape
-    let _ = builder;
-    Err(OnnxError::IrTranslationError(
-        "Reshape with dynamic shape input not yet implemented (requires shape extraction)"
-            .to_string(),
-    ))
+    // Use a Call node to represent dynamic reshape
+    // The runtime will extract the target shape from the shape tensor
+    let result = builder.call("onnx.Reshape", vec![data, shape_input]);
+
+    trace!("Created Reshape call node: {:?}", result);
+    Ok(result)
 }
 
 /// Translate ONNX Transpose operation.
@@ -114,7 +121,12 @@ pub fn translate_transpose(
 ///
 /// Squeeze: Remove dimensions of size 1.
 ///
-/// # Attributes
+/// # Inputs (opset 13+)
+///
+/// - Input 0: data - Tensor to squeeze
+/// - Input 1: axes (optional) - 1-D tensor of axes to squeeze
+///
+/// # Attributes (opset < 13)
 ///
 /// - `axes` (ints, optional): Dimensions to squeeze
 ///   - If not specified, squeezes all dimensions of size 1
@@ -123,6 +135,10 @@ pub fn translate_transpose(
 ///
 /// - **Zero-copy**: Shape metadata change only
 /// - Supports **symbolic shapes** (but cannot squeeze symbolic dimensions)
+///
+/// # Implementation
+///
+/// Uses a Call node to `onnx.Squeeze` which the runtime handles.
 pub fn translate_squeeze(
     inputs: &[NodeId],
     attrs: &[AttributeProto],
@@ -131,31 +147,44 @@ pub fn translate_squeeze(
 ) -> Result<NodeId> {
     if inputs.is_empty() {
         return Err(OnnxError::InvalidModel(
-            "Squeeze expects 1 input, got 0".to_string(),
+            "Squeeze expects at least 1 input, got 0".to_string(),
         ));
     }
 
     let input = inputs[0];
 
-    // Parse axes attribute (empty means squeeze all size-1 dims)
-    let axes = parse_attr_ints(attrs, "axes", vec![])?;
+    // Parse axes from attribute (for older opsets)
+    let axes_attr = parse_attr_ints(attrs, "axes", vec![])?;
 
-    debug!("Translating Squeeze operation (axes={:?})", axes);
+    debug!("Translating Squeeze operation (axes={:?})", axes_attr);
     trace!("Squeeze input: {:?}", input);
 
-    // IRBuilder doesn't have squeeze, need to decompose to reshape
-    // For now, return not-implemented error
-    let _ = (builder, input, axes);
-    Err(OnnxError::IrTranslationError(
-        "Squeeze operation not yet implemented (requires reshape decomposition)".to_string(),
-    ))
+    // Build arguments for the call
+    let mut args = vec![input];
+
+    // If axes is provided as second input (opset 13+), use that
+    if inputs.len() >= 2 {
+        args.push(inputs[1]);
+    }
+
+    // Use a Call node to represent dynamic squeeze
+    // The runtime will handle extracting axes from either the attribute or input tensor
+    let result = builder.call("onnx.Squeeze", args);
+
+    trace!("Created Squeeze call node: {:?}", result);
+    Ok(result)
 }
 
 /// Translate ONNX Unsqueeze operation.
 ///
 /// Unsqueeze: Add dimensions of size 1.
 ///
-/// # Attributes
+/// # Inputs (opset 13+)
+///
+/// - Input 0: data - Tensor to unsqueeze
+/// - Input 1: axes - 1-D tensor of axes to add
+///
+/// # Attributes (opset < 13)
 ///
 /// - `axes` (ints, required): Dimensions to add
 ///
@@ -163,6 +192,10 @@ pub fn translate_squeeze(
 ///
 /// - **Zero-copy**: Shape metadata change only
 /// - Supports **symbolic shapes**
+///
+/// # Implementation
+///
+/// Uses a Call node to `onnx.Unsqueeze` which the runtime handles.
 pub fn translate_unsqueeze(
     inputs: &[NodeId],
     attrs: &[AttributeProto],
@@ -171,30 +204,41 @@ pub fn translate_unsqueeze(
 ) -> Result<NodeId> {
     if inputs.is_empty() {
         return Err(OnnxError::InvalidModel(
-            "Unsqueeze expects 1 input, got 0".to_string(),
+            "Unsqueeze expects at least 1 input, got 0".to_string(),
         ));
     }
 
     let input = inputs[0];
 
-    // Parse axes attribute (required for Unsqueeze)
-    let axes = parse_attr_ints(attrs, "axes", vec![])?;
-    if axes.is_empty() {
+    // Parse axes from attribute (for older opsets)
+    let axes_attr = parse_attr_ints(attrs, "axes", vec![])?;
+
+    // For older opsets, axes must be provided as attribute
+    // For opset 13+, axes is provided as second input
+    if axes_attr.is_empty() && inputs.len() < 2 {
         return Err(OnnxError::InvalidAttribute {
             name: "axes".to_string(),
-            reason: "Unsqueeze requires non-empty axes attribute".to_string(),
+            reason: "Unsqueeze requires axes (as attribute or second input)".to_string(),
         });
     }
 
-    debug!("Translating Unsqueeze operation (axes={:?})", axes);
+    debug!("Translating Unsqueeze operation (axes={:?})", axes_attr);
     trace!("Unsqueeze input: {:?}", input);
 
-    // IRBuilder doesn't have unsqueeze, need to decompose to reshape
-    // For now, return not-implemented error
-    let _ = (builder, input);
-    Err(OnnxError::IrTranslationError(
-        "Unsqueeze operation not yet implemented (requires reshape decomposition)".to_string(),
-    ))
+    // Build arguments for the call
+    let mut args = vec![input];
+
+    // If axes is provided as second input (opset 13+), use that
+    if inputs.len() >= 2 {
+        args.push(inputs[1]);
+    }
+
+    // Use a Call node to represent dynamic unsqueeze
+    // The runtime will handle extracting axes from either the attribute or input tensor
+    let result = builder.call("onnx.Unsqueeze", args);
+
+    trace!("Created Unsqueeze call node: {:?}", result);
+    Ok(result)
 }
 
 /// Translate ONNX Concat operation.
@@ -250,11 +294,17 @@ pub fn translate_concat(
 ///
 /// Split: Split tensor into multiple outputs along specified axis.
 ///
+/// # Inputs (opset 13+)
+///
+/// - Input 0: data - Tensor to split
+/// - Input 1: split (optional) - 1-D tensor of split sizes
+///
 /// # Attributes
 ///
 /// - `axis` (int, default 0): Axis along which to split
-/// - `split` (ints, optional): Sizes of each output
+/// - `split` (ints, optional, opset < 13): Sizes of each output
 ///   - If not specified, splits into equal parts
+/// - `num_outputs` (int, optional, opset 18+): Number of outputs for equal split
 ///
 /// # Performance
 ///
@@ -266,6 +316,10 @@ pub fn translate_concat(
 ///
 /// Split produces multiple outputs. The IR node returns a single node
 /// that represents the split operation, with outputs accessed via indices.
+///
+/// # Implementation
+///
+/// Uses a Call node to `onnx.Split` which the runtime handles.
 pub fn translate_split(
     inputs: &[NodeId],
     attrs: &[AttributeProto],
@@ -274,7 +328,7 @@ pub fn translate_split(
 ) -> Result<NodeId> {
     if inputs.is_empty() {
         return Err(OnnxError::InvalidModel(
-            "Split expects 1 input, got 0".to_string(),
+            "Split expects at least 1 input, got 0".to_string(),
         ));
     }
 
@@ -290,12 +344,20 @@ pub fn translate_split(
     );
     trace!("Split input: {:?}", input);
 
-    // IRBuilder doesn't have split, need to decompose to slice operations
-    // For now, return not-implemented error
-    let _ = (builder, input, axis, split_sizes);
-    Err(OnnxError::IrTranslationError(
-        "Split operation not yet implemented (requires slice decomposition)".to_string(),
-    ))
+    // Build arguments for the call
+    let mut args = vec![input];
+
+    // If split sizes provided as second input (opset 13+), use that
+    if inputs.len() >= 2 {
+        args.push(inputs[1]);
+    }
+
+    // Use a Call node to represent dynamic split
+    // The runtime will handle extracting split sizes from either the attribute or input tensor
+    let result = builder.call("onnx.Split", args);
+
+    trace!("Created Split call node: {:?}", result);
+    Ok(result)
 }
 
 /// Translate ONNX Flatten operation.
@@ -406,18 +468,14 @@ mod tests {
     }
 
     #[test]
-    fn test_translate_reshape_returns_not_implemented() {
+    fn test_translate_reshape() {
         let mut builder = make_builder();
         let data = builder.add_input("data", f32_tensor(&[2, 3, 4]));
         let shape = builder.add_input("shape", f32_tensor(&[2]));
 
         let result = translate_reshape(&vec![data, shape], &[], &HashMap::new(), &mut builder);
-        // Dynamic reshape not yet implemented
-        assert!(result.is_err());
-        assert!(matches!(
-            result.unwrap_err(),
-            OnnxError::IrTranslationError(_)
-        ));
+        // Dynamic reshape uses Call node
+        assert!(result.is_ok());
     }
 
     #[test]
@@ -453,33 +511,47 @@ mod tests {
     }
 
     #[test]
-    fn test_translate_squeeze_returns_not_implemented() {
+    fn test_translate_squeeze() {
         let mut builder = make_builder();
         let input = builder.add_input("X", f32_tensor(&[1, 2, 1, 3]));
 
-        // Squeeze not yet implemented
+        // Squeeze uses Call node
         let result = translate_squeeze(&vec![input], &[], &HashMap::new(), &mut builder);
-        assert!(result.is_err());
-        assert!(matches!(
-            result.unwrap_err(),
-            OnnxError::IrTranslationError(_)
-        ));
+        assert!(result.is_ok());
     }
 
     #[test]
-    fn test_translate_unsqueeze_returns_not_implemented() {
+    fn test_translate_squeeze_with_axes_input() {
+        let mut builder = make_builder();
+        let input = builder.add_input("X", f32_tensor(&[1, 2, 1, 3]));
+        let axes = builder.add_input("axes", f32_tensor(&[2]));
+
+        // Squeeze with axes input (opset 13+)
+        let result = translate_squeeze(&vec![input, axes], &[], &HashMap::new(), &mut builder);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_translate_unsqueeze() {
+        let mut builder = make_builder();
+        let input = builder.add_input("X", f32_tensor(&[2, 3]));
+        let axes = builder.add_input("axes", f32_tensor(&[2]));
+
+        // Unsqueeze with axes input (opset 13+)
+        let result = translate_unsqueeze(&vec![input, axes], &[], &HashMap::new(), &mut builder);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_translate_unsqueeze_with_attribute() {
         let mut builder = make_builder();
         let input = builder.add_input("X", f32_tensor(&[2, 3]));
 
         let attrs = vec![make_ints_attr("axes", vec![0, 3])];
 
+        // Unsqueeze with axes attribute (opset < 13)
         let result = translate_unsqueeze(&vec![input], &attrs, &HashMap::new(), &mut builder);
-        // Unsqueeze not yet implemented
-        assert!(result.is_err());
-        assert!(matches!(
-            result.unwrap_err(),
-            OnnxError::IrTranslationError(_)
-        ));
+        assert!(result.is_ok());
     }
 
     #[test]
@@ -487,7 +559,7 @@ mod tests {
         let mut builder = make_builder();
         let input = builder.add_input("X", f32_tensor(&[2, 3]));
 
-        // No axes attribute should fail with InvalidAttribute
+        // No axes attribute and no axes input should fail with InvalidAttribute
         let result = translate_unsqueeze(&vec![input], &[], &HashMap::new(), &mut builder);
         assert!(result.is_err());
         assert!(matches!(
@@ -538,19 +610,28 @@ mod tests {
     }
 
     #[test]
-    fn test_translate_split_returns_not_implemented() {
+    fn test_translate_split() {
         let mut builder = make_builder();
         let input = builder.add_input("X", f32_tensor(&[2, 6]));
 
         let attrs = vec![make_int_attr("axis", 1)];
 
+        // Split uses Call node
         let result = translate_split(&vec![input], &attrs, &HashMap::new(), &mut builder);
-        // Split not yet implemented
-        assert!(result.is_err());
-        assert!(matches!(
-            result.unwrap_err(),
-            OnnxError::IrTranslationError(_)
-        ));
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_translate_split_with_sizes_input() {
+        let mut builder = make_builder();
+        let input = builder.add_input("X", f32_tensor(&[2, 6]));
+        let split_sizes = builder.add_input("split", f32_tensor(&[2]));
+
+        let attrs = vec![make_int_attr("axis", 1)];
+
+        // Split with sizes input (opset 13+)
+        let result = translate_split(&vec![input, split_sizes], &attrs, &HashMap::new(), &mut builder);
+        assert!(result.is_ok());
     }
 
     #[test]

@@ -245,6 +245,10 @@ fn calculate_conv_output_dim(
 /// - **Im2col+GEMM decomposition**: Similar to Conv2D
 /// - **PhiCoordinate addressing**: Efficient memory access patterns
 /// - Supports **symbolic shapes**
+///
+/// # Implementation
+///
+/// Uses a Call node to `onnx.ConvTranspose` which the runtime handles.
 pub fn translate_conv_transpose(
     inputs: &[NodeId],
     attrs: &[AttributeProto],
@@ -258,38 +262,22 @@ pub fn translate_conv_transpose(
         )));
     }
 
-    let input = inputs[0];
-    let kernel = inputs[1];
-    let bias = inputs.get(2).copied();
-
-    // Parse attributes
+    // Parse attributes for logging
     let strides = parse_attr_ints(attrs, "strides", vec![1, 1])?;
     let pads = parse_attr_ints(attrs, "pads", vec![0, 0, 0, 0])?;
-    let dilations = parse_attr_ints(attrs, "dilations", vec![1, 1])?;
     let output_padding = parse_attr_ints(attrs, "output_padding", vec![0, 0])?;
-    let groups = parse_attr_int(attrs, "group", 1)? as usize;
 
     debug!(
         "Translating ConvTranspose: strides={:?}, pads={:?}, output_padding={:?}",
         strides, pads, output_padding
     );
+    trace!("ConvTranspose inputs: {:?}", inputs);
 
-    // IRBuilder doesn't have conv_transpose, need to decompose
-    // For now, return not-implemented error
-    let _ = (
-        builder,
-        input,
-        kernel,
-        bias,
-        strides,
-        pads,
-        dilations,
-        output_padding,
-        groups,
-    );
-    Err(OnnxError::IrTranslationError(
-        "ConvTranspose operation not yet implemented".to_string(),
-    ))
+    // Use Call node for ConvTranspose - runtime handles the transposed convolution
+    let result = builder.call("onnx.ConvTranspose", inputs.to_vec());
+
+    trace!("Created ConvTranspose call node: {:?}", result);
+    Ok(result)
 }
 
 /// Infer ConvTranspose output shape.
@@ -485,19 +473,14 @@ mod tests {
     }
 
     #[test]
-    fn test_translate_conv_transpose_returns_not_implemented() {
+    fn test_translate_conv_transpose() {
         let mut builder = make_builder();
         let input = builder.add_input("X", f32_tensor(&[1, 64, 56, 56]));
         let kernel = builder.add_input("W", f32_tensor(&[64, 3, 2, 2]));
 
         let result =
             translate_conv_transpose(&vec![input, kernel], &[], &HashMap::new(), &mut builder);
-        // ConvTranspose not yet implemented
-        assert!(result.is_err());
-        assert!(matches!(
-            result.unwrap_err(),
-            OnnxError::IrTranslationError(_)
-        ));
+        assert!(result.is_ok());
     }
 
     #[test]

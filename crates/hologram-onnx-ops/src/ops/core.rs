@@ -345,6 +345,7 @@ mod tests {
     use super::*;
     use crate::test_utils::f32_tensor;
     use hologram_compiler::ir::IRBuilder;
+    use hologram_onnx_spec::attribute_proto::AttributeType;
 
     fn make_builder() -> IRBuilder {
         IRBuilder::new("test")
@@ -474,8 +475,6 @@ mod tests {
 
     #[test]
     fn test_gemm_with_transpose() {
-        use hologram_onnx_spec::attribute_proto::AttributeType;
-
         let mut builder = make_builder();
         let a = builder.add_input("A", f32_tensor(&[3, 2])); // Will be transposed to [2, 3]
         let b = builder.add_input("B", f32_tensor(&[4, 3])); // Will be transposed to [3, 4]
