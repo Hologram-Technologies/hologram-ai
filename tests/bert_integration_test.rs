@@ -19,6 +19,13 @@ use hologram_onnx_core::{
 use hologram_onnx_ops::translate_onnx_op;
 use tempfile::TempDir;
 
+fn hologram_onnx_bin() -> std::path::PathBuf {
+    std::env::var("CARGO_BIN_EXE_hologram-onnx")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|err| {
+            panic!("CARGO_BIN_EXE_hologram-onnx not set: {}", err)
+        })
+}
 // ============================================================================
 // Test Fixtures
 // ============================================================================
@@ -41,6 +48,7 @@ fn find_bert_model() -> Option<PathBuf> {
 }
 
 /// Check if any BERT model exists.
+#[allow(dead_code)]
 fn has_bert_model() -> bool {
     find_bert_model().is_some()
 }
@@ -379,7 +387,7 @@ fn test_bert_full_compilation() {
 
     use std::process::Command;
 
-    let status = Command::new(env!("CARGO_BIN_EXE_hologram-onnx"))
+    let status = Command::new(hologram_onnx_bin())
         .args([
             "compile",
             bert_path.to_str().unwrap(),
@@ -431,7 +439,7 @@ fn test_bert_attention_decomposition() {
 
     use std::process::Command;
 
-    let status = Command::new(env!("CARGO_BIN_EXE_hologram-onnx"))
+    let status = Command::new(hologram_onnx_bin())
         .args([
             "compile",
             bert_path.to_str().unwrap(),

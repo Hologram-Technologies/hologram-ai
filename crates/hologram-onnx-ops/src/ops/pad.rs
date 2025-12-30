@@ -92,7 +92,7 @@ mod tests {
         let data = builder.add_input("data", f32_tensor(&[1, 3, 64, 64]));
         let pads = builder.add_input("pads", f32_tensor(&[8]));
 
-        let result = translate_pad(&vec![data, pads], &[], &HashMap::new(), &mut builder);
+        let result = translate_pad(&[data, pads], &[], &HashMap::new(), &mut builder);
         assert!(result.is_ok());
     }
 
@@ -104,7 +104,7 @@ mod tests {
 
         let attrs = vec![make_string_attr("mode", "constant")];
 
-        let result = translate_pad(&vec![data, pads], &attrs, &HashMap::new(), &mut builder);
+        let result = translate_pad(&[data, pads], &attrs, &HashMap::new(), &mut builder);
         assert!(result.is_ok());
     }
 
@@ -116,7 +116,7 @@ mod tests {
 
         let attrs = vec![make_string_attr("mode", "reflect")];
 
-        let result = translate_pad(&vec![data, pads], &attrs, &HashMap::new(), &mut builder);
+        let result = translate_pad(&[data, pads], &attrs, &HashMap::new(), &mut builder);
         assert!(result.is_ok());
     }
 
@@ -128,7 +128,7 @@ mod tests {
         let constant = builder.add_input("constant", f32_tensor(&[]));
 
         let result = translate_pad(
-            &vec![data, pads, constant],
+            &[data, pads, constant],
             &[],
             &HashMap::new(),
             &mut builder,

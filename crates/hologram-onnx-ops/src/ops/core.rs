@@ -370,12 +370,12 @@ mod tests {
         let a = builder.add_input("A", f32_tensor(&[2, 3]));
 
         // Only 1 input (should fail)
-        let result = translate_matmul(&vec![a], &[], &HashMap::new(), &mut builder);
+        let result = translate_matmul(&[a], &[], &HashMap::new(), &mut builder);
         assert!(result.is_err());
         assert!(matches!(result.unwrap_err(), OnnxError::InvalidModel(_)));
 
         // 3 inputs (should fail)
-        let result = translate_matmul(&vec![a, a, a], &[], &HashMap::new(), &mut builder);
+        let result = translate_matmul(&[a, a, a], &[], &HashMap::new(), &mut builder);
         assert!(result.is_err());
     }
 
@@ -438,7 +438,7 @@ mod tests {
         ];
 
         for op in ops {
-            let result = op(&vec![a], &[], &HashMap::new(), &mut builder);
+            let result = op(&[a], &[], &HashMap::new(), &mut builder);
             assert!(result.is_err());
             assert!(matches!(result.unwrap_err(), OnnxError::InvalidModel(_)));
         }
@@ -530,7 +530,7 @@ mod tests {
             ..Default::default()
         }];
 
-        let result = translate_cast(&vec![input], &attrs, &HashMap::new(), &mut builder);
+        let result = translate_cast(&[input], &attrs, &HashMap::new(), &mut builder);
         assert!(result.is_ok());
     }
 
@@ -547,7 +547,7 @@ mod tests {
             ..Default::default()
         }];
 
-        let result = translate_cast(&vec![input], &attrs, &HashMap::new(), &mut builder);
+        let result = translate_cast(&[input], &attrs, &HashMap::new(), &mut builder);
         assert!(result.is_ok());
     }
 

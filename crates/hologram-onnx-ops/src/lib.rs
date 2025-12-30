@@ -90,11 +90,18 @@ pub use hologram_compiler::ir::{IRBuilder, IRNode, NodeId};
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::test_utils::{f32_tensor, i32_tensor, i64_tensor, symbolic_tensor};
 
     #[test]
     fn test_module_structure() {
-        // Verify all modules are accessible
-        assert!(true, "Module structure is correct");
+        let f32 = f32_tensor(&[1, 3, 224, 224]);
+        let i64 = i64_tensor(&[2, 2]);
+        let i32 = i32_tensor(&[4]);
+        let unknown = symbolic_tensor();
+
+        assert!(matches!(f32, hologram_compiler::ir::types::Type::Tensor(_)));
+        assert!(matches!(i64, hologram_compiler::ir::types::Type::Tensor(_)));
+        assert!(matches!(i32, hologram_compiler::ir::types::Type::Tensor(_)));
+        assert!(matches!(unknown, hologram_compiler::ir::types::Type::Unknown));
     }
 }

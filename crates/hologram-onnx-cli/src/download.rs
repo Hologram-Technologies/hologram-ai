@@ -47,7 +47,7 @@ struct FileInfo {
 /// use std::path::Path;
 /// # use anyhow::Result;
 /// # fn main() -> Result<()> {
-/// hologram_onnx_cli::download::download_command(
+/// hologram_onnx_cli::download_command(
 ///     "CompVis/stable-diffusion-v1-4",
 ///     Path::new("./models"),
 ///     Some("main"),

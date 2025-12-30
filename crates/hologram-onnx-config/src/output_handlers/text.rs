@@ -226,7 +226,7 @@ mod tests {
 
         let handler = TextHandler::from_config(&config).unwrap();
         assert_eq!(handler.output_name, "token_ids");
-        assert_eq!(handler.skip_special_tokens, true);
+        assert!(handler.skip_special_tokens);
     }
 
     #[test]
@@ -278,7 +278,7 @@ mod tests {
         };
 
         let handler = TextHandler::from_config(&config).unwrap();
-        assert_eq!(handler.skip_special_tokens, true);
+        assert!(handler.skip_special_tokens);
     }
 
     #[test]

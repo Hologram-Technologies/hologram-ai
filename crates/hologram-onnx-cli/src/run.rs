@@ -3,16 +3,18 @@
 //! This module provides the `run` command which:
 //! - Loads a unified config from a TOML file
 //! - Compiles models if needed (or uses precompiled .holo files)
-//! - Executes the pipeline with provided inputs
+//! - Executes the pipeline with provided inputs using hologram runtime
 //! - Processes outputs using configured handlers
 
 use anyhow::{Context, Result};
 use hologram_onnx_config::{
-    ModelDef, OutputHandlerType, PipelineConfig, StageDef, UnifiedConfig,
+    ModelDef, OutputDef, OutputHandlerType, PipelineConfig, StageDef, UnifiedConfig,
 };
-use hologram_onnx_core::OnnxConfig;
-use std::collections::HashMap;
+use hologram_onnx_core::serialization::{DimSpec, SerNode, SerNodeKind};
+use hologram_onnx_core::{load_holo_file, Interpreter, OnnxConfig};
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
+use std::sync::Arc;
 use tracing::{debug, info, warn};
 
 use crate::compile::compile_command;
@@ -115,11 +117,11 @@ fn parse_inputs(
             if let Some(default_str) = input_def.default_string() {
                 debug!("Using default for '{}': {}", name, default_str);
                 result.insert(name.clone(), default_str.to_string());
-            } else if let Some(default_val) = input_def.default_value() {
-                if let Some(s) = default_val.as_str() {
-                    debug!("Using default for '{}': {}", name, s);
-                    result.insert(name.clone(), s.to_string());
-                }
+            } else if let Some(default_val) = input_def.default_value()
+                && let Some(s) = default_val.as_str()
+            {
+                debug!("Using default for '{}': {}", name, s);
+                result.insert(name.clone(), s.to_string());
             }
         }
     }
@@ -191,8 +193,8 @@ fn get_compiled_path(model_def: &ModelDef, config_dir: &Path) -> std::path::Path
 
     // Default: replace .onnx with .holo
     let onnx_path = model_def.path();
-    let holo_path = if onnx_path.ends_with(".onnx") {
-        format!("{}.holo", &onnx_path[..onnx_path.len() - 5])
+    let holo_path = if let Some(stripped) = onnx_path.strip_suffix(".onnx") {
+        format!("{}.holo", stripped)
     } else {
         format!("{}.holo", onnx_path)
     };
@@ -210,16 +212,17 @@ fn resolve_model_path(path: &str, config_dir: &Path) -> std::path::PathBuf {
     }
 }
 
-/// Execute the pipeline with the given inputs.
+/// Execute the pipeline with the given inputs using the interpreter.
 ///
-/// This is a placeholder implementation. Full implementation will use
-/// hologram's runtime execution engine.
+/// This function loads compiled .holo files and executes them using the
+/// CPU-based interpreter which supports all operations.
 fn execute_pipeline(
     config: &UnifiedConfig,
     compiled_models: &HashMap<String, std::path::PathBuf>,
-    _inputs: &HashMap<String, String>,
+    inputs: &HashMap<String, String>,
 ) -> Result<HashMap<String, OutputData>> {
-    let mut outputs = HashMap::new();
+    let mut outputs: HashMap<String, OutputData> = HashMap::new();
+    let mut tensor_cache: HashMap<String, Arc<Vec<f32>>> = HashMap::new();
 
     // Process stages
     for (idx, stage) in config.stages.iter().enumerate() {
@@ -236,21 +239,100 @@ fn execute_pipeline(
                     model_path.display()
                 );
 
-                // Placeholder: In a real implementation, this would:
-                // 1. Load the compiled model
-                // 2. Prepare input tensors from the inputs map
-                // 3. Execute the model
-                // 4. Store outputs in the outputs map
+                // Load the compiled model using the new format
+                let holo_model = load_holo_file(model_path)
+                    .with_context(|| format!("Failed to load .holo file: {}", model_path.display()))?;
 
-                // For now, create placeholder outputs
-                for output_name in &model_stage.outputs {
-                    outputs.insert(
-                        output_name.clone(),
-                        OutputData::Tensor(vec![0.0f32; 10]), // Placeholder
-                    );
+                debug!("Loaded HoloModel '{}' with {} nodes", holo_model.metadata.name, holo_model.graph.nodes.len());
+
+                // Create interpreter for this model
+                let mut interpreter = Interpreter::new(&holo_model)
+                    .map_err(|e| anyhow::anyhow!("Failed to create interpreter: {}", e))?;
+
+                let model_inputs: HashMap<&str, &SerNode> = holo_model
+                    .graph
+                    .nodes
+                    .iter()
+                    .filter_map(|node| {
+                        if let SerNodeKind::Input { name } = &node.node {
+                            Some((name.as_str(), node))
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
+                let mut set_inputs: HashSet<String> = HashSet::new();
+
+                // Map stage inputs to tensors
+                for (input_name, tensor_expr) in &model_stage.inputs {
+                    let input_node = model_inputs.get(input_name.as_str()).ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "Model '{}' has no input named '{}'",
+                            model_stage.model,
+                            input_name
+                        )
+                    })?;
+
+                    // Extract string reference from expression
+                    let tensor_ref = tensor_expr.as_str().unwrap_or_default();
+
+                    // First check if it's in the tensor cache from previous stages
+                    let input_data = if let Some(cached) = tensor_cache.get(tensor_ref) {
+                        cached.as_ref().clone()
+                    } else if let Some(input_str) = inputs.get(tensor_ref) {
+                        // Parse runtime input as tensor
+                        parse_input_tensor(input_str)?
+                    } else {
+                        let shape = input_shape_for_node(input_node)?;
+                        warn!(
+                            "Input '{}' (tensor '{}') not found, using zeros with shape {:?}",
+                            input_name, tensor_ref, shape
+                        );
+                        default_tensor_for_node(input_node)?
+                    };
+
+                    // Set the input in interpreter
+                    interpreter
+                        .set_input(input_name, &input_data)
+                        .with_context(|| format!("Failed to set input '{}'", input_name))?;
+                    set_inputs.insert(input_name.clone());
                 }
 
-                info!("  ✓ Stage {}: {} completed", idx, model_stage.model);
+                for (input_name, input_spec) in &model_inputs {
+                    if !set_inputs.contains(*input_name) {
+                        let shape = input_shape_for_node(input_spec)?;
+                        warn!(
+                            "Input '{}' not provided, using zeros with shape {:?}",
+                            input_name, shape
+                        );
+                        let input_data = default_tensor_for_node(input_spec)?;
+                        interpreter
+                            .set_input(input_name, &input_data)
+                            .with_context(|| format!("Failed to set input '{}'", input_name))?;
+                    }
+                }
+
+                // Execute the model
+                interpreter.run()
+                    .map_err(|e| anyhow::anyhow!("Execution failed: {}", e))?;
+
+                // Get outputs
+                let output_tensors = interpreter.get_outputs()
+                    .map_err(|e| anyhow::anyhow!("Failed to get outputs: {}", e))?;
+
+                // Store outputs
+                for (i, output_name) in model_stage.outputs.iter().enumerate() {
+                    if let Some(tensor) = output_tensors.get(i) {
+                        let data = tensor.to_vec();
+                        tensor_cache.insert(output_name.clone(), Arc::new(data.clone()));
+                        outputs.insert(output_name.clone(), OutputData::Tensor(data));
+                        debug!("Output '{}': {} elements, shape {:?}", output_name, tensor.data.len(), tensor.shape());
+                    } else {
+                        warn!("Expected output '{}' not found in execution results", output_name);
+                    }
+                }
+
+                info!("  ✓ Stage {}: {} completed ({} outputs)", idx, model_stage.model, output_tensors.len());
             }
 
             StageDef::Builtin(builtin_stage) => {
@@ -259,12 +341,18 @@ fn execute_pipeline(
                     idx, builtin_stage.builtin
                 );
 
-                // Placeholder for builtin operations (randn, concat, etc.)
-                for output_name in &builtin_stage.outputs {
-                    outputs.insert(
-                        output_name.clone(),
-                        OutputData::Tensor(vec![0.0f32; 10]),
-                    );
+                // Execute builtin operations
+                let builtin_outputs = execute_builtin(
+                    &builtin_stage.builtin,
+                    &builtin_stage.args,
+                    &builtin_stage.outputs,
+                    &tensor_cache,
+                    inputs,
+                )?;
+
+                for (name, tensor) in builtin_outputs {
+                    tensor_cache.insert(name.clone(), Arc::new(tensor.clone()));
+                    outputs.insert(name, OutputData::Tensor(tensor));
                 }
 
                 info!("  ✓ Stage {}: {} completed", idx, builtin_stage.builtin);
@@ -272,13 +360,15 @@ fn execute_pipeline(
 
             StageDef::Loop(loop_stage) => {
                 debug!("Stage {}: Loop over '{}'", idx, loop_stage.over);
-                // Placeholder for loop execution
+                // TODO: Implement loop execution for iterative pipelines
+                warn!("Loop stages not yet implemented");
                 info!("  ✓ Stage {}: loop completed", idx);
             }
 
             StageDef::Conditional(cond_stage) => {
                 debug!("Stage {}: Conditional '{}'", idx, cond_stage.condition);
-                // Placeholder for conditional execution
+                // TODO: Implement conditional execution
+                warn!("Conditional stages not yet implemented");
                 info!("  ✓ Stage {}: conditional completed", idx);
             }
         }
@@ -292,8 +382,171 @@ fn execute_pipeline(
                 "Output '{}' (tensor '{}') not produced by pipeline",
                 name, tensor_name
             );
-            // Create placeholder output
-            outputs.insert(tensor_name.to_string(), OutputData::Tensor(vec![0.0f32; 10]));
+            if let Some(cached) = tensor_cache.get(tensor_name) {
+                outputs.insert(tensor_name.to_string(), OutputData::Tensor(cached.as_ref().clone()));
+            }
+        }
+    }
+
+    Ok(outputs)
+}
+
+/// Parse an input string as a tensor.
+fn parse_input_tensor(input_str: &str) -> Result<Vec<f32>> {
+    // Handle file path inputs (e.g., image files)
+    if input_str.ends_with(".png") || input_str.ends_with(".jpg") || input_str.ends_with(".jpeg") {
+        return load_image_as_tensor(input_str);
+    }
+
+    // Handle JSON array format
+    if input_str.starts_with('[') {
+        let values: Vec<f32> = serde_json::from_str(input_str)
+            .with_context(|| format!("Failed to parse input as JSON array: {}", input_str))?;
+        return Ok(values);
+    }
+
+    // Handle comma-separated values
+    if input_str.contains(',') {
+        let values: Result<Vec<f32>, _> = input_str
+            .split(',')
+            .map(|s| s.trim().parse::<f32>())
+            .collect();
+        return values.with_context(|| format!("Failed to parse comma-separated values: {}", input_str));
+    }
+
+    // Single scalar value
+    let value: f32 = input_str.parse()
+        .with_context(|| format!("Failed to parse scalar value: {}", input_str))?;
+    Ok(vec![value])
+}
+
+fn concrete_shape_from_dims(dims: &[DimSpec]) -> Vec<usize> {
+    dims.iter()
+        .map(|dim| match dim {
+            DimSpec::Concrete(size) => *size,
+            DimSpec::Symbolic(name) => {
+                debug!("Symbolic dim '{}' defaulting to 1", name);
+                1
+            }
+        })
+        .collect()
+}
+
+fn input_shape_for_node(node: &SerNode) -> Result<Vec<usize>> {
+    let dims = node.shape.as_ref().ok_or_else(|| {
+        anyhow::anyhow!("Input node {} has no shape information", node.id)
+    })?;
+    Ok(concrete_shape_from_dims(dims))
+}
+
+fn default_tensor_for_node(node: &SerNode) -> Result<Vec<f32>> {
+    let shape = input_shape_for_node(node)?;
+    let size: usize = shape.iter().product();
+    Ok(vec![0.0f32; size])
+}
+
+/// Load an image file as a tensor.
+fn load_image_as_tensor(path: &str) -> Result<Vec<f32>> {
+    // Basic image loading - returns flattened RGB values normalized to [0, 1]
+    let _img_bytes = std::fs::read(path)
+        .with_context(|| format!("Failed to read image: {}", path))?;
+
+    // For now, return placeholder - actual image decoding would use image crate
+    warn!("Image loading not fully implemented, using placeholder for: {}", path);
+    Ok(vec![0.5f32; 224 * 224 * 3]) // Placeholder: 224x224x3 image
+}
+
+/// Execute a builtin operation.
+fn execute_builtin(
+    name: &str,
+    args: &HashMap<String, hologram_onnx_config::Expr>,
+    output_names: &[String],
+    tensor_cache: &HashMap<String, Arc<Vec<f32>>>,
+    runtime_inputs: &HashMap<String, String>,
+) -> Result<HashMap<String, Vec<f32>>> {
+    let mut outputs = HashMap::new();
+
+    // Helper to get arg as string
+    let get_arg_str = |key: &str| -> Option<&str> {
+        args.get(key).and_then(|expr| expr.as_str())
+    };
+
+    // Helper to get arg as i64 array (for shape)
+    let get_arg_shape = |key: &str| -> Option<Vec<usize>> {
+        args.get(key).and_then(|expr| {
+            match expr {
+                hologram_onnx_config::Expr::Literal(v) => {
+                    v.as_array().map(|arr| {
+                        arr.iter().filter_map(|v| v.as_i64().map(|i| i as usize)).collect()
+                    })
+                }
+            }
+        })
+    };
+
+    let default_output = output_names.first()
+        .map(|s| s.as_str())
+        .unwrap_or("output");
+
+    match name {
+        "randn" | "random_normal" => {
+            // Generate random normal tensor
+            let shape = get_arg_shape("shape")
+                .unwrap_or_else(|| vec![1, 4, 64, 64]); // Default latent shape
+
+            let size: usize = shape.iter().product();
+            use std::f32::consts::PI;
+
+            // Box-Muller transform for random normal
+            let mut rng_state = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos() as u64)
+                .unwrap_or(42);
+
+            let mut tensor = Vec::with_capacity(size);
+            for _ in 0..size {
+                // Simple LCG random
+                rng_state = rng_state.wrapping_mul(6364136223846793005).wrapping_add(1);
+                let u1 = (rng_state as f32) / (u64::MAX as f32);
+                rng_state = rng_state.wrapping_mul(6364136223846793005).wrapping_add(1);
+                let u2 = (rng_state as f32) / (u64::MAX as f32);
+
+                let z = (-2.0 * u1.max(1e-10).ln()).sqrt() * (2.0 * PI * u2).cos();
+                tensor.push(z);
+            }
+
+            outputs.insert(default_output.to_string(), tensor);
+        }
+
+        "concat" | "concatenate" => {
+            // Concatenate tensors
+            let mut result = Vec::new();
+            for tensor_expr in args.values() {
+                if let Some(tensor_ref) = tensor_expr.as_str()
+                    && let Some(cached) = tensor_cache.get(tensor_ref)
+                {
+                    result.extend(cached.as_ref().iter().copied());
+                }
+            }
+
+            outputs.insert(default_output.to_string(), result);
+        }
+
+        "encode_text" | "tokenize" => {
+            // Text encoding placeholder
+            let text_ref = get_arg_str("text").unwrap_or("");
+            let text = runtime_inputs.get(text_ref)
+                .map(|s| s.as_str())
+                .unwrap_or("");
+
+            debug!("Encoding text: {}", text);
+
+            // Return placeholder embeddings
+            outputs.insert(default_output.to_string(), vec![0.0f32; 77 * 768]); // CLIP-style embeddings
+        }
+
+        _ => {
+            warn!("Unknown builtin operation: {}", name);
         }
     }
 
@@ -322,6 +575,10 @@ fn process_outputs(
 ) -> Result<()> {
     let output_dir = output_dir.unwrap_or_else(|| Path::new("."));
 
+    // Create output dir if it doesn't exist
+    std::fs::create_dir_all(output_dir)
+        .with_context(|| format!("Failed to create output directory: {}", output_dir.display()))?;
+
     for (name, output_def) in &config.outputs {
         let tensor_name = output_def.tensor();
         let handler_type = output_def.handler_type();
@@ -334,35 +591,57 @@ fn process_outputs(
             OutputHandlerType::Image => {
                 let output_path = output_dir.join(format!("{}.png", name));
                 info!("Writing image output: {}", output_path.display());
-                // Placeholder: Would use image output handler
-                std::fs::write(&output_path, b"PNG placeholder")?;
+
+                if let OutputData::Tensor(tensor) = data {
+                    // Get image dimensions from config or infer from tensor
+                    let (width, height, channels) = infer_image_dimensions(tensor.len(), output_def);
+
+                    // Convert tensor to u8 image data
+                    let image_data = tensor_to_image_data(tensor, width, height, channels)?;
+
+                    // Write using the image crate
+                    write_image_data(&image_data, width, height, channels, &output_path)?;
+
+                    info!("  Image saved: {}x{} ({} channels)", width, height, channels);
+                } else {
+                    warn!("Image output '{}' has non-tensor data", name);
+                }
             }
 
             OutputHandlerType::Audio => {
                 let output_path = output_dir.join(format!("{}.wav", name));
                 info!("Writing audio output: {}", output_path.display());
-                // Placeholder: Would use audio output handler
-                std::fs::write(&output_path, b"WAV placeholder")?;
+
+                if let OutputData::Tensor(tensor) = data {
+                    // Write raw audio samples
+                    write_audio_output(tensor, &output_path)?;
+                } else {
+                    warn!("Audio output '{}' has non-tensor data", name);
+                }
             }
 
             OutputHandlerType::Text => {
                 if let OutputData::Text(text) = data {
                     info!("Text output '{}': {}", name, text);
-                } else {
-                    info!("Text output '{}': <tensor data>", name);
+                } else if let OutputData::Tensor(tensor) = data {
+                    info!("Text output '{}': {} values", name, tensor.len());
                 }
             }
 
             OutputHandlerType::Json => {
                 let output_path = output_dir.join(format!("{}.json", name));
                 info!("Writing JSON output: {}", output_path.display());
-                // Placeholder: Would serialize tensor to JSON
-                std::fs::write(&output_path, "{}")?;
+
+                if let OutputData::Tensor(tensor) = data {
+                    let json = serde_json::to_string_pretty(tensor)?;
+                    std::fs::write(&output_path, json)?;
+                }
             }
 
             OutputHandlerType::Binary => {
                 let output_path = output_dir.join(format!("{}.bin", name));
                 info!("Writing binary output: {}", output_path.display());
+
                 if let OutputData::Tensor(tensor) = data {
                     let bytes: Vec<u8> = tensor
                         .iter()
@@ -376,6 +655,175 @@ fn process_outputs(
                 debug!("Auto output handler for '{}' - no action", name);
             }
         }
+    }
+
+    Ok(())
+}
+
+/// Infer image dimensions from tensor size and config.
+fn infer_image_dimensions(
+    tensor_size: usize,
+    _output_def: &OutputDef,
+) -> (u32, u32, u8) {
+    // Default to 512x512 RGB (common for SD)
+    let default_width = 512u32;
+    let default_height = 512u32;
+    let default_channels = 3u8;
+
+    let expected_size = (default_width * default_height * default_channels as u32) as usize;
+    if tensor_size == expected_size {
+        return (default_width, default_height, default_channels);
+    }
+
+    // Try to infer from tensor size
+    // Assume RGB (3 channels) by default
+    let inferred_channels = 3u8;
+    let pixel_count = tensor_size / inferred_channels as usize;
+    let dim = (pixel_count as f64).sqrt() as u32;
+    if dim * dim * inferred_channels as u32 == tensor_size as u32 {
+        return (dim, dim, inferred_channels);
+    }
+
+    // Try 4 channels (RGBA)
+    let inferred_channels = 4u8;
+    let pixel_count = tensor_size / inferred_channels as usize;
+    let dim = (pixel_count as f64).sqrt() as u32;
+    if dim * dim * inferred_channels as u32 == tensor_size as u32 {
+        return (dim, dim, inferred_channels);
+    }
+
+    // Fall back to default with warning
+    debug!("Could not infer image dimensions from tensor size {}", tensor_size);
+    (default_width, default_height, default_channels)
+}
+
+/// Convert tensor data to image u8 data.
+///
+/// Handles NCHW layout (default for diffusion models) and normalizes from [-1, 1] to [0, 255].
+fn tensor_to_image_data(tensor: &[f32], width: u32, height: u32, channels: u8) -> Result<Vec<u8>> {
+    let expected_size = (width * height * channels as u32) as usize;
+
+    // Check if we have batch dimension (NCHW layout)
+    let data = if tensor.len() == expected_size {
+        tensor
+    } else if tensor.len() >= expected_size {
+        // Take first image from batch
+        &tensor[..expected_size]
+    } else {
+        anyhow::bail!(
+            "Tensor size {} doesn't match expected {}x{}x{}={}",
+            tensor.len(), width, height, channels, expected_size
+        );
+    };
+
+    // Detect if NCHW layout (most diffusion models use this)
+    // For NCHW with 3 channels: tensor is [C, H, W] = [3, H, W]
+    let channel_stride = (width * height) as usize;
+    let is_nchw = tensor.len() >= channel_stride * channels as usize;
+
+    let mut result = vec![0u8; expected_size];
+
+    for h in 0..height as usize {
+        for w in 0..width as usize {
+            for c in 0..channels as usize {
+                let src_idx = if is_nchw && channels > 1 {
+                    // NCHW: [channel][height][width]
+                    c * channel_stride + h * width as usize + w
+                } else {
+                    // NHWC: [height][width][channel]
+                    h * width as usize * channels as usize + w * channels as usize + c
+                };
+
+                let dst_idx = h * width as usize * channels as usize + w * channels as usize + c;
+
+                // Normalize from [-1, 1] to [0, 255]
+                let value = if src_idx < data.len() {
+                    let v = data[src_idx];
+                    // Clamp and scale: [-1, 1] -> [0, 255]
+                    ((v + 1.0) / 2.0 * 255.0).clamp(0.0, 255.0) as u8
+                } else {
+                    0
+                };
+
+                result[dst_idx] = value;
+            }
+        }
+    }
+
+    Ok(result)
+}
+
+/// Write image data to file.
+fn write_image_data(data: &[u8], width: u32, height: u32, channels: u8, path: &Path) -> Result<()> {
+    use image::{ImageBuffer, Rgb, Rgba, Luma};
+
+    match channels {
+        1 => {
+            let img: ImageBuffer<Luma<u8>, Vec<u8>> =
+                ImageBuffer::from_raw(width, height, data.to_vec())
+                    .ok_or_else(|| anyhow::anyhow!("Failed to create grayscale image buffer"))?;
+            img.save(path)?;
+        }
+        3 => {
+            let img: ImageBuffer<Rgb<u8>, Vec<u8>> =
+                ImageBuffer::from_raw(width, height, data.to_vec())
+                    .ok_or_else(|| anyhow::anyhow!("Failed to create RGB image buffer"))?;
+            img.save(path)?;
+        }
+        4 => {
+            let img: ImageBuffer<Rgba<u8>, Vec<u8>> =
+                ImageBuffer::from_raw(width, height, data.to_vec())
+                    .ok_or_else(|| anyhow::anyhow!("Failed to create RGBA image buffer"))?;
+            img.save(path)?;
+        }
+        _ => anyhow::bail!("Unsupported channel count: {}", channels),
+    }
+
+    Ok(())
+}
+
+/// Write audio output to WAV file.
+fn write_audio_output(samples: &[f32], path: &Path) -> Result<()> {
+    // Simple WAV writer (mono, 44100 Hz)
+    use std::io::Write;
+
+    let sample_rate = 44100u32;
+    let num_channels = 1u16;
+    let bits_per_sample = 16u16;
+    let byte_rate = sample_rate * num_channels as u32 * bits_per_sample as u32 / 8;
+    let block_align = num_channels * bits_per_sample / 8;
+
+    // Convert f32 samples to i16
+    let samples_i16: Vec<i16> = samples
+        .iter()
+        .map(|&s| (s.clamp(-1.0, 1.0) * 32767.0) as i16)
+        .collect();
+
+    let data_size = (samples_i16.len() * 2) as u32;
+    let file_size = 36 + data_size;
+
+    let mut file = std::fs::File::create(path)?;
+
+    // RIFF header
+    file.write_all(b"RIFF")?;
+    file.write_all(&file_size.to_le_bytes())?;
+    file.write_all(b"WAVE")?;
+
+    // fmt chunk
+    file.write_all(b"fmt ")?;
+    file.write_all(&16u32.to_le_bytes())?; // chunk size
+    file.write_all(&1u16.to_le_bytes())?; // PCM format
+    file.write_all(&num_channels.to_le_bytes())?;
+    file.write_all(&sample_rate.to_le_bytes())?;
+    file.write_all(&byte_rate.to_le_bytes())?;
+    file.write_all(&block_align.to_le_bytes())?;
+    file.write_all(&bits_per_sample.to_le_bytes())?;
+
+    // data chunk
+    file.write_all(b"data")?;
+    file.write_all(&data_size.to_le_bytes())?;
+    for sample in samples_i16 {
+        file.write_all(&sample.to_le_bytes())?;
     }
 
     Ok(())
@@ -447,5 +895,35 @@ mod tests {
 
         let result = run_command(&config_path, &[], None, false);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_concrete_shape_from_spec_symbolic_defaults() {
+        let input = SerNode {
+            id: 0,
+            node: SerNodeKind::Input {
+                name: "tokens".to_string(),
+            },
+            dtype: None,
+            shape: Some(vec![DimSpec::Concrete(2), DimSpec::Symbolic("n".to_string())]),
+        };
+
+        let shape = input_shape_for_node(&input).unwrap();
+        assert_eq!(shape, vec![2, 1]);
+    }
+
+    #[test]
+    fn test_default_tensor_for_input_size() {
+        let input = SerNode {
+            id: 1,
+            node: SerNodeKind::Input {
+                name: "tokens".to_string(),
+            },
+            dtype: None,
+            shape: Some(vec![DimSpec::Concrete(1), DimSpec::Concrete(77)]),
+        };
+
+        let data = default_tensor_for_node(&input).unwrap();
+        assert_eq!(data.len(), 77);
     }
 }

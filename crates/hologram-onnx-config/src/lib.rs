@@ -52,14 +52,14 @@ pub use config::{ExecutionConfig, OutputHandlerConfig, PipelineConfig, StageConf
 pub use error::ConfigError;
 
 // Unified configuration exports
-pub use unified::{
-    BuiltinStage, CompilerConfig, ConditionalStage, DimExpr, Expr, InputDef, InputSpec, InputType,
-    LoopStage, ModelDef, ModelSpec, ModelStage, OutputDef, OutputHandlerType, OutputSpec,
-    StageDef, UnifiedConfig,
-};
 pub use output_handlers::{
     AudioOutput, ImageOutput, OutputHandler, OutputHandlerRegistry, ProcessedOutput, TensorData,
     TensorOutput,
+};
+pub use unified::{
+    BuiltinStage, CompilerConfig, ConditionalStage, DimExpr, Expr, InputDef, InputSpec, InputType,
+    LoopStage, ModelDef, ModelSpec, ModelStage, OutputDef, OutputHandlerType, OutputSpec, StageDef,
+    UnifiedConfig,
 };
 
 // Feature-gated handler exports
@@ -71,14 +71,3 @@ pub use output_handlers::audio::AudioHandler;
 
 #[cfg(feature = "text-output")]
 pub use output_handlers::text::TextHandler;
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_module_structure() {
-        // Verify all modules are accessible
-        assert!(true, "Module structure is correct");
-    }
-}

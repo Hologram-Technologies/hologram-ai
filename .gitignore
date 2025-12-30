@@ -1,2 +1,5 @@
 /target
-/models
+/models/**
+**/*.png
+**/*.jpg
+**/*.jpeg

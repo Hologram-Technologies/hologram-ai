@@ -699,7 +699,7 @@ mod tests {
         let value = builder.add_input("V", f32_tensor(&[2, 10, 64]));
 
         let result =
-            translate_attention(&vec![query, key, value], &[], &HashMap::new(), &mut builder);
+            translate_attention(&[query, key, value], &[], &HashMap::new(), &mut builder);
         assert!(result.is_ok());
     }
 
@@ -718,7 +718,7 @@ mod tests {
         }];
 
         let result = translate_attention(
-            &vec![query, key, value],
+            &[query, key, value],
             &attrs,
             &HashMap::new(),
             &mut builder,
@@ -735,7 +735,7 @@ mod tests {
         let mask = builder.add_input("mask", f32_tensor(&[2, 10, 10]));
 
         let result = translate_attention(
-            &vec![query, key, value, mask],
+            &[query, key, value, mask],
             &[],
             &HashMap::new(),
             &mut builder,
@@ -749,7 +749,7 @@ mod tests {
         let query = builder.add_input("Q", f32_tensor(&[2, 10, 64]));
         let key = builder.add_input("K", f32_tensor(&[2, 10, 64]));
 
-        let result = translate_attention(&vec![query, key], &[], &HashMap::new(), &mut builder);
+        let result = translate_attention(&[query, key], &[], &HashMap::new(), &mut builder);
         assert!(result.is_err());
         assert!(matches!(result.unwrap_err(), OnnxError::InvalidModel(_)));
     }
@@ -763,7 +763,7 @@ mod tests {
         let value = builder.add_input("V", f32_tensor(&[]));
 
         let result =
-            translate_attention(&vec![query, key, value], &[], &HashMap::new(), &mut builder);
+            translate_attention(&[query, key, value], &[], &HashMap::new(), &mut builder);
         assert!(result.is_ok());
     }
 
@@ -787,7 +787,7 @@ mod tests {
         }];
 
         let result = translate_multi_head_attention(
-            &vec![query, key, value, q_weight, k_weight, v_weight],
+            &[query, key, value, q_weight, k_weight, v_weight],
             &attrs,
             &HashMap::new(),
             &mut builder,
@@ -819,7 +819,7 @@ mod tests {
         }];
 
         let result = translate_multi_head_attention(
-            &vec![
+            &[
                 query, key, value, q_weight, k_weight, v_weight, q_bias, k_bias, v_bias,
                 out_weight, out_bias, mask,
             ],
@@ -844,7 +844,7 @@ mod tests {
         }];
 
         let result = translate_multi_head_attention(
-            &vec![query, key],
+            &[query, key],
             &attrs,
             &HashMap::new(),
             &mut builder,
@@ -872,7 +872,7 @@ mod tests {
         }];
 
         let result = translate_multi_head_attention(
-            &vec![query, key, value, q_weight, k_weight, v_weight],
+            &[query, key, value, q_weight, k_weight, v_weight],
             &attrs,
             &HashMap::new(),
             &mut builder,
@@ -899,7 +899,7 @@ mod tests {
             }];
 
             let result = translate_multi_head_attention(
-                &vec![query, key, value, q_weight, k_weight, v_weight],
+                &[query, key, value, q_weight, k_weight, v_weight],
                 &attrs,
                 &HashMap::new(),
                 &mut builder,
@@ -928,7 +928,7 @@ mod tests {
             ..Default::default()
         }];
 
-        let result = translate_lstm(&vec![x, w, r], &attrs, &HashMap::new(), &mut builder);
+        let result = translate_lstm(&[x, w, r], &attrs, &HashMap::new(), &mut builder);
         assert!(result.is_ok());
     }
 
@@ -959,7 +959,7 @@ mod tests {
         ];
 
         let result = translate_lstm(
-            &vec![x, w, r, b, sequence_lens, initial_h, initial_c],
+            &[x, w, r, b, sequence_lens, initial_h, initial_c],
             &attrs,
             &HashMap::new(),
             &mut builder,
@@ -989,7 +989,7 @@ mod tests {
             },
         ];
 
-        let result = translate_lstm(&vec![x, w, r], &attrs, &HashMap::new(), &mut builder);
+        let result = translate_lstm(&[x, w, r], &attrs, &HashMap::new(), &mut builder);
         assert!(result.is_ok());
     }
 
@@ -1001,7 +1001,7 @@ mod tests {
         let r = builder.add_input("R", f32_tensor(&[4, 256, 256]));
 
         let result = translate_lstm(
-            &vec![x, w, r],
+            &[x, w, r],
             &[], // No attributes
             &HashMap::new(),
             &mut builder,
@@ -1026,7 +1026,7 @@ mod tests {
             ..Default::default()
         }];
 
-        let result = translate_lstm(&vec![x, w], &attrs, &HashMap::new(), &mut builder);
+        let result = translate_lstm(&[x, w], &attrs, &HashMap::new(), &mut builder);
         assert!(result.is_err());
         assert!(matches!(result.unwrap_err(), OnnxError::InvalidModel(_)));
     }
@@ -1045,7 +1045,7 @@ mod tests {
             ..Default::default()
         }];
 
-        let result = translate_lstm(&vec![x, w, r], &attrs, &HashMap::new(), &mut builder);
+        let result = translate_lstm(&[x, w, r], &attrs, &HashMap::new(), &mut builder);
         assert!(result.is_ok());
     }
 
@@ -1065,7 +1065,7 @@ mod tests {
             ..Default::default()
         }];
 
-        let result = translate_gru(&vec![x, w, r], &attrs, &HashMap::new(), &mut builder);
+        let result = translate_gru(&[x, w, r], &attrs, &HashMap::new(), &mut builder);
         assert!(result.is_ok());
     }
 
@@ -1095,7 +1095,7 @@ mod tests {
         ];
 
         let result = translate_gru(
-            &vec![x, w, r, b, sequence_lens, initial_h],
+            &[x, w, r, b, sequence_lens, initial_h],
             &attrs,
             &HashMap::new(),
             &mut builder,
@@ -1115,7 +1115,7 @@ mod tests {
             ..Default::default()
         }];
 
-        let result = translate_gru(&vec![x], &attrs, &HashMap::new(), &mut builder);
+        let result = translate_gru(&[x], &attrs, &HashMap::new(), &mut builder);
         assert!(result.is_err());
         assert!(matches!(result.unwrap_err(), OnnxError::InvalidModel(_)));
     }
@@ -1134,7 +1134,7 @@ mod tests {
             ..Default::default()
         }];
 
-        let result = translate_gru(&vec![x, w, r], &attrs, &HashMap::new(), &mut builder);
+        let result = translate_gru(&[x, w, r], &attrs, &HashMap::new(), &mut builder);
         assert!(result.is_ok());
     }
 
@@ -1154,7 +1154,7 @@ mod tests {
             ..Default::default()
         }];
 
-        let result = translate_rnn(&vec![x, w, r], &attrs, &HashMap::new(), &mut builder);
+        let result = translate_rnn(&[x, w, r], &attrs, &HashMap::new(), &mut builder);
         assert!(result.is_ok());
     }
 
@@ -1184,7 +1184,7 @@ mod tests {
         ];
 
         let result = translate_rnn(
-            &vec![x, w, r, b, sequence_lens, initial_h],
+            &[x, w, r, b, sequence_lens, initial_h],
             &attrs,
             &HashMap::new(),
             &mut builder,
@@ -1214,7 +1214,7 @@ mod tests {
             },
         ];
 
-        let result = translate_rnn(&vec![x, w, r], &attrs, &HashMap::new(), &mut builder);
+        let result = translate_rnn(&[x, w, r], &attrs, &HashMap::new(), &mut builder);
         assert!(result.is_ok());
     }
 
@@ -1231,7 +1231,7 @@ mod tests {
             ..Default::default()
         }];
 
-        let result = translate_rnn(&vec![x, w], &attrs, &HashMap::new(), &mut builder);
+        let result = translate_rnn(&[x, w], &attrs, &HashMap::new(), &mut builder);
         assert!(result.is_err());
         assert!(matches!(result.unwrap_err(), OnnxError::InvalidModel(_)));
     }
@@ -1250,7 +1250,7 @@ mod tests {
             ..Default::default()
         }];
 
-        let result = translate_rnn(&vec![x, w, r], &attrs, &HashMap::new(), &mut builder);
+        let result = translate_rnn(&[x, w, r], &attrs, &HashMap::new(), &mut builder);
         assert!(result.is_ok());
     }
 
@@ -1270,7 +1270,7 @@ mod tests {
                 ..Default::default()
             }];
 
-            let result = translate_rnn(&vec![x, w, r], &attrs, &HashMap::new(), &mut builder);
+            let result = translate_rnn(&[x, w, r], &attrs, &HashMap::new(), &mut builder);
             assert!(
                 result.is_ok(),
                 "Expected success for hidden_size={}",

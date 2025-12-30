@@ -230,7 +230,7 @@ mod tests {
         let mut builder = make_builder();
         let input = builder.add_input("X", f32_tensor(&[2, 3, 4]));
 
-        let result = translate_sqrt(&vec![input], &[], &HashMap::new(), &mut builder);
+        let result = translate_sqrt(&[input], &[], &HashMap::new(), &mut builder);
         assert!(result.is_ok());
     }
 
@@ -239,7 +239,7 @@ mod tests {
         let mut builder = make_builder();
         let input = builder.add_input("X", f32_tensor(&[]));
 
-        let result = translate_sqrt(&vec![input], &[], &HashMap::new(), &mut builder);
+        let result = translate_sqrt(&[input], &[], &HashMap::new(), &mut builder);
         assert!(result.is_ok());
     }
 
@@ -259,7 +259,7 @@ mod tests {
         let mut builder = make_builder();
         let input = builder.add_input("X", f32_tensor(&[2, 3, 4]));
 
-        let result = translate_exp(&vec![input], &[], &HashMap::new(), &mut builder);
+        let result = translate_exp(&[input], &[], &HashMap::new(), &mut builder);
         assert!(result.is_ok());
     }
 
@@ -268,7 +268,7 @@ mod tests {
         let mut builder = make_builder();
         let input = builder.add_input("X", f32_tensor(&[]));
 
-        let result = translate_exp(&vec![input], &[], &HashMap::new(), &mut builder);
+        let result = translate_exp(&[input], &[], &HashMap::new(), &mut builder);
         assert!(result.is_ok());
     }
 
@@ -281,7 +281,7 @@ mod tests {
         let mut builder = make_builder();
         let input = builder.add_input("X", f32_tensor(&[2, 3, 4]));
 
-        let result = translate_log(&vec![input], &[], &HashMap::new(), &mut builder);
+        let result = translate_log(&[input], &[], &HashMap::new(), &mut builder);
         assert!(result.is_ok());
     }
 
@@ -290,7 +290,7 @@ mod tests {
         let mut builder = make_builder();
         let input = builder.add_input("X", f32_tensor(&[]));
 
-        let result = translate_log(&vec![input], &[], &HashMap::new(), &mut builder);
+        let result = translate_log(&[input], &[], &HashMap::new(), &mut builder);
         assert!(result.is_ok());
     }
 
@@ -303,7 +303,7 @@ mod tests {
         let mut builder = make_builder();
         let input = builder.add_input("X", f32_tensor(&[2, 3, 4]));
 
-        let result = translate_neg(&vec![input], &[], &HashMap::new(), &mut builder);
+        let result = translate_neg(&[input], &[], &HashMap::new(), &mut builder);
         assert!(result.is_ok());
     }
 
@@ -312,7 +312,7 @@ mod tests {
         let mut builder = make_builder();
         let input = builder.add_input("X", f32_tensor(&[]));
 
-        let result = translate_neg(&vec![input], &[], &HashMap::new(), &mut builder);
+        let result = translate_neg(&[input], &[], &HashMap::new(), &mut builder);
         assert!(result.is_ok());
     }
 
@@ -325,7 +325,7 @@ mod tests {
         let mut builder = make_builder();
         let input = builder.add_input("X", f32_tensor(&[2, 3, 4]));
 
-        let result = translate_abs(&vec![input], &[], &HashMap::new(), &mut builder);
+        let result = translate_abs(&[input], &[], &HashMap::new(), &mut builder);
         assert!(result.is_ok());
     }
 
@@ -334,7 +334,7 @@ mod tests {
         let mut builder = make_builder();
         let input = builder.add_input("X", f32_tensor(&[]));
 
-        let result = translate_abs(&vec![input], &[], &HashMap::new(), &mut builder);
+        let result = translate_abs(&[input], &[], &HashMap::new(), &mut builder);
         assert!(result.is_ok());
     }
 
@@ -347,7 +347,7 @@ mod tests {
         let mut builder = make_builder();
         let input = builder.add_input("X", f32_tensor(&[2, 3, 4]));
 
-        let result = translate_reciprocal(&vec![input], &[], &HashMap::new(), &mut builder);
+        let result = translate_reciprocal(&[input], &[], &HashMap::new(), &mut builder);
         assert!(result.is_ok());
     }
 
@@ -356,7 +356,7 @@ mod tests {
         let mut builder = make_builder();
         let input = builder.add_input("X", f32_tensor(&[]));
 
-        let result = translate_reciprocal(&vec![input], &[], &HashMap::new(), &mut builder);
+        let result = translate_reciprocal(&[input], &[], &HashMap::new(), &mut builder);
         assert!(result.is_ok());
     }
 }

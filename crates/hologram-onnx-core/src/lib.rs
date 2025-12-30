@@ -37,22 +37,38 @@
 #![deny(missing_docs)]
 #![warn(clippy::all)]
 
+pub mod bundle;
 mod config;
 mod error;
+pub mod interpreter;
+mod ir_to_graph;
 mod parser;
 mod partitioning;
+pub mod serialization;
 mod shapes;
 mod translator;
 mod weights;
 
 // Re-export public API
+pub use bundle::{BundleBuilder, BundleHeader, HoloBundle, ModelIndexEntry, is_bundle};
 pub use config::OnnxConfig;
 pub use error::{OnnxError, Result};
+pub use ir_to_graph::ir_to_operation_graph;
 pub use parser::{extract_opset_version, get_tensor_shape, parse_model, validate_model};
 pub use partitioning::{GraphPartition, GraphPartitioner};
+pub use serialization::{
+    // Serialization
+    serialize_ir_function, write_compiled_model, HoloHeader, HoloMetadata,
+    HoloSerializer, SerGraph, SerModel, SerNode, SerNodeKind, WeightEntry,
+    HOLO_MAGIC, FORMAT_VERSION, HEADER_SIZE, FLAG_EXTERNAL_WEIGHTS,
+    // Deserialization
+    HoloModel, load_holo_file, load_holo_bytes, validate_holo_file, inspect_holo_file,
+    InputSpec, OutputSpec, DimSpec,
+};
 pub use shapes::{Dim, Shape, SymbolicShape};
 pub use translator::{OperationGraph, lower_to_operation_graph};
 pub use weights::WeightData;
+pub use interpreter::{Interpreter, Tensor};
 
 // Note: OnnxCompiler has been moved to the top-level hologram-onnx crate
 // because it requires both core (parsing) and ops (translators).

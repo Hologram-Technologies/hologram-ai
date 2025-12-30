@@ -322,7 +322,7 @@ mod tests {
         let y = builder.add_input("Y", f32_tensor(&[2, 3]));
 
         let result =
-            translate_where(&vec![condition, x, y], &[], &HashMap::new(), &mut builder);
+            translate_where(&[condition, x, y], &[], &HashMap::new(), &mut builder);
         assert!(result.is_ok());
     }
 
@@ -331,7 +331,7 @@ mod tests {
         let mut builder = make_builder();
         let x = builder.add_input("X", f32_tensor(&[2, 3]));
 
-        let result = translate_where(&vec![x], &[], &HashMap::new(), &mut builder);
+        let result = translate_where(&[x], &[], &HashMap::new(), &mut builder);
         assert!(result.is_err());
     }
 
@@ -345,8 +345,17 @@ mod tests {
         let a = builder.add_input("A", f32_tensor(&[2, 3]));
         let b = builder.add_input("B", f32_tensor(&[2, 3]));
 
-        let result = translate_equal(&vec![a, b], &[], &HashMap::new(), &mut builder);
+        let result = translate_equal(&[a, b], &[], &HashMap::new(), &mut builder);
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_translate_equal_wrong_inputs() {
+        let mut builder = make_builder();
+        let a = builder.add_input("A", f32_tensor(&[2, 3]));
+
+        let result = translate_equal(&[a], &[], &HashMap::new(), &mut builder);
+        assert!(result.is_err());
     }
 
     #[test]
@@ -355,7 +364,7 @@ mod tests {
         let a = builder.add_input("A", f32_tensor(&[2, 3]));
         let b = builder.add_input("B", f32_tensor(&[2, 3]));
 
-        let result = translate_less(&vec![a, b], &[], &HashMap::new(), &mut builder);
+        let result = translate_less(&[a, b], &[], &HashMap::new(), &mut builder);
         assert!(result.is_ok());
     }
 
@@ -365,7 +374,7 @@ mod tests {
         let a = builder.add_input("A", f32_tensor(&[2, 3]));
         let b = builder.add_input("B", f32_tensor(&[2, 3]));
 
-        let result = translate_greater(&vec![a, b], &[], &HashMap::new(), &mut builder);
+        let result = translate_greater(&[a, b], &[], &HashMap::new(), &mut builder);
         assert!(result.is_ok());
     }
 
@@ -375,7 +384,7 @@ mod tests {
         let a = builder.add_input("A", f32_tensor(&[2, 3]));
         let b = builder.add_input("B", f32_tensor(&[2, 3]));
 
-        let result = translate_less_or_equal(&vec![a, b], &[], &HashMap::new(), &mut builder);
+        let result = translate_less_or_equal(&[a, b], &[], &HashMap::new(), &mut builder);
         assert!(result.is_ok());
     }
 
@@ -385,7 +394,7 @@ mod tests {
         let a = builder.add_input("A", f32_tensor(&[2, 3]));
         let b = builder.add_input("B", f32_tensor(&[2, 3]));
 
-        let result = translate_greater_or_equal(&vec![a, b], &[], &HashMap::new(), &mut builder);
+        let result = translate_greater_or_equal(&[a, b], &[], &HashMap::new(), &mut builder);
         assert!(result.is_ok());
     }
 
@@ -398,8 +407,15 @@ mod tests {
         let mut builder = make_builder();
         let input = builder.add_input("X", f32_tensor(&[2, 3]));
 
-        let result = translate_not(&vec![input], &[], &HashMap::new(), &mut builder);
+        let result = translate_not(&[input], &[], &HashMap::new(), &mut builder);
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_translate_not_wrong_inputs() {
+        let mut builder = make_builder();
+        let result = translate_not(&[], &[], &HashMap::new(), &mut builder);
+        assert!(result.is_err());
     }
 
     #[test]
@@ -408,7 +424,7 @@ mod tests {
         let a = builder.add_input("A", f32_tensor(&[2, 3]));
         let b = builder.add_input("B", f32_tensor(&[2, 3]));
 
-        let result = translate_and(&vec![a, b], &[], &HashMap::new(), &mut builder);
+        let result = translate_and(&[a, b], &[], &HashMap::new(), &mut builder);
         assert!(result.is_ok());
     }
 
@@ -418,7 +434,7 @@ mod tests {
         let a = builder.add_input("A", f32_tensor(&[2, 3]));
         let b = builder.add_input("B", f32_tensor(&[2, 3]));
 
-        let result = translate_or(&vec![a, b], &[], &HashMap::new(), &mut builder);
+        let result = translate_or(&[a, b], &[], &HashMap::new(), &mut builder);
         assert!(result.is_ok());
     }
 }

@@ -19,8 +19,10 @@ use std::collections::HashSet;
 
 /// Create a linear chain graph: node0 → node1 → node2 → ... → nodeN
 fn create_linear_graph(node_count: usize) -> GraphProto {
-    let mut graph = GraphProto::default();
-    graph.name = format!("linear_graph_{}", node_count);
+    let mut graph = GraphProto {
+        name: format!("linear_graph_{}", node_count),
+        ..Default::default()
+    };
 
     // Add input
     graph
@@ -28,9 +30,11 @@ fn create_linear_graph(node_count: usize) -> GraphProto {
         .push(make_value_info("input", &[1, 3, 224, 224]));
 
     for i in 0..node_count {
-        let mut node = NodeProto::default();
-        node.name = format!("node_{}", i);
-        node.op_type = "Relu".to_string();
+        let mut node = NodeProto {
+            name: format!("node_{}", i),
+            op_type: "Relu".to_string(),
+            ..Default::default()
+        };
 
         if i == 0 {
             node.input.push("input".to_string());
@@ -62,8 +66,10 @@ fn create_linear_graph(node_count: usize) -> GraphProto {
 ///     concat
 /// ```
 fn create_wide_graph(branch_count: usize, nodes_per_branch: usize) -> GraphProto {
-    let mut graph = GraphProto::default();
-    graph.name = format!("wide_graph_{}x{}", branch_count, nodes_per_branch);
+    let mut graph = GraphProto {
+        name: format!("wide_graph_{}x{}", branch_count, nodes_per_branch),
+        ..Default::default()
+    };
 
     // Add input
     graph
@@ -75,9 +81,11 @@ fn create_wide_graph(branch_count: usize, nodes_per_branch: usize) -> GraphProto
     // Create parallel branches
     for b in 0..branch_count {
         for n in 0..nodes_per_branch {
-            let mut node = NodeProto::default();
-            node.name = format!("branch{}_{}", b, n);
-            node.op_type = "Relu".to_string();
+            let mut node = NodeProto {
+                name: format!("branch{}_{}", b, n),
+                op_type: "Relu".to_string(),
+                ..Default::default()
+            };
 
             if n == 0 {
                 node.input.push("input".to_string());
@@ -97,18 +105,22 @@ fn create_wide_graph(branch_count: usize, nodes_per_branch: usize) -> GraphProto
     }
 
     // Create concat node that merges all branches
-    let mut concat_node = NodeProto::default();
-    concat_node.name = "concat".to_string();
-    concat_node.op_type = "Concat".to_string();
+    let mut concat_node = NodeProto {
+        name: "concat".to_string(),
+        op_type: "Concat".to_string(),
+        ..Default::default()
+    };
     for output in &branch_outputs {
         concat_node.input.push(output.clone());
     }
     concat_node.output.push("output".to_string());
 
     // Add axis attribute for concat
-    let mut axis_attr = AttributeProto::default();
-    axis_attr.name = "axis".to_string();
-    axis_attr.i = 1;
+    let axis_attr = AttributeProto {
+        name: "axis".to_string(),
+        i: 1,
+        ..Default::default()
+    };
     concat_node.attribute.push(axis_attr);
 
     graph.node.push(concat_node);
@@ -137,39 +149,49 @@ fn create_wide_graph(branch_count: usize, nodes_per_branch: usize) -> GraphProto
 ///        output
 /// ```
 fn create_diamond_graph() -> GraphProto {
-    let mut graph = GraphProto::default();
-    graph.name = "diamond_graph".to_string();
+    let mut graph = GraphProto {
+        name: "diamond_graph".to_string(),
+        ..Default::default()
+    };
 
     graph.input.push(make_value_info("input", &[1, 64]));
 
     // node0: input → split into two paths
-    let mut node0 = NodeProto::default();
-    node0.name = "node0".to_string();
-    node0.op_type = "Relu".to_string();
+    let mut node0 = NodeProto {
+        name: "node0".to_string(),
+        op_type: "Relu".to_string(),
+        ..Default::default()
+    };
     node0.input.push("input".to_string());
     node0.output.push("t0".to_string());
     graph.node.push(node0);
 
     // node1: left branch
-    let mut node1 = NodeProto::default();
-    node1.name = "node1".to_string();
-    node1.op_type = "Sigmoid".to_string();
+    let mut node1 = NodeProto {
+        name: "node1".to_string(),
+        op_type: "Sigmoid".to_string(),
+        ..Default::default()
+    };
     node1.input.push("t0".to_string());
     node1.output.push("t1".to_string());
     graph.node.push(node1);
 
     // node2: right branch
-    let mut node2 = NodeProto::default();
-    node2.name = "node2".to_string();
-    node2.op_type = "Tanh".to_string();
+    let mut node2 = NodeProto {
+        name: "node2".to_string(),
+        op_type: "Tanh".to_string(),
+        ..Default::default()
+    };
     node2.input.push("t0".to_string());
     node2.output.push("t2".to_string());
     graph.node.push(node2);
 
     // node3: merge paths
-    let mut node3 = NodeProto::default();
-    node3.name = "node3".to_string();
-    node3.op_type = "Add".to_string();
+    let mut node3 = NodeProto {
+        name: "node3".to_string(),
+        op_type: "Add".to_string(),
+        ..Default::default()
+    };
     node3.input.push("t1".to_string());
     node3.input.push("t2".to_string());
     node3.output.push("output".to_string());
@@ -191,8 +213,10 @@ fn create_diamond_graph() -> GraphProto {
 ///         conv3 → bn3 ─────────────────→ add → relu
 /// ```
 fn create_resnet_block_graph(num_blocks: usize) -> GraphProto {
-    let mut graph = GraphProto::default();
-    graph.name = format!("resnet_blocks_{}", num_blocks);
+    let mut graph = GraphProto {
+        name: format!("resnet_blocks_{}", num_blocks),
+        ..Default::default()
+    };
 
     graph.input.push(make_value_info("input", &[1, 64, 56, 56]));
 
@@ -209,18 +233,22 @@ fn create_resnet_block_graph(num_blocks: usize) -> GraphProto {
         let relu2_out = format!("block{}_out", block);
 
         // Conv1
-        let mut conv1 = NodeProto::default();
-        conv1.name = format!("block{}_conv1", block);
-        conv1.op_type = "Conv".to_string();
+        let mut conv1 = NodeProto {
+            name: format!("block{}_conv1", block),
+            op_type: "Conv".to_string(),
+            ..Default::default()
+        };
         conv1.input.push(current_input.clone());
         conv1.input.push(format!("block{}_conv1_weight", block));
         conv1.output.push(conv1_out.clone());
         graph.node.push(conv1);
 
         // BN1
-        let mut bn1 = NodeProto::default();
-        bn1.name = format!("block{}_bn1", block);
-        bn1.op_type = "BatchNormalization".to_string();
+        let mut bn1 = NodeProto {
+            name: format!("block{}_bn1", block),
+            op_type: "BatchNormalization".to_string(),
+            ..Default::default()
+        };
         bn1.input.push(conv1_out);
         bn1.input.push(format!("block{}_bn1_scale", block));
         bn1.input.push(format!("block{}_bn1_bias", block));
@@ -230,26 +258,32 @@ fn create_resnet_block_graph(num_blocks: usize) -> GraphProto {
         graph.node.push(bn1);
 
         // ReLU1
-        let mut relu1 = NodeProto::default();
-        relu1.name = format!("block{}_relu1", block);
-        relu1.op_type = "Relu".to_string();
+        let mut relu1 = NodeProto {
+            name: format!("block{}_relu1", block),
+            op_type: "Relu".to_string(),
+            ..Default::default()
+        };
         relu1.input.push(bn1_out);
         relu1.output.push(relu1_out.clone());
         graph.node.push(relu1);
 
         // Conv2
-        let mut conv2 = NodeProto::default();
-        conv2.name = format!("block{}_conv2", block);
-        conv2.op_type = "Conv".to_string();
+        let mut conv2 = NodeProto {
+            name: format!("block{}_conv2", block),
+            op_type: "Conv".to_string(),
+            ..Default::default()
+        };
         conv2.input.push(relu1_out);
         conv2.input.push(format!("block{}_conv2_weight", block));
         conv2.output.push(conv2_out.clone());
         graph.node.push(conv2);
 
         // BN2
-        let mut bn2 = NodeProto::default();
-        bn2.name = format!("block{}_bn2", block);
-        bn2.op_type = "BatchNormalization".to_string();
+        let mut bn2 = NodeProto {
+            name: format!("block{}_bn2", block),
+            op_type: "BatchNormalization".to_string(),
+            ..Default::default()
+        };
         bn2.input.push(conv2_out);
         bn2.input.push(format!("block{}_bn2_scale", block));
         bn2.input.push(format!("block{}_bn2_bias", block));
@@ -259,18 +293,22 @@ fn create_resnet_block_graph(num_blocks: usize) -> GraphProto {
         graph.node.push(bn2);
 
         // Add (skip connection)
-        let mut add = NodeProto::default();
-        add.name = format!("block{}_add", block);
-        add.op_type = "Add".to_string();
+        let mut add = NodeProto {
+            name: format!("block{}_add", block),
+            op_type: "Add".to_string(),
+            ..Default::default()
+        };
         add.input.push(bn2_out);
         add.input.push(current_input.clone()); // Skip connection
         add.output.push(add_out.clone());
         graph.node.push(add);
 
         // ReLU2
-        let mut relu2 = NodeProto::default();
-        relu2.name = format!("block{}_relu2", block);
-        relu2.op_type = "Relu".to_string();
+        let mut relu2 = NodeProto {
+            name: format!("block{}_relu2", block),
+            op_type: "Relu".to_string(),
+            ..Default::default()
+        };
         relu2.input.push(add_out);
         relu2.output.push(relu2_out.clone());
         graph.node.push(relu2);
@@ -287,8 +325,10 @@ fn create_resnet_block_graph(num_blocks: usize) -> GraphProto {
 
 /// Create a UNet-style encoder-decoder graph with skip connections.
 fn create_unet_style_graph(depth: usize, nodes_per_level: usize) -> GraphProto {
-    let mut graph = GraphProto::default();
-    graph.name = format!("unet_style_d{}_n{}", depth, nodes_per_level);
+    let mut graph = GraphProto {
+        name: format!("unet_style_d{}_n{}", depth, nodes_per_level),
+        ..Default::default()
+    };
 
     graph
         .input
@@ -302,9 +342,11 @@ fn create_unet_style_graph(depth: usize, nodes_per_level: usize) -> GraphProto {
         for node in 0..nodes_per_level {
             let output_name = format!("enc_l{}_n{}", level, node);
 
-            let mut n = NodeProto::default();
-            n.name = output_name.clone();
-            n.op_type = if node % 2 == 0 { "Conv" } else { "Relu" }.to_string();
+            let mut n = NodeProto {
+                name: output_name.clone(),
+                op_type: if node % 2 == 0 { "Conv" } else { "Relu" }.to_string(),
+                ..Default::default()
+            };
             n.input.push(current_tensor.clone());
             if n.op_type == "Conv" {
                 n.input.push(format!("enc_l{}_n{}_weight", level, node));
@@ -320,9 +362,11 @@ fn create_unet_style_graph(depth: usize, nodes_per_level: usize) -> GraphProto {
         // Downsample (except at bottom)
         if level < depth - 1 {
             let pool_out = format!("enc_pool_{}", level);
-            let mut pool = NodeProto::default();
-            pool.name = pool_out.clone();
-            pool.op_type = "MaxPool".to_string();
+            let mut pool = NodeProto {
+                name: pool_out.clone(),
+                op_type: "MaxPool".to_string(),
+                ..Default::default()
+            };
             pool.input.push(current_tensor.clone());
             pool.output.push(pool_out.clone());
             graph.node.push(pool);
@@ -334,18 +378,22 @@ fn create_unet_style_graph(depth: usize, nodes_per_level: usize) -> GraphProto {
     for level in (0..depth - 1).rev() {
         // Upsample
         let upsample_out = format!("dec_upsample_{}", level);
-        let mut upsample = NodeProto::default();
-        upsample.name = upsample_out.clone();
-        upsample.op_type = "Resize".to_string();
+        let mut upsample = NodeProto {
+            name: upsample_out.clone(),
+            op_type: "Resize".to_string(),
+            ..Default::default()
+        };
         upsample.input.push(current_tensor.clone());
         upsample.output.push(upsample_out.clone());
         graph.node.push(upsample);
 
         // Concat with encoder skip connection
         let concat_out = format!("dec_concat_{}", level);
-        let mut concat = NodeProto::default();
-        concat.name = concat_out.clone();
-        concat.op_type = "Concat".to_string();
+        let mut concat = NodeProto {
+            name: concat_out.clone(),
+            op_type: "Concat".to_string(),
+            ..Default::default()
+        };
         concat.input.push(upsample_out);
         concat.input.push(encoder_outputs[level].clone()); // Skip connection
         concat.output.push(concat_out.clone());
@@ -357,9 +405,11 @@ fn create_unet_style_graph(depth: usize, nodes_per_level: usize) -> GraphProto {
         for node in 0..nodes_per_level {
             let output_name = format!("dec_l{}_n{}", level, node);
 
-            let mut n = NodeProto::default();
-            n.name = output_name.clone();
-            n.op_type = if node % 2 == 0 { "Conv" } else { "Relu" }.to_string();
+            let mut n = NodeProto {
+                name: output_name.clone(),
+                op_type: if node % 2 == 0 { "Conv" } else { "Relu" }.to_string(),
+                ..Default::default()
+            };
             n.input.push(current_tensor.clone());
             if n.op_type == "Conv" {
                 n.input.push(format!("dec_l{}_n{}_weight", level, node));
@@ -372,9 +422,11 @@ fn create_unet_style_graph(depth: usize, nodes_per_level: usize) -> GraphProto {
     }
 
     // Final output conv
-    let mut final_conv = NodeProto::default();
-    final_conv.name = "final_conv".to_string();
-    final_conv.op_type = "Conv".to_string();
+    let mut final_conv = NodeProto {
+        name: "final_conv".to_string(),
+        op_type: "Conv".to_string(),
+        ..Default::default()
+    };
     final_conv.input.push(current_tensor);
     final_conv.input.push("final_conv_weight".to_string());
     final_conv.output.push("output".to_string());
@@ -580,7 +632,7 @@ fn test_partitioning_diamond_graph() {
     let partitions = partitioner.partition(&graph).unwrap();
 
     // Diamond with 4 nodes, partition size 2 → 2 partitions
-    assert!(partitions.len() >= 1);
+    assert!(!partitions.is_empty());
 
     // Total should be 4 nodes
     let total: usize = partitions.iter().map(|p| p.node_count()).sum();
@@ -777,12 +829,16 @@ fn test_original_indices_no_duplicates() {
 
 #[test]
 fn test_single_node_graph() {
-    let mut graph = GraphProto::default();
-    graph.name = "single_node".to_string();
+    let mut graph = GraphProto {
+        name: "single_node".to_string(),
+        ..Default::default()
+    };
 
-    let mut node = NodeProto::default();
-    node.name = "node0".to_string();
-    node.op_type = "Relu".to_string();
+    let mut node = NodeProto {
+        name: "node0".to_string(),
+        op_type: "Relu".to_string(),
+        ..Default::default()
+    };
     node.input.push("input".to_string());
     node.output.push("output".to_string());
     graph.node.push(node);

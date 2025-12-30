@@ -13,6 +13,7 @@ path = "src/main.rs"
 hologram-onnx-core.workspace = true
 hologram-onnx-spec.workspace = true
 hologram-onnx-ops.workspace = true
+hologram-onnx-config.workspace = true
 
 # Hologram compiler
 hologram-compiler.workspace = true
@@ -31,6 +32,9 @@ serde_json = "1.0"
 # Logging
 tracing.workspace = true
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Image processing
+image.workspace = true
 
 [dev-dependencies]
 tempfile = "3.8"

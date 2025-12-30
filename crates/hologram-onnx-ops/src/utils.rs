@@ -303,7 +303,7 @@ mod tests {
             parse_attr_ints(&attrs, "any", vec![1, 2]).unwrap(),
             vec![1, 2]
         );
-        assert_eq!(parse_attr_float(&attrs, "any", 3.14).unwrap(), 3.14);
+        assert_eq!(parse_attr_float(&attrs, "any", 2.5).unwrap(), 2.5);
         assert_eq!(
             parse_attr_floats(&attrs, "any", vec![1.0]).unwrap(),
             vec![1.0]

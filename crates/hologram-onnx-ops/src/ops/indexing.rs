@@ -157,7 +157,7 @@ pub fn translate_slice(
 ///
 /// - Input 0: data - Tensor of rank r
 /// - Input 1: indices - Tensor of rank r with same shape except possibly
-///            the dimension at axis
+///   the dimension at axis
 ///
 /// # Attributes
 ///
@@ -221,7 +221,7 @@ mod tests {
 
         let attrs = vec![make_int_attr("axis", 0)];
 
-        let result = translate_gather(&vec![data, indices], &attrs, &HashMap::new(), &mut builder);
+        let result = translate_gather(&[data, indices], &attrs, &HashMap::new(), &mut builder);
         assert!(result.is_ok());
     }
 
@@ -233,7 +233,7 @@ mod tests {
 
         let attrs = vec![make_int_attr("axis", 1)];
 
-        let result = translate_gather(&vec![data, indices], &attrs, &HashMap::new(), &mut builder);
+        let result = translate_gather(&[data, indices], &attrs, &HashMap::new(), &mut builder);
         assert!(result.is_ok());
     }
 
@@ -243,7 +243,7 @@ mod tests {
         let data = builder.add_input("data", f32_tensor(&[]));
         let indices = builder.add_input("indices", f32_tensor(&[]));
 
-        let result = translate_gather(&vec![data, indices], &[], &HashMap::new(), &mut builder);
+        let result = translate_gather(&[data, indices], &[], &HashMap::new(), &mut builder);
         assert!(result.is_ok());
     }
 
@@ -252,7 +252,7 @@ mod tests {
         let mut builder = make_builder();
         let data = builder.add_input("data", f32_tensor(&[10, 768]));
 
-        let result = translate_gather(&vec![data], &[], &HashMap::new(), &mut builder);
+        let result = translate_gather(&[data], &[], &HashMap::new(), &mut builder);
         assert!(result.is_err());
     }
 
@@ -268,7 +268,7 @@ mod tests {
         let ends = builder.add_input("ends", f32_tensor(&[3]));
 
         let result = translate_slice(
-            &vec![data, starts, ends],
+            &[data, starts, ends],
             &[],
             &HashMap::new(),
             &mut builder
@@ -285,7 +285,7 @@ mod tests {
         let axes = builder.add_input("axes", f32_tensor(&[1]));
 
         let result = translate_slice(
-            &vec![data, starts, ends, axes],
+            &[data, starts, ends, axes],
             &[],
             &HashMap::new(),
             &mut builder
@@ -303,7 +303,7 @@ mod tests {
         let steps = builder.add_input("steps", f32_tensor(&[1]));
 
         let result = translate_slice(
-            &vec![data, starts, ends, axes, steps],
+            &[data, starts, ends, axes, steps],
             &[],
             &HashMap::new(),
             &mut builder
@@ -318,7 +318,7 @@ mod tests {
         let starts = builder.add_input("starts", f32_tensor(&[3]));
 
         // Only 2 inputs (needs at least 3)
-        let result = translate_slice(&vec![data, starts], &[], &HashMap::new(), &mut builder);
+        let result = translate_slice(&[data, starts], &[], &HashMap::new(), &mut builder);
         assert!(result.is_err());
     }
 
@@ -335,11 +335,20 @@ mod tests {
         let attrs = vec![make_int_attr("axis", 0)];
 
         let result = translate_gather_elements(
-            &vec![data, indices],
+            &[data, indices],
             &attrs,
             &HashMap::new(),
             &mut builder
         );
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_translate_gather_elements_wrong_inputs() {
+        let mut builder = make_builder();
+        let data = builder.add_input("data", f32_tensor(&[3, 3]));
+
+        let result = translate_gather_elements(&[data], &[], &HashMap::new(), &mut builder);
+        assert!(result.is_err());
     }
 }

@@ -3,14 +3,17 @@
 //! These tests verify the full pipeline: config → handler → process → save.
 
 use std::collections::HashMap;
-use std::fs;
 use tempfile::TempDir;
 
 use hologram_onnx_config::{
-    ConfigError, OutputHandler, OutputHandlerConfig, OutputHandlerRegistry, PipelineConfig,
-    ProcessedOutput, TensorData,
+    ConfigError, OutputHandlerConfig, OutputHandlerRegistry, PipelineConfig, TensorData,
 };
 
+#[cfg(any(feature = "image-output", feature = "audio-output"))]
+use std::fs;
+
+#[cfg(any(feature = "image-output", feature = "audio-output"))]
+use hologram_onnx_config::ProcessedOutput;
 // ============================================================================
 // Test Fixtures and Helpers
 // ============================================================================
@@ -33,6 +36,7 @@ fn minimal_config() -> PipelineConfig {
 /// Create mock image tensor data (NCHW format, [0,1] range).
 ///
 /// Returns a 4D tensor [batch=1, channels=3, height, width] with gradient pattern.
+#[cfg(feature = "image-output")]
 fn mock_image_tensor_nchw(height: usize, width: usize) -> TensorData {
     let channels = 3;
     let mut data = Vec::with_capacity(channels * height * width);
@@ -57,6 +61,7 @@ fn mock_image_tensor_nchw(height: usize, width: usize) -> TensorData {
 }
 
 /// Create mock image tensor data (NHWC format, [0,1] range).
+#[cfg(feature = "image-output")]
 fn mock_image_tensor_nhwc(height: usize, width: usize) -> TensorData {
     let channels = 3;
     let mut data = Vec::with_capacity(height * width * channels);
@@ -74,6 +79,7 @@ fn mock_image_tensor_nhwc(height: usize, width: usize) -> TensorData {
 }
 
 /// Create mock grayscale image tensor (NCHW).
+#[cfg(feature = "image-output")]
 fn mock_grayscale_tensor(height: usize, width: usize) -> TensorData {
     let mut data = Vec::with_capacity(height * width);
 
@@ -87,6 +93,7 @@ fn mock_grayscale_tensor(height: usize, width: usize) -> TensorData {
 }
 
 /// Create mock audio tensor (mono, 1 second at given sample rate).
+#[cfg(feature = "audio-output")]
 fn mock_audio_tensor_mono(sample_rate: usize) -> TensorData {
     let mut data = Vec::with_capacity(sample_rate);
 
@@ -101,6 +108,7 @@ fn mock_audio_tensor_mono(sample_rate: usize) -> TensorData {
 }
 
 /// Create mock audio tensor (stereo, 1 second).
+#[cfg(feature = "audio-output")]
 fn mock_audio_tensor_stereo(sample_rate: usize) -> TensorData {
     let mut data = Vec::with_capacity(sample_rate * 2);
 
@@ -332,7 +340,6 @@ fn test_registry_creation() {
     let _registry = OutputHandlerRegistry::new();
     // Registry should be created successfully
     // Available handlers depend on enabled features
-    assert!(true); // Registry created without panic
 }
 
 #[test]
@@ -821,6 +828,14 @@ fn test_multi_handler_creation_from_config() {
         assert!(handlers.contains_key("image"));
         assert!(handlers.contains_key("audio"));
     }
+
+    #[cfg(not(all(feature = "image-output", feature = "audio-output")))]
+    {
+        match registry.create_handlers(&owned_configs) {
+            Ok(_) => panic!("Expected create_handlers to fail without required features"),
+            Err(err) => assert!(err.to_string().contains("feature")),
+        }
+    }
 }
 
 #[cfg(all(feature = "image-output", feature = "audio-output"))]
@@ -909,10 +924,11 @@ fn test_tensor_data_empty() {
 #[test]
 fn test_tensor_data_4d() {
     // Simulate NCHW tensor
-    let tensor = TensorData::new(vec![0.0; 1 * 3 * 64 * 64], vec![1, 3, 64, 64]);
+    let element_count = 3 * 64 * 64;
+    let tensor = TensorData::new(vec![0.0; element_count], vec![1, 3, 64, 64]);
 
     assert_eq!(tensor.ndim(), 4);
-    assert_eq!(tensor.len(), 1 * 3 * 64 * 64);
+    assert_eq!(tensor.len(), element_count);
     assert_eq!(tensor.shape[0], 1); // batch
     assert_eq!(tensor.shape[1], 3); // channels
     assert_eq!(tensor.shape[2], 64); // height

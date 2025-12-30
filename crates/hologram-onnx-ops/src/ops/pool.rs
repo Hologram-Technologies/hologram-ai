@@ -316,7 +316,7 @@ mod tests {
 
         let attrs = vec![make_ints_attr("kernel_shape", vec![2, 2])];
 
-        let result = translate_max_pool(&vec![input], &attrs, &HashMap::new(), &mut builder);
+        let result = translate_max_pool(&[input], &attrs, &HashMap::new(), &mut builder);
         assert!(result.is_ok());
     }
 
@@ -331,7 +331,7 @@ mod tests {
             make_ints_attr("pads", vec![1, 1, 1, 1]),
         ];
 
-        let result = translate_max_pool(&vec![input], &attrs, &HashMap::new(), &mut builder);
+        let result = translate_max_pool(&[input], &attrs, &HashMap::new(), &mut builder);
         assert!(result.is_ok());
     }
 
@@ -340,7 +340,7 @@ mod tests {
         let mut builder = make_builder();
         let input = builder.add_input("X", f32_tensor(&[1, 64, 224, 224]));
 
-        let result = translate_max_pool(&vec![input], &[], &HashMap::new(), &mut builder);
+        let result = translate_max_pool(&[input], &[], &HashMap::new(), &mut builder);
         assert!(result.is_err());
         assert!(matches!(
             result.unwrap_err(),
@@ -354,7 +354,7 @@ mod tests {
 
         let attrs = vec![make_ints_attr("kernel_shape", vec![2, 2])];
 
-        let result = translate_max_pool(&vec![], &attrs, &HashMap::new(), &mut builder);
+        let result = translate_max_pool(&[], &attrs, &HashMap::new(), &mut builder);
         assert!(result.is_err());
         assert!(matches!(result.unwrap_err(), OnnxError::InvalidModel(_)));
     }
@@ -366,7 +366,7 @@ mod tests {
 
         let attrs = vec![make_ints_attr("kernel_shape", vec![2, 2])];
 
-        let result = translate_average_pool(&vec![input], &attrs, &HashMap::new(), &mut builder);
+        let result = translate_average_pool(&[input], &attrs, &HashMap::new(), &mut builder);
         assert!(result.is_ok());
     }
 
@@ -380,7 +380,7 @@ mod tests {
             make_ints_attr("strides", vec![2, 2]),
         ];
 
-        let result = translate_average_pool(&vec![input], &attrs, &HashMap::new(), &mut builder);
+        let result = translate_average_pool(&[input], &attrs, &HashMap::new(), &mut builder);
         assert!(result.is_ok());
     }
 
@@ -390,7 +390,7 @@ mod tests {
         let input = builder.add_input("X", f32_tensor(&[1, 2048, 7, 7]));
 
         let result =
-            translate_global_average_pool(&vec![input], &[], &HashMap::new(), &mut builder);
+            translate_global_average_pool(&[input], &[], &HashMap::new(), &mut builder);
         assert!(result.is_ok());
     }
 
@@ -398,7 +398,7 @@ mod tests {
     fn test_translate_global_average_pool_no_input() {
         let mut builder = make_builder();
 
-        let result = translate_global_average_pool(&vec![], &[], &HashMap::new(), &mut builder);
+        let result = translate_global_average_pool(&[], &[], &HashMap::new(), &mut builder);
         assert!(result.is_err());
     }
 
@@ -464,8 +464,8 @@ mod tests {
         let shapes = HashMap::new();
 
         // All pooling ops should work with symbolic shapes
-        assert!(translate_max_pool(&vec![input], &attrs, &shapes, &mut builder).is_ok());
-        assert!(translate_average_pool(&vec![input], &attrs, &shapes, &mut builder).is_ok());
-        assert!(translate_global_average_pool(&vec![input], &[], &shapes, &mut builder).is_ok());
+        assert!(translate_max_pool(&[input], &attrs, &shapes, &mut builder).is_ok());
+        assert!(translate_average_pool(&[input], &attrs, &shapes, &mut builder).is_ok());
+        assert!(translate_global_average_pool(&[input], &[], &shapes, &mut builder).is_ok());
     }
 }

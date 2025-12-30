@@ -473,7 +473,7 @@ mod tests {
         let data = builder.add_input("data", f32_tensor(&[2, 3, 4]));
         let shape = builder.add_input("shape", f32_tensor(&[2]));
 
-        let result = translate_reshape(&vec![data, shape], &[], &HashMap::new(), &mut builder);
+        let result = translate_reshape(&[data, shape], &[], &HashMap::new(), &mut builder);
         // Dynamic reshape uses Call node
         assert!(result.is_ok());
     }
@@ -484,7 +484,7 @@ mod tests {
         let data = builder.add_input("data", f32_tensor(&[2, 3]));
 
         // Only 1 input (needs 2)
-        let result = translate_reshape(&vec![data], &[], &HashMap::new(), &mut builder);
+        let result = translate_reshape(&[data], &[], &HashMap::new(), &mut builder);
         assert!(result.is_err());
         assert!(matches!(result.unwrap_err(), OnnxError::InvalidModel(_)));
     }
@@ -495,7 +495,7 @@ mod tests {
         let input = builder.add_input("X", f32_tensor(&[2, 3, 4]));
 
         // No perm attribute means reverse dimensions
-        let result = translate_transpose(&vec![input], &[], &HashMap::new(), &mut builder);
+        let result = translate_transpose(&[input], &[], &HashMap::new(), &mut builder);
         assert!(result.is_ok());
     }
 
@@ -506,7 +506,7 @@ mod tests {
 
         let attrs = vec![make_ints_attr("perm", vec![2, 0, 1])];
 
-        let result = translate_transpose(&vec![input], &attrs, &HashMap::new(), &mut builder);
+        let result = translate_transpose(&[input], &attrs, &HashMap::new(), &mut builder);
         assert!(result.is_ok());
     }
 
@@ -516,7 +516,7 @@ mod tests {
         let input = builder.add_input("X", f32_tensor(&[1, 2, 1, 3]));
 
         // Squeeze uses Call node
-        let result = translate_squeeze(&vec![input], &[], &HashMap::new(), &mut builder);
+        let result = translate_squeeze(&[input], &[], &HashMap::new(), &mut builder);
         assert!(result.is_ok());
     }
 
@@ -527,7 +527,7 @@ mod tests {
         let axes = builder.add_input("axes", f32_tensor(&[2]));
 
         // Squeeze with axes input (opset 13+)
-        let result = translate_squeeze(&vec![input, axes], &[], &HashMap::new(), &mut builder);
+        let result = translate_squeeze(&[input, axes], &[], &HashMap::new(), &mut builder);
         assert!(result.is_ok());
     }
 
@@ -538,7 +538,7 @@ mod tests {
         let axes = builder.add_input("axes", f32_tensor(&[2]));
 
         // Unsqueeze with axes input (opset 13+)
-        let result = translate_unsqueeze(&vec![input, axes], &[], &HashMap::new(), &mut builder);
+        let result = translate_unsqueeze(&[input, axes], &[], &HashMap::new(), &mut builder);
         assert!(result.is_ok());
     }
 
@@ -550,7 +550,7 @@ mod tests {
         let attrs = vec![make_ints_attr("axes", vec![0, 3])];
 
         // Unsqueeze with axes attribute (opset < 13)
-        let result = translate_unsqueeze(&vec![input], &attrs, &HashMap::new(), &mut builder);
+        let result = translate_unsqueeze(&[input], &attrs, &HashMap::new(), &mut builder);
         assert!(result.is_ok());
     }
 
@@ -560,7 +560,7 @@ mod tests {
         let input = builder.add_input("X", f32_tensor(&[2, 3]));
 
         // No axes attribute and no axes input should fail with InvalidAttribute
-        let result = translate_unsqueeze(&vec![input], &[], &HashMap::new(), &mut builder);
+        let result = translate_unsqueeze(&[input], &[], &HashMap::new(), &mut builder);
         assert!(result.is_err());
         assert!(matches!(
             result.unwrap_err(),
@@ -577,7 +577,7 @@ mod tests {
 
         let attrs = vec![make_int_attr("axis", 1)];
 
-        let result = translate_concat(&vec![a, b, c], &attrs, &HashMap::new(), &mut builder);
+        let result = translate_concat(&[a, b, c], &attrs, &HashMap::new(), &mut builder);
         assert!(result.is_ok());
     }
 
@@ -589,7 +589,7 @@ mod tests {
         let attrs = vec![make_int_attr("axis", 0)];
 
         // Only 1 input (needs at least 2)
-        let result = translate_concat(&vec![a], &attrs, &HashMap::new(), &mut builder);
+        let result = translate_concat(&[a], &attrs, &HashMap::new(), &mut builder);
         assert!(result.is_err());
         assert!(matches!(result.unwrap_err(), OnnxError::InvalidModel(_)));
     }
@@ -601,7 +601,7 @@ mod tests {
         let b = builder.add_input("B", f32_tensor(&[2, 3]));
 
         // No axis attribute should fail
-        let result = translate_concat(&vec![a, b], &[], &HashMap::new(), &mut builder);
+        let result = translate_concat(&[a, b], &[], &HashMap::new(), &mut builder);
         assert!(result.is_err());
         assert!(matches!(
             result.unwrap_err(),
@@ -617,7 +617,7 @@ mod tests {
         let attrs = vec![make_int_attr("axis", 1)];
 
         // Split uses Call node
-        let result = translate_split(&vec![input], &attrs, &HashMap::new(), &mut builder);
+        let result = translate_split(&[input], &attrs, &HashMap::new(), &mut builder);
         assert!(result.is_ok());
     }
 
@@ -630,7 +630,7 @@ mod tests {
         let attrs = vec![make_int_attr("axis", 1)];
 
         // Split with sizes input (opset 13+)
-        let result = translate_split(&vec![input, split_sizes], &attrs, &HashMap::new(), &mut builder);
+        let result = translate_split(&[input, split_sizes], &attrs, &HashMap::new(), &mut builder);
         assert!(result.is_ok());
     }
 
@@ -638,7 +638,7 @@ mod tests {
     fn test_transpose_empty_input() {
         let mut builder = make_builder();
 
-        let result = translate_transpose(&vec![], &[], &HashMap::new(), &mut builder);
+        let result = translate_transpose(&[], &[], &HashMap::new(), &mut builder);
         assert!(result.is_err());
         assert!(matches!(result.unwrap_err(), OnnxError::InvalidModel(_)));
     }

@@ -19,6 +19,13 @@ use hologram_onnx_core::{OnnxConfig, SymbolicShape, parse_model, validate_model}
 use hologram_onnx_ops::translate_onnx_op;
 use tempfile::TempDir;
 
+fn hologram_onnx_bin() -> std::path::PathBuf {
+    std::env::var("CARGO_BIN_EXE_hologram-onnx")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|err| {
+            panic!("CARGO_BIN_EXE_hologram-onnx not set: {}", err)
+        })
+}
 // ============================================================================
 // Test Fixtures
 // ============================================================================
@@ -229,7 +236,7 @@ fn test_sd_unet_compilation() {
     use std::process::Command;
 
     // UNet requires partitioning due to size
-    let status = Command::new(env!("CARGO_BIN_EXE_hologram-onnx"))
+    let status = Command::new(hologram_onnx_bin())
         .args([
             "compile",
             unet_path.to_str().unwrap(),
@@ -329,7 +336,7 @@ fn test_sd_vae_decoder_compilation() {
 
     use std::process::Command;
 
-    let status = Command::new(env!("CARGO_BIN_EXE_hologram-onnx"))
+    let status = Command::new(hologram_onnx_bin())
         .args([
             "compile",
             vae_path.to_str().unwrap(),
@@ -417,7 +424,7 @@ fn test_sd_text_encoder_compilation() {
 
     use std::process::Command;
 
-    let status = Command::new(env!("CARGO_BIN_EXE_hologram-onnx"))
+    let status = Command::new(hologram_onnx_bin())
         .args([
             "compile",
             text_path.to_str().unwrap(),
@@ -487,7 +494,7 @@ fn test_sd_full_pipeline_compilation() {
             ]);
         }
 
-        let status = Command::new(env!("CARGO_BIN_EXE_hologram-onnx"))
+        let status = Command::new(hologram_onnx_bin())
             .args(&args)
             .status()
             .expect("Failed to run hologram-onnx compile");

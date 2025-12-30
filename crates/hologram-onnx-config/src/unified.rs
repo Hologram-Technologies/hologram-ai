@@ -179,10 +179,11 @@ pub struct InputSpec {
 }
 
 /// Supported input types.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum InputType {
     /// Text input (string)
+    #[default]
     Text,
     /// Image input (path or base64)
     Image,
@@ -196,12 +197,6 @@ pub enum InputType {
     Float,
     /// File path input
     Path,
-}
-
-impl Default for InputType {
-    fn default() -> Self {
-        Self::Text
-    }
 }
 
 // =============================================================================
@@ -570,7 +565,7 @@ impl Expr {
         match self {
             Self::Literal(serde_json::Value::String(s)) => {
                 // References are strings that look like "var.output" or "var"
-                !s.starts_with('"') && !s.parse::<f64>().is_ok()
+                !s.starts_with('"') && s.parse::<f64>().is_err()
             }
             _ => false,
         }
@@ -651,7 +646,7 @@ pub struct OutputSpec {
 }
 
 /// Output handler types.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum OutputHandlerType {
     /// Image output (PNG, JPEG)
@@ -665,13 +660,8 @@ pub enum OutputHandlerType {
     /// Binary output (raw tensor data)
     Binary,
     /// Auto-detect based on tensor shape
+    #[default]
     Auto,
-}
-
-impl Default for OutputHandlerType {
-    fn default() -> Self {
-        Self::Auto
-    }
 }
 
 // =============================================================================
@@ -687,6 +677,7 @@ impl UnifiedConfig {
     }
 
     /// Parse config from a TOML string.
+    #[allow(clippy::should_implement_trait)]
     pub fn from_str(toml: &str) -> Result<Self, ConfigError> {
         let mut config: UnifiedConfig = toml::from_str(toml)?;
         config.normalize()?;
@@ -714,23 +705,23 @@ impl UnifiedConfig {
         }
 
         // Expand single input to inputs map
-        if let Some(input) = self.input.take() {
-            if self.inputs.is_empty() {
-                self.inputs.insert("input".to_string(), input);
-            }
+        if let Some(input) = self.input.take()
+            && self.inputs.is_empty()
+        {
+            self.inputs.insert("input".to_string(), input);
         }
 
         // Expand single output to outputs map
-        if let Some(output) = self.output.take() {
-            if self.outputs.is_empty() {
-                self.outputs
-                    .insert("output".to_string(), OutputDef::Simple(output));
-            }
+        if let Some(output) = self.output.take()
+            && self.outputs.is_empty()
+        {
+            self.outputs
+                .insert("output".to_string(), OutputDef::Simple(output));
         }
 
         // Auto-generate stages if empty and we have models
         if self.stages.is_empty() && !self.models.is_empty() {
-            for (name, _model) in &self.models {
+            for name in self.models.keys() {
                 self.stages.push(StageDef::Model(ModelStage {
                     model: name.clone(),
                     inputs: HashMap::new(),
@@ -759,24 +750,25 @@ impl UnifiedConfig {
             ));
         }
 
-        if let Some(budget) = self.compiler.memory_budget {
-            if budget < 100 {
-                return Err(ConfigError::invalid_value(
-                    "compiler.memory_budget",
-                    "must be >= 100 MB",
-                ));
-            }
+        if let Some(budget) = self.compiler.memory_budget
+            && budget < 100
+        {
+            return Err(ConfigError::invalid_value(
+                "compiler.memory_budget",
+                "must be >= 100 MB",
+            ));
         }
 
         // Validate stage model references
         for stage in &self.stages {
-            if let StageDef::Model(ms) = stage {
-                if !self.models.contains_key(&ms.model) && !self.models.is_empty() {
-                    return Err(ConfigError::invalid_value(
-                        "stages.model",
-                        format!("unknown model: {}", ms.model),
-                    ));
-                }
+            if let StageDef::Model(ms) = stage
+                && !self.models.contains_key(&ms.model)
+                && !self.models.is_empty()
+            {
+                return Err(ConfigError::invalid_value(
+                    "stages.model",
+                    format!("unknown model: {}", ms.model),
+                ));
             }
         }
 

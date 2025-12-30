@@ -392,7 +392,7 @@ mod tests {
         let input = builder.add_input("X", f32_tensor(&[1, 3, 224, 224]));
         let kernel = builder.add_input("W", f32_tensor(&[64, 3, 7, 7]));
 
-        let result = translate_conv(&vec![input, kernel], &[], &HashMap::new(), &mut builder);
+        let result = translate_conv(&[input, kernel], &[], &HashMap::new(), &mut builder);
         assert!(result.is_ok());
     }
 
@@ -404,7 +404,7 @@ mod tests {
         let bias = builder.add_input("B", f32_tensor(&[64]));
 
         let result = translate_conv(
-            &vec![input, kernel, bias],
+            &[input, kernel, bias],
             &[],
             &HashMap::new(),
             &mut builder,
@@ -425,7 +425,7 @@ mod tests {
             make_int_attr("group", 1),
         ];
 
-        let result = translate_conv(&vec![input, kernel], &attrs, &HashMap::new(), &mut builder);
+        let result = translate_conv(&[input, kernel], &attrs, &HashMap::new(), &mut builder);
         assert!(result.is_ok());
     }
 
@@ -435,7 +435,7 @@ mod tests {
         let input = builder.add_input("X", f32_tensor(&[1, 3, 224, 224]));
 
         // Only 1 input
-        let result = translate_conv(&vec![input], &[], &HashMap::new(), &mut builder);
+        let result = translate_conv(&[input], &[], &HashMap::new(), &mut builder);
         assert!(result.is_err());
     }
 
@@ -479,7 +479,7 @@ mod tests {
         let kernel = builder.add_input("W", f32_tensor(&[64, 3, 2, 2]));
 
         let result =
-            translate_conv_transpose(&vec![input, kernel], &[], &HashMap::new(), &mut builder);
+            translate_conv_transpose(&[input, kernel], &[], &HashMap::new(), &mut builder);
         assert!(result.is_ok());
     }
 

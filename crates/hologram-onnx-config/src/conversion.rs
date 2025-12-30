@@ -130,7 +130,11 @@ impl From<&UnifiedConfig> for PipelineConfig {
                 } else {
                     Some(output_handlers)
                 },
-                stages: if stages.is_empty() { None } else { Some(stages) },
+                stages: if stages.is_empty() {
+                    None
+                } else {
+                    Some(stages)
+                },
             })
         } else {
             // Create minimal execution config for single-model case
@@ -172,7 +176,9 @@ impl From<UnifiedConfig> for PipelineConfig {
 // =============================================================================
 
 /// Convert unified OutputDef map to OutputHandlerConfig map.
-fn convert_output_handlers(outputs: &HashMap<String, OutputDef>) -> HashMap<String, OutputHandlerConfig> {
+fn convert_output_handlers(
+    outputs: &HashMap<String, OutputDef>,
+) -> HashMap<String, OutputHandlerConfig> {
     outputs
         .iter()
         .filter_map(|(name, output)| {
@@ -209,14 +215,11 @@ fn handler_type_to_string(handler_type: &OutputHandlerType) -> String {
 fn convert_output_options(output: &OutputDef) -> HashMap<String, toml::Value> {
     match output {
         OutputDef::Simple(_) => HashMap::new(),
-        OutputDef::Full(spec) => {
-            spec.options
-                .iter()
-                .filter_map(|(k, v)| {
-                    json_to_toml(v).map(|toml_val| (k.clone(), toml_val))
-                })
-                .collect()
-        }
+        OutputDef::Full(spec) => spec
+            .options
+            .iter()
+            .filter_map(|(k, v)| json_to_toml(v).map(|toml_val| (k.clone(), toml_val)))
+            .collect(),
     }
 }
 
@@ -228,10 +231,8 @@ fn json_to_toml(json: &serde_json::Value) -> Option<toml::Value> {
         serde_json::Value::Number(n) => {
             if let Some(i) = n.as_i64() {
                 Some(toml::Value::Integer(i))
-            } else if let Some(f) = n.as_f64() {
-                Some(toml::Value::Float(f))
             } else {
-                None
+                n.as_f64().map(toml::Value::Float)
             }
         }
         serde_json::Value::String(s) => Some(toml::Value::String(s.clone())),
@@ -261,9 +262,7 @@ fn convert_stages(
         .iter()
         .filter_map(|stage| {
             match stage {
-                StageDef::Model(model_stage) => {
-                    Some(convert_model_stage(model_stage, models))
-                }
+                StageDef::Model(model_stage) => Some(convert_model_stage(model_stage, models)),
                 // Builtin, Loop, and Conditional stages are not supported
                 // in the basic PipelineConfig format
                 _ => None,
@@ -283,8 +282,8 @@ fn convert_model_stage(
         .map(|m| {
             // Convert .onnx to .holo
             let path = m.path();
-            if path.ends_with(".onnx") {
-                format!("{}.holo", &path[..path.len() - 5])
+            if let Some(stripped) = path.strip_suffix(".onnx") {
+                format!("{}.holo", stripped)
             } else {
                 format!("{}.holo", path)
             }
@@ -295,9 +294,7 @@ fn convert_model_stage(
     let inputs: HashMap<String, String> = stage
         .inputs
         .iter()
-        .filter_map(|(k, v)| {
-            v.as_str().map(|s| (k.clone(), s.to_string()))
-        })
+        .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
         .collect();
 
     StageConfig {
@@ -397,8 +394,10 @@ mod tests {
 
     #[test]
     fn test_unified_to_pipeline_with_inputs_outputs() {
-        let mut unified = UnifiedConfig::default();
-        unified.name = Some("test".to_string());
+        let mut unified = UnifiedConfig {
+            name: Some("test".to_string()),
+            ..Default::default()
+        };
 
         unified.inputs.insert(
             "prompt".to_string(),
@@ -445,8 +444,10 @@ mod tests {
 
     #[test]
     fn test_unified_to_pipeline_with_stages() {
-        let mut unified = UnifiedConfig::default();
-        unified.name = Some("multi-model".to_string());
+        let mut unified = UnifiedConfig {
+            name: Some("multi-model".to_string()),
+            ..Default::default()
+        };
 
         unified.models.insert(
             "encoder".to_string(),
@@ -472,9 +473,10 @@ mod tests {
         unified
             .inputs
             .insert("input".to_string(), InputDef::Simple("test".to_string()));
-        unified
-            .outputs
-            .insert("output".to_string(), OutputDef::Simple("result".to_string()));
+        unified.outputs.insert(
+            "output".to_string(),
+            OutputDef::Simple("result".to_string()),
+        );
 
         let pipeline: PipelineConfig = unified.into();
         let exec = pipeline.pipeline.execution.unwrap();
@@ -510,8 +512,8 @@ mod tests {
             Some(toml::Value::Integer(42))
         );
         assert_eq!(
-            json_to_toml(&serde_json::json!(3.14)),
-            Some(toml::Value::Float(3.14))
+            json_to_toml(&serde_json::json!(std::f64::consts::PI)),
+            Some(toml::Value::Float(std::f64::consts::PI))
         );
         assert_eq!(
             json_to_toml(&serde_json::Value::String("hello".to_string())),

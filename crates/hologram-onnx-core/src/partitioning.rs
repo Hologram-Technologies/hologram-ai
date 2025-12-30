@@ -330,13 +330,17 @@ mod tests {
 
     fn create_linear_graph(node_count: usize) -> GraphProto {
         // Create a simple linear graph: node0 → node1 → node2 → ...
-        let mut graph = GraphProto::default();
-        graph.name = "test_graph".to_string();
+        let mut graph = GraphProto {
+            name: "test_graph".to_string(),
+            ..Default::default()
+        };
 
         for i in 0..node_count {
-            let mut node = NodeProto::default();
-            node.name = format!("node{}", i);
-            node.op_type = "Add".to_string();
+            let mut node = NodeProto {
+                name: format!("node{}", i),
+                op_type: "Add".to_string(),
+                ..Default::default()
+            };
 
             if i == 0 {
                 node.input.push("input".to_string());
@@ -358,33 +362,43 @@ mod tests {
         // node1  node2
         //   \     /
         //    node3
-        let mut graph = GraphProto::default();
-        graph.name = "dag_graph".to_string();
+        let mut graph = GraphProto {
+            name: "dag_graph".to_string(),
+            ..Default::default()
+        };
 
-        let mut node0 = NodeProto::default();
-        node0.name = "node0".to_string();
-        node0.op_type = "Add".to_string();
+        let mut node0 = NodeProto {
+            name: "node0".to_string(),
+            op_type: "Add".to_string(),
+            ..Default::default()
+        };
         node0.input.push("input".to_string());
         node0.output.push("tensor0".to_string());
         graph.node.push(node0);
 
-        let mut node1 = NodeProto::default();
-        node1.name = "node1".to_string();
-        node1.op_type = "Add".to_string();
+        let mut node1 = NodeProto {
+            name: "node1".to_string(),
+            op_type: "Add".to_string(),
+            ..Default::default()
+        };
         node1.input.push("tensor0".to_string());
         node1.output.push("tensor1".to_string());
         graph.node.push(node1);
 
-        let mut node2 = NodeProto::default();
-        node2.name = "node2".to_string();
-        node2.op_type = "Add".to_string();
+        let mut node2 = NodeProto {
+            name: "node2".to_string(),
+            op_type: "Add".to_string(),
+            ..Default::default()
+        };
         node2.input.push("tensor0".to_string());
         node2.output.push("tensor2".to_string());
         graph.node.push(node2);
 
-        let mut node3 = NodeProto::default();
-        node3.name = "node3".to_string();
-        node3.op_type = "Add".to_string();
+        let mut node3 = NodeProto {
+            name: "node3".to_string(),
+            op_type: "Add".to_string(),
+            ..Default::default()
+        };
         node3.input.push("tensor1".to_string());
         node3.input.push("tensor2".to_string());
         node3.output.push("output".to_string());
@@ -543,13 +557,13 @@ mod tests {
         assert_eq!(partitions[3].node_count(), 50);
 
         // Each partition (except first) should have boundary inputs
-        for i in 1..partitions.len() {
-            assert!(partitions[i].has_boundary_inputs());
+        for partition in partitions.iter().skip(1) {
+            assert!(partition.has_boundary_inputs());
         }
 
         // Each partition (except last) should have boundary outputs
-        for i in 0..partitions.len() - 1 {
-            assert!(partitions[i].has_boundary_outputs());
+        for partition in partitions.iter().take(partitions.len() - 1) {
+            assert!(partition.has_boundary_outputs());
         }
     }
 

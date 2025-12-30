@@ -36,7 +36,11 @@
       "Bash(gh run view:*)",
       "Bash(gh run watch:*)",
       "Bash(gh run:*)",
-      "Bash(cargo fmt:*)"
+      "Bash(cargo fmt:*)",
+      "Bash(cut:*)",
+      "Bash(head:*)",
+      "Bash(./target/release/hologram-onnx-cli:*)",
+      "Bash(xxd:*)"
     ]
   }
 }

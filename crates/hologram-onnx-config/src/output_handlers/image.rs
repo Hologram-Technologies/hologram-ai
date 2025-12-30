@@ -9,7 +9,7 @@
 use crate::config::OutputHandlerConfig;
 use crate::error::ConfigError;
 use crate::output_handlers::{ImageOutput, OutputHandler, ProcessedOutput, TensorData};
-use image::{GrayImage, ImageBuffer, Luma, Rgb, RgbImage, Rgba, RgbaImage};
+use image::{GrayImage, RgbImage, RgbaImage};
 use std::collections::HashMap;
 use std::path::Path;
 use tracing::{debug, trace};
@@ -28,7 +28,7 @@ pub enum PixelFormat {
 impl PixelFormat {
     /// Parse from string.
     pub fn from_str(s: &str) -> Result<Self, ConfigError> {
-        match s.to_lowercase().as_str() {
+        match s.to_ascii_lowercase().as_str() {
             "grayscale" | "gray" | "grey" => Ok(Self::Grayscale),
             "rgb" => Ok(Self::Rgb),
             "rgba" => Ok(Self::Rgba),
@@ -53,17 +53,17 @@ impl PixelFormat {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TensorLayout {
     /// Channels-first: [N, C, H, W]
-    NCHW,
+    Nchw,
     /// Channels-last: [N, H, W, C]
-    NHWC,
+    Nhwc,
 }
 
 impl TensorLayout {
     /// Parse from string.
     pub fn from_str(s: &str) -> Result<Self, ConfigError> {
-        match s.to_uppercase().as_str() {
-            "NCHW" => Ok(Self::NCHW),
-            "NHWC" => Ok(Self::NHWC),
+        match s.to_ascii_uppercase().as_str() {
+            "NCHW" => Ok(Self::Nchw),
+            "NHWC" => Ok(Self::Nhwc),
             _ => Err(ConfigError::InvalidImageFormat(format!(
                 "Unknown tensor layout: {}",
                 s
@@ -86,7 +86,7 @@ pub enum ValueRange {
 impl ValueRange {
     /// Parse from string.
     pub fn from_str(s: &str) -> Result<Self, ConfigError> {
-        match s.to_lowercase().as_str() {
+        match s.to_ascii_lowercase().as_str() {
             "neg_one_one" | "-1_1" | "tanh" => Ok(Self::NegOneOne),
             "zero_one" | "0_1" | "sigmoid" => Ok(Self::ZeroOne),
             "byte" | "uint8" => Ok(Self::Byte),
@@ -232,13 +232,13 @@ impl OutputHandler for ImageHandler {
         }
 
         let (batch, channels, height, width) = match self.layout {
-            TensorLayout::NCHW => (
+            TensorLayout::Nchw => (
                 tensor.shape[0],
                 tensor.shape[1],
                 tensor.shape[2],
                 tensor.shape[3],
             ),
-            TensorLayout::NHWC => (
+            TensorLayout::Nhwc => (
                 tensor.shape[0],
                 tensor.shape[3],
                 tensor.shape[1],
@@ -271,11 +271,11 @@ impl OutputHandler for ImageHandler {
 
         // Reorder if needed (NCHW → HWC)
         let hwc_data = match self.layout {
-            TensorLayout::NCHW => {
+            TensorLayout::Nchw => {
                 trace!("Reordering NCHW → HWC");
                 self.reorder_nchw_to_hwc(image_data, channels, height, width)
             }
-            TensorLayout::NHWC => image_data.to_vec(),
+            TensorLayout::Nhwc => image_data.to_vec(),
         };
 
         // Normalize to bytes
@@ -369,9 +369,9 @@ mod tests {
 
     #[test]
     fn test_tensor_layout_parse() {
-        assert_eq!(TensorLayout::from_str("NCHW").unwrap(), TensorLayout::NCHW);
-        assert_eq!(TensorLayout::from_str("nchw").unwrap(), TensorLayout::NCHW);
-        assert_eq!(TensorLayout::from_str("NHWC").unwrap(), TensorLayout::NHWC);
+        assert_eq!(TensorLayout::from_str("NCHW").unwrap(), TensorLayout::Nchw);
+        assert_eq!(TensorLayout::from_str("nchw").unwrap(), TensorLayout::Nchw);
+        assert_eq!(TensorLayout::from_str("NHWC").unwrap(), TensorLayout::Nhwc);
         assert!(TensorLayout::from_str("unknown").is_err());
     }
 
@@ -431,7 +431,7 @@ mod tests {
         let handler = ImageHandler::from_config(&config).unwrap();
         assert_eq!(handler.output_name, "sample");
         assert_eq!(handler.pixel_format, PixelFormat::Rgb);
-        assert_eq!(handler.layout, TensorLayout::NCHW);
+        assert_eq!(handler.layout, TensorLayout::Nchw);
         assert_eq!(handler.value_range, ValueRange::ZeroOne);
     }
 
@@ -460,7 +460,7 @@ mod tests {
         };
 
         let handler = ImageHandler::from_config(&config).unwrap();
-        assert_eq!(handler.layout, TensorLayout::NCHW);
+        assert_eq!(handler.layout, TensorLayout::Nchw);
         assert_eq!(handler.value_range, ValueRange::NegOneOne);
     }
 

@@ -158,6 +158,11 @@ pub fn translate_identity(
 /// # Attributes
 ///
 /// - `value` (tensor, default [0.0]): The constant value to fill the tensor with
+///
+/// # Implementation
+///
+/// Uses a Call node to `onnx.ConstantOfShape` for the shape, then adds the
+/// scalar value when non-zero.
 pub fn translate_constant_of_shape(
     inputs: &[NodeId],
     attrs: &[AttributeProto],
@@ -171,10 +176,10 @@ pub fn translate_constant_of_shape(
         )));
     }
 
-    let _shape_input = inputs[0];
+    let shape_input = inputs[0];
 
     debug!("Translating ConstantOfShape operation");
-    trace!("ConstantOfShape shape input: {:?}", _shape_input);
+    trace!("ConstantOfShape shape input: {:?}", shape_input);
 
     // Get the constant value (default 0.0)
     let mut value = 0.0_f32;
@@ -196,9 +201,16 @@ pub fn translate_constant_of_shape(
 
     trace!("ConstantOfShape fill value: {}", value);
 
-    // Create a constant node with the fill value
-    // The actual shape will be determined at runtime
-    let result = builder.add_f32(value);
+    // Create the base tensor with the requested shape at runtime.
+    let base = builder.call("onnx.ConstantOfShape", vec![shape_input]);
+
+    // If the fill value is non-zero, add it to the base tensor.
+    let result = if value == 0.0 {
+        base
+    } else {
+        let value_const = builder.add_f32(value);
+        builder.add(base, value_const)
+    };
 
     trace!("Created ConstantOfShape node: {:?}", result);
     Ok(result)
@@ -215,11 +227,15 @@ pub fn translate_constant_of_shape(
 /// # Output
 ///
 /// 1-D tensor containing the shape of the input
+///
+/// # Implementation
+///
+/// Uses a Call node to `onnx.Shape` so the runtime can materialize dims.
 pub fn translate_shape_op(
     inputs: &[NodeId],
     _attrs: &[AttributeProto],
     _shapes: &HashMap<String, SymbolicShape>,
-    _builder: &mut IRBuilder,
+    builder: &mut IRBuilder,
 ) -> Result<NodeId> {
     if inputs.len() != 1 {
         return Err(OnnxError::InvalidModel(format!(
@@ -233,9 +249,8 @@ pub fn translate_shape_op(
     debug!("Translating Shape operation");
     trace!("Shape input: {:?}", input);
 
-    // Shape returns the shape of the input
-    // For now, passthrough - shape operations need special handling
-    let result = input;
+    // Shape needs runtime handling to materialize a 1-D tensor of dims.
+    let result = builder.call("onnx.Shape", vec![input]);
 
     trace!("Created Shape node (passthrough): {:?}", result);
     Ok(result)
@@ -247,6 +262,7 @@ mod tests {
     use crate::test_utils::f32_tensor;
     use hologram_compiler::ir::IRBuilder;
     use hologram_onnx_spec::attribute_proto::AttributeType;
+    use hologram_onnx_spec::{tensor_proto::DataType, TensorProto};
 
     fn make_builder() -> IRBuilder {
         IRBuilder::new("test")
@@ -270,6 +286,19 @@ mod tests {
         }
     }
 
+    fn make_tensor_attr(name: &str, value: f32) -> AttributeProto {
+        AttributeProto {
+            name: name.to_string(),
+            r#type: AttributeType::Tensor as i32,
+            t: Some(TensorProto {
+                data_type: DataType::Float as i32,
+                float_data: vec![value],
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+    }
+
     // ========================================================================
     // Constant Tests
     // ========================================================================
@@ -277,7 +306,7 @@ mod tests {
     #[test]
     fn test_translate_constant_float() {
         let mut builder = make_builder();
-        let attrs = vec![make_float_attr("value_float", 3.14)];
+        let attrs = vec![make_float_attr("value_float", 2.5)];
 
         let result = translate_constant(&[], &attrs, &HashMap::new(), &mut builder);
         assert!(result.is_ok());
@@ -318,7 +347,7 @@ mod tests {
         let mut builder = make_builder();
         let input = builder.add_input("X", f32_tensor(&[2, 3, 4]));
 
-        let result = translate_identity(&vec![input], &[], &HashMap::new(), &mut builder);
+        let result = translate_identity(&[input], &[], &HashMap::new(), &mut builder);
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), input);
     }
@@ -328,7 +357,7 @@ mod tests {
         let mut builder = make_builder();
         let input = builder.add_input("X", f32_tensor(&[]));
 
-        let result = translate_identity(&vec![input], &[], &HashMap::new(), &mut builder);
+        let result = translate_identity(&[input], &[], &HashMap::new(), &mut builder);
         assert!(result.is_ok());
     }
 
@@ -348,7 +377,7 @@ mod tests {
         let mut builder = make_builder();
         let shape = builder.add_input("shape", f32_tensor(&[3]));
 
-        let result = translate_constant_of_shape(&vec![shape], &[], &HashMap::new(), &mut builder);
+        let result = translate_constant_of_shape(&[shape], &[], &HashMap::new(), &mut builder);
         assert!(result.is_ok());
     }
 
@@ -356,11 +385,18 @@ mod tests {
     fn test_translate_constant_of_shape_with_value() {
         let mut builder = make_builder();
         let shape = builder.add_input("shape", f32_tensor(&[3]));
-        let attrs = vec![make_float_attr("value_float", 1.0)];
+        let attrs = vec![make_tensor_attr("value", 1.0)];
 
         let result =
-            translate_constant_of_shape(&vec![shape], &attrs, &HashMap::new(), &mut builder);
+            translate_constant_of_shape(&[shape], &attrs, &HashMap::new(), &mut builder);
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_translate_constant_of_shape_wrong_inputs() {
+        let mut builder = make_builder();
+        let result = translate_constant_of_shape(&[], &[], &HashMap::new(), &mut builder);
+        assert!(result.is_err());
     }
 
     // ========================================================================
@@ -372,7 +408,7 @@ mod tests {
         let mut builder = make_builder();
         let input = builder.add_input("X", f32_tensor(&[2, 3, 4]));
 
-        let result = translate_shape_op(&vec![input], &[], &HashMap::new(), &mut builder);
+        let result = translate_shape_op(&[input], &[], &HashMap::new(), &mut builder);
         assert!(result.is_ok());
     }
 

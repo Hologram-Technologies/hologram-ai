@@ -379,9 +379,7 @@ mod tests {
 
     #[test]
     fn test_registry_creation() {
-        let registry = OutputHandlerRegistry::new();
-        // Registry should be created successfully
-        assert!(true);
+        let _registry = OutputHandlerRegistry::new();
     }
 
     #[test]
@@ -401,7 +399,7 @@ mod tests {
 
     #[test]
     fn test_feature_not_enabled_error() {
-        let registry = OutputHandlerRegistry::new();
+        let _registry = OutputHandlerRegistry::new();
 
         // Test for handlers that require features
         #[cfg(not(feature = "image-output"))]
@@ -412,7 +410,7 @@ mod tests {
                 config: HashMap::new(),
             };
 
-            let result = registry.create_handler(&config);
+            let result = _registry.create_handler(&config);
             assert!(result.is_err());
             let err = result.err().unwrap();
             assert!(err.to_string().contains("image-output"));
@@ -426,7 +424,7 @@ mod tests {
                 config: HashMap::new(),
             };
 
-            let result = registry.create_handler(&config);
+            let result = _registry.create_handler(&config);
             assert!(result.is_err());
             let err = result.err().unwrap();
             assert!(err.to_string().contains("audio-output"));
@@ -440,7 +438,7 @@ mod tests {
                 config: HashMap::new(),
             };
 
-            let result = registry.create_handler(&config);
+            let result = _registry.create_handler(&config);
             assert!(result.is_err());
             let err = result.err().unwrap();
             assert!(err.to_string().contains("text-output"));

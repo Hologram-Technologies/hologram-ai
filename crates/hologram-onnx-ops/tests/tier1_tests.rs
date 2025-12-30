@@ -95,10 +95,8 @@ fn test_matmul_translation() {
     assert!(result.is_ok(), "MatMul translation should succeed");
 
     let node_id = result.unwrap();
-    assert!(
-        node_id.0 > 0 || node_id.0 == 0,
-        "Result should be a valid node ID"
-    );
+    // node_id.0 is unsigned, so it's always >= 0
+    assert!(node_id.0 > 0, "Result should be a valid node ID");
 }
 
 /// Test Add operation (bias addition in MNIST).
@@ -150,8 +148,7 @@ fn test_softmax_translation() {
 }
 
 /// Test Reshape operation (flattening in MNIST).
-/// Note: Dynamic reshape (with shape as second input) is not yet fully implemented.
-/// This test verifies the translator handles this case gracefully.
+/// Dynamic reshape should translate to a runtime call.
 #[test]
 fn test_reshape_translation() {
     let mut builder = IRBuilder::new("test_reshape");
@@ -167,17 +164,7 @@ fn test_reshape_translation() {
     shapes.insert("X".to_string(), concrete_shape(&[1, 28, 28]));
 
     let result = translate_reshape(&[x, shape], &[], &shapes, &mut builder);
-    // Dynamic reshape is not yet implemented - verify it fails gracefully
-    assert!(
-        result.is_err(),
-        "Dynamic reshape should return error (not yet implemented)"
-    );
-
-    let err = result.unwrap_err();
-    assert!(
-        !err.is_unsupported_op(),
-        "Reshape is a supported op, just not fully implemented"
-    );
+    assert!(result.is_ok(), "Dynamic reshape should be supported");
 }
 
 // ============================================================================
@@ -286,7 +273,7 @@ fn test_add_symbolic_broadcast() {
 /// Test shape inference with symbolic dimensions.
 #[test]
 fn test_shape_inference_symbolic() {
-    let input_shapes = vec![
+    let input_shapes = [
         symbolic_batch_shape("batch", &[784]),
         concrete_shape(&[784, 10]),
     ];
@@ -458,8 +445,7 @@ fn test_dispatcher_mnist_ops() {
 
         // We're just testing that the dispatcher recognizes the op, not that it succeeds
         // Some ops need specific input counts/types
-        if result.is_err() {
-            let err = result.unwrap_err();
+        if let Err(err) = result {
             assert!(
                 !err.is_unsupported_op(),
                 "Op '{}' should be supported (got: {:?})",
@@ -591,7 +577,7 @@ fn test_shape_mismatch() {
     shapes.insert("B".to_string(), concrete_shape(&[3, 2]));
 
     // Shape inference should catch this
-    let input_shapes = vec![concrete_shape(&[1, 4]), concrete_shape(&[3, 2])];
+    let input_shapes = [concrete_shape(&[1, 4]), concrete_shape(&[3, 2])];
     let shape_refs: Vec<&SymbolicShape> = input_shapes.iter().collect();
 
     let result = infer_op_output_shape("MatMul", &shape_refs, &[]);

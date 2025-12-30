@@ -269,7 +269,7 @@ mod tests {
         let mut builder = make_builder();
         let input = builder.add_input("X", f32_tensor(&[2, 3, 4]));
 
-        let result = translate_reduce_sum(&vec![input], &[], &HashMap::new(), &mut builder);
+        let result = translate_reduce_sum(&[input], &[], &HashMap::new(), &mut builder);
         assert!(result.is_ok());
     }
 
@@ -285,7 +285,7 @@ mod tests {
             ..Default::default()
         }];
 
-        let result = translate_reduce_sum(&vec![input], &attrs, &HashMap::new(), &mut builder);
+        let result = translate_reduce_sum(&[input], &attrs, &HashMap::new(), &mut builder);
         assert!(result.is_ok());
     }
 
@@ -301,14 +301,14 @@ mod tests {
             ..Default::default()
         }];
 
-        let result = translate_reduce_sum(&vec![input], &attrs, &HashMap::new(), &mut builder);
+        let result = translate_reduce_sum(&[input], &attrs, &HashMap::new(), &mut builder);
         assert!(result.is_ok());
     }
 
     #[test]
     fn test_translate_reduce_sum_no_input() {
         let mut builder = make_builder();
-        let result = translate_reduce_sum(&vec![], &[], &HashMap::new(), &mut builder);
+        let result = translate_reduce_sum(&[], &[], &HashMap::new(), &mut builder);
         assert!(result.is_err());
         assert!(matches!(result.unwrap_err(), OnnxError::InvalidModel(_)));
     }
@@ -320,7 +320,7 @@ mod tests {
         let mut builder = make_builder();
         let input = builder.add_input("X", f32_tensor(&[2, 3, 4]));
 
-        let result = translate_reduce_mean(&vec![input], &[], &HashMap::new(), &mut builder);
+        let result = translate_reduce_mean(&[input], &[], &HashMap::new(), &mut builder);
         assert!(result.is_ok());
     }
 
@@ -336,14 +336,14 @@ mod tests {
             ..Default::default()
         }];
 
-        let result = translate_reduce_mean(&vec![input], &attrs, &HashMap::new(), &mut builder);
+        let result = translate_reduce_mean(&[input], &attrs, &HashMap::new(), &mut builder);
         assert!(result.is_ok());
     }
 
     #[test]
     fn test_translate_reduce_mean_no_input() {
         let mut builder = make_builder();
-        let result = translate_reduce_mean(&vec![], &[], &HashMap::new(), &mut builder);
+        let result = translate_reduce_mean(&[], &[], &HashMap::new(), &mut builder);
         assert!(result.is_err());
     }
 
@@ -354,14 +354,14 @@ mod tests {
         let mut builder = make_builder();
         let input = builder.add_input("X", f32_tensor(&[2, 3, 4]));
 
-        let result = translate_reduce_max(&vec![input], &[], &HashMap::new(), &mut builder);
+        let result = translate_reduce_max(&[input], &[], &HashMap::new(), &mut builder);
         assert!(result.is_ok());
     }
 
     #[test]
     fn test_translate_reduce_max_no_input() {
         let mut builder = make_builder();
-        let result = translate_reduce_max(&vec![], &[], &HashMap::new(), &mut builder);
+        let result = translate_reduce_max(&[], &[], &HashMap::new(), &mut builder);
         assert!(result.is_err());
     }
 
@@ -372,14 +372,14 @@ mod tests {
         let mut builder = make_builder();
         let input = builder.add_input("X", f32_tensor(&[2, 3, 4]));
 
-        let result = translate_reduce_min(&vec![input], &[], &HashMap::new(), &mut builder);
+        let result = translate_reduce_min(&[input], &[], &HashMap::new(), &mut builder);
         assert!(result.is_ok());
     }
 
     #[test]
     fn test_translate_reduce_min_no_input() {
         let mut builder = make_builder();
-        let result = translate_reduce_min(&vec![], &[], &HashMap::new(), &mut builder);
+        let result = translate_reduce_min(&[], &[], &HashMap::new(), &mut builder);
         assert!(result.is_err());
         assert!(matches!(result.unwrap_err(), OnnxError::InvalidModel(_)));
     }
@@ -391,14 +391,14 @@ mod tests {
         let mut builder = make_builder();
         let input = builder.add_input("X", f32_tensor(&[2, 3, 4]));
 
-        let result = translate_reduce_prod(&vec![input], &[], &HashMap::new(), &mut builder);
+        let result = translate_reduce_prod(&[input], &[], &HashMap::new(), &mut builder);
         assert!(result.is_ok());
     }
 
     #[test]
     fn test_translate_reduce_prod_no_input() {
         let mut builder = make_builder();
-        let result = translate_reduce_prod(&vec![], &[], &HashMap::new(), &mut builder);
+        let result = translate_reduce_prod(&[], &[], &HashMap::new(), &mut builder);
         assert!(result.is_err());
         assert!(matches!(result.unwrap_err(), OnnxError::InvalidModel(_)));
     }
@@ -413,9 +413,9 @@ mod tests {
         let shapes = HashMap::new();
 
         // Implemented reductions should work with symbolic shapes
-        assert!(translate_reduce_sum(&vec![input], &[], &shapes, &mut builder).is_ok());
-        assert!(translate_reduce_mean(&vec![input], &[], &shapes, &mut builder).is_ok());
-        assert!(translate_reduce_max(&vec![input], &[], &shapes, &mut builder).is_ok());
+        assert!(translate_reduce_sum(&[input], &[], &shapes, &mut builder).is_ok());
+        assert!(translate_reduce_mean(&[input], &[], &shapes, &mut builder).is_ok());
+        assert!(translate_reduce_max(&[input], &[], &shapes, &mut builder).is_ok());
     }
 
     #[test]
@@ -426,8 +426,8 @@ mod tests {
         let shapes = HashMap::new();
 
         // All reductions should work with symbolic shapes
-        assert!(translate_reduce_min(&vec![input], &[], &shapes, &mut builder).is_ok());
-        assert!(translate_reduce_prod(&vec![input], &[], &shapes, &mut builder).is_ok());
+        assert!(translate_reduce_min(&[input], &[], &shapes, &mut builder).is_ok());
+        assert!(translate_reduce_prod(&[input], &[], &shapes, &mut builder).is_ok());
     }
 
     #[test]
@@ -450,7 +450,7 @@ mod tests {
             },
         ];
 
-        let result = translate_reduce_sum(&vec![input], &attrs, &HashMap::new(), &mut builder);
+        let result = translate_reduce_sum(&[input], &attrs, &HashMap::new(), &mut builder);
         assert!(result.is_ok());
     }
 }

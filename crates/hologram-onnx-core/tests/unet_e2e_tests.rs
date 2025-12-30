@@ -44,8 +44,10 @@ use tempfile::NamedTempFile;
 /// - depth=4, nodes_per_level=30 → ~750 nodes
 /// - depth=5, nodes_per_level=50 → ~3000 nodes
 fn create_unet_graph(depth: usize, nodes_per_level: usize) -> GraphProto {
-    let mut graph = GraphProto::default();
-    graph.name = format!("unet_d{}_n{}", depth, nodes_per_level);
+    let mut graph = GraphProto {
+        name: format!("unet_d{}_n{}", depth, nodes_per_level),
+        ..Default::default()
+    };
 
     // Input: batch, channels, height, width (NCHW)
     graph
@@ -75,9 +77,11 @@ fn create_unet_graph(depth: usize, nodes_per_level: usize) -> GraphProto {
                 .initializer
                 .push(make_conv_weight(&weight_name, out_channels, in_ch, 3, 3));
 
-            let mut conv = NodeProto::default();
-            conv.name = conv_out.clone();
-            conv.op_type = "Conv".to_string();
+            let mut conv = NodeProto {
+                name: conv_out.clone(),
+                op_type: "Conv".to_string(),
+                ..Default::default()
+            };
             conv.input.push(current_tensor.clone());
             conv.input.push(weight_name);
             conv.output.push(conv_out.clone());
@@ -107,9 +111,11 @@ fn create_unet_graph(depth: usize, nodes_per_level: usize) -> GraphProto {
                 .initializer
                 .push(make_1d_weight(&bn_var, out_channels, 1.0));
 
-            let mut bn = NodeProto::default();
-            bn.name = bn_out.clone();
-            bn.op_type = "BatchNormalization".to_string();
+            let mut bn = NodeProto {
+                name: bn_out.clone(),
+                op_type: "BatchNormalization".to_string(),
+                ..Default::default()
+            };
             bn.input.push(conv_out);
             bn.input.push(bn_scale);
             bn.input.push(bn_bias);
@@ -120,9 +126,11 @@ fn create_unet_graph(depth: usize, nodes_per_level: usize) -> GraphProto {
 
             // ReLU
             let relu_out = format!("enc_l{}_relu{}", level, block);
-            let mut relu = NodeProto::default();
-            relu.name = relu_out.clone();
-            relu.op_type = "Relu".to_string();
+            let mut relu = NodeProto {
+                name: relu_out.clone(),
+                op_type: "Relu".to_string(),
+                ..Default::default()
+            };
             relu.input.push(bn_out);
             relu.output.push(relu_out.clone());
             graph.node.push(relu);
@@ -136,9 +144,11 @@ fn create_unet_graph(depth: usize, nodes_per_level: usize) -> GraphProto {
         // MaxPool (except at bottom)
         if level < depth - 1 {
             let pool_out = format!("enc_pool_{}", level);
-            let mut pool = NodeProto::default();
-            pool.name = pool_out.clone();
-            pool.op_type = "MaxPool".to_string();
+            let mut pool = NodeProto {
+                name: pool_out.clone(),
+                op_type: "MaxPool".to_string(),
+                ..Default::default()
+            };
             pool.input.push(current_tensor.clone());
             pool.output.push(pool_out.clone());
             pool.attribute
@@ -164,9 +174,11 @@ fn create_unet_graph(depth: usize, nodes_per_level: usize) -> GraphProto {
             2,
         ));
 
-        let mut upsample = NodeProto::default();
-        upsample.name = upsample_out.clone();
-        upsample.op_type = "ConvTranspose".to_string();
+        let mut upsample = NodeProto {
+            name: upsample_out.clone(),
+            op_type: "ConvTranspose".to_string(),
+            ..Default::default()
+        };
         upsample.input.push(current_tensor.clone());
         upsample.input.push(upsample_weight);
         upsample.output.push(upsample_out.clone());
@@ -180,9 +192,11 @@ fn create_unet_graph(depth: usize, nodes_per_level: usize) -> GraphProto {
 
         // Concat with skip connection
         let concat_out = format!("dec_concat_{}", level);
-        let mut concat = NodeProto::default();
-        concat.name = concat_out.clone();
-        concat.op_type = "Concat".to_string();
+        let mut concat = NodeProto {
+            name: concat_out.clone(),
+            op_type: "Concat".to_string(),
+            ..Default::default()
+        };
         concat.input.push(upsample_out);
         concat.input.push(encoder_skip_outputs[level].clone());
         concat.output.push(concat_out.clone());
@@ -208,9 +222,11 @@ fn create_unet_graph(depth: usize, nodes_per_level: usize) -> GraphProto {
                 .initializer
                 .push(make_conv_weight(&weight_name, out_channels, in_ch, 3, 3));
 
-            let mut conv = NodeProto::default();
-            conv.name = conv_out.clone();
-            conv.op_type = "Conv".to_string();
+            let mut conv = NodeProto {
+                name: conv_out.clone(),
+                op_type: "Conv".to_string(),
+                ..Default::default()
+            };
             conv.input.push(current_tensor.clone());
             conv.input.push(weight_name);
             conv.output.push(conv_out.clone());
@@ -240,9 +256,11 @@ fn create_unet_graph(depth: usize, nodes_per_level: usize) -> GraphProto {
                 .initializer
                 .push(make_1d_weight(&bn_var, out_channels, 1.0));
 
-            let mut bn = NodeProto::default();
-            bn.name = bn_out.clone();
-            bn.op_type = "BatchNormalization".to_string();
+            let mut bn = NodeProto {
+                name: bn_out.clone(),
+                op_type: "BatchNormalization".to_string(),
+                ..Default::default()
+            };
             bn.input.push(conv_out);
             bn.input.push(bn_scale);
             bn.input.push(bn_bias);
@@ -253,9 +271,11 @@ fn create_unet_graph(depth: usize, nodes_per_level: usize) -> GraphProto {
 
             // ReLU
             let relu_out = format!("dec_l{}_relu{}", level, block);
-            let mut relu = NodeProto::default();
-            relu.name = relu_out.clone();
-            relu.op_type = "Relu".to_string();
+            let mut relu = NodeProto {
+                name: relu_out.clone(),
+                op_type: "Relu".to_string(),
+                ..Default::default()
+            };
             relu.input.push(bn_out);
             relu.output.push(relu_out.clone());
             graph.node.push(relu);
@@ -272,9 +292,11 @@ fn create_unet_graph(depth: usize, nodes_per_level: usize) -> GraphProto {
         .initializer
         .push(make_conv_weight(&final_weight, 1, current_channels, 1, 1));
 
-    let mut final_conv = NodeProto::default();
-    final_conv.name = "final_conv".to_string();
-    final_conv.op_type = "Conv".to_string();
+    let mut final_conv = NodeProto {
+        name: "final_conv".to_string(),
+        op_type: "Conv".to_string(),
+        ..Default::default()
+    };
     final_conv.input.push(current_tensor);
     final_conv.input.push(final_weight);
     final_conv.output.push("logits".to_string());
@@ -284,9 +306,11 @@ fn create_unet_graph(depth: usize, nodes_per_level: usize) -> GraphProto {
     graph.node.push(final_conv);
 
     // Sigmoid for segmentation output
-    let mut sigmoid = NodeProto::default();
-    sigmoid.name = "sigmoid".to_string();
-    sigmoid.op_type = "Sigmoid".to_string();
+    let mut sigmoid = NodeProto {
+        name: "sigmoid".to_string(),
+        op_type: "Sigmoid".to_string(),
+        ..Default::default()
+    };
     sigmoid.input.push("logits".to_string());
     sigmoid.output.push("output".to_string());
     graph.node.push(sigmoid);
@@ -662,7 +686,7 @@ fn test_unet_3000_nodes_full_pipeline() {
     let partitions = partitioner.partition(graph).expect("Partitioning failed");
 
     // Should match documented ~7 partitions
-    let expected = (graph.node.len() + 499) / 500;
+    let expected = graph.node.len().div_ceil(500);
     assert_eq!(partitions.len(), expected);
 
     // Extract weights

@@ -4,10 +4,14 @@
 //! - Loads an ONNX model from disk
 //! - Translates ONNX → hologram IR using the full translation pipeline
 //! - Applies decomposition pass (Conv2D → Im2col+GEMM)
+//! - Serializes the IR to .holo format for execution
 //! - Writes the resulting .holo and .weights files
 
 use anyhow::{Context, Result};
-use hologram_onnx_core::{OnnxConfig, extract_opset_version, parse_model, validate_model};
+use hologram_onnx_core::{
+    OnnxConfig, extract_opset_version, parse_model, validate_model,
+    serialize_ir_function,
+};
 use std::fs;
 use std::path::Path;
 use tracing::{debug, info};
@@ -91,76 +95,34 @@ pub fn compile_command(
 
     info!("Decomposition complete: {} IR nodes", decomposed.body.len());
 
-    // Step 4: Serialize IR function (placeholder for now)
-    // TODO: Implement proper lowering to OperationGraph and serialization
-    // For now, we serialize a simple representation
-    let holo_bytes = serialize_ir_function(&decomposed)?;
-    let weight_bytes = Vec::new(); // Weights are embedded in IR for now
+    // Step 4: Serialize IR to .holo format
+    info!("Serializing to .holo format...");
+    let (holo_bytes, weights_bytes) = serialize_ir_function(&decomposed, weight_threshold)
+        .map_err(|e| anyhow::anyhow!("Serialization failed: {}", e))?;
 
     info!("Compilation successful!");
     info!("  .holo size: {} bytes", holo_bytes.len());
-    info!("  .weights size: {} bytes", weight_bytes.len());
+    info!("  .weights size: {} bytes", weights_bytes.len());
 
     // Write .holo file
     let holo_path = output.with_extension("holo");
     info!("Writing .holo file: {}", holo_path.display());
-    fs::write(&holo_path, holo_bytes)
+    fs::write(&holo_path, &holo_bytes)
         .with_context(|| format!("Failed to write .holo file to {}", holo_path.display()))?;
 
-    // Write .weights file if non-empty
-    let has_weights = !weight_bytes.is_empty();
-    if has_weights {
+    // Write .weights file if there are external weights
+    if !weights_bytes.is_empty() {
         let weights_path = output.with_extension("weights");
         info!("Writing .weights file: {}", weights_path.display());
-        fs::write(&weights_path, &weight_bytes).with_context(|| {
-            format!(
-                "Failed to write .weights file to {}",
-                weights_path.display()
-            )
-        })?;
-    } else {
-        info!("No external weights (all weights embedded in .holo file)");
+        fs::write(&weights_path, &weights_bytes)
+            .with_context(|| format!("Failed to write .weights file to {}", weights_path.display()))?;
+        info!("  Output: {}.weights", output.display());
     }
 
     info!("✓ Compilation complete!");
     info!("  Output: {}.holo", output.display());
-    if has_weights {
-        info!("          {}.weights", output.display());
-    }
 
     Ok(())
-}
-
-/// Serialize IR function to bytes.
-///
-/// This is a placeholder implementation. Full implementation will use
-/// hologram's OperationGraph serialization.
-fn serialize_ir_function(func: &hologram_compiler::ir::IRFunction) -> Result<Vec<u8>> {
-    // For now, create a simple representation
-    // Full implementation will lower to OperationGraph and use rkyv serialization
-    let mut output = Vec::new();
-
-    // Magic header for .holo files
-    output.extend_from_slice(b"HOLO");
-    output.extend_from_slice(&1u32.to_le_bytes()); // Version
-
-    // Function name
-    let name_bytes = func.name.as_bytes();
-    output.extend_from_slice(&(name_bytes.len() as u32).to_le_bytes());
-    output.extend_from_slice(name_bytes);
-
-    // Node count
-    output.extend_from_slice(&(func.body.len() as u32).to_le_bytes());
-
-    // Simplified node serialization
-    for entry in &func.body {
-        // Node ID
-        output.extend_from_slice(&entry.id.0.to_le_bytes());
-        // Node type marker (placeholder)
-        output.push(0u8);
-    }
-
-    Ok(output)
 }
 
 #[cfg(test)]

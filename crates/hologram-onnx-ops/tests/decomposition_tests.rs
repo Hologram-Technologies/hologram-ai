@@ -567,7 +567,7 @@ fn test_large_conv_chain_decomposition() {
 
     // Add 10 conv layers
     for i in 0..10 {
-        let kernel = builder.add_input(&format!("W{}", i), f32_tensor(&[64, 64, 3, 3]));
+        let kernel = builder.add_input(format!("W{}", i), f32_tensor(&[64, 64, 3, 3]));
         current = builder.conv2d(current, kernel, None, (1, 1), (1, 1), (1, 1), 1);
     }
 

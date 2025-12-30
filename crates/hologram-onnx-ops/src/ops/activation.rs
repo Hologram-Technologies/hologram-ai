@@ -502,9 +502,19 @@ mod tests {
     use super::*;
     use crate::test_utils::f32_tensor;
     use hologram_compiler::ir::IRBuilder;
+    use hologram_onnx_spec::attribute_proto::AttributeType;
 
     fn make_builder() -> IRBuilder {
         IRBuilder::new("test")
+    }
+
+    fn make_float_attr(name: &str, value: f32) -> AttributeProto {
+        AttributeProto {
+            name: name.to_string(),
+            f: value,
+            r#type: AttributeType::Float as i32,
+            ..Default::default()
+        }
     }
 
     #[test]
@@ -512,14 +522,14 @@ mod tests {
         let mut builder = make_builder();
         let input = builder.add_input("X", f32_tensor(&[2, 3, 4]));
 
-        let result = translate_relu(&vec![input], &[], &HashMap::new(), &mut builder);
+        let result = translate_relu(&[input], &[], &HashMap::new(), &mut builder);
         assert!(result.is_ok());
     }
 
     #[test]
     fn test_translate_relu_no_input() {
         let mut builder = make_builder();
-        let result = translate_relu(&vec![], &[], &HashMap::new(), &mut builder);
+        let result = translate_relu(&[], &[], &HashMap::new(), &mut builder);
         assert!(result.is_err());
         assert!(matches!(result.unwrap_err(), OnnxError::InvalidModel(_)));
     }
@@ -529,14 +539,14 @@ mod tests {
         let mut builder = make_builder();
         let input = builder.add_input("X", f32_tensor(&[1, 2, 3]));
 
-        let result = translate_sigmoid(&vec![input], &[], &HashMap::new(), &mut builder);
+        let result = translate_sigmoid(&[input], &[], &HashMap::new(), &mut builder);
         assert!(result.is_ok());
     }
 
     #[test]
     fn test_translate_sigmoid_no_input() {
         let mut builder = make_builder();
-        let result = translate_sigmoid(&vec![], &[], &HashMap::new(), &mut builder);
+        let result = translate_sigmoid(&[], &[], &HashMap::new(), &mut builder);
         assert!(result.is_err());
     }
 
@@ -545,15 +555,62 @@ mod tests {
         let mut builder = make_builder();
         let input = builder.add_input("X", f32_tensor(&[4, 5]));
 
-        let result = translate_tanh(&vec![input], &[], &HashMap::new(), &mut builder);
+        let result = translate_tanh(&[input], &[], &HashMap::new(), &mut builder);
         assert!(result.is_ok());
     }
 
     #[test]
     fn test_translate_tanh_no_input() {
         let mut builder = make_builder();
-        let result = translate_tanh(&vec![], &[], &HashMap::new(), &mut builder);
+        let result = translate_tanh(&[], &[], &HashMap::new(), &mut builder);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_translate_leaky_relu_default_alpha() {
+        let mut builder = make_builder();
+        let input = builder.add_input("X", f32_tensor(&[2, 3]));
+
+        let result = translate_leaky_relu(&[input], &[], &HashMap::new(), &mut builder);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_translate_leaky_relu_custom_alpha() {
+        let mut builder = make_builder();
+        let input = builder.add_input("X", f32_tensor(&[2, 3]));
+        let attrs = vec![make_float_attr("alpha", 0.2)];
+
+        let result = translate_leaky_relu(&[input], &attrs, &HashMap::new(), &mut builder);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_translate_leaky_relu_no_input() {
+        let mut builder = make_builder();
+        let result = translate_leaky_relu(&[], &[], &HashMap::new(), &mut builder);
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), OnnxError::InvalidModel(_)));
+    }
+
+    #[test]
+    fn test_translate_prelu() {
+        let mut builder = make_builder();
+        let input = builder.add_input("X", f32_tensor(&[1, 4, 8, 8]));
+        let slope = builder.add_input("slope", f32_tensor(&[4]));
+
+        let result = translate_prelu(&[input, slope], &[], &HashMap::new(), &mut builder);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_translate_prelu_wrong_inputs() {
+        let mut builder = make_builder();
+        let input = builder.add_input("X", f32_tensor(&[1, 4, 8, 8]));
+
+        let result = translate_prelu(&[input], &[], &HashMap::new(), &mut builder);
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), OnnxError::InvalidModel(_)));
     }
 
     #[test]
@@ -561,7 +618,7 @@ mod tests {
         let mut builder = make_builder();
         let input = builder.add_input("X", f32_tensor(&[2, 3, 4]));
 
-        let result = translate_softmax(&vec![input], &[], &HashMap::new(), &mut builder);
+        let result = translate_softmax(&[input], &[], &HashMap::new(), &mut builder);
         assert!(result.is_ok());
     }
 
@@ -579,14 +636,14 @@ mod tests {
             ..Default::default()
         }];
 
-        let result = translate_softmax(&vec![input], &attrs, &HashMap::new(), &mut builder);
+        let result = translate_softmax(&[input], &attrs, &HashMap::new(), &mut builder);
         assert!(result.is_ok());
     }
 
     #[test]
     fn test_translate_softmax_no_input() {
         let mut builder = make_builder();
-        let result = translate_softmax(&vec![], &[], &HashMap::new(), &mut builder);
+        let result = translate_softmax(&[], &[], &HashMap::new(), &mut builder);
         assert!(result.is_err());
     }
 
@@ -599,11 +656,11 @@ mod tests {
         let shapes = HashMap::new();
 
         // Implemented activations should work with symbolic shapes
-        assert!(translate_relu(&vec![input], &[], &shapes, &mut builder).is_ok());
-        assert!(translate_sigmoid(&vec![input], &[], &shapes, &mut builder).is_ok());
-        assert!(translate_tanh(&vec![input], &[], &shapes, &mut builder).is_ok());
-        assert!(translate_softmax(&vec![input], &[], &shapes, &mut builder).is_ok());
-        assert!(translate_gelu(&vec![input], &[], &shapes, &mut builder).is_ok());
+        assert!(translate_relu(&[input], &[], &shapes, &mut builder).is_ok());
+        assert!(translate_sigmoid(&[input], &[], &shapes, &mut builder).is_ok());
+        assert!(translate_tanh(&[input], &[], &shapes, &mut builder).is_ok());
+        assert!(translate_softmax(&[input], &[], &shapes, &mut builder).is_ok());
+        assert!(translate_gelu(&[input], &[], &shapes, &mut builder).is_ok());
     }
 
     #[test]
@@ -612,9 +669,9 @@ mod tests {
         let input = builder.add_input("X", f32_tensor(&[2, 3]));
 
         // Create chain: ReLU -> Sigmoid (tests ClassMap fusion potential)
-        let relu_out = translate_relu(&vec![input], &[], &HashMap::new(), &mut builder).unwrap();
+        let relu_out = translate_relu(&[input], &[], &HashMap::new(), &mut builder).unwrap();
         let sigmoid_out =
-            translate_sigmoid(&vec![relu_out], &[], &HashMap::new(), &mut builder).unwrap();
+            translate_sigmoid(&[relu_out], &[], &HashMap::new(), &mut builder).unwrap();
 
         // Should successfully create chain
         assert!(sigmoid_out != input);
@@ -628,14 +685,14 @@ mod tests {
         let mut builder = make_builder();
         let input = builder.add_input("X", f32_tensor(&[2, 3, 4]));
 
-        let result = translate_gelu(&vec![input], &[], &HashMap::new(), &mut builder);
+        let result = translate_gelu(&[input], &[], &HashMap::new(), &mut builder);
         assert!(result.is_ok());
     }
 
     #[test]
     fn test_translate_gelu_no_input() {
         let mut builder = make_builder();
-        let result = translate_gelu(&vec![], &[], &HashMap::new(), &mut builder);
+        let result = translate_gelu(&[], &[], &HashMap::new(), &mut builder);
         assert!(result.is_err());
         assert!(matches!(result.unwrap_err(), OnnxError::InvalidModel(_)));
     }
@@ -645,14 +702,14 @@ mod tests {
         let mut builder = make_builder();
         let input = builder.add_input("X", f32_tensor(&[1, 2, 3]));
 
-        let result = translate_swish(&vec![input], &[], &HashMap::new(), &mut builder);
+        let result = translate_swish(&[input], &[], &HashMap::new(), &mut builder);
         assert!(result.is_ok());
     }
 
     #[test]
     fn test_translate_swish_no_input() {
         let mut builder = make_builder();
-        let result = translate_swish(&vec![], &[], &HashMap::new(), &mut builder);
+        let result = translate_swish(&[], &[], &HashMap::new(), &mut builder);
         assert!(result.is_err());
         assert!(matches!(result.unwrap_err(), OnnxError::InvalidModel(_)));
     }
@@ -662,14 +719,14 @@ mod tests {
         let mut builder = make_builder();
         let input = builder.add_input("X", f32_tensor(&[2, 3]));
 
-        let result = translate_elu(&vec![input], &[], &HashMap::new(), &mut builder);
+        let result = translate_elu(&[input], &[], &HashMap::new(), &mut builder);
         assert!(result.is_ok());
     }
 
     #[test]
     fn test_translate_elu_no_input() {
         let mut builder = make_builder();
-        let result = translate_elu(&vec![], &[], &HashMap::new(), &mut builder);
+        let result = translate_elu(&[], &[], &HashMap::new(), &mut builder);
         assert!(result.is_err());
         assert!(matches!(result.unwrap_err(), OnnxError::InvalidModel(_)));
     }
@@ -679,14 +736,14 @@ mod tests {
         let mut builder = make_builder();
         let input = builder.add_input("X", f32_tensor(&[2, 3]));
 
-        let result = translate_selu(&vec![input], &[], &HashMap::new(), &mut builder);
+        let result = translate_selu(&[input], &[], &HashMap::new(), &mut builder);
         assert!(result.is_ok());
     }
 
     #[test]
     fn test_translate_selu_no_input() {
         let mut builder = make_builder();
-        let result = translate_selu(&vec![], &[], &HashMap::new(), &mut builder);
+        let result = translate_selu(&[], &[], &HashMap::new(), &mut builder);
         assert!(result.is_err());
         assert!(matches!(result.unwrap_err(), OnnxError::InvalidModel(_)));
     }
@@ -699,8 +756,8 @@ mod tests {
         let shapes = HashMap::new();
 
         // All activations should work with symbolic shapes
-        assert!(translate_swish(&vec![input], &[], &shapes, &mut builder).is_ok());
-        assert!(translate_elu(&vec![input], &[], &shapes, &mut builder).is_ok());
-        assert!(translate_selu(&vec![input], &[], &shapes, &mut builder).is_ok());
+        assert!(translate_swish(&[input], &[], &shapes, &mut builder).is_ok());
+        assert!(translate_elu(&[input], &[], &shapes, &mut builder).is_ok());
+        assert!(translate_selu(&[input], &[], &shapes, &mut builder).is_ok());
     }
 }

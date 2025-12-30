@@ -179,7 +179,6 @@ pub fn apply_ir_decomposition(ir_func: IRFunction, config: &OnnxConfig) -> Resul
     let decompose_config = DecomposeConfig {
         decompose_conv2d: config.decompose_conv2d,
         decompose_pooling: config.decompose_pooling,
-        ..Default::default()
     };
 
     let decomposed = decompose_function(&ir_func, &decompose_config)
@@ -393,9 +392,11 @@ mod tests {
 
     #[test]
     fn test_extract_float_data() {
-        let mut tensor = TensorProto::default();
-        tensor.data_type = DataType::Float as i32;
-        tensor.float_data = vec![1.0, 2.0, 3.0];
+        let tensor = TensorProto {
+            data_type: DataType::Float as i32,
+            float_data: vec![1.0, 2.0, 3.0],
+            ..Default::default()
+        };
 
         let data = extract_tensor_data(&tensor).unwrap();
         assert_eq!(data.len(), 12); // 3 floats * 4 bytes
@@ -403,9 +404,11 @@ mod tests {
 
     #[test]
     fn test_extract_raw_data() {
-        let mut tensor = TensorProto::default();
-        tensor.data_type = DataType::Float as i32;
-        tensor.raw_data = vec![0, 0, 128, 63]; // 1.0f32 in little-endian
+        let tensor = TensorProto {
+            data_type: DataType::Float as i32,
+            raw_data: vec![0, 0, 128, 63], // 1.0f32 in little-endian
+            ..Default::default()
+        };
 
         let data = extract_tensor_data(&tensor).unwrap();
         assert_eq!(data, vec![0, 0, 128, 63]);

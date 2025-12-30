@@ -255,7 +255,7 @@ mod tests {
 
         let attrs = vec![make_string_attr("mode", "nearest")];
 
-        let result = translate_resize(&vec![input], &attrs, &HashMap::new(), &mut builder);
+        let result = translate_resize(&[input], &attrs, &HashMap::new(), &mut builder);
         assert!(result.is_ok());
     }
 
@@ -266,7 +266,7 @@ mod tests {
 
         let attrs = vec![make_string_attr("mode", "linear")];
 
-        let result = translate_resize(&vec![input], &attrs, &HashMap::new(), &mut builder);
+        let result = translate_resize(&[input], &attrs, &HashMap::new(), &mut builder);
         assert!(result.is_ok());
     }
 
@@ -277,7 +277,7 @@ mod tests {
 
         let attrs = vec![make_string_attr("mode", "cubic")];
 
-        let result = translate_resize(&vec![input], &attrs, &HashMap::new(), &mut builder);
+        let result = translate_resize(&[input], &attrs, &HashMap::new(), &mut builder);
         assert!(result.is_ok()); // Falls back to bilinear
     }
 
@@ -299,7 +299,7 @@ mod tests {
 
         let attrs = vec![make_string_attr("mode", "nearest")];
 
-        let result = translate_upsample(&vec![input], &attrs, &HashMap::new(), &mut builder);
+        let result = translate_upsample(&[input], &attrs, &HashMap::new(), &mut builder);
         assert!(result.is_ok());
     }
 
@@ -310,8 +310,15 @@ mod tests {
 
         let attrs = vec![make_string_attr("mode", "linear")];
 
-        let result = translate_upsample(&vec![input], &attrs, &HashMap::new(), &mut builder);
+        let result = translate_upsample(&[input], &attrs, &HashMap::new(), &mut builder);
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_translate_upsample_wrong_inputs() {
+        let mut builder = make_builder();
+        let result = translate_upsample(&[], &[], &HashMap::new(), &mut builder);
+        assert!(result.is_err());
     }
 
     // ========================================================================
@@ -325,7 +332,7 @@ mod tests {
 
         let attrs = vec![make_int_attr("blocksize", 2)];
 
-        let result = translate_depth_to_space(&vec![input], &attrs, &HashMap::new(), &mut builder);
+        let result = translate_depth_to_space(&[input], &attrs, &HashMap::new(), &mut builder);
         assert!(result.is_ok());
     }
 
@@ -339,7 +346,7 @@ mod tests {
             make_string_attr("mode", "CRD"),
         ];
 
-        let result = translate_depth_to_space(&vec![input], &attrs, &HashMap::new(), &mut builder);
+        let result = translate_depth_to_space(&[input], &attrs, &HashMap::new(), &mut builder);
         assert!(result.is_ok());
     }
 
@@ -354,7 +361,7 @@ mod tests {
 
         let attrs = vec![make_int_attr("blocksize", 2)];
 
-        let result = translate_space_to_depth(&vec![input], &attrs, &HashMap::new(), &mut builder);
+        let result = translate_space_to_depth(&[input], &attrs, &HashMap::new(), &mut builder);
         assert!(result.is_ok());
     }
 }

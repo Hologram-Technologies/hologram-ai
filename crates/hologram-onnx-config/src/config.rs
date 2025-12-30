@@ -54,6 +54,7 @@ impl PipelineConfig {
     /// Load pipeline config from TOML string.
     ///
     /// # Performance: O(n) where n = string length
+    #[allow(clippy::should_implement_trait)]
     pub fn from_str(toml: &str) -> Result<Self, ConfigError> {
         trace!("Parsing TOML config");
         let config: PipelineConfig = toml::from_str(toml)?;

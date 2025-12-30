@@ -1,26 +1,33 @@
-//! Display ONNX model information.
+//! Display ONNX and HOLO model information.
 //!
-//! This module provides functionality to inspect ONNX models and display
+//! This module provides functionality to inspect ONNX and .holo models and display
 //! their structure, inputs, outputs, and operations.
 
 use anyhow::{Context, Result};
-use hologram_onnx_core::{extract_opset_version, parse_model};
+use hologram_onnx_core::{extract_opset_version, inspect_holo_file, parse_model};
 use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
 use tracing::{debug, info};
 
-/// Display information about an ONNX model.
+/// Display information about an ONNX or .holo model.
 ///
 /// # Arguments
 ///
-/// * `model_path` - Path to ONNX model file
+/// * `model_path` - Path to ONNX or .holo model file
 /// * `detailed` - Show detailed operation list
 ///
 /// # Returns
 ///
 /// Returns Ok(()) on success, or an error if the model cannot be read/parsed.
 pub fn info_command(model_path: &Path, detailed: bool) -> Result<()> {
+    // Check file extension to determine format
+    if let Some(ext) = model_path.extension()
+        && ext == "holo"
+    {
+        return info_holo_command(model_path);
+    }
+
     info!("Reading ONNX model: {}", model_path.display());
 
     // Read model file
@@ -185,6 +192,17 @@ fn get_tensor_type_string(value_info: &hologram_onnx_spec::ValueInfoProto) -> St
         };
     }
     "tensor".to_string()
+}
+
+/// Display information about a compiled .holo model.
+fn info_holo_command(model_path: &Path) -> Result<()> {
+    info!("Reading HOLO model: {}", model_path.display());
+
+    let output = inspect_holo_file(model_path)
+        .with_context(|| format!("Failed to read HOLO model from {}", model_path.display()))?;
+
+    println!("{}", output);
+    Ok(())
 }
 
 #[cfg(test)]

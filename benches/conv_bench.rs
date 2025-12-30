@@ -173,7 +173,7 @@ fn bench_resnet_block(c: &mut Criterion) {
 
                     for i in 0..num_convs {
                         let kernel =
-                            builder.add_input(&format!("W{}", i), f32_tensor(&[64, 64, 3, 3]));
+                            builder.add_input(format!("W{}", i), f32_tensor(&[64, 64, 3, 3]));
                         current = builder.conv2d(current, kernel, None, (1, 1), (1, 1), (1, 1), 1);
                     }
 
@@ -193,7 +193,7 @@ fn bench_resnet_block(c: &mut Criterion) {
         let mut current = builder.add_input("X", f32_tensor(&[1, 64, 56, 56]));
 
         for i in 0..num_convs {
-            let kernel = builder.add_input(&format!("W{}", i), f32_tensor(&[64, 64, 3, 3]));
+            let kernel = builder.add_input(format!("W{}", i), f32_tensor(&[64, 64, 3, 3]));
             current = builder.conv2d(current, kernel, None, (1, 1), (1, 1), (1, 1), 1);
         }
 
@@ -232,7 +232,7 @@ fn bench_large_conv_chain(c: &mut Criterion) {
 
                     for i in 0..num_convs {
                         let kernel =
-                            builder.add_input(&format!("W{}", i), f32_tensor(&[64, 64, 3, 3]));
+                            builder.add_input(format!("W{}", i), f32_tensor(&[64, 64, 3, 3]));
                         current = builder.conv2d(current, kernel, None, (1, 1), (1, 1), (1, 1), 1);
                     }
 
@@ -252,7 +252,7 @@ fn bench_large_conv_chain(c: &mut Criterion) {
         let mut current = builder.add_input("X", f32_tensor(&[1, 64, 56, 56]));
 
         for i in 0..num_convs {
-            let kernel = builder.add_input(&format!("W{}", i), f32_tensor(&[64, 64, 3, 3]));
+            let kernel = builder.add_input(format!("W{}", i), f32_tensor(&[64, 64, 3, 3]));
             current = builder.conv2d(current, kernel, None, (1, 1), (1, 1), (1, 1), 1);
         }
 
