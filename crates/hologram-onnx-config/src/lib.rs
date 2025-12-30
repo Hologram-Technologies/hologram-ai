@@ -42,12 +42,21 @@ use std::path::Path;
 
 // Module declarations
 mod config;
+pub mod conversion;
 mod error;
 mod output_handlers;
+pub mod unified;
 
 // Public exports
 pub use config::{ExecutionConfig, OutputHandlerConfig, PipelineConfig, StageConfig};
 pub use error::ConfigError;
+
+// Unified configuration exports
+pub use unified::{
+    BuiltinStage, CompilerConfig, ConditionalStage, DimExpr, Expr, InputDef, InputSpec, InputType,
+    LoopStage, ModelDef, ModelSpec, ModelStage, OutputDef, OutputHandlerType, OutputSpec,
+    StageDef, UnifiedConfig,
+};
 pub use output_handlers::{
     AudioOutput, ImageOutput, OutputHandler, OutputHandlerRegistry, ProcessedOutput, TensorData,
     TensorOutput,

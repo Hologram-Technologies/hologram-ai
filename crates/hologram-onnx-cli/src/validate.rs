@@ -245,7 +245,7 @@ mod tests {
 
     #[test]
     fn test_supported_ops_count() {
-        // We have 48 operations implemented (including Cast)
-        assert_eq!(SUPPORTED_OPS.len(), 48);
+        // We have 72 operations implemented
+        assert_eq!(SUPPORTED_OPS.len(), 72);
     }
 }

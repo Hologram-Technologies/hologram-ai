@@ -1,0 +1,66 @@
+# Whisper Speech Recognition - Unified Config Format
+#
+# Demonstrates audio input processing with the unified config.
+# Uses the Whisper encoder-decoder architecture for transcription.
+#
+# Usage:
+#   hologram-onnx compile --config whisper-unified.toml
+#   hologram-onnx run --config whisper-unified.toml --audio recording.wav
+
+name = "whisper"
+version = "1.0"
+description = "Speech recognition with OpenAI Whisper"
+
+# Pipeline inputs
+[inputs]
+audio = { type = "audio", default = "audio.wav" }
+language = { type = "text", default = "en" }
+task = { type = "text", default = "transcribe" }
+
+# Models
+[models]
+encoder = "models/whisper/encoder.onnx"
+decoder = "models/whisper/decoder.onnx"
+
+# Compiler settings
+[compiler]
+weight_threshold = 4096
+enable_partitioning = true
+partition_size = 500
+
+# Execution stages
+[[stages]]
+builtin = "mel_spectrogram"
+args = { audio = "audio", n_mels = 80, hop_length = 160 }
+outputs = ["mel"]
+
+[[stages]]
+model = "encoder"
+inputs = { mel = "mel" }
+outputs = ["encoder_hidden_states"]
+
+[[stages]]
+builtin = "init_decoder"
+args = { language = "language", task = "task" }
+outputs = ["decoder_input_ids"]
+
+[[stages]]
+over = "range(448)"  # max_length
+as = "step"
+
+[[stages.stages]]
+model = "decoder"
+inputs = {
+    input_ids = "decoder_input_ids",
+    encoder_hidden_states = "encoder_hidden_states"
+}
+outputs = ["logits"]
+
+[[stages.stages]]
+builtin = "argmax"
+args = { tensor = "logits", dim = -1 }
+outputs = ["next_token"]
+
+# Output handler for text
+[outputs]
+transcription = { tensor = "generated_ids", handler = "text" }
