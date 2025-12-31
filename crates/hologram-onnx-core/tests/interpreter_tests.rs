@@ -141,6 +141,7 @@ fn test_simple_interpreter_execution() {
             size: 16,
             external: false,
         }],
+        packed_weight_entries: Vec::new(),
         embedded_weights: weight_data,
         external_weights: vec![],
     };
@@ -237,6 +238,7 @@ fn test_dynamic_reshape_call_execution() {
             size: shape_bytes.len(),
             external: false,
         }],
+        packed_weight_entries: Vec::new(),
         embedded_weights: shape_bytes,
         external_weights: vec![],
     };
@@ -327,6 +329,7 @@ fn test_matmul_execution() {
             size: 24,
             external: false,
         }],
+        packed_weight_entries: Vec::new(),
         embedded_weights: weight_data,
         external_weights: vec![],
     };
@@ -350,6 +353,574 @@ fn test_matmul_execution() {
     // = [[1, 2], [3, 4]]
     assert_eq!(result, vec![1.0, 2.0, 3.0, 4.0]);
     println!("MatMul test passed: {:?}", result);
+}
+
+#[test]
+fn test_matmul_execution_with_backend() {
+    use hologram_onnx_core::serialization::{
+        FORMAT_VERSION, HoloHeader, HoloMetadata, HoloModel, InputSpec, OutputSpec, SerGraph,
+        SerNode, SerNodeKind, WeightEntry,
+    };
+    use hologram_onnx_core::RuntimeBackend;
+
+    let weight_data: Vec<u8> = [1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0]
+        .iter()
+        .flat_map(|f| f.to_le_bytes())
+        .collect();
+
+    let model = HoloModel {
+        header: HoloHeader {
+            version: FORMAT_VERSION,
+            flags: 0,
+            metadata_offset: 40,
+            graph_offset: 40,
+            weights_offset: 0,
+        },
+        metadata: HoloMetadata {
+            name: "test_matmul_backend".to_string(),
+            inputs: vec![InputSpec {
+                name: "x".to_string(),
+                dtype: "f32".to_string(),
+                shape: vec![DimSpec::Concrete(2), DimSpec::Concrete(3)],
+            }],
+            outputs: vec![OutputSpec {
+                node_id: 2,
+                dtype: "f32".to_string(),
+                shape: vec![DimSpec::Concrete(2), DimSpec::Concrete(2)],
+            }],
+            embedded_weight_size: 24,
+            external_weight_size: 0,
+            node_count: 3,
+        },
+        graph: SerGraph {
+            nodes: vec![
+                SerNode {
+                    id: 0,
+                    node: SerNodeKind::Input {
+                        name: "x".to_string(),
+                    },
+                    dtype: Some("f32".to_string()),
+                    shape: Some(vec![DimSpec::Concrete(2), DimSpec::Concrete(3)]),
+                },
+                SerNode {
+                    id: 1,
+                    node: SerNodeKind::Constant { weight_id: 0 },
+                    dtype: Some("f32".to_string()),
+                    shape: Some(vec![DimSpec::Concrete(3), DimSpec::Concrete(2)]),
+                },
+                SerNode {
+                    id: 2,
+                    node: SerNodeKind::MatMul { lhs: 0, rhs: 1 },
+                    dtype: Some("f32".to_string()),
+                    shape: Some(vec![DimSpec::Concrete(2), DimSpec::Concrete(2)]),
+                },
+            ],
+            outputs: vec![2],
+        },
+        weight_entries: vec![WeightEntry {
+            id: 0,
+            name: "weight".to_string(),
+            shape: vec![3, 2],
+            dtype: "f32".to_string(),
+            offset: 0,
+            size: 24,
+            external: false,
+        }],
+        packed_weight_entries: Vec::new(),
+        embedded_weights: weight_data,
+        external_weights: vec![],
+    };
+
+    let mut interpreter =
+        Interpreter::new_with_backend(&model, RuntimeBackend::Cpu).expect("Backend init failed");
+
+    let input = vec![1.0f32, 0.0, 0.0, 0.0, 1.0, 0.0];
+    interpreter
+        .set_input("x", &input)
+        .expect("Failed to set input");
+    interpreter.run().expect("Failed to run");
+
+    let output = interpreter.get_output(0).expect("Failed to get output");
+    let result = output.to_vec();
+    assert_eq!(result, vec![1.0, 2.0, 3.0, 4.0]);
+}
+
+#[test]
+fn test_batched_matmul_with_transpose_input() {
+    use hologram_onnx_core::serialization::{
+        FORMAT_VERSION, HoloHeader, HoloMetadata, HoloModel, InputSpec, OutputSpec, SerGraph,
+        SerNode, SerNodeKind, WeightEntry,
+    };
+
+    let weight_data: Vec<u8> = [1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]
+        .iter()
+        .flat_map(|f| f.to_le_bytes())
+        .collect();
+
+    let model = HoloModel {
+        header: HoloHeader {
+            version: FORMAT_VERSION,
+            flags: 0,
+            metadata_offset: 40,
+            graph_offset: 40,
+            weights_offset: 0,
+        },
+        metadata: HoloMetadata {
+            name: "test_batched_matmul_transpose".to_string(),
+            inputs: vec![InputSpec {
+                name: "x".to_string(),
+                dtype: "f32".to_string(),
+                shape: vec![
+                    DimSpec::Concrete(1),
+                    DimSpec::Concrete(2),
+                    DimSpec::Concrete(3),
+                ],
+            }],
+            outputs: vec![OutputSpec {
+                node_id: 3,
+                dtype: "f32".to_string(),
+                shape: vec![DimSpec::Concrete(3), DimSpec::Concrete(4)],
+            }],
+            embedded_weight_size: 32,
+            external_weight_size: 0,
+            node_count: 4,
+        },
+        graph: SerGraph {
+            nodes: vec![
+                SerNode {
+                    id: 0,
+                    node: SerNodeKind::Input {
+                        name: "x".to_string(),
+                    },
+                    dtype: Some("f32".to_string()),
+                    shape: Some(vec![
+                        DimSpec::Concrete(1),
+                        DimSpec::Concrete(2),
+                        DimSpec::Concrete(3),
+                    ]),
+                },
+                SerNode {
+                    id: 1,
+                    node: SerNodeKind::Transpose {
+                        input: 0,
+                        perm: vec![0, 2, 1],
+                    },
+                    dtype: Some("f32".to_string()),
+                    shape: Some(vec![
+                        DimSpec::Concrete(1),
+                        DimSpec::Concrete(3),
+                        DimSpec::Concrete(2),
+                    ]),
+                },
+                SerNode {
+                    id: 2,
+                    node: SerNodeKind::Constant { weight_id: 0 },
+                    dtype: Some("f32".to_string()),
+                    shape: Some(vec![DimSpec::Concrete(2), DimSpec::Concrete(4)]),
+                },
+                SerNode {
+                    id: 3,
+                    node: SerNodeKind::MatMul { lhs: 1, rhs: 2 },
+                    dtype: Some("f32".to_string()),
+                    shape: Some(vec![DimSpec::Concrete(3), DimSpec::Concrete(4)]),
+                },
+            ],
+            outputs: vec![3],
+        },
+        weight_entries: vec![WeightEntry {
+            id: 0,
+            name: "weight".to_string(),
+            shape: vec![2, 4],
+            dtype: "f32".to_string(),
+            offset: 0,
+            size: 32,
+            external: false,
+        }],
+        packed_weight_entries: Vec::new(),
+        embedded_weights: weight_data,
+        external_weights: vec![],
+    };
+
+    let mut interpreter = Interpreter::new(&model).expect("Failed to create interpreter");
+    let input = vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0];
+    interpreter
+        .set_input("x", &input)
+        .expect("Failed to set input");
+
+    interpreter.run().expect("Failed to run");
+
+    let output = interpreter.get_output(0).expect("Failed to get output");
+    let result = output.to_vec();
+    assert_eq!(
+        result,
+        vec![21.0, 26.0, 31.0, 36.0, 27.0, 34.0, 41.0, 48.0, 33.0, 42.0, 51.0, 60.0]
+    );
+}
+
+#[test]
+fn test_batched_matmul_execution() {
+    use hologram_onnx_core::serialization::{
+        FORMAT_VERSION, HoloHeader, HoloMetadata, HoloModel, InputSpec, OutputSpec, SerGraph,
+        SerNode, SerNodeKind, WeightEntry,
+    };
+
+    let weight_data: Vec<u8> = [
+        1.0f32, 0.0, 0.0, 1.0, 1.0, 1.0, // batch 0 (3x2)
+        2.0, 0.0, 0.0, 2.0, 0.0, 0.0,   // batch 1 (3x2)
+    ]
+    .iter()
+    .flat_map(|f| f.to_le_bytes())
+    .collect();
+
+    let model = HoloModel {
+        header: HoloHeader {
+            version: FORMAT_VERSION,
+            flags: 0,
+            metadata_offset: 40,
+            graph_offset: 40,
+            weights_offset: 0,
+        },
+        metadata: HoloMetadata {
+            name: "test_batched_matmul".to_string(),
+            inputs: vec![InputSpec {
+                name: "x".to_string(),
+                dtype: "f32".to_string(),
+                shape: vec![
+                    DimSpec::Concrete(2),
+                    DimSpec::Concrete(2),
+                    DimSpec::Concrete(3),
+                ],
+            }],
+            outputs: vec![OutputSpec {
+                node_id: 2,
+                dtype: "f32".to_string(),
+                shape: vec![
+                    DimSpec::Concrete(2),
+                    DimSpec::Concrete(2),
+                    DimSpec::Concrete(2),
+                ],
+            }],
+            embedded_weight_size: 48,
+            external_weight_size: 0,
+            node_count: 3,
+        },
+        graph: SerGraph {
+            nodes: vec![
+                SerNode {
+                    id: 0,
+                    node: SerNodeKind::Input {
+                        name: "x".to_string(),
+                    },
+                    dtype: Some("f32".to_string()),
+                    shape: Some(vec![
+                        DimSpec::Concrete(2),
+                        DimSpec::Concrete(2),
+                        DimSpec::Concrete(3),
+                    ]),
+                },
+                SerNode {
+                    id: 1,
+                    node: SerNodeKind::Constant { weight_id: 0 },
+                    dtype: Some("f32".to_string()),
+                    shape: Some(vec![
+                        DimSpec::Concrete(2),
+                        DimSpec::Concrete(3),
+                        DimSpec::Concrete(2),
+                    ]),
+                },
+                SerNode {
+                    id: 2,
+                    node: SerNodeKind::MatMul { lhs: 0, rhs: 1 },
+                    dtype: Some("f32".to_string()),
+                    shape: Some(vec![
+                        DimSpec::Concrete(2),
+                        DimSpec::Concrete(2),
+                        DimSpec::Concrete(2),
+                    ]),
+                },
+            ],
+            outputs: vec![2],
+        },
+        weight_entries: vec![WeightEntry {
+            id: 0,
+            name: "weight".to_string(),
+            shape: vec![2, 3, 2],
+            dtype: "f32".to_string(),
+            offset: 0,
+            size: 48,
+            external: false,
+        }],
+        packed_weight_entries: Vec::new(),
+        embedded_weights: weight_data,
+        external_weights: vec![],
+    };
+
+    let mut interpreter = Interpreter::new(&model).expect("Failed to create interpreter");
+    let input = vec![
+        1.0f32, 2.0, 3.0,
+        4.0, 5.0, 6.0,
+        1.0, 0.0, 0.0,
+        0.0, 1.0, 0.0,
+    ];
+
+    interpreter
+        .set_input("x", &input)
+        .expect("Failed to set input");
+
+    interpreter.run().expect("Failed to run");
+
+    let output = interpreter.get_output(0).expect("Failed to get output");
+    let result = output.to_vec();
+
+    assert_eq!(result, vec![4.0, 5.0, 10.0, 11.0, 2.0, 0.0, 0.0, 2.0]);
+}
+
+/// Test Conv2D operation
+#[test]
+fn test_conv2d_execution() {
+    use hologram_onnx_core::serialization::{
+        FORMAT_VERSION, HoloHeader, HoloMetadata, HoloModel, InputSpec, OutputSpec, SerGraph,
+        SerNode, SerNodeKind, WeightEntry,
+    };
+
+    let weight_data: Vec<u8> = [1.0f32, 0.0, 0.0, 1.0]
+        .iter()
+        .flat_map(|f| f.to_le_bytes())
+        .collect();
+
+    let model = HoloModel {
+        header: HoloHeader {
+            version: FORMAT_VERSION,
+            flags: 0,
+            metadata_offset: 40,
+            graph_offset: 40,
+            weights_offset: 0,
+        },
+        metadata: HoloMetadata {
+            name: "test_conv2d".to_string(),
+            inputs: vec![InputSpec {
+                name: "x".to_string(),
+                dtype: "f32".to_string(),
+                shape: vec![
+                    DimSpec::Concrete(1),
+                    DimSpec::Concrete(1),
+                    DimSpec::Concrete(3),
+                    DimSpec::Concrete(3),
+                ],
+            }],
+            outputs: vec![OutputSpec {
+                node_id: 2,
+                dtype: "f32".to_string(),
+                shape: vec![
+                    DimSpec::Concrete(1),
+                    DimSpec::Concrete(1),
+                    DimSpec::Concrete(2),
+                    DimSpec::Concrete(2),
+                ],
+            }],
+            embedded_weight_size: 16,
+            external_weight_size: 0,
+            node_count: 3,
+        },
+        graph: SerGraph {
+            nodes: vec![
+                SerNode {
+                    id: 0,
+                    node: SerNodeKind::Input {
+                        name: "x".to_string(),
+                    },
+                    dtype: Some("f32".to_string()),
+                    shape: Some(vec![
+                        DimSpec::Concrete(1),
+                        DimSpec::Concrete(1),
+                        DimSpec::Concrete(3),
+                        DimSpec::Concrete(3),
+                    ]),
+                },
+                SerNode {
+                    id: 1,
+                    node: SerNodeKind::Constant { weight_id: 0 },
+                    dtype: Some("f32".to_string()),
+                    shape: Some(vec![
+                        DimSpec::Concrete(1),
+                        DimSpec::Concrete(1),
+                        DimSpec::Concrete(2),
+                        DimSpec::Concrete(2),
+                    ]),
+                },
+                SerNode {
+                    id: 2,
+                    node: SerNodeKind::Conv2D {
+                        input: 0,
+                        weight: 1,
+                        bias: None,
+                        stride: vec![1, 1],
+                        padding: vec![0, 0],
+                        dilation: vec![1, 1],
+                        groups: 1,
+                    },
+                    dtype: Some("f32".to_string()),
+                    shape: Some(vec![
+                        DimSpec::Concrete(1),
+                        DimSpec::Concrete(1),
+                        DimSpec::Concrete(2),
+                        DimSpec::Concrete(2),
+                    ]),
+                },
+            ],
+            outputs: vec![2],
+        },
+        weight_entries: vec![WeightEntry {
+            id: 0,
+            name: "weight".to_string(),
+            shape: vec![1, 1, 2, 2],
+            dtype: "f32".to_string(),
+            offset: 0,
+            size: 16,
+            external: false,
+        }],
+        packed_weight_entries: Vec::new(),
+        embedded_weights: weight_data,
+        external_weights: vec![],
+    };
+
+    let mut interpreter = Interpreter::new(&model).expect("Failed to create interpreter");
+
+    let input = vec![
+        1.0f32, 2.0, 3.0,
+        4.0, 5.0, 6.0,
+        7.0, 8.0, 9.0,
+    ];
+    interpreter
+        .set_input("x", &input)
+        .expect("Failed to set input");
+
+    interpreter.run().expect("Failed to run");
+
+    let output = interpreter.get_output(0).expect("Failed to get output");
+    let result = output.to_vec();
+
+    assert_eq!(result, vec![6.0, 8.0, 12.0, 14.0]);
+}
+
+#[test]
+fn test_resize_nearest_execution() {
+    use hologram_onnx_core::serialization::{
+        FORMAT_VERSION, HoloHeader, HoloMetadata, HoloModel, InputSpec, OutputSpec, SerGraph,
+        SerNode, SerNodeKind, WeightEntry,
+    };
+
+    let scales_data: Vec<u8> = [1.0f32, 1.0, 2.0, 2.0]
+        .iter()
+        .flat_map(|f| f.to_le_bytes())
+        .collect();
+
+    let model = HoloModel {
+        header: HoloHeader {
+            version: FORMAT_VERSION,
+            flags: 0,
+            metadata_offset: 40,
+            graph_offset: 40,
+            weights_offset: 0,
+        },
+        metadata: HoloMetadata {
+            name: "test_resize_nearest".to_string(),
+            inputs: vec![InputSpec {
+                name: "x".to_string(),
+                dtype: "f32".to_string(),
+                shape: vec![
+                    DimSpec::Concrete(1),
+                    DimSpec::Concrete(1),
+                    DimSpec::Concrete(2),
+                    DimSpec::Concrete(2),
+                ],
+            }],
+            outputs: vec![OutputSpec {
+                node_id: 2,
+                dtype: "f32".to_string(),
+                shape: vec![
+                    DimSpec::Concrete(1),
+                    DimSpec::Concrete(1),
+                    DimSpec::Concrete(4),
+                    DimSpec::Concrete(4),
+                ],
+            }],
+            embedded_weight_size: 16,
+            external_weight_size: 0,
+            node_count: 3,
+        },
+        graph: SerGraph {
+            nodes: vec![
+                SerNode {
+                    id: 0,
+                    node: SerNodeKind::Input {
+                        name: "x".to_string(),
+                    },
+                    dtype: Some("f32".to_string()),
+                    shape: Some(vec![
+                        DimSpec::Concrete(1),
+                        DimSpec::Concrete(1),
+                        DimSpec::Concrete(2),
+                        DimSpec::Concrete(2),
+                    ]),
+                },
+                SerNode {
+                    id: 1,
+                    node: SerNodeKind::Constant { weight_id: 0 },
+                    dtype: Some("f32".to_string()),
+                    shape: Some(vec![DimSpec::Concrete(4)]),
+                },
+                SerNode {
+                    id: 2,
+                    node: SerNodeKind::Call {
+                        func: "onnx.Resize".to_string(),
+                        args: vec![0, 1],
+                    },
+                    dtype: Some("f32".to_string()),
+                    shape: Some(vec![
+                        DimSpec::Concrete(1),
+                        DimSpec::Concrete(1),
+                        DimSpec::Concrete(4),
+                        DimSpec::Concrete(4),
+                    ]),
+                },
+            ],
+            outputs: vec![2],
+        },
+        weight_entries: vec![WeightEntry {
+            id: 0,
+            name: "scales".to_string(),
+            shape: vec![4],
+            dtype: "f32".to_string(),
+            offset: 0,
+            size: 16,
+            external: false,
+        }],
+        packed_weight_entries: Vec::new(),
+        embedded_weights: scales_data,
+        external_weights: vec![],
+    };
+
+    let mut interpreter = Interpreter::new(&model).expect("Failed to create interpreter");
+    let input = vec![1.0f32, 2.0, 3.0, 4.0];
+    interpreter
+        .set_input("x", &input)
+        .expect("Failed to set input");
+
+    interpreter.run().expect("Failed to run");
+
+    let output = interpreter.get_output(0).expect("Failed to get output");
+    let result = output.to_vec();
+
+    assert_eq!(
+        result,
+        vec![
+            1.0, 1.0, 2.0, 2.0,
+            1.0, 1.0, 2.0, 2.0,
+            3.0, 3.0, 4.0, 4.0,
+            3.0, 3.0, 4.0, 4.0,
+        ]
+    );
 }
 
 #[test]
@@ -414,6 +985,7 @@ fn test_call_shape() {
             outputs: vec![1],
         },
         weight_entries: vec![],
+        packed_weight_entries: Vec::new(),
         embedded_weights: vec![],
         external_weights: vec![],
     };
@@ -502,6 +1074,7 @@ fn test_call_constant_of_shape() {
             size: 8,
             external: false,
         }],
+        packed_weight_entries: Vec::new(),
         embedded_weights: shape_data.clone(),
         external_weights: vec![],
     };
@@ -643,6 +1216,7 @@ fn test_call_group_normalization() {
                 external: false,
             },
         ],
+        packed_weight_entries: Vec::new(),
         embedded_weights: {
             let mut data = Vec::new();
             data.extend(scale_data);
@@ -729,6 +1303,7 @@ fn test_static_reshape_symbolic_flatten() {
             outputs: vec![1],
         },
         weight_entries: vec![],
+        packed_weight_entries: Vec::new(),
         embedded_weights: vec![],
         external_weights: vec![],
     };
@@ -825,6 +1400,7 @@ fn test_call_reshape() {
             size: 8,
             external: false,
         }],
+        packed_weight_entries: Vec::new(),
         embedded_weights: shape_data,
         external_weights: vec![],
     };

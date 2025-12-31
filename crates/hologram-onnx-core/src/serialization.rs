@@ -353,12 +353,35 @@ pub struct WeightEntry {
     pub external: bool, // True if in external file
 }
 
+/// Packed weight layouts for fast runtime execution.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum PackedWeightKind {
+    MatMulRhs,
+    Conv2dIm2Col,
+}
+
+/// Packed weight entry metadata.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PackedWeightEntry {
+    pub id: usize,
+    pub source_weight_id: usize,
+    pub kind: PackedWeightKind,
+    pub layout: String,
+    pub shape: Vec<usize>,
+    pub offset: u64,
+    pub size: usize,
+    pub external: bool,
+}
+
 /// Complete serializable model
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SerModel {
     pub metadata: HoloMetadata,
     pub graph: SerGraph,
     pub weights: Vec<WeightEntry>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub packed_weights: Vec<PackedWeightEntry>,
 }
 
 // =============================================================================
@@ -368,7 +391,9 @@ pub struct SerModel {
 /// Serialization context
 pub struct HoloSerializer {
     weight_threshold: usize,
+    pack_weights: bool,
     weights: Vec<WeightEntry>,
+    packed_weights: Vec<PackedWeightEntry>,
     embedded_data: Vec<u8>,
     external_data: Vec<u8>,
     weight_id_map: HashMap<NodeId, usize>,
@@ -377,10 +402,12 @@ pub struct HoloSerializer {
 impl HoloSerializer {
     /// Create a new serializer with the given weight threshold.
     /// Weights larger than this threshold will be stored externally.
-    pub fn new(weight_threshold: usize) -> Self {
+    pub fn new(weight_threshold: usize, pack_weights: bool) -> Self {
         Self {
             weight_threshold,
+            pack_weights,
             weights: Vec::new(),
+            packed_weights: Vec::new(),
             embedded_data: Vec::new(),
             external_data: Vec::new(),
             weight_id_map: HashMap::new(),
@@ -391,6 +418,10 @@ impl HoloSerializer {
     pub fn serialize(&mut self, func: &IRFunction) -> Result<(Vec<u8>, Vec<u8>)> {
         // First pass: extract weights and build weight table
         self.extract_weights(func)?;
+
+        if self.pack_weights {
+            self.extract_packed_weights(func)?;
+        }
 
         // Build serializable graph
         let graph = self.build_graph(func)?;
@@ -403,6 +434,7 @@ impl HoloSerializer {
             metadata,
             graph,
             weights: self.weights.clone(),
+            packed_weights: self.packed_weights.clone(),
         };
 
         // Serialize model to JSON
@@ -486,6 +518,115 @@ impl HoloSerializer {
                 self.weight_id_map.insert(entry.id, weight_id);
             }
         }
+        Ok(())
+    }
+
+    fn extract_packed_weights(&mut self, func: &IRFunction) -> Result<()> {
+        let mut packed_map: HashMap<(usize, PackedWeightKind), usize> = HashMap::new();
+
+        for entry in &func.body {
+            match &entry.node {
+                IRNode::MatMul { rhs, .. } => {
+                    if let Some(&weight_id) = self.weight_id_map.get(rhs) {
+                        let key = (weight_id, PackedWeightKind::MatMulRhs);
+                        if packed_map.contains_key(&key) {
+                            continue;
+                        }
+
+                        let weight_entry = self.weights.get(weight_id).ok_or_else(|| {
+                            OnnxError::SerializationError(format!(
+                                "Missing weight entry for MatMul rhs {}",
+                                weight_id
+                            ))
+                        })?;
+
+                        if weight_entry.dtype != "f32" || weight_entry.shape.len() != 2 {
+                            continue;
+                        }
+
+                        let packed_id = self.packed_weights.len();
+                        self.packed_weights.push(PackedWeightEntry {
+                            id: packed_id,
+                            source_weight_id: weight_id,
+                            kind: PackedWeightKind::MatMulRhs,
+                            layout: "row_major".to_string(),
+                            shape: weight_entry.shape.clone(),
+                            offset: weight_entry.offset,
+                            size: weight_entry.size,
+                            external: weight_entry.external,
+                        });
+                        packed_map.insert(key, packed_id);
+                    }
+                }
+                IRNode::Conv2D {
+                    kernel,
+                    dilation,
+                    groups,
+                    ..
+                } => {
+                    if *groups != 1 || dilation.0 != 1 || dilation.1 != 1 {
+                        continue;
+                    }
+
+                    let Some(&weight_id) = self.weight_id_map.get(kernel) else {
+                        continue;
+                    };
+
+                    let key = (weight_id, PackedWeightKind::Conv2dIm2Col);
+                    if packed_map.contains_key(&key) {
+                        continue;
+                    }
+
+                    let weight_entry = self.weights.get(weight_id).ok_or_else(|| {
+                        OnnxError::SerializationError(format!(
+                            "Missing weight entry for Conv2D kernel {}",
+                            weight_id
+                        ))
+                    })?;
+
+                    if weight_entry.dtype != "f32" || weight_entry.shape.len() != 4 {
+                        continue;
+                    }
+
+                    let weight_bytes = self.weight_bytes(weight_entry).ok_or_else(|| {
+                        OnnxError::SerializationError(format!(
+                            "Missing Conv2D weight bytes for {}",
+                            weight_id
+                        ))
+                    })?;
+                    let packed = pack_conv2d_weight(weight_bytes, &weight_entry.shape)?;
+                    let packed_bytes = f32_vec_to_bytes(&packed);
+
+                    let external = packed_bytes.len() > self.weight_threshold;
+                    let offset = if external {
+                        let off = self.external_data.len() as u64;
+                        self.external_data.extend_from_slice(&packed_bytes);
+                        off
+                    } else {
+                        let off = self.embedded_data.len() as u64;
+                        self.embedded_data.extend_from_slice(&packed_bytes);
+                        off
+                    };
+
+                    let packed_id = self.packed_weights.len();
+                    let k = weight_entry.shape[1] * weight_entry.shape[2] * weight_entry.shape[3];
+                    let c_out = weight_entry.shape[0];
+                    self.packed_weights.push(PackedWeightEntry {
+                        id: packed_id,
+                        source_weight_id: weight_id,
+                        kind: PackedWeightKind::Conv2dIm2Col,
+                        layout: "kxc_out".to_string(),
+                        shape: vec![k, c_out],
+                        offset,
+                        size: packed_bytes.len(),
+                        external,
+                    });
+                    packed_map.insert(key, packed_id);
+                }
+                _ => {}
+            }
+        }
+
         Ok(())
     }
 
@@ -812,14 +953,26 @@ impl HoloSerializer {
             .iter()
             .filter(|w| !w.external)
             .map(|w| w.size as u64)
-            .sum();
+            .sum::<u64>()
+            + self
+                .packed_weights
+                .iter()
+                .filter(|w| !w.external)
+                .map(|w| w.size as u64)
+                .sum::<u64>();
 
         let external_weight_size: u64 = self
             .weights
             .iter()
             .filter(|w| w.external)
             .map(|w| w.size as u64)
-            .sum();
+            .sum::<u64>()
+            + self
+                .packed_weights
+                .iter()
+                .filter(|w| w.external)
+                .map(|w| w.size as u64)
+                .sum::<u64>();
 
         HoloMetadata {
             name: func.name.clone(),
@@ -828,6 +981,23 @@ impl HoloSerializer {
             embedded_weight_size,
             external_weight_size,
             node_count: func.body.len(),
+        }
+    }
+
+    fn weight_bytes(&self, entry: &WeightEntry) -> Option<&[u8]> {
+        let offset = entry.offset as usize;
+        let size = entry.size;
+
+        if entry.external {
+            if offset + size <= self.external_data.len() {
+                Some(&self.external_data[offset..offset + size])
+            } else {
+                None
+            }
+        } else if offset + size <= self.embedded_data.len() {
+            Some(&self.embedded_data[offset..offset + size])
+        } else {
+            None
         }
     }
 }
@@ -845,6 +1015,65 @@ fn type_to_dtype_string(ty: &Type) -> String {
         Type::Void => "void".to_string(),
         Type::Unknown => "unknown".to_string(),
     }
+}
+
+fn f32_vec_to_bytes(values: &[f32]) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(values.len() * 4);
+    for value in values {
+        bytes.extend_from_slice(&value.to_le_bytes());
+    }
+    bytes
+}
+
+fn bytes_to_f32_vec(data: &[u8]) -> Result<Vec<f32>> {
+    if data.len() % 4 != 0 {
+        return Err(OnnxError::SerializationError(
+            "Packed weight data length is not a multiple of 4".into(),
+        ));
+    }
+    Ok(data
+        .chunks_exact(4)
+        .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
+        .collect())
+}
+
+fn pack_conv2d_weight(data: &[u8], shape: &[usize]) -> Result<Vec<f32>> {
+    let values = bytes_to_f32_vec(data)?;
+    if shape.len() != 4 {
+        return Err(OnnxError::SerializationError(
+            "Conv2D weight shape must be 4D".into(),
+        ));
+    }
+
+    let c_out = shape[0];
+    let c_in = shape[1];
+    let kh = shape[2];
+    let kw = shape[3];
+    let k = c_in * kh * kw;
+
+    if values.len() != c_out * k {
+        return Err(OnnxError::SerializationError(format!(
+            "Conv2D weight size mismatch: expected {}, got {}",
+            c_out * k,
+            values.len()
+        )));
+    }
+
+    let mut packed = vec![0.0f32; k * c_out];
+    for oc in 0..c_out {
+        let mut k_idx = 0;
+        for ic in 0..c_in {
+            for ky in 0..kh {
+                for kx in 0..kw {
+                    let src_idx = ((oc * c_in + ic) * kh + ky) * kw + kx;
+                    packed[k_idx * c_out + oc] = values[src_idx];
+                    k_idx += 1;
+                }
+            }
+        }
+    }
+
+    Ok(packed)
 }
 
 fn type_to_shape_spec(ty: &Type) -> Option<Vec<DimSpec>> {
@@ -939,8 +1168,9 @@ fn reduceop_to_string(op: ReduceOp) -> String {
 pub fn serialize_ir_function(
     func: &IRFunction,
     weight_threshold: usize,
+    pack_weights: bool,
 ) -> Result<(Vec<u8>, Vec<u8>)> {
-    let mut serializer = HoloSerializer::new(weight_threshold);
+    let mut serializer = HoloSerializer::new(weight_threshold, pack_weights);
     serializer.serialize(func)
 }
 
@@ -949,8 +1179,9 @@ pub fn write_compiled_model(
     func: &IRFunction,
     output_path: &Path,
     weight_threshold: usize,
+    pack_weights: bool,
 ) -> Result<(usize, usize)> {
-    let (holo_bytes, weight_bytes) = serialize_ir_function(func, weight_threshold)?;
+    let (holo_bytes, weight_bytes) = serialize_ir_function(func, weight_threshold, pack_weights)?;
 
     let holo_path = output_path.with_extension("holo");
     std::fs::write(&holo_path, &holo_bytes).map_err(|e| {
@@ -985,6 +1216,8 @@ pub struct HoloModel {
     pub graph: SerGraph,
     /// Weight entries (metadata only)
     pub weight_entries: Vec<WeightEntry>,
+    /// Packed weight entries (metadata only)
+    pub packed_weight_entries: Vec<PackedWeightEntry>,
     /// Embedded weight data (weights that were below threshold)
     pub embedded_weights: Vec<u8>,
     /// External weight data (weights that were above threshold)
@@ -1021,6 +1254,35 @@ impl HoloModel {
         let len = data.len() / 4;
         // Safe because Vec<u8> from file is properly aligned
         Some(unsafe { std::slice::from_raw_parts(data.as_ptr() as *const f32, len) })
+    }
+
+    /// Get packed weight metadata for a source weight and kind.
+    pub fn packed_weight_entry(
+        &self,
+        source_weight_id: usize,
+        kind: PackedWeightKind,
+    ) -> Option<&PackedWeightEntry> {
+        self.packed_weight_entries.iter().find(|entry| {
+            entry.source_weight_id == source_weight_id && entry.kind == kind
+        })
+    }
+
+    /// Get packed weight data by entry.
+    pub fn get_packed_weight(&self, entry: &PackedWeightEntry) -> Option<&[u8]> {
+        let offset = entry.offset as usize;
+        let size = entry.size;
+
+        if entry.external {
+            if offset + size <= self.external_weights.len() {
+                Some(&self.external_weights[offset..offset + size])
+            } else {
+                None
+            }
+        } else if offset + size <= self.embedded_weights.len() {
+            Some(&self.embedded_weights[offset..offset + size])
+        } else {
+            None
+        }
     }
 
     /// Get all inputs required by this model.
@@ -1122,6 +1384,7 @@ pub fn load_holo_bytes(holo_bytes: &[u8], holo_path: Option<&Path>) -> Result<Ho
         metadata: model.metadata,
         graph: model.graph,
         weight_entries: model.weights,
+        packed_weight_entries: model.packed_weights,
         embedded_weights,
         external_weights,
     })
@@ -1203,6 +1466,14 @@ pub fn inspect_holo_file(path: &Path) -> Result<String> {
         model.metadata.external_weight_size
     )
     .unwrap();
+    if !model.packed_weight_entries.is_empty() {
+        writeln!(
+            output,
+            "Packed weights: {} entries",
+            model.packed_weight_entries.len()
+        )
+        .unwrap();
+    }
 
     writeln!(output, "\n--- Inputs ---").unwrap();
     for input in &model.metadata.inputs {
@@ -1336,7 +1607,7 @@ mod tests {
         builder.set_output(sum);
         let func = builder.build();
 
-        let (holo_bytes, weights_bytes) = serialize_ir_function(&func, 4096).unwrap();
+        let (holo_bytes, weights_bytes) = serialize_ir_function(&func, 4096, true).unwrap();
 
         // Check magic
         assert_eq!(&holo_bytes[0..4], HOLO_MAGIC);
@@ -1357,7 +1628,7 @@ mod tests {
         builder.set_output(result);
         let func = builder.build();
 
-        let (holo_bytes, weights_bytes) = serialize_ir_function(&func, 4096).unwrap();
+        let (holo_bytes, weights_bytes) = serialize_ir_function(&func, 4096, true).unwrap();
 
         // Check magic
         assert_eq!(&holo_bytes[0..4], HOLO_MAGIC);
@@ -1381,7 +1652,7 @@ mod tests {
         let func = builder.build();
 
         // Use small threshold to force external storage
-        let (holo_bytes, weights_bytes) = serialize_ir_function(&func, 1000).unwrap();
+        let (holo_bytes, weights_bytes) = serialize_ir_function(&func, 1000, true).unwrap();
 
         // Check magic
         assert_eq!(&holo_bytes[0..4], HOLO_MAGIC);
@@ -1404,7 +1675,7 @@ mod tests {
         builder.set_output(sum);
         let func = builder.build();
 
-        let (holo_bytes, _weights_bytes) = serialize_ir_function(&func, 4096).unwrap();
+        let (holo_bytes, _weights_bytes) = serialize_ir_function(&func, 4096, true).unwrap();
 
         // Load without file path (no external weights)
         let model = load_holo_bytes(&holo_bytes, None).unwrap();
@@ -1435,7 +1706,7 @@ mod tests {
         builder.set_output(result);
         let func = builder.build();
 
-        let (holo_bytes, _weights_bytes) = serialize_ir_function(&func, 4096).unwrap();
+        let (holo_bytes, _weights_bytes) = serialize_ir_function(&func, 4096, true).unwrap();
 
         let model = load_holo_bytes(&holo_bytes, None).unwrap();
 
@@ -1444,6 +1715,45 @@ mod tests {
         let weight = model.get_weight(0).unwrap();
         assert_eq!(weight.len(), 48);
         assert_eq!(weight, &weight_data[..]);
+    }
+
+    #[test]
+    fn test_serialize_packed_conv2d_weights() {
+        let mut builder = IRBuilder::new("packed_conv2d");
+        let input = builder.add_input(
+            "x",
+            Type::tensor(ScalarType::F32, Shape::concrete(vec![1, 1, 3, 3])),
+        );
+
+        let kernel_values: Vec<f32> = (0..8).map(|v| v as f32).collect();
+        let kernel_bytes: Vec<u8> = kernel_values
+            .iter()
+            .flat_map(|v| v.to_le_bytes())
+            .collect();
+        let kernel = builder.add_tensor_const(vec![2, 1, 2, 2], kernel_bytes, ScalarType::F32);
+        let conv = builder.conv2d(input, kernel, None, (1, 1), (0, 0), (1, 1), 1);
+        builder.set_output(conv);
+        let func = builder.build();
+
+        let (holo_bytes, _weights_bytes) = serialize_ir_function(&func, 4096, true).unwrap();
+        let model = load_holo_bytes(&holo_bytes, None).unwrap();
+
+        let entry = model
+            .packed_weight_entries
+            .iter()
+            .find(|entry| entry.kind == PackedWeightKind::Conv2dIm2Col)
+            .expect("Packed Conv2D entry missing");
+
+        let packed = model
+            .get_packed_weight(entry)
+            .expect("Packed weight bytes missing");
+        assert_eq!(packed.len(), 8 * 4);
+
+        let packed_f32: Vec<f32> = packed
+            .chunks_exact(4)
+            .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
+            .collect();
+        assert_eq!(packed_f32, vec![0.0, 4.0, 1.0, 5.0, 2.0, 6.0, 3.0, 7.0]);
     }
 
     #[test]

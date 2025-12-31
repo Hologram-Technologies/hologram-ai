@@ -7,17 +7,24 @@
 //! - Processes outputs using configured handlers
 
 use anyhow::{Context, Result};
+use hologram_compiler::{execute_schedule_rayon, Compiler, ParallelCompiledGraph};
 use hologram_onnx_config::{
     ModelDef, OutputDef, OutputHandlerType, PipelineConfig, StageDef, UnifiedConfig,
 };
 use hologram_onnx_core::serialization::{DimSpec, SerNode, SerNodeKind};
-use hologram_onnx_core::{load_holo_file, Interpreter, OnnxConfig};
+use hologram_onnx_core::{
+    ir_to_operation_graph, load_holo_file, parse_model, validate_model, extract_opset_version,
+    Interpreter, OnnxConfig, RuntimeBackend,
+};
 use std::collections::{HashMap, HashSet};
+use std::fs;
 use std::path::Path;
 use std::sync::Arc;
+use std::time::Instant;
 use tracing::{debug, info, warn};
 
 use crate::compile::compile_command;
+use crate::translator::{apply_ir_decomposition, translate_graph_to_ir};
 
 /// Run an ONNX pipeline from a unified config file.
 ///
@@ -27,6 +34,7 @@ use crate::compile::compile_command;
 /// * `inputs` - Runtime inputs as key=value pairs
 /// * `output_dir` - Optional directory for output files
 /// * `force_recompile` - Force recompilation even if .holo files exist
+/// * `use_parallel` - Use parallel scheduler (rayon) instead of interpreter
 ///
 /// # Returns
 ///
@@ -36,6 +44,7 @@ pub fn run_command(
     inputs: &[String],
     output_dir: Option<&Path>,
     force_recompile: bool,
+    use_parallel: bool,
 ) -> Result<()> {
     info!("Loading pipeline config: {}", config_path.display());
 
@@ -57,25 +66,302 @@ pub fn run_command(
     let runtime_inputs = parse_inputs(inputs, &config)?;
     debug!("Runtime inputs: {:?}", runtime_inputs);
 
-    // Ensure all models are compiled
-    info!("Checking model compilation status...");
-    let compiled_models = ensure_models_compiled(&config, config_dir, force_recompile)?;
-    debug!("Compiled models: {:?}", compiled_models);
+    // Execution mode selection
+    if use_parallel {
+        info!("Using parallel scheduler (rayon) for execution");
 
-    // Convert to PipelineConfig for execution
-    let pipeline_config: PipelineConfig = (&config).into();
-    debug!("Pipeline config: {:?}", pipeline_config.pipeline.name);
+        // Get ONNX model paths for parallel execution
+        let onnx_models = get_onnx_model_paths(&config, config_dir)?;
 
-    // Execute the pipeline
-    info!("Executing pipeline...");
-    let outputs = execute_pipeline(&config, &compiled_models, &runtime_inputs)?;
+        // Execute using parallel scheduler
+        let outputs = execute_pipeline_parallel(
+            &config,
+            &onnx_models,
+            &runtime_inputs,
+        )?;
 
-    // Process outputs
-    info!("Processing outputs...");
-    process_outputs(&config, &outputs, output_dir)?;
+        // Process outputs
+        info!("Processing outputs...");
+        process_outputs(&config, &outputs, output_dir)?;
+    } else {
+        // Use interpreter path (original behavior)
+        info!("Using interpreter for execution");
+
+        // Ensure all models are compiled
+        info!("Checking model compilation status...");
+        let compiled_models = ensure_models_compiled(&config, config_dir, force_recompile)?;
+        debug!("Compiled models: {:?}", compiled_models);
+
+        // Convert to PipelineConfig for execution
+        let pipeline_config: PipelineConfig = (&config).into();
+        debug!("Pipeline config: {:?}", pipeline_config.pipeline.name);
+
+        // Execute the pipeline
+        info!("Executing pipeline...");
+        let runtime_backend = config
+            .compiler
+            .backend
+            .as_deref()
+            .map(RuntimeBackend::from_str)
+            .transpose()?;
+        if let Some(backend) = runtime_backend {
+            info!("Runtime backend: {:?}", backend);
+        }
+
+        let outputs = execute_pipeline(
+            &config,
+            &compiled_models,
+            &runtime_inputs,
+            runtime_backend,
+        )?;
+
+        // Process outputs
+        info!("Processing outputs...");
+        process_outputs(&config, &outputs, output_dir)?;
+    }
 
     info!("Pipeline execution complete!");
     Ok(())
+}
+
+/// Get ONNX model paths from config.
+fn get_onnx_model_paths(
+    config: &UnifiedConfig,
+    config_dir: &Path,
+) -> Result<HashMap<String, std::path::PathBuf>> {
+    let mut onnx_paths = HashMap::new();
+
+    for (name, model_def) in &config.models {
+        let onnx_path = resolve_model_path(model_def.path(), config_dir);
+
+        if !onnx_path.exists() {
+            anyhow::bail!(
+                "ONNX model not found: {} (for model '{}')",
+                onnx_path.display(),
+                name
+            );
+        }
+
+        onnx_paths.insert(name.clone(), onnx_path);
+    }
+
+    Ok(onnx_paths)
+}
+
+/// Check if a cached .holopar file is valid (exists and is newer than source ONNX).
+fn is_cache_valid(onnx_path: &Path, cache_path: &Path) -> bool {
+    if !cache_path.exists() {
+        return false;
+    }
+
+    // Check if cache is newer than source
+    let onnx_modified = match fs::metadata(onnx_path).and_then(|m| m.modified()) {
+        Ok(t) => t,
+        Err(_) => return false,
+    };
+
+    let cache_modified = match fs::metadata(cache_path).and_then(|m| m.modified()) {
+        Ok(t) => t,
+        Err(_) => return false,
+    };
+
+    cache_modified >= onnx_modified
+}
+
+/// Execute pipeline using the parallel scheduler (rayon).
+///
+/// This compiles ONNX models to OperationGraph and executes with rayon parallelism.
+/// Compiled graphs are cached in `.holopar` files for faster subsequent runs.
+fn execute_pipeline_parallel(
+    config: &UnifiedConfig,
+    onnx_models: &HashMap<String, std::path::PathBuf>,
+    inputs: &HashMap<String, String>,
+) -> Result<HashMap<String, OutputData>> {
+    let mut outputs: HashMap<String, OutputData> = HashMap::new();
+    let mut tensor_cache: HashMap<String, Arc<Vec<f32>>> = HashMap::new();
+
+    // Get compiler config for decomposition settings
+    let onnx_config: OnnxConfig = (&config.compiler).into();
+
+    // Process stages
+    for (idx, stage) in config.stages.iter().enumerate() {
+        match stage {
+            StageDef::Model(model_stage) => {
+                let onnx_path = onnx_models.get(&model_stage.model).ok_or_else(|| {
+                    anyhow::anyhow!("Model '{}' not found in ONNX models", model_stage.model)
+                })?;
+
+                info!(
+                    "  ▶ Stage {}: running model '{}' with parallel scheduler",
+                    idx, model_stage.model
+                );
+
+                let stage_start = Instant::now();
+
+                // Check for cached .holopar file
+                let holopar_path = onnx_path.with_extension("holopar");
+                let compiled = if is_cache_valid(onnx_path, &holopar_path) {
+                    // Load from cache
+                    info!("  ▸ Loading cached parallel graph from {}", holopar_path.display());
+                    let load_start = Instant::now();
+                    let compiled = ParallelCompiledGraph::from_holo(holopar_path.to_str().unwrap())
+                        .map_err(|e| anyhow::anyhow!("Failed to load cached graph: {}", e))?;
+                    info!("  ▸ Loaded cached graph in {:?}", load_start.elapsed());
+                    compiled
+                } else {
+                    // Compile from ONNX
+                    info!("  ▸ Compiling ONNX model (no valid cache found)");
+                    let compile_start = Instant::now();
+
+                    // Load and parse ONNX model
+                    let onnx_bytes = fs::read(onnx_path)
+                        .with_context(|| format!("Failed to read ONNX model: {}", onnx_path.display()))?;
+
+                    let model = parse_model(&onnx_bytes)
+                        .map_err(|e| anyhow::anyhow!("Failed to parse ONNX model: {}", e))?;
+
+                    validate_model(&model)
+                        .map_err(|e| anyhow::anyhow!("Model validation failed: {}", e))?;
+
+                    let opset_version = extract_opset_version(&model);
+                    let graph = model.graph.as_ref()
+                        .ok_or_else(|| anyhow::anyhow!("Model has no graph"))?;
+
+                    debug!("Parsed ONNX model: {} nodes, opset {}", graph.node.len(), opset_version);
+
+                    // Translate ONNX → IR
+                    let ir_func = translate_graph_to_ir(graph, opset_version)
+                        .map_err(|e| anyhow::anyhow!("Failed to translate ONNX to IR: {}", e))?;
+
+                    // Apply decomposition pass
+                    let decomposed = apply_ir_decomposition(ir_func, &onnx_config)
+                        .map_err(|e| anyhow::anyhow!("Decomposition failed: {}", e))?;
+
+                    debug!("IR function: {} nodes after decomposition", decomposed.body.len());
+
+                    // Convert IR to OperationGraph
+                    let op_graph = ir_to_operation_graph(&decomposed)
+                        .map_err(|e| anyhow::anyhow!("Failed to convert IR to OperationGraph: {}", e))?;
+
+                    debug!("OperationGraph: {} nodes", op_graph.len());
+
+                    // Compile to parallel schedule
+                    let compiler = Compiler::new();
+                    let compiled = compiler.compile_graph_parallel(op_graph)
+                        .map_err(|e| anyhow::anyhow!("Failed to compile graph: {}", e))?;
+
+                    info!("  ▸ Compiled parallel schedule in {:?}", compile_start.elapsed());
+
+                    // Save to cache
+                    if let Err(e) = compiled.to_holo(holopar_path.to_str().unwrap()) {
+                        warn!("Failed to cache compiled graph: {}", e);
+                    } else {
+                        info!("  ▸ Cached compiled graph to {}", holopar_path.display());
+                    }
+
+                    compiled
+                };
+
+                // Prepare inputs for execution
+                let mut exec_inputs: HashMap<String, Vec<f32>> = HashMap::new();
+
+                for (input_name, tensor_expr) in &model_stage.inputs {
+                    let tensor_ref = tensor_expr.as_str().unwrap_or_default();
+
+                    let input_data = if let Some(cached) = tensor_cache.get(tensor_ref) {
+                        cached.as_ref().clone()
+                    } else if let Some(input_str) = inputs.get(tensor_ref) {
+                        parse_input_tensor(input_str)?
+                    } else {
+                        warn!("Input '{}' not found, using empty tensor", input_name);
+                        vec![0.0f32; 1]
+                    };
+
+                    exec_inputs.insert(input_name.clone(), input_data);
+                }
+
+                // Execute with rayon
+                let exec_start = Instant::now();
+                let exec_outputs = execute_schedule_rayon(&compiled.schedule, exec_inputs)
+                    .map_err(|e| anyhow::anyhow!("Parallel execution failed: {}", e))?;
+
+                info!("  ▸ Parallel execution completed in {:?}", exec_start.elapsed());
+
+                // Store outputs
+                for (i, output_name) in model_stage.outputs.iter().enumerate() {
+                    let output_key = if exec_outputs.len() == 1 {
+                        exec_outputs.keys().next().unwrap().clone()
+                    } else {
+                        format!("output_{}", i)
+                    };
+
+                    if let Some(output_data) = exec_outputs.get(&output_key) {
+                        let data = output_data.as_ref().clone();
+                        tensor_cache.insert(output_name.clone(), Arc::new(data.clone()));
+                        outputs.insert(output_name.clone(), OutputData::Tensor(data));
+                        debug!("Output '{}': {} elements", output_name, output_data.len());
+                    } else if let Some(first_output) = exec_outputs.values().next() {
+                        let data = first_output.as_ref().clone();
+                        tensor_cache.insert(output_name.clone(), Arc::new(data.clone()));
+                        outputs.insert(output_name.clone(), OutputData::Tensor(data));
+                    } else {
+                        warn!("No output produced for '{}'", output_name);
+                    }
+                }
+
+                info!(
+                    "  ✓ Stage {}: {} completed in {:?}",
+                    idx,
+                    model_stage.model,
+                    stage_start.elapsed()
+                );
+            }
+
+            StageDef::Builtin(builtin_stage) => {
+                debug!(
+                    "Stage {}: Executing builtin '{}'",
+                    idx, builtin_stage.builtin
+                );
+
+                let builtin_outputs = execute_builtin(
+                    &builtin_stage.builtin,
+                    &builtin_stage.args,
+                    &builtin_stage.outputs,
+                    &tensor_cache,
+                    inputs,
+                )?;
+
+                for (name, tensor) in builtin_outputs {
+                    tensor_cache.insert(name.clone(), Arc::new(tensor.clone()));
+                    outputs.insert(name, OutputData::Tensor(tensor));
+                }
+
+                info!("  ✓ Stage {}: {} completed", idx, builtin_stage.builtin);
+            }
+
+            StageDef::Loop(loop_stage) => {
+                debug!("Stage {}: Loop over '{}'", idx, loop_stage.over);
+                warn!("Loop stages not yet implemented for parallel execution");
+            }
+
+            StageDef::Conditional(cond_stage) => {
+                debug!("Stage {}: Conditional '{}'", idx, cond_stage.condition);
+                warn!("Conditional stages not yet implemented for parallel execution");
+            }
+        }
+    }
+
+    // Ensure all config outputs are present
+    for (_name, output_def) in &config.outputs {
+        let tensor_name = output_def.tensor();
+        if !outputs.contains_key(tensor_name) {
+            if let Some(cached) = tensor_cache.get(tensor_name) {
+                outputs.insert(tensor_name.to_string(), OutputData::Tensor(cached.as_ref().clone()));
+            }
+        }
+    }
+
+    Ok(outputs)
 }
 
 /// Parse command-line inputs into a HashMap.
@@ -170,6 +456,8 @@ fn ensure_models_compiled(
                 onnx_config.partition_size,
                 onnx_config.memory_budget,
                 onnx_config.weight_threshold,
+                onnx_config.decompose_conv2d,
+                onnx_config.decompose_pooling,
             )
             .with_context(|| format!("Failed to compile model '{}'", name))?;
 
@@ -220,6 +508,7 @@ fn execute_pipeline(
     config: &UnifiedConfig,
     compiled_models: &HashMap<String, std::path::PathBuf>,
     inputs: &HashMap<String, String>,
+    runtime_backend: Option<RuntimeBackend>,
 ) -> Result<HashMap<String, OutputData>> {
     let mut outputs: HashMap<String, OutputData> = HashMap::new();
     let mut tensor_cache: HashMap<String, Arc<Vec<f32>>> = HashMap::new();
@@ -244,10 +533,21 @@ fn execute_pipeline(
                     .with_context(|| format!("Failed to load .holo file: {}", model_path.display()))?;
 
                 debug!("Loaded HoloModel '{}' with {} nodes", holo_model.metadata.name, holo_model.graph.nodes.len());
+                info!(
+                    "  ▶ Stage {}: running model '{}' ({} nodes)",
+                    idx,
+                    model_stage.model,
+                    holo_model.graph.nodes.len()
+                );
 
                 // Create interpreter for this model
-                let mut interpreter = Interpreter::new(&holo_model)
-                    .map_err(|e| anyhow::anyhow!("Failed to create interpreter: {}", e))?;
+                let mut interpreter = if let Some(backend) = runtime_backend {
+                    Interpreter::new_with_backend(&holo_model, backend)
+                        .map_err(|e| anyhow::anyhow!("Failed to create interpreter: {}", e))?
+                } else {
+                    Interpreter::new(&holo_model)
+                        .map_err(|e| anyhow::anyhow!("Failed to create interpreter: {}", e))?
+                };
 
                 let model_inputs: HashMap<&str, &SerNode> = holo_model
                     .graph
@@ -312,8 +612,11 @@ fn execute_pipeline(
                     }
                 }
 
+                let stage_start = Instant::now();
+
                 // Execute the model
-                interpreter.run()
+                interpreter
+                    .run()
                     .map_err(|e| anyhow::anyhow!("Execution failed: {}", e))?;
 
                 // Get outputs
@@ -332,7 +635,13 @@ fn execute_pipeline(
                     }
                 }
 
-                info!("  ✓ Stage {}: {} completed ({} outputs)", idx, model_stage.model, output_tensors.len());
+                info!(
+                    "  ✓ Stage {}: {} completed ({} outputs) in {:?}",
+                    idx,
+                    model_stage.model,
+                    output_tensors.len(),
+                    stage_start.elapsed()
+                );
             }
 
             StageDef::Builtin(builtin_stage) => {
@@ -893,7 +1202,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let config_path = temp_dir.path().join("missing.toml");
 
-        let result = run_command(&config_path, &[], None, false);
+        let result = run_command(&config_path, &[], None, false, false);
         assert!(result.is_err());
     }
 

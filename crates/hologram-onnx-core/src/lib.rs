@@ -59,7 +59,8 @@ pub use partitioning::{GraphPartition, GraphPartitioner};
 pub use serialization::{
     // Serialization
     serialize_ir_function, write_compiled_model, HoloHeader, HoloMetadata,
-    HoloSerializer, SerGraph, SerModel, SerNode, SerNodeKind, WeightEntry,
+    HoloSerializer, PackedWeightEntry, PackedWeightKind, SerGraph, SerModel, SerNode, SerNodeKind,
+    WeightEntry,
     HOLO_MAGIC, FORMAT_VERSION, HEADER_SIZE, FLAG_EXTERNAL_WEIGHTS,
     // Deserialization
     HoloModel, load_holo_file, load_holo_bytes, validate_holo_file, inspect_holo_file,
@@ -68,7 +69,7 @@ pub use serialization::{
 pub use shapes::{Dim, Shape, SymbolicShape};
 pub use translator::{OperationGraph, lower_to_operation_graph};
 pub use weights::WeightData;
-pub use interpreter::{Interpreter, Tensor};
+pub use interpreter::{Interpreter, RuntimeBackend, Tensor};
 
 // Note: OnnxCompiler has been moved to the top-level hologram-onnx crate
 // because it requires both core (parsing) and ops (translators).

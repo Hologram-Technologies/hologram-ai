@@ -115,6 +115,9 @@ audio-output = ["hologram-onnx-config/audio-output"]
 text-output = ["hologram-onnx-config/text-output"]
 all-outputs = ["image-output", "audio-output", "text-output"]
 
+[patch."https://github.com/UOR-Foundation/hologram-backend.git"]
+hologram-backend = { path = "/hologram/externals/hologram-backend" }
+
 [[bin]]
 name = "hologram-onnx-core"
 path = "src/main.rs"

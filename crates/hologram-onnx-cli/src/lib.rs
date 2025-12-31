@@ -84,6 +84,10 @@ enum Commands {
         /// Force recompilation of all models
         #[arg(long)]
         recompile: bool,
+
+        /// Use parallel scheduler (rayon) instead of interpreter for faster execution
+        #[arg(long)]
+        parallel: bool,
     },
 
     /// Download ONNX model from Hugging Face
@@ -203,6 +207,8 @@ pub fn run() -> anyhow::Result<()> {
                     partition_size,
                     memory_budget,
                     weight_threshold,
+                    true,
+                    true,
                 )
             }
         }
@@ -212,7 +218,8 @@ pub fn run() -> anyhow::Result<()> {
             inputs,
             output,
             recompile,
-        } => run_command(&config, &inputs, output.as_deref(), recompile),
+            parallel,
+        } => run_command(&config, &inputs, output.as_deref(), recompile, parallel),
 
         Commands::Download {
             model_id,
@@ -298,6 +305,8 @@ fn compile_with_config(
             partition_size,
             memory_budget,
             weight_threshold,
+            compiler_config.decompose_conv2d,
+            compiler_config.decompose_pooling,
         );
     }
 
@@ -339,6 +348,8 @@ fn compile_with_config(
             partition_size,
             memory_budget,
             weight_threshold,
+            compiler_config.decompose_conv2d,
+            compiler_config.decompose_pooling,
         )?;
     }
 

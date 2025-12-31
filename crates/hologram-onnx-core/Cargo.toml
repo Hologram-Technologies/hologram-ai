@@ -33,6 +33,7 @@ serde_json.workspace = true
 # Runtime execution
 ndarray = "0.16"
 rayon.workspace = true
+matrixmultiply = "0.3"
 
 [dev-dependencies]
 tempfile = "3"

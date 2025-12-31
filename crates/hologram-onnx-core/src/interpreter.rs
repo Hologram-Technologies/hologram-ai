@@ -1,9 +1,9 @@
-//! CPU-based interpreter for executing .holo models.
+//! CPU-based interpreter for executing .holo models with optional backend acceleration.
 //!
 //! This module provides a simple interpreter that executes SerGraph nodes
 //! using ndarray for tensor operations. It's designed for:
 //! - Correctness verification
-//! - CPU fallback when ISA execution is not available
+//! - CPU fallback when backend execution is not available
 //! - Simple deployment without GPU requirements
 //!
 //! # Example
@@ -25,12 +25,77 @@
 //! ```
 
 use std::collections::HashMap;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
+use hologram_backend::Backend;
+use hologram_core::{BackendType, Buffer, Executor};
+use matrixmultiply::sgemm;
 use ndarray::{Array, ArrayD, Axis, IxDyn};
-use tracing::{debug, trace};
+use rayon::prelude::*;
+use tracing::{debug, info, trace, warn};
 
-use crate::serialization::{DimSpec, HoloModel, SerNode, SerNodeKind};
+use crate::serialization::{DimSpec, HoloModel, PackedWeightKind, SerNode, SerNodeKind};
 use crate::{OnnxError, Result};
+
+/// Runtime backend selection for interpreter acceleration.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RuntimeBackend {
+    /// Use backend auto-detection (preferred).
+    Auto,
+    /// Force CPU backend.
+    Cpu,
+    /// Force CUDA backend.
+    Cuda,
+    /// Force Metal backend.
+    Metal,
+    /// Force WebGPU backend.
+    WebGpu,
+}
+
+impl RuntimeBackend {
+    /// Parse a backend name from configuration.
+    pub fn from_str(value: &str) -> Result<Self> {
+        match value.to_ascii_lowercase().as_str() {
+            "auto" => Ok(Self::Auto),
+            "cpu" => Ok(Self::Cpu),
+            "cuda" => Ok(Self::Cuda),
+            "metal" => Ok(Self::Metal),
+            "webgpu" => Ok(Self::WebGpu),
+            other => Err(OnnxError::InvalidModel(format!(
+                "Unknown runtime backend '{}'",
+                other
+            ))),
+        }
+    }
+
+    fn backend_type(self) -> Option<BackendType> {
+        match self {
+            Self::Auto => None,
+            Self::Cpu => Some(BackendType::Cpu),
+            Self::Cuda => Some(BackendType::Cuda),
+            Self::Metal => Some(BackendType::Metal),
+            Self::WebGpu => Some(BackendType::WebGpu),
+        }
+    }
+}
+
+struct BackendContext {
+    exec: Executor,
+}
+
+impl BackendContext {
+    fn new(backend: RuntimeBackend) -> Result<Self> {
+        let exec = Executor::new_with_boxed_backend(
+            Box::new(Backend::detect()),
+            backend.backend_type(),
+        )
+        .map_err(|e| {
+            OnnxError::HologramError(format!("Failed to initialize backend executor: {}", e))
+        })?;
+        Ok(Self { exec })
+    }
+}
 
 /// Tensor value in the interpreter
 #[derive(Debug, Clone)]
@@ -85,17 +150,44 @@ pub struct Interpreter<'a> {
     model: &'a HoloModel,
     /// Tensor storage indexed by node ID
     tensors: HashMap<usize, Tensor>,
+    constant_weight_ids: HashMap<usize, usize>,
+    packed_weight_cache: HashMap<usize, Arc<Vec<f32>>>,
+    runtime_packed_matmul_rhs: HashMap<usize, Arc<Vec<f32>>>,
+    runtime_packed_conv2d: HashMap<usize, Arc<Vec<f32>>>,
     /// Flag indicating if the model has been executed
     executed: bool,
+    /// Optional hologram backend executor for accelerated ops.
+    backend: Option<BackendContext>,
 }
 
 impl<'a> Interpreter<'a> {
     /// Create a new interpreter for the given model
     pub fn new(model: &'a HoloModel) -> Result<Self> {
+        let constant_weight_ids = build_constant_weight_map(model);
         Ok(Self {
             model,
             tensors: HashMap::new(),
+            constant_weight_ids,
+            packed_weight_cache: HashMap::new(),
+            runtime_packed_matmul_rhs: HashMap::new(),
+            runtime_packed_conv2d: HashMap::new(),
             executed: false,
+            backend: None,
+        })
+    }
+
+    /// Create a new interpreter using hologram backend acceleration.
+    pub fn new_with_backend(model: &'a HoloModel, backend: RuntimeBackend) -> Result<Self> {
+        let constant_weight_ids = build_constant_weight_map(model);
+        Ok(Self {
+            model,
+            tensors: HashMap::new(),
+            constant_weight_ids,
+            packed_weight_cache: HashMap::new(),
+            runtime_packed_matmul_rhs: HashMap::new(),
+            runtime_packed_conv2d: HashMap::new(),
+            executed: false,
+            backend: Some(BackendContext::new(backend)?),
         })
     }
 
@@ -139,13 +231,198 @@ impl<'a> Interpreter<'a> {
         );
 
         // Execute nodes in order (assumes topological sort)
-        for node in &self.model.graph.nodes {
+        let total_nodes = self.model.graph.nodes.len();
+        let log_interval = 50usize;
+        let slow_node_threshold = Duration::from_secs(1);
+        let start = Instant::now();
+
+        for (index, node) in self.model.graph.nodes.iter().enumerate() {
+            let node_start = Instant::now();
             self.execute_node(node)?;
+
+            let node_elapsed = node_start.elapsed();
+            if node_elapsed >= slow_node_threshold {
+                let (kind_label, input_shapes, output_shape) = self.slow_node_details(node);
+                info!(
+                    "Interpreter slow node: {}/{} (id {}, {}) took {:?} inputs={:?} output={:?}",
+                    index + 1,
+                    total_nodes,
+                    node.id,
+                    kind_label,
+                    node_elapsed,
+                    input_shapes,
+                    output_shape
+                );
+            }
+
+            if total_nodes > 0
+                && ((index + 1) % log_interval == 0 || index + 1 == total_nodes)
+            {
+                let elapsed = start.elapsed();
+                let percent = ((index + 1) as f64 / total_nodes as f64) * 100.0;
+                info!(
+                    "Interpreter progress: {}/{} ({:.1}%) nodes in {:?}",
+                    index + 1,
+                    total_nodes,
+                    percent,
+                    elapsed
+                );
+            }
         }
 
         self.executed = true;
-        debug!("Inference complete");
+        info!("Interpreter inference complete in {:?}", start.elapsed());
         Ok(())
+    }
+
+    fn slow_node_details(
+        &self,
+        node: &SerNode,
+    ) -> (String, Vec<Vec<usize>>, Option<Vec<usize>>) {
+        let kind_label = self.node_kind_label(&node.node);
+        let input_ids = self.node_input_ids(&node.node);
+        let input_shapes = input_ids
+            .iter()
+            .filter_map(|id| self.tensors.get(id).map(|tensor| tensor.shape().to_vec()))
+            .collect();
+        let output_shape = self
+            .tensors
+            .get(&node.id)
+            .map(|tensor| tensor.shape().to_vec());
+        (kind_label, input_shapes, output_shape)
+    }
+
+    fn node_kind_label(&self, node: &SerNodeKind) -> String {
+        match node {
+            SerNodeKind::Input { .. } => "Input".to_string(),
+            SerNodeKind::Constant { .. } => "Constant".to_string(),
+            SerNodeKind::ScalarConst { .. } => "ScalarConst".to_string(),
+            SerNodeKind::WeightRef { .. } => "WeightRef".to_string(),
+            SerNodeKind::BinaryOp { op, .. } => format!("BinaryOp:{}", op),
+            SerNodeKind::UnaryOp { op, .. } => format!("UnaryOp:{}", op),
+            SerNodeKind::MatMul { .. } => "MatMul".to_string(),
+            SerNodeKind::Softmax { .. } => "Softmax".to_string(),
+            SerNodeKind::Reshape { .. } => "Reshape".to_string(),
+            SerNodeKind::Transpose { .. } => "Transpose".to_string(),
+            SerNodeKind::Broadcast { .. } => "Broadcast".to_string(),
+            SerNodeKind::Slice { .. } => "Slice".to_string(),
+            SerNodeKind::Gather { .. } => "Gather".to_string(),
+            SerNodeKind::Concat { .. } => "Concat".to_string(),
+            SerNodeKind::Reduce { op, .. } => format!("Reduce:{}", op),
+            SerNodeKind::Select { .. } => "Select".to_string(),
+            SerNodeKind::Phi { .. } => "Phi".to_string(),
+            SerNodeKind::Conv2D { .. } => "Conv2D".to_string(),
+            SerNodeKind::BatchNorm { .. } => "BatchNorm".to_string(),
+            SerNodeKind::MaxPool { .. } => "MaxPool".to_string(),
+            SerNodeKind::AvgPool { .. } => "AvgPool".to_string(),
+            SerNodeKind::Cast { .. } => "Cast".to_string(),
+            SerNodeKind::Call { func, .. } => format!("Call:{}", func),
+            SerNodeKind::Im2Col { .. } => "Im2Col".to_string(),
+            SerNodeKind::Col2Im { .. } => "Col2Im".to_string(),
+            SerNodeKind::Unfold { .. } => "Unfold".to_string(),
+            SerNodeKind::Stack { .. } => "Stack".to_string(),
+            SerNodeKind::VStack { .. } => "VStack".to_string(),
+            SerNodeKind::HStack { .. } => "HStack".to_string(),
+        }
+    }
+
+    fn node_input_ids(&self, node: &SerNodeKind) -> Vec<usize> {
+        match node {
+            SerNodeKind::Input { .. }
+            | SerNodeKind::Constant { .. }
+            | SerNodeKind::ScalarConst { .. }
+            | SerNodeKind::WeightRef { .. } => Vec::new(),
+            SerNodeKind::BinaryOp { lhs, rhs, .. } => vec![*lhs, *rhs],
+            SerNodeKind::UnaryOp { operand, .. } => vec![*operand],
+            SerNodeKind::MatMul { lhs, rhs } => vec![*lhs, *rhs],
+            SerNodeKind::Softmax { input, .. } => vec![*input],
+            SerNodeKind::Reshape { input, .. } => vec![*input],
+            SerNodeKind::Transpose { input, .. } => vec![*input],
+            SerNodeKind::Broadcast { input, .. } => vec![*input],
+            SerNodeKind::Slice { input, .. } => vec![*input],
+            SerNodeKind::Gather { input, indices, .. } => vec![*input, *indices],
+            SerNodeKind::Concat { inputs, .. } => inputs.clone(),
+            SerNodeKind::Reduce { input, .. } => vec![*input],
+            SerNodeKind::Select {
+                cond,
+                on_true,
+                on_false,
+            } => vec![*cond, *on_true, *on_false],
+            SerNodeKind::Phi { inputs } => inputs.clone(),
+            SerNodeKind::Conv2D {
+                input,
+                weight,
+                bias,
+                ..
+            } => {
+                let mut ids = vec![*input, *weight];
+                if let Some(bias_id) = bias {
+                    ids.push(*bias_id);
+                }
+                ids
+            }
+            SerNodeKind::BatchNorm {
+                input,
+                scale,
+                bias,
+                mean,
+                var,
+                ..
+            } => vec![*input, *scale, *bias, *mean, *var],
+            SerNodeKind::MaxPool { input, .. } => vec![*input],
+            SerNodeKind::AvgPool { input, .. } => vec![*input],
+            SerNodeKind::Cast { input, .. } => vec![*input],
+            SerNodeKind::Call { args, .. } => args.clone(),
+            SerNodeKind::Im2Col { input, .. } => vec![*input],
+            SerNodeKind::Col2Im { input, .. } => vec![*input],
+            SerNodeKind::Unfold { input, .. } => vec![*input],
+            SerNodeKind::Stack { inputs, .. } => inputs.clone(),
+            SerNodeKind::VStack { inputs, .. } => inputs.clone(),
+            SerNodeKind::HStack { inputs, .. } => inputs.clone(),
+        }
+    }
+
+    fn node_debug_info(&self, node_id: usize) -> Option<String> {
+        let node = self.model.graph.nodes.iter().find(|node| node.id == node_id)?;
+        let shape = self.get_concrete_shape(node).ok();
+        let extra = match &node.node {
+            SerNodeKind::Reshape { input, shape } => {
+                let input_info = self.node_debug_info(*input);
+                Some(format!(
+                    "reshape={:?}, input={:?}",
+                    shape, input_info
+                ))
+            }
+            SerNodeKind::Transpose { input, perm } => {
+                let input_info = self.node_debug_info(*input);
+                Some(format!("transpose={:?}, input={:?}", perm, input_info))
+            }
+            SerNodeKind::Im2Col {
+                kernel,
+                stride,
+                padding,
+                dilation,
+                ..
+            } => Some(format!(
+                "im2col(kernel={:?}, stride={:?}, padding={:?}, dilation={:?})",
+                kernel, stride, padding, dilation
+            )),
+            _ => None,
+        };
+
+        Some(match extra {
+            Some(extra) => format!(
+                "kind={}, shape={:?}, {}",
+                self.node_kind_label(&node.node),
+                shape,
+                extra
+            ),
+            None => format!(
+                "kind={}, shape={:?}",
+                self.node_kind_label(&node.node),
+                shape
+            ),
+        })
     }
 
     /// Get output tensor by index
@@ -218,9 +495,9 @@ impl<'a> Interpreter<'a> {
 
             SerNodeKind::UnaryOp { op, operand } => self.execute_unary_op(op, *operand)?,
 
-            SerNodeKind::MatMul { lhs, rhs } => self.execute_matmul(*lhs, *rhs)?,
+            SerNodeKind::MatMul { lhs, rhs } => self.execute_matmul(node.id, *lhs, *rhs)?,
 
-            SerNodeKind::Reshape { input, shape } => self.execute_reshape(*input, shape)?,
+            SerNodeKind::Reshape { input, shape } => self.execute_reshape(node.id, *input, shape)?,
 
             SerNodeKind::Transpose { input, perm } => self.execute_transpose(*input, perm)?,
 
@@ -315,7 +592,7 @@ impl<'a> Interpreter<'a> {
             SerNodeKind::Phi { .. } => {
                 return Err(OnnxError::unsupported_op("Phi", 0));
             }
-            SerNodeKind::Call { func, args } => self.execute_call(func, args)?,
+            SerNodeKind::Call { func, args } => self.execute_call(node.id, func, args)?,
             SerNodeKind::Col2Im { .. } => {
                 return Err(OnnxError::unsupported_op("Col2Im", 0));
             }
@@ -454,63 +731,177 @@ impl<'a> Interpreter<'a> {
     }
 
     /// Execute matrix multiplication
-    fn execute_matmul(&self, lhs_id: usize, rhs_id: usize) -> Result<Tensor> {
-        let lhs = self.get_tensor(lhs_id)?;
-        let rhs = self.get_tensor(rhs_id)?;
-
-        let lhs_shape = lhs.shape();
-        let rhs_shape = rhs.shape();
+    fn execute_matmul(&mut self, node_id: usize, lhs_id: usize, rhs_id: usize) -> Result<Tensor> {
+        let (lhs_shape, rhs_shape) = {
+            let lhs = self.get_tensor(lhs_id)?;
+            let rhs = self.get_tensor(rhs_id)?;
+            (lhs.shape().to_vec(), rhs.shape().to_vec())
+        };
+        let rhs_weight_id = if rhs_shape.len() == 2 {
+            self.constant_weight_ids.get(&rhs_id).copied()
+        } else {
+            None
+        };
+        let mut rhs_storage = rhs_weight_id
+            .and_then(|weight_id| self.packed_weight_vec(weight_id, PackedWeightKind::MatMulRhs));
 
         // Handle different dimension cases
         let result = if lhs_shape.len() == 2 && rhs_shape.len() == 2 {
-            // Simple 2D matmul
             let m = lhs_shape[0];
             let k = lhs_shape[1];
             let n = rhs_shape[1];
 
             if k != rhs_shape[0] {
+                let lhs_info = self.node_debug_info(lhs_id);
+                let rhs_info = self.node_debug_info(rhs_id);
                 return Err(OnnxError::InvalidModel(format!(
-                    "MatMul dimension mismatch: {:?} x {:?}",
-                    lhs_shape, rhs_shape
+                    "MatMul node {} dimension mismatch: {:?} x {:?} (lhs {:?}, rhs {:?})",
+                    node_id, lhs_shape, rhs_shape, lhs_info, rhs_info
                 )));
             }
 
-            let mut result = Array::zeros((m, n));
-            for i in 0..m {
-                for j in 0..n {
-                    let mut sum = 0.0f32;
-                    for l in 0..k {
-                        sum += lhs.data[[i, l]] * rhs.data[[l, j]];
-                    }
-                    result[[i, j]] = sum;
+            let (lhs_vec, mut rhs_vec_fallback) = {
+                let lhs = self.get_tensor(lhs_id)?;
+                let rhs = self.get_tensor(rhs_id)?;
+                let lhs_vec = self.contiguous_vec(&lhs.data)?;
+                let rhs_vec_fallback = if rhs_storage.is_some() {
+                    None
+                } else {
+                    Some(self.contiguous_vec(&rhs.data)?)
+                };
+                (lhs_vec, rhs_vec_fallback)
+            };
+            if rhs_storage.is_none() {
+                if let (Some(weight_id), Some(rhs_vec)) = (rhs_weight_id, rhs_vec_fallback.take())
+                {
+                    rhs_storage = Some(self.runtime_pack_matmul_rhs(weight_id, rhs_vec)?);
                 }
             }
-            result.into_dyn()
-        } else if lhs_shape.len() > 2 || rhs_shape.len() > 2 {
-            // Batched matmul - simplified implementation
-            // For now, reshape to 2D, multiply, and reshape back
-            let lhs_flat = self.flatten_batch_dims(&lhs.data)?;
-            let rhs_2d = if rhs_shape.len() == 2 {
-                rhs.data.clone()
+            let rhs_vec_fallback = if rhs_storage.is_none() && rhs_vec_fallback.is_none() {
+                let rhs = self.get_tensor(rhs_id)?;
+                Some(self.contiguous_vec(&rhs.data)?)
             } else {
-                self.flatten_batch_dims(&rhs.data)?
+                rhs_vec_fallback
+            };
+            let rhs_vec = match (&rhs_storage, &rhs_vec_fallback) {
+                (Some(storage), _) => storage.as_slice(),
+                (None, Some(vec)) => vec.as_slice(),
+                (None, None) => {
+                    return Err(OnnxError::InvalidModel(
+                        "MatMul rhs data missing".into(),
+                    ))
+                }
+            };
+            let output = if self.backend.is_some() {
+                self.matmul_2d_backend(&lhs_vec, rhs_vec, m, k, n)?
+            } else {
+                Self::matmul_2d_sgemm(&lhs_vec, rhs_vec, m, k, n)?
+            };
+            ArrayD::from_shape_vec(IxDyn(&[m, n]), output)
+                .map_err(|e| OnnxError::InvalidModel(format!("MatMul output shape error: {}", e)))?
+        } else if lhs_shape.len() > 2 || rhs_shape.len() > 2 {
+            let (lhs_batch, lhs_m, lhs_k) = self.split_batch_matmul_shape(&lhs_shape)?;
+            let (rhs_batch, rhs_k, rhs_n) = self.split_batch_matmul_shape(&rhs_shape)?;
+
+            if lhs_k != rhs_k {
+                let lhs_info = self.node_debug_info(lhs_id);
+                let rhs_info = self.node_debug_info(rhs_id);
+                return Err(OnnxError::InvalidModel(format!(
+                    "MatMul node {} dimension mismatch: {:?} x {:?} (lhs {:?}, rhs {:?})",
+                    node_id, lhs_shape, rhs_shape, lhs_info, rhs_info
+                )));
+            }
+
+            let batch_dims = if rhs_batch.is_empty() {
+                lhs_batch.clone()
+            } else if lhs_batch == rhs_batch {
+                lhs_batch.clone()
+            } else {
+                let lhs_info = self.node_debug_info(lhs_id);
+                let rhs_info = self.node_debug_info(rhs_id);
+                return Err(OnnxError::InvalidModel(format!(
+                    "MatMul node {} batch dimension mismatch: {:?} x {:?} (lhs {:?}, rhs {:?})",
+                    node_id, lhs_shape, rhs_shape, lhs_info, rhs_info
+                )));
             };
 
-            let m = lhs_flat.shape()[0];
-            let k = lhs_flat.shape()[1];
-            let n = rhs_2d.shape()[1];
+            let batch_size: usize = if batch_dims.is_empty() {
+                1
+            } else {
+                batch_dims.iter().product()
+            };
 
-            let mut result = Array::zeros((m, n));
-            for i in 0..m {
-                for j in 0..n {
-                    let mut sum = 0.0f32;
-                    for l in 0..k {
-                        sum += lhs_flat[[i, l]] * rhs_2d[[l, j]];
-                    }
-                    result[[i, j]] = sum;
+            let (lhs_vec, mut rhs_vec_fallback) = {
+                let lhs = self.get_tensor(lhs_id)?;
+                let rhs = self.get_tensor(rhs_id)?;
+                let lhs_vec = self.contiguous_vec(&lhs.data)?;
+                let rhs_vec_fallback = if rhs_storage.is_some() {
+                    None
+                } else {
+                    Some(self.contiguous_vec(&rhs.data)?)
+                };
+                (lhs_vec, rhs_vec_fallback)
+            };
+            if rhs_storage.is_none() {
+                if let (Some(weight_id), Some(rhs_vec)) = (rhs_weight_id, rhs_vec_fallback.take())
+                {
+                    rhs_storage = Some(self.runtime_pack_matmul_rhs(weight_id, rhs_vec)?);
                 }
             }
-            result.into_dyn()
+
+            let lhs_stride = lhs_m * lhs_k;
+            let rhs_stride = rhs_k * rhs_n;
+            let out_stride = lhs_m * rhs_n;
+
+            let rhs_vec_fallback = if rhs_storage.is_none() && rhs_vec_fallback.is_none() {
+                let rhs = self.get_tensor(rhs_id)?;
+                Some(self.contiguous_vec(&rhs.data)?)
+            } else {
+                rhs_vec_fallback
+            };
+            let rhs_buffer = match (&rhs_storage, &rhs_vec_fallback) {
+                (Some(storage), _) => Some(storage.as_slice()),
+                (None, Some(vec)) => Some(vec.as_slice()),
+                (None, None) => None,
+            }
+            .ok_or_else(|| OnnxError::InvalidModel("MatMul rhs data missing".into()))?;
+
+            let output = if self.backend.is_some() && batch_size == 1 {
+                self.matmul_2d_backend(&lhs_vec, rhs_buffer, lhs_m, lhs_k, rhs_n)?
+            } else {
+                let mut output = vec![0.0f32; batch_size * out_stride];
+                output
+                    .par_chunks_mut(out_stride)
+                    .enumerate()
+                    .for_each(|(b, out_plane)| {
+                        let lhs_offset = b * lhs_stride;
+                        let rhs_offset = if rhs_batch.is_empty() {
+                            0
+                        } else {
+                            b * rhs_stride
+                        };
+
+                        let lhs_slice = &lhs_vec[lhs_offset..lhs_offset + lhs_stride];
+                        let rhs_slice = &rhs_buffer[rhs_offset..rhs_offset + rhs_stride];
+
+                        Self::matmul_2d_sgemm_into(
+                            lhs_slice,
+                            rhs_slice,
+                            lhs_m,
+                            lhs_k,
+                            rhs_n,
+                            out_plane,
+                        );
+                    });
+                output
+            };
+
+            let mut out_shape = batch_dims;
+            out_shape.push(lhs_m);
+            out_shape.push(rhs_n);
+
+            ArrayD::from_shape_vec(IxDyn(&out_shape), output)
+                .map_err(|e| OnnxError::InvalidModel(format!("MatMul output shape error: {}", e)))?
         } else {
             return Err(OnnxError::unsupported_op(
                 format!("MatMul with shapes {:?}x{:?}", lhs_shape, rhs_shape),
@@ -521,25 +912,234 @@ impl<'a> Interpreter<'a> {
         Ok(Tensor { data: result })
     }
 
-    /// Flatten batch dimensions for batched operations
-    fn flatten_batch_dims(&self, arr: &ArrayD<f32>) -> Result<ArrayD<f32>> {
-        let shape = arr.shape();
+    fn split_batch_matmul_shape(
+        &self,
+        shape: &[usize],
+    ) -> Result<(Vec<usize>, usize, usize)> {
         if shape.len() < 2 {
             return Err(OnnxError::InvalidModel(
-                "Cannot flatten array with < 2 dims".into(),
+                "MatMul expects tensors with at least 2 dims".into(),
             ));
         }
+        let m = shape[shape.len() - 2];
+        let k = shape[shape.len() - 1];
+        let batch = shape[..shape.len() - 2].to_vec();
+        Ok((batch, m, k))
+    }
 
-        let batch_size: usize = shape[..shape.len() - 1].iter().product();
-        let last_dim = shape[shape.len() - 1];
+    fn contiguous_vec(&self, arr: &ArrayD<f32>) -> Result<Vec<f32>> {
+        if arr.is_standard_layout() {
+            return Ok(
+                arr.as_slice()
+                    .map(|slice| slice.to_vec())
+                    .unwrap_or_else(|| arr.iter().copied().collect()),
+            );
+        }
 
-        arr.clone()
-            .into_shape_with_order(IxDyn(&[batch_size, last_dim]))
-            .map_err(|e| OnnxError::InvalidModel(format!("Reshape failed: {}", e)))
+        let shape = arr.shape();
+        let owned = ArrayD::from_shape_vec(IxDyn(shape), arr.iter().copied().collect()).map_err(|e| {
+            OnnxError::InvalidModel(format!("Failed to make contiguous: {}", e))
+        })?;
+        Ok(owned
+            .as_slice()
+            .map(|slice| slice.to_vec())
+            .unwrap_or_else(|| owned.iter().copied().collect()))
+    }
+
+    fn packed_weight_vec(
+        &mut self,
+        weight_id: usize,
+        kind: PackedWeightKind,
+    ) -> Option<Arc<Vec<f32>>> {
+        let entry = self.model.packed_weight_entry(weight_id, kind)?;
+        if let Some(cached) = self.packed_weight_cache.get(&entry.id) {
+            return Some(cached.clone());
+        }
+
+        let bytes = self.model.get_packed_weight(entry)?;
+        if bytes.len() % 4 != 0 {
+            return None;
+        }
+        let vec = bytes_to_f32(bytes);
+        let arc = Arc::new(vec);
+        self.packed_weight_cache.insert(entry.id, arc.clone());
+        Some(arc)
+    }
+
+    fn runtime_pack_matmul_rhs(
+        &mut self,
+        weight_id: usize,
+        rhs_vec: Vec<f32>,
+    ) -> Result<Arc<Vec<f32>>> {
+        if let Some(cached) = self.runtime_packed_matmul_rhs.get(&weight_id) {
+            return Ok(cached.clone());
+        }
+        let arc = Arc::new(rhs_vec);
+        self.runtime_packed_matmul_rhs
+            .insert(weight_id, arc.clone());
+        Ok(arc)
+    }
+
+    fn runtime_pack_conv2d_weight(
+        &mut self,
+        weight_id: usize,
+        weight_vec: &[f32],
+        c_out: usize,
+        c_in: usize,
+        kh: usize,
+        kw: usize,
+    ) -> Result<Arc<Vec<f32>>> {
+        if let Some(cached) = self.runtime_packed_conv2d.get(&weight_id) {
+            return Ok(cached.clone());
+        }
+
+        if weight_vec.len() != c_out * c_in * kh * kw {
+            return Err(OnnxError::InvalidModel(format!(
+                "Conv2D weight size mismatch: expected {}, got {}",
+                c_out * c_in * kh * kw,
+                weight_vec.len()
+            )));
+        }
+        let mut packed = vec![0.0f32; c_out * c_in * kh * kw];
+        for oc in 0..c_out {
+            let mut k_idx = 0;
+            for ic in 0..c_in {
+                for ky in 0..kh {
+                    for kx in 0..kw {
+                        let src_idx = ((oc * c_in + ic) * kh + ky) * kw + kx;
+                        packed[k_idx * c_out + oc] = weight_vec[src_idx];
+                        k_idx += 1;
+                    }
+                }
+            }
+        }
+
+        let arc = Arc::new(packed);
+        self.runtime_packed_conv2d.insert(weight_id, arc.clone());
+        Ok(arc)
+    }
+
+    fn pack_conv2d_weight_from_tensor(
+        &self,
+        weight_vec: &[f32],
+        c_out: usize,
+        c_in: usize,
+        kh: usize,
+        kw: usize,
+    ) -> Result<Vec<f32>> {
+        if weight_vec.len() != c_out * c_in * kh * kw {
+            return Err(OnnxError::InvalidModel(format!(
+                "Conv2D weight size mismatch: expected {}, got {}",
+                c_out * c_in * kh * kw,
+                weight_vec.len()
+            )));
+        }
+        let mut packed = vec![0.0f32; c_out * c_in * kh * kw];
+        for oc in 0..c_out {
+            let mut k_idx = 0;
+            for ic in 0..c_in {
+                for ky in 0..kh {
+                    for kx in 0..kw {
+                        let src_idx = ((oc * c_in + ic) * kh + ky) * kw + kx;
+                        packed[k_idx * c_out + oc] = weight_vec[src_idx];
+                        k_idx += 1;
+                    }
+                }
+            }
+        }
+        Ok(packed)
+    }
+
+    fn matmul_2d_sgemm(
+        lhs: &[f32],
+        rhs: &[f32],
+        m: usize,
+        k: usize,
+        n: usize,
+    ) -> Result<Vec<f32>> {
+        let mut output = vec![0.0f32; m * n];
+        Self::matmul_2d_sgemm_into(lhs, rhs, m, k, n, &mut output);
+        Ok(output)
+    }
+
+    fn matmul_2d_backend(
+        &mut self,
+        lhs: &[f32],
+        rhs: &[f32],
+        m: usize,
+        k: usize,
+        n: usize,
+    ) -> Result<Vec<f32>> {
+        let backend = self.backend.as_mut().ok_or_else(|| {
+            OnnxError::InternalError("Backend executor missing for MatMul".into())
+        })?;
+        let exec = &mut backend.exec;
+
+        let mut buf_a: Buffer<f32> = exec
+            .allocate(m * k)
+            .map_err(|e| OnnxError::HologramError(format!("MatMul allocate A failed: {}", e)))?;
+        let mut buf_b: Buffer<f32> = exec
+            .allocate(k * n)
+            .map_err(|e| OnnxError::HologramError(format!("MatMul allocate B failed: {}", e)))?;
+        let mut buf_c: Buffer<f32> = exec
+            .allocate(m * n)
+            .map_err(|e| OnnxError::HologramError(format!("MatMul allocate C failed: {}", e)))?;
+
+        buf_a
+            .copy_from_slice(exec, lhs)
+            .map_err(|e| OnnxError::HologramError(format!("MatMul copy A failed: {}", e)))?;
+        buf_b
+            .copy_from_slice(exec, rhs)
+            .map_err(|e| OnnxError::HologramError(format!("MatMul copy B failed: {}", e)))?;
+
+        hologram_core::ops::linalg::gemm(exec, &buf_a, &buf_b, &mut buf_c, m, k, n)
+            .map_err(|e| OnnxError::HologramError(format!("MatMul GEMM failed: {}", e)))?;
+
+        let mut output = vec![0.0f32; m * n];
+        buf_c
+            .copy_to_slice(exec, &mut output)
+            .map_err(|e| OnnxError::HologramError(format!("MatMul copy C failed: {}", e)))?;
+        Ok(output)
+    }
+
+    fn matmul_2d_sgemm_into(
+        lhs: &[f32],
+        rhs: &[f32],
+        m: usize,
+        k: usize,
+        n: usize,
+        output: &mut [f32],
+    ) {
+        let k_i = k as isize;
+        let n_i = n as isize;
+
+        unsafe {
+            sgemm(
+                m,
+                k,
+                n,
+                1.0,
+                lhs.as_ptr(),
+                k_i,
+                1,
+                rhs.as_ptr(),
+                n_i,
+                1,
+                0.0,
+                output.as_mut_ptr(),
+                n_i,
+                1,
+            );
+        }
     }
 
     /// Execute reshape
-    fn execute_reshape(&self, input_id: usize, shape: &[DimSpec]) -> Result<Tensor> {
+    fn execute_reshape(
+        &self,
+        node_id: usize,
+        input_id: usize,
+        shape: &[DimSpec],
+    ) -> Result<Tensor> {
         let input = self.get_tensor(input_id)?;
         let input_shape = input.shape();
         let input_size: usize = input_shape.iter().product();
@@ -549,7 +1149,19 @@ impl<'a> Interpreter<'a> {
 
         for (i, dim) in shape.iter().enumerate() {
             match dim {
-                DimSpec::Concrete(n) => new_shape.push(*n),
+                DimSpec::Concrete(n) => {
+                    if *n == 0 {
+                        let size = *input_shape.get(i).ok_or_else(|| {
+                            OnnxError::InvalidModel(format!(
+                                "Reshape dimension {} is out of range for input shape {:?}",
+                                i, input_shape
+                            ))
+                        })?;
+                        new_shape.push(size);
+                    } else {
+                        new_shape.push(*n);
+                    }
+                }
                 DimSpec::Symbolic(s) => {
                     if let Ok(n) = s.parse::<usize>() {
                         new_shape.push(n);
@@ -586,6 +1198,18 @@ impl<'a> Interpreter<'a> {
                     new_shape, input_shape
                 )));
             }
+        }
+
+        let new_size: usize = new_shape.iter().product();
+        if input_size != new_size {
+            warn!(
+                "Reshape node {} size mismatch: input {:?} ({}) -> target {:?} ({})",
+                node_id, input_shape, input_size, new_shape, new_size
+            );
+            return Err(OnnxError::InvalidModel(format!(
+                "Reshape node {} size mismatch: input {:?} ({}) -> target {:?} ({})",
+                node_id, input_shape, input_size, new_shape, new_size
+            )));
         }
 
         self.reshape_with_shape(input, &new_shape)
@@ -630,6 +1254,14 @@ impl<'a> Interpreter<'a> {
             })
             .collect();
 
+        if axes.iter().any(|&axis| axis >= ndim) {
+            return Err(OnnxError::InvalidModel(format!(
+                "Reduce axis out of bounds: axes {:?} for input shape {:?}",
+                axes,
+                input.shape()
+            )));
+        }
+
         // Sort axes in descending order for proper reduction
         let mut sorted_axes = axes.clone();
         sorted_axes.sort_by(|a, b| b.cmp(a));
@@ -637,9 +1269,22 @@ impl<'a> Interpreter<'a> {
         let mut result = input.data.clone();
 
         for axis in sorted_axes {
+            if axis >= result.ndim() {
+                return Err(OnnxError::InvalidModel(format!(
+                    "Reduce axis {} out of bounds for shape {:?}",
+                    axis,
+                    result.shape()
+                )));
+            }
             result = match op {
                 "sum" => result.sum_axis(Axis(axis)),
-                "mean" => result.mean_axis(Axis(axis)).unwrap(),
+                "mean" => result.mean_axis(Axis(axis)).ok_or_else(|| {
+                    OnnxError::InvalidModel(format!(
+                        "Reduce mean failed for axis {} on shape {:?}",
+                        axis,
+                        result.shape()
+                    ))
+                })?,
                 "max" => result.map_axis(Axis(axis), |row| {
                     row.iter().fold(f32::NEG_INFINITY, |a, &b| a.max(b))
                 }),
@@ -727,7 +1372,7 @@ impl<'a> Interpreter<'a> {
         kernel: &[usize],
         stride: &[usize],
         padding: &[usize],
-        _dilation: &[usize],
+        dilation: &[usize],
     ) -> Result<Tensor> {
         let input = self.get_tensor(input_id)?;
         let shape = input.shape();
@@ -743,44 +1388,91 @@ impl<'a> Interpreter<'a> {
         let (kh, kw) = (kernel[0], kernel[1]);
         let (sh, sw) = (stride[0], stride[1]);
         let (ph, pw) = (padding[0], padding[1]);
+        let (dh, dw) = (dilation[0], dilation[1]);
 
-        let h_out = (h + 2 * ph - kh) / sh + 1;
-        let w_out = (w + 2 * pw - kw) / sw + 1;
+        let h_out = (h + 2 * ph - dh * (kh - 1) - 1) / sh + 1;
+        let w_out = (w + 2 * pw - dw * (kw - 1) - 1) / sw + 1;
 
+        let col_vec = self.im2col_to_vec(
+            input,
+            h_out,
+            w_out,
+            (kh, kw),
+            (sh, sw),
+            (ph, pw),
+            (dh, dw),
+        )?;
         let col_size = c * kh * kw;
-        let mut col = Array::zeros((n * h_out * w_out, col_size));
-
-        for batch in 0..n {
-            for y in 0..h_out {
-                for x in 0..w_out {
-                    let row = batch * h_out * w_out + y * w_out + x;
-                    let mut col_idx = 0;
-
-                    for channel in 0..c {
-                        for ky in 0..kh {
-                            for kx in 0..kw {
-                                let in_y = y * sh + ky;
-                                let in_x = x * sw + kx;
-
-                                let val =
-                                    if in_y >= ph && in_y < h + ph && in_x >= pw && in_x < w + pw {
-                                        input.data[[batch, channel, in_y - ph, in_x - pw]]
-                                    } else {
-                                        0.0
-                                    };
-
-                                col[[row, col_idx]] = val;
-                                col_idx += 1;
-                            }
-                        }
-                    }
-                }
-            }
-        }
+        let col = Array::from_shape_vec((n * h_out * w_out, col_size), col_vec).map_err(|e| {
+            OnnxError::InvalidModel(format!("Im2Col output shape error: {}", e))
+        })?;
 
         Ok(Tensor {
             data: col.into_dyn(),
         })
+    }
+
+    fn im2col_to_vec(
+        &self,
+        input: &Tensor,
+        h_out: usize,
+        w_out: usize,
+        kernel: (usize, usize),
+        stride: (usize, usize),
+        padding: (usize, usize),
+        dilation: (usize, usize),
+    ) -> Result<Vec<f32>> {
+        let shape = input.shape();
+        if shape.len() != 4 {
+            return Err(OnnxError::InvalidModel(format!(
+                "Im2Col expects 4D input, got {:?}",
+                shape
+            )));
+        }
+
+        let (n, c, h, w) = (shape[0], shape[1], shape[2], shape[3]);
+        let (kh, kw) = kernel;
+        let (sh, sw) = stride;
+        let (ph, pw) = padding;
+        let (dh, dw) = dilation;
+
+        let col_size = c * kh * kw;
+        let rows = n * h_out * w_out;
+        let mut col = vec![0.0f32; rows * col_size];
+
+        col.par_chunks_mut(col_size)
+            .enumerate()
+            .for_each(|(row, out_row)| {
+                let batch = row / (h_out * w_out);
+                let idx = row % (h_out * w_out);
+                let y = idx / w_out;
+                let x = idx % w_out;
+
+                let mut col_idx = 0;
+                for channel in 0..c {
+                    for ky in 0..kh {
+                        for kx in 0..kw {
+                            let in_y = y * sh + ky * dh;
+                            let in_x = x * sw + kx * dw;
+
+                            let val = if in_y >= ph
+                                && in_y < h + ph
+                                && in_x >= pw
+                                && in_x < w + pw
+                            {
+                                input.data[[batch, channel, in_y - ph, in_x - pw]]
+                            } else {
+                                0.0
+                            };
+
+                            out_row[col_idx] = val;
+                            col_idx += 1;
+                        }
+                    }
+                }
+            });
+
+        Ok(col)
     }
 
     /// Execute unfold (similar to im2col for pooling)
@@ -972,7 +1664,7 @@ impl<'a> Interpreter<'a> {
     /// Execute conv2d
     #[allow(clippy::too_many_arguments)]
     fn execute_conv2d(
-        &self,
+        &mut self,
         input_id: usize,
         weight_id: usize,
         bias_id: Option<usize>,
@@ -981,11 +1673,11 @@ impl<'a> Interpreter<'a> {
         dilation: &[usize],
         groups: usize,
     ) -> Result<Tensor> {
-        let input = self.get_tensor(input_id)?;
-        let weight = self.get_tensor(weight_id)?;
-
-        let input_shape = input.shape();
-        let weight_shape = weight.shape();
+        let (input_shape, weight_shape) = {
+            let input = self.get_tensor(input_id)?;
+            let weight = self.get_tensor(weight_id)?;
+            (input.shape().to_vec(), weight.shape().to_vec())
+        };
 
         if input_shape.len() != 4 || weight_shape.len() != 4 {
             return Err(OnnxError::InvalidModel("Conv2D expects 4D tensors".into()));
@@ -1008,21 +1700,151 @@ impl<'a> Interpreter<'a> {
         let (ph, pw) = (padding[0], padding[1]);
         let (dh, dw) = (dilation[0], dilation[1]);
 
+        if groups == 0 || c_out % groups != 0 {
+            return Err(OnnxError::InvalidModel(format!(
+                "Conv2D invalid groups: {} for c_out {}",
+                groups, c_out
+            )));
+        }
+
         let h_out = (h + 2 * ph - dh * (kh - 1) - 1) / sh + 1;
         let w_out = (w + 2 * pw - dw * (kw - 1) - 1) / sw + 1;
 
-        let mut output = Array::zeros((n, c_out, h_out, w_out));
+        let bias_values = if let Some(bias_id) = bias_id {
+            let bias = self.get_tensor(bias_id)?;
+            let bias_slice = bias.data.as_slice().ok_or_else(|| {
+                OnnxError::InvalidModel("Conv2D bias must be contiguous".into())
+            })?;
+            if bias_slice.len() != c_out {
+                return Err(OnnxError::InvalidModel(format!(
+                    "Conv2D bias length {} does not match c_out {}",
+                    bias_slice.len(),
+                    c_out
+                )));
+            }
+            Some(bias_slice.to_vec())
+        } else {
+            None
+        };
 
-        // Simple convolution implementation
-        for batch in 0..n {
-            for oc in 0..c_out {
+        if groups == 1 && dh == 1 && dw == 1 {
+            let weight_vec = {
+                let weight = self.get_tensor(weight_id)?;
+                self.contiguous_vec(&weight.data)?
+            };
+            let m = n * h_out * w_out;
+            let k = _c_in_k * kh * kw;
+
+            let weight_entry_id = self.constant_weight_ids.get(&weight_id).copied();
+            let weight_t = if let Some(weight_id) = weight_entry_id {
+                if let Some(packed) = self.packed_weight_vec(weight_id, PackedWeightKind::Conv2dIm2Col)
+                {
+                    packed
+                } else {
+                    self.runtime_pack_conv2d_weight(
+                        weight_id,
+                        &weight_vec,
+                        c_out,
+                        _c_in_k,
+                        kh,
+                        kw,
+                    )?
+                }
+            } else {
+                Arc::new(self.pack_conv2d_weight_from_tensor(
+                    &weight_vec,
+                    c_out,
+                    _c_in_k,
+                    kh,
+                    kw,
+                )?)
+            };
+            if weight_t.len() != k * c_out {
+                return Err(OnnxError::InvalidModel(format!(
+                    "Conv2D packed weight size mismatch: expected {}, got {}",
+                    k * c_out,
+                    weight_t.len()
+                )));
+            }
+
+            let input = self.get_tensor(input_id)?;
+            let col_vec = self.im2col_to_vec(
+                input,
+                h_out,
+                w_out,
+                (kh, kw),
+                (sh, sw),
+                (ph, pw),
+                (dh, dw),
+            )?;
+
+            let out_vec = if self.backend.is_some() {
+                self.matmul_2d_backend(&col_vec, weight_t.as_slice(), m, k, c_out)?
+            } else {
+                let mut out_vec = vec![0.0f32; m * c_out];
+                Self::matmul_2d_sgemm_into(
+                    &col_vec,
+                    weight_t.as_slice(),
+                    m,
+                    k,
+                    c_out,
+                    &mut out_vec,
+                );
+                out_vec
+            };
+
+            let plane = h_out * w_out;
+            let mut output = vec![0.0f32; n * c_out * plane];
+            output
+                .par_chunks_mut(plane)
+                .enumerate()
+                .for_each(|(index, out_plane)| {
+                    let batch = index / c_out;
+                    let oc = index % c_out;
+                    let bias_val = bias_values
+                        .as_ref()
+                        .map(|bias| bias[oc])
+                        .unwrap_or(0.0);
+                    for y in 0..h_out {
+                        for x in 0..w_out {
+                            let row = batch * plane + y * w_out + x;
+                            out_plane[y * w_out + x] = out_vec[row * c_out + oc] + bias_val;
+                        }
+                    }
+                });
+
+            let output = Array::from_shape_vec((n, c_out, h_out, w_out), output).map_err(|e| {
+                OnnxError::InvalidModel(format!("Conv2D output shape error: {}", e))
+            })?;
+
+            return Ok(Tensor {
+                data: output.into_dyn(),
+            });
+        }
+
+        let input = self.get_tensor(input_id)?;
+        let weight = self.get_tensor(weight_id)?;
+
+        let plane = h_out * w_out;
+        let mut output = vec![0.0f32; n * c_out * plane];
+
+        output
+            .par_chunks_mut(plane)
+            .enumerate()
+            .for_each(|(index, out_plane)| {
+                let batch = index / c_out;
+                let oc = index % c_out;
                 let oc_group = oc / (c_out / groups);
-                let ic_start = oc_group * (_c_in_k);
+                let ic_start = oc_group * _c_in_k;
                 let ic_end = ic_start + _c_in_k;
+                let bias_val = bias_values
+                    .as_ref()
+                    .map(|bias| bias[oc])
+                    .unwrap_or(0.0);
 
                 for y in 0..h_out {
                     for x in 0..w_out {
-                        let mut sum = 0.0f32;
+                        let mut sum = bias_val;
 
                         for ic in ic_start..ic_end {
                             let ic_k = ic - ic_start;
@@ -1031,7 +1853,11 @@ impl<'a> Interpreter<'a> {
                                     let in_y = y * sh + ky * dh;
                                     let in_x = x * sw + kx * dw;
 
-                                    if in_y >= ph && in_y < h + ph && in_x >= pw && in_x < w + pw {
+                                    if in_y >= ph
+                                        && in_y < h + ph
+                                        && in_x >= pw
+                                        && in_x < w + pw
+                                    {
                                         let val = input.data[[batch, ic, in_y - ph, in_x - pw]];
                                         let w_val = weight.data[[oc, ic_k, ky, kx]];
                                         sum += val * w_val;
@@ -1040,26 +1866,14 @@ impl<'a> Interpreter<'a> {
                             }
                         }
 
-                        output[[batch, oc, y, x]] = sum;
+                        out_plane[y * w_out + x] = sum;
                     }
                 }
-            }
-        }
+            });
 
-        // Add bias if present
-        if let Some(bias_id) = bias_id {
-            let bias = self.get_tensor(bias_id)?;
-            for batch in 0..n {
-                for oc in 0..c_out {
-                    let b = bias.data[[oc]];
-                    for y in 0..h_out {
-                        for x in 0..w_out {
-                            output[[batch, oc, y, x]] += b;
-                        }
-                    }
-                }
-            }
-        }
+        let output = Array::from_shape_vec((n, c_out, h_out, w_out), output).map_err(|e| {
+            OnnxError::InvalidModel(format!("Conv2D output shape error: {}", e))
+        })?;
 
         Ok(Tensor {
             data: output.into_dyn(),
@@ -1279,17 +2093,18 @@ impl<'a> Interpreter<'a> {
     }
 
     /// Execute runtime call operation
-    fn execute_call(&self, func: &str, args: &[usize]) -> Result<Tensor> {
+    fn execute_call(&self, node_id: usize, func: &str, args: &[usize]) -> Result<Tensor> {
         match func {
             "onnx.Shape" => self.execute_shape(args),
             "onnx.ConstantOfShape" => self.execute_constant_of_shape(args),
             "onnx.GroupNormalization" => self.execute_group_normalization(args),
-            "onnx.Reshape" => self.execute_dynamic_reshape(args),
+            "onnx.Reshape" => self.execute_dynamic_reshape(node_id, args),
+            "onnx.Resize" | "onnx.Upsample" => self.execute_resize(node_id, args),
             _ => Err(OnnxError::unsupported_op(format!("Call::{}", func), 0)),
         }
     }
 
-    fn execute_dynamic_reshape(&self, args: &[usize]) -> Result<Tensor> {
+    fn execute_dynamic_reshape(&self, node_id: usize, args: &[usize]) -> Result<Tensor> {
         if args.len() != 2 {
             return Err(OnnxError::InvalidModel(format!(
                 "Reshape expects 2 inputs, got {}",
@@ -1300,7 +2115,40 @@ impl<'a> Interpreter<'a> {
         let input = self.get_tensor(args[0])?;
         let shape_tensor = self.get_tensor(args[1])?;
         let shape_values = self.parse_shape_tensor(shape_tensor)?;
-        let new_shape = self.resolve_reshape_dims(input.shape(), &shape_values)?;
+        let new_shape = self
+            .resolve_reshape_dims(input.shape(), &shape_values)
+            .map_err(|e| {
+                OnnxError::InvalidModel(format!(
+                    "Reshape node {} failed to resolve dims for input {:?} shape {:?}: {}",
+                    node_id,
+                    input.shape(),
+                    shape_values,
+                    e
+                ))
+            })?;
+        let input_size: usize = input.shape().iter().product();
+        let new_size: usize = new_shape.iter().product();
+        if input_size != new_size {
+            warn!(
+                "Reshape node {} size mismatch: input {:?} ({}) -> target {:?} ({}) (shape={:?})",
+                node_id,
+                input.shape(),
+                input_size,
+                new_shape,
+                new_size,
+                shape_values
+            );
+            return Err(OnnxError::InvalidModel(format!(
+                "Reshape node {} size mismatch: input {:?} ({}) -> target {:?} ({}) (shape={:?})",
+                node_id,
+                input.shape(),
+                input_size,
+                new_shape,
+                new_size,
+                shape_values
+            )));
+        }
+
         self.reshape_with_shape(input, &new_shape)
     }
 
@@ -1320,6 +2168,130 @@ impl<'a> Interpreter<'a> {
             .collect()
     }
 
+    fn execute_resize(&self, node_id: usize, args: &[usize]) -> Result<Tensor> {
+        if args.is_empty() || args.len() > 4 {
+            return Err(OnnxError::InvalidModel(format!(
+                "Resize expects 1-4 inputs, got {}",
+                args.len()
+            )));
+        }
+
+        let input = self.get_tensor(args[0])?;
+        let input_shape = input.shape();
+        if input_shape.len() != 4 {
+            return Err(OnnxError::InvalidModel(format!(
+                "Resize expects 4D input, got shape {:?}",
+                input_shape
+            )));
+        }
+
+        let scales_id = if args.len() == 2 {
+            Some(args[1])
+        } else if args.len() >= 3 {
+            Some(args[2])
+        } else {
+            None
+        };
+        let sizes_id = if args.len() == 4 { Some(args[3]) } else { None };
+
+        let sizes = if let Some(sizes_id) = sizes_id {
+            let sizes_tensor = self.get_tensor(sizes_id)?;
+            Some(self.parse_shape_tensor(sizes_tensor)?)
+        } else {
+            None
+        };
+
+        let scales = if sizes.is_none() {
+            if let Some(scales_id) = scales_id {
+                let scales_tensor = self.get_tensor(scales_id)?;
+                Some(
+                    scales_tensor
+                        .data
+                        .iter()
+                        .map(|&v| v as f32)
+                        .collect::<Vec<f32>>(),
+                )
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        let output_shape: Vec<usize> = if let Some(sizes) = sizes {
+            sizes
+                .iter()
+                .map(|&s| {
+                    if s <= 0 {
+                        Err(OnnxError::InvalidModel(format!(
+                            "Resize node {} invalid size {}",
+                            node_id, s
+                        )))
+                    } else {
+                        Ok(s as usize)
+                    }
+                })
+                .collect::<Result<_>>()?
+        } else if let Some(scales) = scales {
+            if scales.len() != input_shape.len() {
+                return Err(OnnxError::InvalidModel(format!(
+                    "Resize node {} scales length {} does not match input rank {}",
+                    node_id,
+                    scales.len(),
+                    input_shape.len()
+                )));
+            }
+            input_shape
+                .iter()
+                .zip(scales.iter())
+                .map(|(&dim, &scale)| {
+                    let scaled = (dim as f32 * scale).round();
+                    if scaled <= 0.0 {
+                        1
+                    } else {
+                        scaled as usize
+                    }
+                })
+                .collect()
+        } else {
+            return Err(OnnxError::InvalidModel(format!(
+                "Resize node {} missing scales or sizes input",
+                node_id
+            )));
+        };
+
+        if output_shape.len() != 4 {
+            return Err(OnnxError::InvalidModel(format!(
+                "Resize node {} expects 4D output, got {:?}",
+                node_id, output_shape
+            )));
+        }
+
+        let (n, c, h, w) = (input_shape[0], input_shape[1], input_shape[2], input_shape[3]);
+        let (out_h, out_w) = (output_shape[2], output_shape[3]);
+        let scale_h = if h == 0 { 1.0 } else { out_h as f32 / h as f32 };
+        let scale_w = if w == 0 { 1.0 } else { out_w as f32 / w as f32 };
+
+        let mut output = Array::zeros((n, c, out_h, out_w));
+        for b in 0..n {
+            for ch in 0..c {
+                for y in 0..out_h {
+                    let in_y = ((y as f32) / scale_h).floor() as usize;
+                    let src_y = in_y.min(h.saturating_sub(1));
+                    for x in 0..out_w {
+                        let in_x = ((x as f32) / scale_w).floor() as usize;
+                        let src_x = in_x.min(w.saturating_sub(1));
+                        output[[b, ch, y, x]] = input.data[[b, ch, src_y, src_x]];
+                    }
+                }
+            }
+        }
+
+        Ok(Tensor {
+            data: output.into_dyn(),
+        })
+    }
+
     fn resolve_reshape_dims(&self, input_shape: &[usize], dims: &[i64]) -> Result<Vec<usize>> {
         if dims.is_empty() {
             return Err(OnnxError::InvalidModel(
@@ -1327,12 +2299,18 @@ impl<'a> Interpreter<'a> {
             ));
         }
 
+        let resolved_dims: Vec<i64> = if dims.len() == 1 && dims[0] == 0 {
+            input_shape.iter().map(|&d| d as i64).collect()
+        } else {
+            dims.to_vec()
+        };
+
         let input_size: usize = input_shape.iter().product();
-        let mut new_shape = Vec::with_capacity(dims.len());
+        let mut new_shape = Vec::with_capacity(resolved_dims.len());
         let mut infer_index: Option<usize> = None;
         let mut known_product: usize = 1;
 
-        for (idx, &dim) in dims.iter().enumerate() {
+        for (idx, &dim) in resolved_dims.iter().enumerate() {
             match dim {
                 0 => {
                     let size = *input_shape.get(idx).ok_or_else(|| {
@@ -1398,6 +2376,10 @@ impl<'a> Interpreter<'a> {
         let new_size: usize = new_shape.iter().product();
 
         if input_size != new_size {
+            warn!(
+                "Reshape size mismatch: input {:?} ({}) -> target {:?} ({})",
+                input_shape, input_size, new_shape, new_size
+            );
             return Err(OnnxError::InvalidModel(format!(
                 "Reshape size mismatch: input {:?} ({}) -> target {:?} ({})",
                 input_shape, input_size, new_shape, new_size
@@ -1601,6 +2583,16 @@ impl<'a> Interpreter<'a> {
             .get(&id)
             .ok_or_else(|| OnnxError::InvalidModel(format!("Tensor for node {} not found", id)))
     }
+}
+
+fn build_constant_weight_map(model: &HoloModel) -> HashMap<usize, usize> {
+    let mut map = HashMap::new();
+    for node in &model.graph.nodes {
+        if let SerNodeKind::Constant { weight_id } = node.node {
+            map.insert(node.id, weight_id);
+        }
+    }
+    map
 }
 
 // Helper functions for byte conversion

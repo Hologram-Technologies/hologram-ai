@@ -48,6 +48,7 @@ impl From<&CompilerConfig> for OnnxConfig {
             partition_size: config.partition_size,
             decompose_conv2d: config.decompose_conv2d,
             decompose_pooling: config.decompose_pooling,
+            pack_weights: config.pack_weights,
             memory_budget: config.memory_budget,
         }
     }
@@ -74,6 +75,7 @@ impl From<&OnnxConfig> for CompilerConfig {
             partition_size: config.partition_size,
             decompose_conv2d: config.decompose_conv2d,
             decompose_pooling: config.decompose_pooling,
+            pack_weights: config.pack_weights,
             memory_budget: config.memory_budget,
             backend: None,
         }
@@ -322,6 +324,7 @@ mod tests {
             partition_size: 1000,
             decompose_conv2d: true,
             decompose_pooling: false,
+            pack_weights: true,
             memory_budget: Some(8 * 1024),
             backend: Some("cuda".to_string()),
         };
@@ -333,6 +336,7 @@ mod tests {
         assert_eq!(onnx_config.partition_size, 1000);
         assert!(onnx_config.decompose_conv2d);
         assert!(!onnx_config.decompose_pooling);
+        assert!(onnx_config.pack_weights);
         assert_eq!(onnx_config.memory_budget, Some(8 * 1024));
     }
 
@@ -344,6 +348,7 @@ mod tests {
             partition_size: 500,
             decompose_conv2d: true,
             decompose_pooling: true,
+            pack_weights: false,
             memory_budget: None,
         };
 
@@ -354,6 +359,7 @@ mod tests {
         assert_eq!(compiler_config.partition_size, 500);
         assert!(compiler_config.decompose_conv2d);
         assert!(compiler_config.decompose_pooling);
+        assert!(!compiler_config.pack_weights);
         assert_eq!(compiler_config.memory_budget, None);
         assert_eq!(compiler_config.backend, None);
     }
@@ -563,6 +569,7 @@ mod tests {
             partition_size: 750,
             decompose_conv2d: false,
             decompose_pooling: true,
+            pack_weights: true,
             memory_budget: Some(4096),
             backend: None,
         };
@@ -575,6 +582,7 @@ mod tests {
         assert_eq!(original.partition_size, back.partition_size);
         assert_eq!(original.decompose_conv2d, back.decompose_conv2d);
         assert_eq!(original.decompose_pooling, back.decompose_pooling);
+        assert_eq!(original.pack_weights, back.pack_weights);
         assert_eq!(original.memory_budget, back.memory_budget);
     }
 }

@@ -695,6 +695,7 @@ fn test_config_structure() {
         partition_size: 100,
         decompose_conv2d: true,
         decompose_pooling: true,
+        pack_weights: true,
         memory_budget: Some(1024),
     };
 
@@ -703,6 +704,7 @@ fn test_config_structure() {
     assert_eq!(config.partition_size, 100);
     assert!(config.decompose_conv2d);
     assert!(config.decompose_pooling);
+    assert!(config.pack_weights);
     assert_eq!(config.memory_budget, Some(1024));
 }
 

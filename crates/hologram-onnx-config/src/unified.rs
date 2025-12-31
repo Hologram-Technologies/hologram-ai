@@ -404,6 +404,10 @@ pub struct CompilerConfig {
     #[serde(default = "default_true")]
     pub decompose_pooling: bool,
 
+    /// Enable packed weight serialization for fast runtime execution
+    #[serde(default = "default_true")]
+    pub pack_weights: bool,
+
     /// Memory budget in megabytes (MB)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub memory_budget: Option<usize>,
@@ -421,6 +425,7 @@ impl Default for CompilerConfig {
             partition_size: default_partition_size(),
             decompose_conv2d: true,
             decompose_pooling: true,
+            pack_weights: true,
             memory_budget: None,
             backend: None,
         }
@@ -871,6 +876,7 @@ mod tests {
         assert_eq!(config.compiler.partition_size, 500);
         assert!(config.compiler.decompose_conv2d);
         assert!(config.compiler.decompose_pooling);
+        assert!(config.compiler.pack_weights);
     }
 
     #[test]

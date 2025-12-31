@@ -28,6 +28,7 @@
 ///     partition_size: 1000,
 ///     decompose_conv2d: true,
 ///     decompose_pooling: true,
+///     pack_weights: true,
 ///     memory_budget: Some(16 * 1024), // 16 GB
 /// };
 /// ```
@@ -108,6 +109,14 @@ pub struct OnnxConfig {
     /// Enables PhiCoordinate addressing and LOOP instructions for pooling.
     pub decompose_pooling: bool,
 
+    /// Enable serialization of packed weights for faster runtime execution.
+    ///
+    /// When enabled, the compiler pre-packs Conv2D/MatMul weights into
+    /// layouts that minimize runtime overhead.
+    ///
+    /// Default: true
+    pub pack_weights: bool,
+
     /// Memory budget in megabytes (MB).
     ///
     /// If set, compilation will fail with [`OnnxError::MemoryBudgetExceeded`]
@@ -139,6 +148,7 @@ impl Default for OnnxConfig {
             partition_size: 500,
             decompose_conv2d: true,
             decompose_pooling: true,
+            pack_weights: true,
             memory_budget: None,
         }
     }
@@ -184,6 +194,7 @@ impl OnnxConfig {
             partition_size: 500,
             decompose_conv2d: true,
             decompose_pooling: true,
+            pack_weights: true,
             memory_budget: Some(8 * 1024), // 8 GB
         }
     }
@@ -214,6 +225,7 @@ impl OnnxConfig {
             partition_size: 500,
             decompose_conv2d: true,
             decompose_pooling: true,
+            pack_weights: true,
             memory_budget: None,
         }
     }
@@ -282,6 +294,7 @@ mod tests {
         assert_eq!(config.partition_size, 500);
         assert!(config.decompose_conv2d);
         assert!(config.decompose_pooling);
+        assert!(config.pack_weights);
         assert_eq!(config.memory_budget, None);
         assert!(config.validate().is_ok());
     }
@@ -358,6 +371,7 @@ mod tests {
             partition_size: 1000,
             decompose_conv2d: true,
             decompose_pooling: false,
+            pack_weights: true,
             memory_budget: Some(16 * 1024),
         };
         assert!(config.validate().is_ok());

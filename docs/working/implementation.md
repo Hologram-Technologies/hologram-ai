@@ -1,6 +1,6 @@
 # hologram-onnx Implementation Status
 
-**Last Updated**: 2025-12-30 (Clippy cleanup for integration tests COMPLETE ✅)
+**Last Updated**: 2025-12-31 (Runtime backend routing + interpreter GEMM acceleration COMPLETE ✅)
 
 **Current Status**: Phase 8 - Testing & Benchmarking (**8.1 + 8.2 + 8.3 COMPLETE** ✅)
 
@@ -15,6 +15,10 @@
 - ✅ Phase 8.2: Symbolic shape test suite (35 tests) - Dim::Var, Dim::Expr, propagation, batch/seq_len
 - ✅ Phase 8.3: Memory profiling complete - docs/working/memory-analysis.md with actual benchmarks
 - ✅ Maintenance: Clippy cleanup for integration tests (runtime bin lookup)
+- ✅ Maintenance: Interpreter slow-node logging + rayon MatMul/Conv2D kernels
+- ✅ Maintenance: Resize/Upsample runtime support + reshape/reduce guards + compiler config honoring decompose flags
+- ✅ Maintenance: Runtime backend selection in CLI + hologram-core GEMM acceleration for MatMul/Conv2D
+- ✅ Maintenance: Packed Conv2D/MatMul weights (serialization + runtime cache) + parallel im2col
 - ✅ **Total: 30 modules, 331 unit tests + 171 integration tests** (100% passing)
 - ✅ **2 benchmark suites**: conv_bench.rs (6 benchmark groups) + shape_bench.rs (8 benchmark groups)
 - ✅ **40 ONNX operations** fully implemented with symbolic shape support

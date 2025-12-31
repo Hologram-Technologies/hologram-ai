@@ -39,12 +39,16 @@ pub fn compile_command(
     partition_size: usize,
     memory_budget: Option<usize>,
     weight_threshold: usize,
+    decompose_conv2d: bool,
+    decompose_pooling: bool,
 ) -> Result<()> {
     info!("Compiling ONNX model: {}", input.display());
     debug!("Output path: {}", output.display());
     debug!("Partitioning: {}", partition);
     debug!("Partition size: {}", partition_size);
     debug!("Weight threshold: {} bytes", weight_threshold);
+    debug!("Decompose Conv2D: {}", decompose_conv2d);
+    debug!("Decompose Pooling: {}", decompose_pooling);
 
     // Read ONNX model
     info!("Reading ONNX model...");
@@ -58,8 +62,9 @@ pub fn compile_command(
         weight_threshold,
         enable_partitioning: partition,
         partition_size,
-        decompose_conv2d: true,
-        decompose_pooling: true,
+        decompose_conv2d,
+        decompose_pooling,
+        pack_weights: true,
         memory_budget,
     };
 
@@ -97,7 +102,8 @@ pub fn compile_command(
 
     // Step 4: Serialize IR to .holo format
     info!("Serializing to .holo format...");
-    let (holo_bytes, weights_bytes) = serialize_ir_function(&decomposed, weight_threshold)
+    let (holo_bytes, weights_bytes) =
+        serialize_ir_function(&decomposed, weight_threshold, config.pack_weights)
         .map_err(|e| anyhow::anyhow!("Serialization failed: {}", e))?;
 
     info!("Compilation successful!");
@@ -136,7 +142,7 @@ mod tests {
         let input = temp_dir.path().join("missing.onnx");
         let output = temp_dir.path().join("output");
 
-        let result = compile_command(&input, &output, false, 500, None, 4096);
+        let result = compile_command(&input, &output, false, 500, None, 4096, true, true);
         assert!(result.is_err());
         assert!(
             result

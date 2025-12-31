@@ -411,7 +411,7 @@ fn test_registry_create_multiple_handlers() {
 #[cfg(feature = "image-output")]
 mod image_handler_tests {
     use super::*;
-    use hologram_onnx_config::ImageHandler;
+    use hologram_onnx_config::{ImageHandler, OutputHandler};
 
     #[test]
     fn test_image_handler_rgb_nchw_full_pipeline() {
@@ -637,7 +637,7 @@ mod image_handler_tests {
 #[cfg(feature = "audio-output")]
 mod audio_handler_tests {
     use super::*;
-    use hologram_onnx_config::AudioHandler;
+    use hologram_onnx_config::{AudioHandler, OutputHandler};
 
     #[test]
     fn test_audio_handler_mono_full_pipeline() {
@@ -841,7 +841,7 @@ fn test_multi_handler_creation_from_config() {
 #[cfg(all(feature = "image-output", feature = "audio-output"))]
 #[test]
 fn test_multi_handler_processing() {
-    use hologram_onnx_config::{AudioHandler, ImageHandler};
+    use hologram_onnx_config::{AudioHandler, ImageHandler, OutputHandler};
 
     let temp_dir = TempDir::new().unwrap();
 
