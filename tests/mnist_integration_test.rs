@@ -349,6 +349,8 @@ fn test_mnist_compilation_with_config() {
         partition_size: 500,
         decompose_conv2d: true,
         decompose_pooling: true,
+        enable_resize_upscaling: true,
+        pack_weights: true,
         memory_budget: Some(512), // 512MB limit
     };
 

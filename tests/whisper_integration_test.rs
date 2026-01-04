@@ -454,6 +454,8 @@ fn test_whisper_config_validation() {
         partition_size: 200,
         decompose_conv2d: true,
         decompose_pooling: true,
+        enable_resize_upscaling: true,
+        pack_weights: true,
         memory_budget: Some(512), // 512MB for Whisper-tiny
     };
 

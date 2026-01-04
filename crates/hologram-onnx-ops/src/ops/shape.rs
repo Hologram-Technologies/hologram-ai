@@ -260,11 +260,17 @@ pub fn translate_concat(
     _shapes: &HashMap<String, SymbolicShape>,
     builder: &mut IRBuilder,
 ) -> Result<NodeId> {
-    if inputs.len() < 2 {
-        return Err(OnnxError::InvalidModel(format!(
-            "Concat expects at least 2 inputs, got {}",
-            inputs.len()
-        )));
+    if inputs.is_empty() {
+        return Err(OnnxError::InvalidModel(
+            "Concat requires at least 1 input".to_string(),
+        ));
+    }
+
+    // Single-input Concat is effectively an identity operation
+    // This can occur in models exported from PyTorch
+    if inputs.len() == 1 {
+        debug!("Concat with single input - treating as identity");
+        return Ok(inputs[0]);
     }
 
     // Parse axis attribute (required)
@@ -435,6 +441,99 @@ pub fn translate_flatten(
     // Create reshape node with symbolic target shape
     let result = builder.reshape(input, target_shape);
 
+    Ok(result)
+}
+
+/// Translate ONNX Expand operation.
+///
+/// Expand: Broadcast tensor to a new shape.
+///
+/// # Inputs
+///
+/// - Input 0: Input tensor to broadcast
+/// - Input 1: Shape tensor specifying the target shape
+///
+/// # Semantics
+///
+/// The operation follows NumPy broadcasting rules:
+/// - Dimensions of size 1 can be broadcast to any size
+/// - New dimensions can be prepended by the shape tensor
+///
+/// # Performance
+///
+/// - **Zero-copy views**: When possible, uses strided views
+/// - **LOOP instructions**: Efficient broadcasting at runtime
+/// - Supports **symbolic shapes**
+pub fn translate_expand(
+    inputs: &[NodeId],
+    _attrs: &[AttributeProto],
+    _shapes: &HashMap<String, SymbolicShape>,
+    builder: &mut IRBuilder,
+) -> Result<NodeId> {
+    if inputs.len() < 2 {
+        return Err(OnnxError::InvalidModel(format!(
+            "Expand expects at least 2 inputs, got {}",
+            inputs.len()
+        )));
+    }
+
+    let input = inputs[0];
+    let _shape = inputs[1]; // Shape tensor - used at runtime
+
+    debug!("Translating Expand operation");
+    trace!("Expand input: {:?}, shape: {:?}", input, _shape);
+
+    // Use a Call node to onnx.Expand since the target shape may be dynamic
+    // The runtime will handle broadcasting based on the shape tensor
+    let result = builder.call("onnx.Expand", vec![input, _shape]);
+
+    trace!("Created Expand call node: {:?}", result);
+    Ok(result)
+}
+
+/// Translate ONNX Range operation.
+///
+/// Range: Generate a sequence of numbers from start to limit with a given delta.
+///
+/// # Inputs
+///
+/// - Input 0: start - Scalar tensor specifying start value
+/// - Input 1: limit - Scalar tensor specifying limit value (exclusive)
+/// - Input 2: delta - Scalar tensor specifying step value
+///
+/// # Output
+///
+/// 1D tensor containing the sequence: [start, start+delta, start+2*delta, ...]
+/// with values less than limit (if delta > 0) or greater than limit (if delta < 0)
+///
+/// # Example
+///
+/// Range(start=0, limit=10, delta=2) -> [0, 2, 4, 6, 8]
+pub fn translate_range(
+    inputs: &[NodeId],
+    _attrs: &[AttributeProto],
+    _shapes: &HashMap<String, SymbolicShape>,
+    builder: &mut IRBuilder,
+) -> Result<NodeId> {
+    if inputs.len() < 3 {
+        return Err(OnnxError::InvalidModel(format!(
+            "Range expects 3 inputs (start, limit, delta), got {}",
+            inputs.len()
+        )));
+    }
+
+    let start = inputs[0];
+    let limit = inputs[1];
+    let delta = inputs[2];
+
+    debug!("Translating Range operation");
+    trace!("Range start: {:?}, limit: {:?}, delta: {:?}", start, limit, delta);
+
+    // Use a Call node to onnx.Range since the values determine the output shape
+    // The runtime will generate the sequence
+    let result = builder.call("onnx.Range", vec![start, limit, delta]);
+
+    trace!("Created Range call node: {:?}", result);
     Ok(result)
 }
 

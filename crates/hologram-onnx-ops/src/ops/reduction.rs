@@ -251,6 +251,94 @@ pub fn translate_reduce_prod(
     Ok(result)
 }
 
+/// Translate ONNX ArgMax operation.
+///
+/// ArgMax: Y = indices of max(X) along specified axis
+///
+/// # Attributes
+///
+/// - `axis` (int, default 0): Axis along which to find max indices
+/// - `keepdims` (int, default 1): Whether to keep reduced dimension (size 1)
+/// - `select_last_index` (int, default 0): Whether to return last index in ties
+///
+/// # Performance
+///
+/// - **LOOP instructions**: O(1) space complexity
+/// - **SIMD vectorization**: Parallel max finding
+/// - Supports **symbolic shapes**
+pub fn translate_argmax(
+    inputs: &[NodeId],
+    attrs: &[AttributeProto],
+    _shapes: &HashMap<String, SymbolicShape>,
+    builder: &mut IRBuilder,
+) -> Result<NodeId> {
+    if inputs.is_empty() {
+        return Err(OnnxError::InvalidModel(
+            "ArgMax expects at least 1 input, got 0".to_string(),
+        ));
+    }
+
+    let axis = parse_attr_int(attrs, "axis", 0)?;
+    let keepdims = parse_attr_int(attrs, "keepdims", 1)? != 0;
+    let select_last_index = parse_attr_int(attrs, "select_last_index", 0)? != 0;
+
+    debug!(
+        "Translating ArgMax operation (axis={}, keepdims={}, select_last_index={})",
+        axis, keepdims, select_last_index
+    );
+    trace!("ArgMax inputs: {:?}", inputs);
+
+    // Use Call node for ArgMax - runtime handles max index finding
+    let result = builder.call("onnx.ArgMax", inputs.to_vec());
+
+    trace!("Created ArgMax call node: {:?}", result);
+    Ok(result)
+}
+
+/// Translate ONNX ArgMin operation.
+///
+/// ArgMin: Y = indices of min(X) along specified axis
+///
+/// # Attributes
+///
+/// - `axis` (int, default 0): Axis along which to find min indices
+/// - `keepdims` (int, default 1): Whether to keep reduced dimension (size 1)
+/// - `select_last_index` (int, default 0): Whether to return last index in ties
+///
+/// # Performance
+///
+/// - **LOOP instructions**: O(1) space complexity
+/// - **SIMD vectorization**: Parallel min finding
+/// - Supports **symbolic shapes**
+pub fn translate_argmin(
+    inputs: &[NodeId],
+    attrs: &[AttributeProto],
+    _shapes: &HashMap<String, SymbolicShape>,
+    builder: &mut IRBuilder,
+) -> Result<NodeId> {
+    if inputs.is_empty() {
+        return Err(OnnxError::InvalidModel(
+            "ArgMin expects at least 1 input, got 0".to_string(),
+        ));
+    }
+
+    let axis = parse_attr_int(attrs, "axis", 0)?;
+    let keepdims = parse_attr_int(attrs, "keepdims", 1)? != 0;
+    let select_last_index = parse_attr_int(attrs, "select_last_index", 0)? != 0;
+
+    debug!(
+        "Translating ArgMin operation (axis={}, keepdims={}, select_last_index={})",
+        axis, keepdims, select_last_index
+    );
+    trace!("ArgMin inputs: {:?}", inputs);
+
+    // Use Call node for ArgMin - runtime handles min index finding
+    let result = builder.call("onnx.ArgMin", inputs.to_vec());
+
+    trace!("Created ArgMin call node: {:?}", result);
+    Ok(result)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

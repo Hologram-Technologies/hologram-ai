@@ -30,6 +30,7 @@
 ///     decompose_pooling: true,
 ///     pack_weights: true,
 ///     memory_budget: Some(16 * 1024), // 16 GB
+///     enable_resize_upscaling: true,
 /// };
 /// ```
 #[derive(Debug, Clone)]
@@ -138,6 +139,22 @@ pub struct OnnxConfig {
     /// };
     /// ```
     pub memory_budget: Option<usize>,
+
+    /// Enable Resize upscaling operations.
+    ///
+    /// When true (default), Resize ops extract scale factors from ONNX
+    /// constants and upscale tensors appropriately (e.g., 64x64 → 512x512).
+    ///
+    /// When false, Resize ops pass through without upscaling, saving memory
+    /// at the cost of lower resolution outputs.
+    ///
+    /// Default: true
+    ///
+    /// # Memory Impact
+    ///
+    /// Full upscaling (512x512) requires ~8GB RAM for VAE decoders.
+    /// Disable this option for systems with limited memory (<8GB).
+    pub enable_resize_upscaling: bool,
 }
 
 impl Default for OnnxConfig {
@@ -150,6 +167,7 @@ impl Default for OnnxConfig {
             decompose_pooling: true,
             pack_weights: true,
             memory_budget: None,
+            enable_resize_upscaling: true,
         }
     }
 }
@@ -196,6 +214,7 @@ impl OnnxConfig {
             decompose_pooling: true,
             pack_weights: true,
             memory_budget: Some(8 * 1024), // 8 GB
+            enable_resize_upscaling: true,
         }
     }
 
@@ -227,6 +246,7 @@ impl OnnxConfig {
             decompose_pooling: true,
             pack_weights: true,
             memory_budget: None,
+            enable_resize_upscaling: true,
         }
     }
 
@@ -373,6 +393,7 @@ mod tests {
             decompose_pooling: false,
             pack_weights: true,
             memory_budget: Some(16 * 1024),
+            enable_resize_upscaling: false,
         };
         assert!(config.validate().is_ok());
     }

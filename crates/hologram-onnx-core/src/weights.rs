@@ -45,8 +45,9 @@ use ahash::AHashMap;
 // bytemuck used for zero-copy f32 conversion
 use hologram_onnx_spec::TensorProto;
 use std::collections::hash_map::DefaultHasher;
+use std::fs::File;
 use std::hash::{Hash, Hasher};
-use std::io::{self, Write};
+use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::Path;
 
 /// Reference to external weight data.
@@ -386,6 +387,131 @@ impl WeightData {
                 "Data type {} not supported",
                 tensor.data_type
             ))),
+        }
+    }
+
+    /// Extract tensor data with support for external data files.
+    ///
+    /// ONNX models can store large tensors in external files (`.onnx_data`).
+    /// This function handles both inline and external data.
+    ///
+    /// # Arguments
+    ///
+    /// * `tensor` - The tensor proto to extract data from
+    /// * `model_path` - Path to the ONNX model file (for resolving relative external paths)
+    ///
+    /// # Returns
+    ///
+    /// Vector of f32 values extracted from the tensor.
+    pub fn extract_tensor_data_with_external(
+        tensor: &TensorProto,
+        model_path: &Path,
+    ) -> Result<Vec<f32>> {
+        // Check if tensor uses external data (data_location == 1 means EXTERNAL)
+        if tensor.data_location == 1 && !tensor.external_data.is_empty() {
+            // Extract external data parameters
+            let mut location: Option<&str> = None;
+            let mut offset: u64 = 0;
+            let mut length: Option<u64> = None;
+
+            for entry in &tensor.external_data {
+                match entry.key.as_str() {
+                    "location" => location = Some(&entry.value),
+                    "offset" => offset = entry.value.parse().unwrap_or(0),
+                    "length" => length = entry.value.parse().ok(),
+                    _ => {}
+                }
+            }
+
+            let location = location.ok_or_else(|| {
+                OnnxError::InvalidModel("External data missing 'location' field".to_string())
+            })?;
+
+            // Resolve path relative to model file
+            let external_path = if Path::new(location).is_absolute() {
+                std::path::PathBuf::from(location)
+            } else {
+                model_path.parent().unwrap_or(Path::new(".")).join(location)
+            };
+
+            // Open external file and read data
+            let mut file = File::open(&external_path).map_err(|e| {
+                OnnxError::IoError(io::Error::other(format!(
+                    "Failed to open external data file '{}': {}",
+                    external_path.display(),
+                    e
+                )))
+            })?;
+
+            // Seek to offset
+            file.seek(SeekFrom::Start(offset)).map_err(|e| {
+                OnnxError::IoError(io::Error::other(format!("Failed to seek in external data: {}", e)))
+            })?;
+
+            // Determine how many bytes to read
+            let bytes_to_read = if let Some(len) = length {
+                len as usize
+            } else {
+                // If length not specified, compute from tensor dims and data type
+                let num_elements: usize = tensor.dims.iter().map(|&d| d as usize).product();
+                let bytes_per_element = match tensor.data_type {
+                    1 => 4,  // FLOAT
+                    10 => 2, // FLOAT16
+                    11 => 8, // DOUBLE
+                    6 => 4,  // INT32
+                    7 => 8,  // INT64
+                    _ => 4,  // Default to 4
+                };
+                num_elements * bytes_per_element
+            };
+
+            // Read raw bytes
+            let mut raw_data = vec![0u8; bytes_to_read];
+            file.read_exact(&mut raw_data).map_err(|e| {
+                OnnxError::IoError(io::Error::other(format!("Failed to read external data: {}", e)))
+            })?;
+
+            // Convert based on data type
+            Self::convert_raw_bytes_to_f32(&raw_data, tensor.data_type)
+        } else {
+            // Use inline data
+            Self::extract_tensor_data(tensor)
+        }
+    }
+
+    /// Convert raw bytes to f32 based on ONNX data type.
+    fn convert_raw_bytes_to_f32(raw_data: &[u8], data_type: i32) -> Result<Vec<f32>> {
+        const FLOAT: i32 = 1;
+        const FLOAT16: i32 = 10;
+        const DOUBLE: i32 = 11;
+        const INT32: i32 = 6;
+        const INT64: i32 = 7;
+
+        match data_type {
+            FLOAT => Ok(bytemuck::cast_slice(raw_data).to_vec()),
+            FLOAT16 => {
+                let u16_data: &[u16] = bytemuck::cast_slice(raw_data);
+                Ok(u16_data
+                    .iter()
+                    .map(|&bits| half::f16::from_bits(bits).to_f32())
+                    .collect())
+            }
+            DOUBLE => {
+                let f64_data: &[f64] = bytemuck::cast_slice(raw_data);
+                Ok(f64_data.iter().map(|&v| v as f32).collect())
+            }
+            INT32 => {
+                let i32_data: &[i32] = bytemuck::cast_slice(raw_data);
+                Ok(i32_data.iter().map(|&v| v as f32).collect())
+            }
+            INT64 => {
+                let i64_data: &[i64] = bytemuck::cast_slice(raw_data);
+                Ok(i64_data.iter().map(|&v| v as f32).collect())
+            }
+            _ => {
+                // For other types, treat as bytes
+                Ok(raw_data.iter().map(|&v| v as f32).collect())
+            }
         }
     }
 

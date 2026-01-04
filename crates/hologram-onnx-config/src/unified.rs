@@ -82,6 +82,10 @@ pub struct UnifiedConfig {
     #[serde(default)]
     pub compiler: CompilerConfig,
 
+    /// Runtime execution settings
+    #[serde(default)]
+    pub runtime: RuntimeConfig,
+
     /// Execution stages (auto-generated from models if not specified)
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub stages: Vec<StageDef>,
@@ -404,6 +408,10 @@ pub struct CompilerConfig {
     #[serde(default = "default_true")]
     pub decompose_pooling: bool,
 
+    /// Enable Resize upscaling (set to false to save memory, outputs at input resolution)
+    #[serde(default = "default_true")]
+    pub enable_resize_upscaling: bool,
+
     /// Enable packed weight serialization for fast runtime execution
     #[serde(default = "default_true")]
     pub pack_weights: bool,
@@ -415,6 +423,65 @@ pub struct CompilerConfig {
     /// Target backend (cpu, cuda, metal, webgpu)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub backend: Option<String>,
+
+    /// Enable aggressive fusion patterns for better performance
+    ///
+    /// When enabled, the compiler applies advanced pattern matching:
+    /// - MatMul + Bias → FusedMatMulBias
+    /// - MatMul + Activation → FusedMatMulActivation
+    /// - Div(x, Sqrt(y)) → Mul(x, Rsqrt(y))
+    /// - Consecutive Add/Mul → vectorized operations
+    #[serde(default)]
+    pub aggressive_fusion: bool,
+
+    /// Optimization level (0-3)
+    ///
+    /// - 0: No optimization
+    /// - 1: Basic algebraic rewrites
+    /// - 2: + Auto fusion of elementwise chains (default)
+    /// - 3: + Dead code elimination, aggressive patterns
+    #[serde(default = "default_opt_level")]
+    pub opt_level: u8,
+
+    /// Enable automatic fusion of element-wise operations
+    #[serde(default = "default_true")]
+    pub auto_fuse: bool,
+
+    /// Enable FP16 (half precision) execution for reduced memory and faster compute.
+    ///
+    /// When enabled, weights and activations are converted to float16 format.
+    /// This reduces memory usage by ~50% and can improve performance on
+    /// hardware with native FP16 support.
+    ///
+    /// Note: May slightly reduce numerical precision.
+    #[serde(default)]
+    pub use_fp16: bool,
+
+    /// Enable INT8 quantization for maximum compression.
+    ///
+    /// When enabled, weights are quantized to 8-bit integers with scale factors.
+    /// This reduces memory by ~75% compared to FP32 and enables faster integer
+    /// operations on compatible hardware.
+    ///
+    /// Requires calibration data for best accuracy (dynamic quantization used otherwise).
+    #[serde(default)]
+    pub use_int8: bool,
+
+    /// Quantization mode for weight compression.
+    ///
+    /// - "none": No quantization (default, full FP32)
+    /// - "dynamic": Dynamic range quantization at runtime
+    /// - "static": Static quantization (requires calibration)
+    #[serde(default = "default_quantization_mode")]
+    pub quantization_mode: String,
+}
+
+fn default_quantization_mode() -> String {
+    "none".to_string()
+}
+
+fn default_opt_level() -> u8 {
+    2
 }
 
 impl Default for CompilerConfig {
@@ -425,11 +492,50 @@ impl Default for CompilerConfig {
             partition_size: default_partition_size(),
             decompose_conv2d: true,
             decompose_pooling: true,
+            enable_resize_upscaling: true,
             pack_weights: true,
             memory_budget: None,
             backend: None,
+            aggressive_fusion: false,
+            opt_level: 2,
+            auto_fuse: true,
+            use_fp16: false,
+            use_int8: false,
+            quantization_mode: "none".to_string(),
         }
     }
+}
+
+// =============================================================================
+// Runtime Configuration
+// =============================================================================
+
+/// Runtime execution configuration.
+///
+/// Controls how models are executed at runtime, including memory management
+/// strategies and performance optimizations.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct RuntimeConfig {
+    /// Enable layer-wise buffer allocation for memory efficiency.
+    ///
+    /// When enabled, buffers are allocated only when first needed and freed
+    /// as soon as their last use completes. This significantly reduces peak
+    /// memory usage for large models at the cost of slightly higher allocation
+    /// overhead.
+    ///
+    /// Recommended for:
+    /// - Models with many intermediate tensors (transformers, diffusion)
+    /// - Memory-constrained environments
+    /// - Models over ~100MB
+    ///
+    /// Default: false (pre-allocate all buffers for maximum performance)
+    #[serde(default)]
+    pub layerwise_execution: bool,
+
+    /// Enable verbose execution logging (shows per-level timing).
+    #[serde(default)]
+    pub verbose: bool,
 }
 
 // =============================================================================

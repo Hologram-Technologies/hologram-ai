@@ -28,7 +28,25 @@ struct ConstantData {
 type Result<T> = std::result::Result<T, OnnxError>;
 
 /// Translate ONNX graph to hologram IR with symbolic shapes.
+///
+/// # Arguments
+/// * `graph` - The ONNX graph to translate
+/// * `opset_version` - The ONNX opset version
 pub fn translate_graph_to_ir(graph: &GraphProto, opset_version: i64) -> Result<IRFunction> {
+    translate_graph_to_ir_with_path(graph, opset_version, None)
+}
+
+/// Translate ONNX graph to hologram IR with symbolic shapes and external data support.
+///
+/// # Arguments
+/// * `graph` - The ONNX graph to translate
+/// * `opset_version` - The ONNX opset version
+/// * `model_path` - Optional path to the ONNX model for resolving external data
+pub fn translate_graph_to_ir_with_path(
+    graph: &GraphProto,
+    opset_version: i64,
+    model_path: Option<&std::path::Path>,
+) -> Result<IRFunction> {
     info!("Starting ONNX graph translation (opset {})", opset_version);
 
     let graph_name = if graph.name.is_empty() {
@@ -57,7 +75,7 @@ pub fn translate_graph_to_ir(graph: &GraphProto, opset_version: i64) -> Result<I
 
         // Store constant data for operations that need it (e.g., Reshape)
         let constant_data = ConstantData {
-            data: extract_tensor_data(initializer)?,
+            data: extract_tensor_data_with_path(initializer, model_path)?,
             dims: initializer.dims.clone(),
             data_type: initializer.data_type,
         };
@@ -293,6 +311,79 @@ fn data_type_to_scalar(data_type: i32) -> Result<ScalarType> {
             data_type
         ))),
     }
+}
+
+/// Extract raw data from ONNX tensor, with support for external data files.
+///
+/// # Arguments
+/// * `tensor` - The tensor proto
+/// * `model_path` - Optional path to the ONNX model file for resolving external data
+fn extract_tensor_data_with_path(tensor: &TensorProto, model_path: Option<&std::path::Path>) -> Result<Vec<u8>> {
+    // Check for external data (data_location == 1 means EXTERNAL)
+    if tensor.data_location == 1 && !tensor.external_data.is_empty() {
+        let mut location: Option<&str> = None;
+        let mut offset: u64 = 0;
+        let mut length: Option<u64> = None;
+
+        for entry in &tensor.external_data {
+            match entry.key.as_str() {
+                "location" => location = Some(&entry.value),
+                "offset" => offset = entry.value.parse().unwrap_or(0),
+                "length" => length = entry.value.parse().ok(),
+                _ => {}
+            }
+        }
+
+        if let (Some(loc), Some(model_path)) = (location, model_path) {
+            let external_path = if std::path::Path::new(loc).is_absolute() {
+                std::path::PathBuf::from(loc)
+            } else {
+                model_path.parent().unwrap_or(std::path::Path::new(".")).join(loc)
+            };
+
+            let mut file = std::fs::File::open(&external_path).map_err(|e| {
+                OnnxError::InvalidModel(format!(
+                    "Failed to open external data file '{}': {}",
+                    external_path.display(), e
+                ))
+            })?;
+
+            use std::io::{Read, Seek, SeekFrom};
+            file.seek(SeekFrom::Start(offset)).map_err(|e| {
+                OnnxError::InvalidModel(format!("Failed to seek: {}", e))
+            })?;
+
+            let bytes_to_read = if let Some(len) = length {
+                len as usize
+            } else {
+                let num_elements: usize = tensor.dims.iter().map(|&d| d as usize).product();
+                let bytes_per_element = match tensor.data_type {
+                    1 => 4,  // FLOAT
+                    10 => 2, // FLOAT16
+                    11 => 8, // DOUBLE
+                    6 => 4,  // INT32
+                    7 => 8,  // INT64
+                    _ => 4,
+                };
+                num_elements * bytes_per_element
+            };
+
+            let mut raw_data = vec![0u8; bytes_to_read];
+            file.read_exact(&mut raw_data).map_err(|e| {
+                OnnxError::InvalidModel(format!("Failed to read external data: {}", e))
+            })?;
+
+            return Ok(raw_data);
+        }
+    }
+
+    // Priority: raw_data > typed data fields
+    if !tensor.raw_data.is_empty() {
+        return Ok(tensor.raw_data.clone());
+    }
+
+    // Fall back to extract_tensor_data
+    extract_tensor_data(tensor)
 }
 
 /// Extract raw data from ONNX tensor.

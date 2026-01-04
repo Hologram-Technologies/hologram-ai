@@ -435,6 +435,8 @@ fn test_resnet_conv2d_decomposition() {
         partition_size: 500,
         decompose_conv2d: true, // Enable Conv2D → Im2col + GEMM
         decompose_pooling: true,
+        enable_resize_upscaling: true,
+        pack_weights: true,
         memory_budget: None,
     };
 

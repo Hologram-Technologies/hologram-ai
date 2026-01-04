@@ -431,6 +431,8 @@ fn test_bert_attention_decomposition() {
         partition_size: 500,
         decompose_conv2d: true,
         decompose_pooling: true,
+        enable_resize_upscaling: true,
+        pack_weights: true,
         memory_budget: Some(1024), // 1GB limit for BERT
     };
 

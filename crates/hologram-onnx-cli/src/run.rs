@@ -2,29 +2,176 @@
 //!
 //! This module provides the `run` command which:
 //! - Loads a unified config from a TOML file
-//! - Compiles models if needed (or uses precompiled .holo files)
-//! - Executes the pipeline with provided inputs using hologram runtime
+//! - Loads pre-compiled .holo files (compile with `hologram-onnx compile` first)
+//! - Executes the pipeline with provided inputs using parallel scheduler
 //! - Processes outputs using configured handlers
+//! - Supports loop stages for diffusion model denoising
 
 use anyhow::{Context, Result};
-use hologram_compiler::{execute_schedule_rayon, Compiler, ParallelCompiledGraph};
+use hologram_compiler::{execute_schedule_layerwise, execute_schedule_rayon, ParallelCompiledGraph};
 use hologram_onnx_config::{
-    ModelDef, OutputDef, OutputHandlerType, PipelineConfig, StageDef, UnifiedConfig,
+    ModelDef, OutputDef, OutputHandlerType, RuntimeConfig, StageDef, UnifiedConfig,
 };
-use hologram_onnx_core::serialization::{DimSpec, SerNode, SerNodeKind};
-use hologram_onnx_core::{
-    ir_to_operation_graph, load_holo_file, parse_model, validate_model, extract_opset_version,
-    Interpreter, OnnxConfig, RuntimeBackend,
-};
-use std::collections::{HashMap, HashSet};
-use std::fs;
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Instant;
 use tracing::{debug, info, warn};
 
-use crate::compile::compile_command;
-use crate::translator::{apply_ir_decomposition, translate_graph_to_ir};
+// =============================================================================
+// Diffusion Scheduler
+// =============================================================================
+
+/// DDIM scheduler for diffusion models.
+/// Implements Denoising Diffusion Implicit Models scheduling.
+#[derive(Clone)]
+pub struct DdimScheduler {
+    /// Number of inference steps
+    num_inference_steps: usize,
+    /// Timesteps for each step
+    timesteps: Vec<i64>,
+    /// Alpha cumulative products
+    alphas_cumprod: Vec<f32>,
+    /// Current step index
+    current_step: usize,
+}
+
+impl DdimScheduler {
+    /// Create a new DDIM scheduler with the given number of steps.
+    pub fn new(num_inference_steps: usize) -> Self {
+        let beta_start = 0.00085f32;
+        let beta_end = 0.012f32;
+        let num_train_timesteps = 1000usize;
+
+        // Linear beta schedule
+        let betas: Vec<f32> = (0..num_train_timesteps)
+            .map(|i| {
+                let t = i as f32 / (num_train_timesteps - 1) as f32;
+                (beta_start.sqrt() + t * (beta_end.sqrt() - beta_start.sqrt())).powi(2)
+            })
+            .collect();
+
+        // Compute alphas and cumulative products
+        let alphas: Vec<f32> = betas.iter().map(|b| 1.0 - b).collect();
+        let mut alphas_cumprod = Vec::with_capacity(num_train_timesteps);
+        let mut cumprod = 1.0f32;
+        for alpha in &alphas {
+            cumprod *= alpha;
+            alphas_cumprod.push(cumprod);
+        }
+
+        // Compute timesteps (evenly spaced from num_train_timesteps-1 to 0)
+        let step_ratio = num_train_timesteps / num_inference_steps;
+        let timesteps: Vec<i64> = (0..num_inference_steps)
+            .rev()
+            .map(|i| (i * step_ratio) as i64)
+            .collect();
+
+        Self {
+            num_inference_steps,
+            timesteps,
+            alphas_cumprod,
+            current_step: 0,
+        }
+    }
+
+    /// Get the current timestep value.
+    pub fn current_timestep(&self) -> i64 {
+        self.timesteps.get(self.current_step).copied().unwrap_or(0)
+    }
+
+    /// Perform one DDIM denoising step.
+    ///
+    /// # Arguments
+    /// * `latents` - Current latent tensor [B, C, H, W]
+    /// * `noise_pred` - Predicted noise from UNet [B, C, H, W]
+    /// * `step_index` - Current step index
+    ///
+    /// # Returns
+    /// Updated latents after one denoising step.
+    pub fn step(&self, latents: &[f32], noise_pred: &[f32], step_index: usize) -> Vec<f32> {
+        let timestep = self.timesteps[step_index] as usize;
+
+        // Get alpha values
+        let alpha_prod_t = self.alphas_cumprod[timestep];
+        let alpha_prod_t_prev = if step_index + 1 < self.num_inference_steps {
+            let prev_timestep = self.timesteps[step_index + 1] as usize;
+            self.alphas_cumprod[prev_timestep]
+        } else {
+            1.0 // Final step
+        };
+
+        let beta_prod_t = 1.0 - alpha_prod_t;
+
+        // Compute predicted original sample (x0)
+        // x0 = (latents - sqrt(1-alpha) * noise_pred) / sqrt(alpha)
+        let sqrt_alpha = alpha_prod_t.sqrt();
+        let sqrt_one_minus_alpha = beta_prod_t.sqrt();
+
+        let mut pred_original: Vec<f32> = latents.iter()
+            .zip(noise_pred.iter())
+            .map(|(x, n)| (x - sqrt_one_minus_alpha * n) / sqrt_alpha.max(1e-8))
+            .collect();
+
+        // Clamp predicted original sample for stability
+        for v in &mut pred_original {
+            *v = v.clamp(-1.0, 1.0);
+        }
+
+        // Compute the previous sample (DDIM formula)
+        // x_{t-1} = sqrt(alpha_{t-1}) * x0 + sqrt(1 - alpha_{t-1}) * noise_pred
+        let sqrt_alpha_prev = alpha_prod_t_prev.sqrt();
+        let sqrt_one_minus_alpha_prev = (1.0 - alpha_prod_t_prev).sqrt();
+
+        pred_original.iter()
+            .zip(noise_pred.iter())
+            .map(|(x0, n)| sqrt_alpha_prev * x0 + sqrt_one_minus_alpha_prev * n)
+            .collect()
+    }
+}
+
+/// Apply classifier-free guidance to noise predictions.
+///
+/// # Arguments
+/// * `noise_pred_uncond` - Unconditional noise prediction
+/// * `noise_pred_cond` - Conditional noise prediction
+/// * `guidance_scale` - CFG scale (typically 7.5)
+///
+/// # Returns
+/// Guided noise prediction.
+pub fn apply_cfg(noise_pred_uncond: &[f32], noise_pred_cond: &[f32], guidance_scale: f32) -> Vec<f32> {
+    noise_pred_uncond.iter()
+        .zip(noise_pred_cond.iter())
+        .map(|(u, c)| u + guidance_scale * (c - u))
+        .collect()
+}
+
+// =============================================================================
+// Pipeline Execution Context
+// =============================================================================
+
+/// Execution context for pipeline stages.
+/// Holds all state needed during pipeline execution.
+struct PipelineContext<'a> {
+    /// Compiled .holo model paths
+    holo_models: &'a HashMap<String, std::path::PathBuf>,
+    /// Runtime string inputs from command line
+    runtime_inputs: &'a HashMap<String, String>,
+    /// Cached tensors from previous stages
+    tensor_cache: HashMap<String, Arc<Vec<f32>>>,
+    /// Loop variables (name -> current value)
+    loop_vars: HashMap<String, i64>,
+    /// Diffusion scheduler (if initialized)
+    scheduler: Option<DdimScheduler>,
+    /// Guidance scale for CFG
+    guidance_scale: f32,
+    /// Random seed
+    seed: u64,
+    /// Runtime configuration
+    runtime_config: &'a RuntimeConfig,
+}
+
+// serde_json is used for parsing input tensors via serde_json::from_str
 
 /// Run an ONNX pipeline from a unified config file.
 ///
@@ -33,18 +180,19 @@ use crate::translator::{apply_ir_decomposition, translate_graph_to_ir};
 /// * `config_path` - Path to the unified config TOML file
 /// * `inputs` - Runtime inputs as key=value pairs
 /// * `output_dir` - Optional directory for output files
-/// * `force_recompile` - Force recompilation even if .holo files exist
-/// * `use_parallel` - Use parallel scheduler (rayon) instead of interpreter
 ///
 /// # Returns
 ///
 /// Returns Ok(()) on success, or an error if execution fails.
+///
+/// # Note
+///
+/// Models must be pre-compiled with `hologram-onnx compile` before running.
+/// The .holo files are loaded and executed using the parallel scheduler (rayon).
 pub fn run_command(
     config_path: &Path,
     inputs: &[String],
     output_dir: Option<&Path>,
-    force_recompile: bool,
-    use_parallel: bool,
 ) -> Result<()> {
     info!("Loading pipeline config: {}", config_path.display());
 
@@ -66,201 +214,132 @@ pub fn run_command(
     let runtime_inputs = parse_inputs(inputs, &config)?;
     debug!("Runtime inputs: {:?}", runtime_inputs);
 
-    // Execution mode selection
-    if use_parallel {
-        info!("Using parallel scheduler (rayon) for execution");
+    // Get compiled .holo model paths
+    let holo_models = get_holo_model_paths(&config, config_dir)?;
 
-        // Get ONNX model paths for parallel execution
-        let onnx_models = get_onnx_model_paths(&config, config_dir)?;
+    // Execute using parallel scheduler
+    info!("Executing pipeline with parallel scheduler...");
+    let outputs = execute_pipeline(&config, &holo_models, &runtime_inputs)?;
 
-        // Execute using parallel scheduler
-        let outputs = execute_pipeline_parallel(
-            &config,
-            &onnx_models,
-            &runtime_inputs,
-        )?;
-
-        // Process outputs
-        info!("Processing outputs...");
-        process_outputs(&config, &outputs, output_dir)?;
-    } else {
-        // Use interpreter path (original behavior)
-        info!("Using interpreter for execution");
-
-        // Ensure all models are compiled
-        info!("Checking model compilation status...");
-        let compiled_models = ensure_models_compiled(&config, config_dir, force_recompile)?;
-        debug!("Compiled models: {:?}", compiled_models);
-
-        // Convert to PipelineConfig for execution
-        let pipeline_config: PipelineConfig = (&config).into();
-        debug!("Pipeline config: {:?}", pipeline_config.pipeline.name);
-
-        // Execute the pipeline
-        info!("Executing pipeline...");
-        let runtime_backend = config
-            .compiler
-            .backend
-            .as_deref()
-            .map(RuntimeBackend::from_str)
-            .transpose()?;
-        if let Some(backend) = runtime_backend {
-            info!("Runtime backend: {:?}", backend);
-        }
-
-        let outputs = execute_pipeline(
-            &config,
-            &compiled_models,
-            &runtime_inputs,
-            runtime_backend,
-        )?;
-
-        // Process outputs
-        info!("Processing outputs...");
-        process_outputs(&config, &outputs, output_dir)?;
-    }
+    // Process outputs
+    info!("Processing outputs...");
+    process_outputs(&config, &outputs, output_dir)?;
 
     info!("Pipeline execution complete!");
     Ok(())
 }
 
-/// Get ONNX model paths from config.
-fn get_onnx_model_paths(
+/// Get compiled .holo model paths from config.
+fn get_holo_model_paths(
     config: &UnifiedConfig,
     config_dir: &Path,
 ) -> Result<HashMap<String, std::path::PathBuf>> {
-    let mut onnx_paths = HashMap::new();
+    let mut holo_paths = HashMap::new();
 
     for (name, model_def) in &config.models {
-        let onnx_path = resolve_model_path(model_def.path(), config_dir);
+        let holo_path = get_compiled_path(model_def, config_dir);
 
-        if !onnx_path.exists() {
+        if !holo_path.exists() {
             anyhow::bail!(
-                "ONNX model not found: {} (for model '{}')",
-                onnx_path.display(),
+                "Compiled .holo file not found: {} (for model '{}'). \
+                 Run 'hologram-onnx compile' first.",
+                holo_path.display(),
                 name
             );
         }
 
-        onnx_paths.insert(name.clone(), onnx_path);
+        holo_paths.insert(name.clone(), holo_path);
     }
 
-    Ok(onnx_paths)
-}
-
-/// Check if a cached .holopar file is valid (exists and is newer than source ONNX).
-fn is_cache_valid(onnx_path: &Path, cache_path: &Path) -> bool {
-    if !cache_path.exists() {
-        return false;
-    }
-
-    // Check if cache is newer than source
-    let onnx_modified = match fs::metadata(onnx_path).and_then(|m| m.modified()) {
-        Ok(t) => t,
-        Err(_) => return false,
-    };
-
-    let cache_modified = match fs::metadata(cache_path).and_then(|m| m.modified()) {
-        Ok(t) => t,
-        Err(_) => return false,
-    };
-
-    cache_modified >= onnx_modified
+    Ok(holo_paths)
 }
 
 /// Execute pipeline using the parallel scheduler (rayon).
 ///
-/// This compiles ONNX models to OperationGraph and executes with rayon parallelism.
-/// Compiled graphs are cached in `.holopar` files for faster subsequent runs.
-fn execute_pipeline_parallel(
+/// This loads pre-compiled .holo files and executes with rayon parallelism.
+fn execute_pipeline(
     config: &UnifiedConfig,
-    onnx_models: &HashMap<String, std::path::PathBuf>,
+    holo_models: &HashMap<String, std::path::PathBuf>,
     inputs: &HashMap<String, String>,
 ) -> Result<HashMap<String, OutputData>> {
+    // Parse guidance scale and seed from inputs
+    let guidance_scale = inputs.get("guidance_scale")
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(7.5f32);
+
+    let seed = inputs.get("seed")
+        .and_then(|s| s.parse().ok())
+        .unwrap_or_else(|| {
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos() as u64)
+                .unwrap_or(42)
+        });
+
+    // Initialize context
+    let mut ctx = PipelineContext {
+        holo_models,
+        runtime_inputs: inputs,
+        tensor_cache: HashMap::new(),
+        loop_vars: HashMap::new(),
+        scheduler: None,
+        guidance_scale,
+        seed,
+        runtime_config: &config.runtime,
+    };
+
+    // Execute all stages
+    execute_stages(&config.stages, &mut ctx, 0)?;
+
+    // Convert tensor cache to output data
     let mut outputs: HashMap<String, OutputData> = HashMap::new();
-    let mut tensor_cache: HashMap<String, Arc<Vec<f32>>> = HashMap::new();
+    for (name, tensor) in &ctx.tensor_cache {
+        outputs.insert(name.clone(), OutputData::Tensor(tensor.as_ref().clone()));
+    }
 
-    // Get compiler config for decomposition settings
-    let onnx_config: OnnxConfig = (&config.compiler).into();
+    // Ensure all config outputs are present
+    for output_def in config.outputs.values() {
+        let tensor_name = output_def.tensor();
+        if !outputs.contains_key(tensor_name)
+            && let Some(cached) = ctx.tensor_cache.get(tensor_name)
+        {
+            outputs.insert(tensor_name.to_string(), OutputData::Tensor(cached.as_ref().clone()));
+        }
+    }
 
-    // Process stages
-    for (idx, stage) in config.stages.iter().enumerate() {
+    Ok(outputs)
+}
+
+/// Execute a list of stages recursively.
+/// This allows loop stages to execute their nested stages.
+fn execute_stages(
+    stages: &[StageDef],
+    ctx: &mut PipelineContext,
+    depth: usize,
+) -> Result<()> {
+    let indent = "  ".repeat(depth);
+
+    for (idx, stage) in stages.iter().enumerate() {
         match stage {
             StageDef::Model(model_stage) => {
-                let onnx_path = onnx_models.get(&model_stage.model).ok_or_else(|| {
-                    anyhow::anyhow!("Model '{}' not found in ONNX models", model_stage.model)
+                let holo_path = ctx.holo_models.get(&model_stage.model).ok_or_else(|| {
+                    anyhow::anyhow!("Model '{}' not found in compiled models", model_stage.model)
                 })?;
 
                 info!(
-                    "  ▶ Stage {}: running model '{}' with parallel scheduler",
-                    idx, model_stage.model
+                    "{}▶ Stage {}: running model '{}'",
+                    indent, idx, model_stage.model
                 );
 
                 let stage_start = Instant::now();
 
-                // Check for cached .holopar file
-                let holopar_path = onnx_path.with_extension("holopar");
-                let compiled = if is_cache_valid(onnx_path, &holopar_path) {
-                    // Load from cache
-                    info!("  ▸ Loading cached parallel graph from {}", holopar_path.display());
-                    let load_start = Instant::now();
-                    let compiled = ParallelCompiledGraph::from_holo(holopar_path.to_str().unwrap())
-                        .map_err(|e| anyhow::anyhow!("Failed to load cached graph: {}", e))?;
-                    info!("  ▸ Loaded cached graph in {:?}", load_start.elapsed());
-                    compiled
-                } else {
-                    // Compile from ONNX
-                    info!("  ▸ Compiling ONNX model (no valid cache found)");
-                    let compile_start = Instant::now();
-
-                    // Load and parse ONNX model
-                    let onnx_bytes = fs::read(onnx_path)
-                        .with_context(|| format!("Failed to read ONNX model: {}", onnx_path.display()))?;
-
-                    let model = parse_model(&onnx_bytes)
-                        .map_err(|e| anyhow::anyhow!("Failed to parse ONNX model: {}", e))?;
-
-                    validate_model(&model)
-                        .map_err(|e| anyhow::anyhow!("Model validation failed: {}", e))?;
-
-                    let opset_version = extract_opset_version(&model);
-                    let graph = model.graph.as_ref()
-                        .ok_or_else(|| anyhow::anyhow!("Model has no graph"))?;
-
-                    debug!("Parsed ONNX model: {} nodes, opset {}", graph.node.len(), opset_version);
-
-                    // Translate ONNX → IR
-                    let ir_func = translate_graph_to_ir(graph, opset_version)
-                        .map_err(|e| anyhow::anyhow!("Failed to translate ONNX to IR: {}", e))?;
-
-                    // Apply decomposition pass
-                    let decomposed = apply_ir_decomposition(ir_func, &onnx_config)
-                        .map_err(|e| anyhow::anyhow!("Decomposition failed: {}", e))?;
-
-                    debug!("IR function: {} nodes after decomposition", decomposed.body.len());
-
-                    // Convert IR to OperationGraph
-                    let op_graph = ir_to_operation_graph(&decomposed)
-                        .map_err(|e| anyhow::anyhow!("Failed to convert IR to OperationGraph: {}", e))?;
-
-                    debug!("OperationGraph: {} nodes", op_graph.len());
-
-                    // Compile to parallel schedule
-                    let compiler = Compiler::new();
-                    let compiled = compiler.compile_graph_parallel(op_graph)
-                        .map_err(|e| anyhow::anyhow!("Failed to compile graph: {}", e))?;
-
-                    info!("  ▸ Compiled parallel schedule in {:?}", compile_start.elapsed());
-
-                    // Save to cache
-                    if let Err(e) = compiled.to_holo(holopar_path.to_str().unwrap()) {
-                        warn!("Failed to cache compiled graph: {}", e);
-                    } else {
-                        info!("  ▸ Cached compiled graph to {}", holopar_path.display());
-                    }
-
-                    compiled
-                };
+                // Load compiled graph from .holo file
+                info!("{}  ▸ Loading compiled graph from {}", indent, holo_path.display());
+                let load_start = Instant::now();
+                let compiled = ParallelCompiledGraph::from_holo(
+                    holo_path.to_str().ok_or_else(|| anyhow::anyhow!("Invalid path"))?
+                ).map_err(|e| anyhow::anyhow!("Failed to load .holo file: {}", e))?;
+                info!("{}  ▸ Loaded graph in {:?}", indent, load_start.elapsed());
 
                 // Prepare inputs for execution
                 let mut exec_inputs: HashMap<String, Vec<f32>> = HashMap::new();
@@ -268,24 +347,22 @@ fn execute_pipeline_parallel(
                 for (input_name, tensor_expr) in &model_stage.inputs {
                     let tensor_ref = tensor_expr.as_str().unwrap_or_default();
 
-                    let input_data = if let Some(cached) = tensor_cache.get(tensor_ref) {
-                        cached.as_ref().clone()
-                    } else if let Some(input_str) = inputs.get(tensor_ref) {
-                        parse_input_tensor(input_str)?
-                    } else {
-                        warn!("Input '{}' not found, using empty tensor", input_name);
-                        vec![0.0f32; 1]
-                    };
-
+                    let input_data = resolve_tensor_ref(tensor_ref, ctx)?;
                     exec_inputs.insert(input_name.clone(), input_data);
                 }
 
-                // Execute with rayon
+                // Execute with rayon (or layer-wise for memory efficiency)
                 let exec_start = Instant::now();
-                let exec_outputs = execute_schedule_rayon(&compiled.schedule, exec_inputs)
-                    .map_err(|e| anyhow::anyhow!("Parallel execution failed: {}", e))?;
+                let exec_outputs = if ctx.runtime_config.layerwise_execution {
+                    info!("{}  ▸ Using layer-wise execution for memory efficiency", indent);
+                    execute_schedule_layerwise(&compiled.schedule, exec_inputs)
+                        .map_err(|e| anyhow::anyhow!("Layer-wise execution failed: {}", e))?
+                } else {
+                    execute_schedule_rayon(&compiled.schedule, exec_inputs)
+                        .map_err(|e| anyhow::anyhow!("Parallel execution failed: {}", e))?
+                };
 
-                info!("  ▸ Parallel execution completed in {:?}", exec_start.elapsed());
+                info!("{}  ▸ Execution completed in {:?}", indent, exec_start.elapsed());
 
                 // Store outputs
                 for (i, output_name) in model_stage.outputs.iter().enumerate() {
@@ -297,20 +374,19 @@ fn execute_pipeline_parallel(
 
                     if let Some(output_data) = exec_outputs.get(&output_key) {
                         let data = output_data.as_ref().clone();
-                        tensor_cache.insert(output_name.clone(), Arc::new(data.clone()));
-                        outputs.insert(output_name.clone(), OutputData::Tensor(data));
-                        debug!("Output '{}': {} elements", output_name, output_data.len());
+                        ctx.tensor_cache.insert(output_name.clone(), Arc::new(data));
+                        debug!("{}Output '{}': {} elements", indent, output_name, output_data.len());
                     } else if let Some(first_output) = exec_outputs.values().next() {
                         let data = first_output.as_ref().clone();
-                        tensor_cache.insert(output_name.clone(), Arc::new(data.clone()));
-                        outputs.insert(output_name.clone(), OutputData::Tensor(data));
+                        ctx.tensor_cache.insert(output_name.clone(), Arc::new(data));
                     } else {
-                        warn!("No output produced for '{}'", output_name);
+                        warn!("{}No output produced for '{}'", indent, output_name);
                     }
                 }
 
                 info!(
-                    "  ✓ Stage {}: {} completed in {:?}",
+                    "{}✓ Stage {}: {} completed in {:?}",
+                    indent,
                     idx,
                     model_stage.model,
                     stage_start.elapsed()
@@ -319,49 +395,185 @@ fn execute_pipeline_parallel(
 
             StageDef::Builtin(builtin_stage) => {
                 debug!(
-                    "Stage {}: Executing builtin '{}'",
-                    idx, builtin_stage.builtin
+                    "{}Stage {}: Executing builtin '{}'",
+                    indent, idx, builtin_stage.builtin
                 );
 
-                let builtin_outputs = execute_builtin(
+                let builtin_outputs = execute_builtin_with_context(
                     &builtin_stage.builtin,
                     &builtin_stage.args,
                     &builtin_stage.outputs,
-                    &tensor_cache,
-                    inputs,
+                    ctx,
                 )?;
 
                 for (name, tensor) in builtin_outputs {
-                    tensor_cache.insert(name.clone(), Arc::new(tensor.clone()));
-                    outputs.insert(name, OutputData::Tensor(tensor));
+                    ctx.tensor_cache.insert(name, Arc::new(tensor));
                 }
 
-                info!("  ✓ Stage {}: {} completed", idx, builtin_stage.builtin);
+                info!("{}✓ Stage {}: {} completed", indent, idx, builtin_stage.builtin);
             }
 
             StageDef::Loop(loop_stage) => {
-                debug!("Stage {}: Loop over '{}'", idx, loop_stage.over);
-                warn!("Loop stages not yet implemented for parallel execution");
+                info!("{}▶ Loop stage: {} as '{}'", indent, loop_stage.over, loop_stage.as_var);
+
+                // Parse the iteration count from the "over" expression
+                let iterations = parse_loop_range(&loop_stage.over, ctx)?;
+
+                info!("{}  Running {} iterations", indent, iterations);
+
+                let loop_start = Instant::now();
+
+                for i in 0..iterations {
+                    // Set loop variable
+                    ctx.loop_vars.insert(loop_stage.as_var.clone(), i as i64);
+
+                    // Update scheduler step if applicable
+                    if let Some(ref mut scheduler) = ctx.scheduler {
+                        scheduler.current_step = i;
+                    }
+
+                    if i % 5 == 0 || i == iterations - 1 {
+                        info!("{}  Step {}/{}", indent, i + 1, iterations);
+                    }
+
+                    // Execute nested stages
+                    execute_stages(&loop_stage.stages, ctx, depth + 1)?;
+                }
+
+                // Clean up loop variable
+                ctx.loop_vars.remove(&loop_stage.as_var);
+
+                info!(
+                    "{}✓ Loop completed in {:?}",
+                    indent,
+                    loop_start.elapsed()
+                );
             }
 
             StageDef::Conditional(cond_stage) => {
-                debug!("Stage {}: Conditional '{}'", idx, cond_stage.condition);
-                warn!("Conditional stages not yet implemented for parallel execution");
+                debug!("{}Stage {}: Conditional '{}'", indent, idx, cond_stage.condition);
+
+                // Evaluate condition
+                let condition_met = evaluate_condition(&cond_stage.condition, ctx)?;
+
+                if condition_met {
+                    info!("{}  Condition '{}' is true, executing then branch", indent, cond_stage.condition);
+                    execute_stages(&cond_stage.then_stages, ctx, depth + 1)?;
+                } else if !cond_stage.else_stages.is_empty() {
+                    info!("{}  Condition '{}' is false, executing else branch", indent, cond_stage.condition);
+                    execute_stages(&cond_stage.else_stages, ctx, depth + 1)?;
+                }
             }
         }
     }
 
-    // Ensure all config outputs are present
-    for (_name, output_def) in &config.outputs {
-        let tensor_name = output_def.tensor();
-        if !outputs.contains_key(tensor_name) {
-            if let Some(cached) = tensor_cache.get(tensor_name) {
-                outputs.insert(tensor_name.to_string(), OutputData::Tensor(cached.as_ref().clone()));
+    Ok(())
+}
+
+/// Resolve a tensor reference to actual data.
+/// Handles cached tensors, runtime inputs, loop variables, and special expressions.
+fn resolve_tensor_ref(tensor_ref: &str, ctx: &PipelineContext) -> Result<Vec<f32>> {
+    // Check tensor cache first
+    if let Some(cached) = ctx.tensor_cache.get(tensor_ref) {
+        return Ok(cached.as_ref().clone());
+    }
+
+    // Check loop variables (return as single-element tensor)
+    if let Some(&value) = ctx.loop_vars.get(tensor_ref) {
+        return Ok(vec![value as f32]);
+    }
+
+    // Check for timestep reference from scheduler
+    if (tensor_ref == "timestep" || tensor_ref == "t")
+        && let Some(ref scheduler) = ctx.scheduler {
+            return Ok(vec![scheduler.current_timestep() as f32]);
+        }
+
+    // Check runtime inputs
+    if let Some(input_str) = ctx.runtime_inputs.get(tensor_ref) {
+        return parse_input_tensor(input_str);
+    }
+
+    // Not found - return empty with warning
+    warn!("Tensor reference '{}' not found, using empty tensor", tensor_ref);
+    Ok(vec![0.0f32; 1])
+}
+
+/// Parse a loop range expression like "range(steps)" or "range(20)".
+fn parse_loop_range(expr: &str, ctx: &PipelineContext) -> Result<usize> {
+    let expr = expr.trim();
+
+    // Handle range(n) syntax
+    if let Some(inner) = expr.strip_prefix("range(").and_then(|s| s.strip_suffix(')')) {
+        let inner = inner.trim();
+
+        // Try parsing as a number
+        if let Ok(n) = inner.parse::<usize>() {
+            return Ok(n);
+        }
+
+        // Try as a runtime input reference
+        if let Some(value_str) = ctx.runtime_inputs.get(inner)
+            && let Ok(n) = value_str.parse::<usize>() {
+                return Ok(n);
             }
+
+        // Try as a loop variable
+        if let Some(&n) = ctx.loop_vars.get(inner) {
+            return Ok(n as usize);
+        }
+
+        anyhow::bail!("Cannot resolve loop range variable: {}", inner);
+    }
+
+    // Try parsing as a plain number
+    if let Ok(n) = expr.parse::<usize>() {
+        return Ok(n);
+    }
+
+    anyhow::bail!("Invalid loop range expression: {}", expr);
+}
+
+/// Evaluate a simple condition expression.
+fn evaluate_condition(condition: &str, ctx: &PipelineContext) -> Result<bool> {
+    let condition = condition.trim();
+
+    // Handle "step > N" patterns
+    if let Some((var, rest)) = condition.split_once('>') {
+        let var = var.trim();
+        let threshold: i64 = rest.trim().parse()
+            .with_context(|| format!("Invalid threshold in condition: {}", condition))?;
+
+        if let Some(&val) = ctx.loop_vars.get(var) {
+            return Ok(val > threshold);
         }
     }
 
-    Ok(outputs)
+    // Handle "step < N" patterns
+    if let Some((var, rest)) = condition.split_once('<') {
+        let var = var.trim();
+        let threshold: i64 = rest.trim().parse()
+            .with_context(|| format!("Invalid threshold in condition: {}", condition))?;
+
+        if let Some(&val) = ctx.loop_vars.get(var) {
+            return Ok(val < threshold);
+        }
+    }
+
+    // Handle "step == N" patterns
+    if let Some((var, rest)) = condition.split_once("==") {
+        let var = var.trim();
+        let value: i64 = rest.trim().parse()
+            .with_context(|| format!("Invalid value in condition: {}", condition))?;
+
+        if let Some(&val) = ctx.loop_vars.get(var) {
+            return Ok(val == value);
+        }
+    }
+
+    // Default to false for unknown conditions
+    warn!("Cannot evaluate condition: {}", condition);
+    Ok(false)
 }
 
 /// Parse command-line inputs into a HashMap.
@@ -415,63 +627,6 @@ fn parse_inputs(
     Ok(result)
 }
 
-/// Ensure all models in the config are compiled.
-///
-/// Returns a map of model name → compiled .holo path.
-fn ensure_models_compiled(
-    config: &UnifiedConfig,
-    config_dir: &Path,
-    force_recompile: bool,
-) -> Result<HashMap<String, std::path::PathBuf>> {
-    let mut compiled = HashMap::new();
-
-    for (name, model_def) in &config.models {
-        let holo_path = get_compiled_path(model_def, config_dir);
-
-        // Check if compilation is needed
-        let needs_compile = force_recompile || !holo_path.exists();
-
-        if needs_compile {
-            let onnx_path = resolve_model_path(model_def.path(), config_dir);
-
-            if !onnx_path.exists() {
-                anyhow::bail!(
-                    "ONNX model not found: {} (for model '{}')",
-                    onnx_path.display(),
-                    name
-                );
-            }
-
-            info!("Compiling model '{}': {}", name, onnx_path.display());
-
-            // Get compiler config
-            let onnx_config: OnnxConfig = (&config.compiler).into();
-
-            // Compile the model
-            let output_base = holo_path.with_extension("");
-            compile_command(
-                &onnx_path,
-                &output_base,
-                onnx_config.enable_partitioning,
-                onnx_config.partition_size,
-                onnx_config.memory_budget,
-                onnx_config.weight_threshold,
-                onnx_config.decompose_conv2d,
-                onnx_config.decompose_pooling,
-            )
-            .with_context(|| format!("Failed to compile model '{}'", name))?;
-
-            info!("Model '{}' compiled successfully", name);
-        } else {
-            debug!("Model '{}' already compiled: {}", name, holo_path.display());
-        }
-
-        compiled.insert(name.clone(), holo_path);
-    }
-
-    Ok(compiled)
-}
-
 /// Get the path to the compiled .holo file for a model.
 fn get_compiled_path(model_def: &ModelDef, config_dir: &Path) -> std::path::PathBuf {
     // Check if precompiled path is specified
@@ -498,206 +653,6 @@ fn resolve_model_path(path: &str, config_dir: &Path) -> std::path::PathBuf {
     } else {
         config_dir.join(path)
     }
-}
-
-/// Execute the pipeline with the given inputs using the interpreter.
-///
-/// This function loads compiled .holo files and executes them using the
-/// CPU-based interpreter which supports all operations.
-fn execute_pipeline(
-    config: &UnifiedConfig,
-    compiled_models: &HashMap<String, std::path::PathBuf>,
-    inputs: &HashMap<String, String>,
-    runtime_backend: Option<RuntimeBackend>,
-) -> Result<HashMap<String, OutputData>> {
-    let mut outputs: HashMap<String, OutputData> = HashMap::new();
-    let mut tensor_cache: HashMap<String, Arc<Vec<f32>>> = HashMap::new();
-
-    // Process stages
-    for (idx, stage) in config.stages.iter().enumerate() {
-        match stage {
-            StageDef::Model(model_stage) => {
-                let model_path = compiled_models.get(&model_stage.model).ok_or_else(|| {
-                    anyhow::anyhow!("Model '{}' not found in compiled models", model_stage.model)
-                })?;
-
-                debug!(
-                    "Stage {}: Executing model '{}' from {}",
-                    idx,
-                    model_stage.model,
-                    model_path.display()
-                );
-
-                // Load the compiled model using the new format
-                let holo_model = load_holo_file(model_path)
-                    .with_context(|| format!("Failed to load .holo file: {}", model_path.display()))?;
-
-                debug!("Loaded HoloModel '{}' with {} nodes", holo_model.metadata.name, holo_model.graph.nodes.len());
-                info!(
-                    "  ▶ Stage {}: running model '{}' ({} nodes)",
-                    idx,
-                    model_stage.model,
-                    holo_model.graph.nodes.len()
-                );
-
-                // Create interpreter for this model
-                let mut interpreter = if let Some(backend) = runtime_backend {
-                    Interpreter::new_with_backend(&holo_model, backend)
-                        .map_err(|e| anyhow::anyhow!("Failed to create interpreter: {}", e))?
-                } else {
-                    Interpreter::new(&holo_model)
-                        .map_err(|e| anyhow::anyhow!("Failed to create interpreter: {}", e))?
-                };
-
-                let model_inputs: HashMap<&str, &SerNode> = holo_model
-                    .graph
-                    .nodes
-                    .iter()
-                    .filter_map(|node| {
-                        if let SerNodeKind::Input { name } = &node.node {
-                            Some((name.as_str(), node))
-                        } else {
-                            None
-                        }
-                    })
-                    .collect();
-                let mut set_inputs: HashSet<String> = HashSet::new();
-
-                // Map stage inputs to tensors
-                for (input_name, tensor_expr) in &model_stage.inputs {
-                    let input_node = model_inputs.get(input_name.as_str()).ok_or_else(|| {
-                        anyhow::anyhow!(
-                            "Model '{}' has no input named '{}'",
-                            model_stage.model,
-                            input_name
-                        )
-                    })?;
-
-                    // Extract string reference from expression
-                    let tensor_ref = tensor_expr.as_str().unwrap_or_default();
-
-                    // First check if it's in the tensor cache from previous stages
-                    let input_data = if let Some(cached) = tensor_cache.get(tensor_ref) {
-                        cached.as_ref().clone()
-                    } else if let Some(input_str) = inputs.get(tensor_ref) {
-                        // Parse runtime input as tensor
-                        parse_input_tensor(input_str)?
-                    } else {
-                        let shape = input_shape_for_node(input_node)?;
-                        warn!(
-                            "Input '{}' (tensor '{}') not found, using zeros with shape {:?}",
-                            input_name, tensor_ref, shape
-                        );
-                        default_tensor_for_node(input_node)?
-                    };
-
-                    // Set the input in interpreter
-                    interpreter
-                        .set_input(input_name, &input_data)
-                        .with_context(|| format!("Failed to set input '{}'", input_name))?;
-                    set_inputs.insert(input_name.clone());
-                }
-
-                for (input_name, input_spec) in &model_inputs {
-                    if !set_inputs.contains(*input_name) {
-                        let shape = input_shape_for_node(input_spec)?;
-                        warn!(
-                            "Input '{}' not provided, using zeros with shape {:?}",
-                            input_name, shape
-                        );
-                        let input_data = default_tensor_for_node(input_spec)?;
-                        interpreter
-                            .set_input(input_name, &input_data)
-                            .with_context(|| format!("Failed to set input '{}'", input_name))?;
-                    }
-                }
-
-                let stage_start = Instant::now();
-
-                // Execute the model
-                interpreter
-                    .run()
-                    .map_err(|e| anyhow::anyhow!("Execution failed: {}", e))?;
-
-                // Get outputs
-                let output_tensors = interpreter.get_outputs()
-                    .map_err(|e| anyhow::anyhow!("Failed to get outputs: {}", e))?;
-
-                // Store outputs
-                for (i, output_name) in model_stage.outputs.iter().enumerate() {
-                    if let Some(tensor) = output_tensors.get(i) {
-                        let data = tensor.to_vec();
-                        tensor_cache.insert(output_name.clone(), Arc::new(data.clone()));
-                        outputs.insert(output_name.clone(), OutputData::Tensor(data));
-                        debug!("Output '{}': {} elements, shape {:?}", output_name, tensor.data.len(), tensor.shape());
-                    } else {
-                        warn!("Expected output '{}' not found in execution results", output_name);
-                    }
-                }
-
-                info!(
-                    "  ✓ Stage {}: {} completed ({} outputs) in {:?}",
-                    idx,
-                    model_stage.model,
-                    output_tensors.len(),
-                    stage_start.elapsed()
-                );
-            }
-
-            StageDef::Builtin(builtin_stage) => {
-                debug!(
-                    "Stage {}: Executing builtin '{}'",
-                    idx, builtin_stage.builtin
-                );
-
-                // Execute builtin operations
-                let builtin_outputs = execute_builtin(
-                    &builtin_stage.builtin,
-                    &builtin_stage.args,
-                    &builtin_stage.outputs,
-                    &tensor_cache,
-                    inputs,
-                )?;
-
-                for (name, tensor) in builtin_outputs {
-                    tensor_cache.insert(name.clone(), Arc::new(tensor.clone()));
-                    outputs.insert(name, OutputData::Tensor(tensor));
-                }
-
-                info!("  ✓ Stage {}: {} completed", idx, builtin_stage.builtin);
-            }
-
-            StageDef::Loop(loop_stage) => {
-                debug!("Stage {}: Loop over '{}'", idx, loop_stage.over);
-                // TODO: Implement loop execution for iterative pipelines
-                warn!("Loop stages not yet implemented");
-                info!("  ✓ Stage {}: loop completed", idx);
-            }
-
-            StageDef::Conditional(cond_stage) => {
-                debug!("Stage {}: Conditional '{}'", idx, cond_stage.condition);
-                // TODO: Implement conditional execution
-                warn!("Conditional stages not yet implemented");
-                info!("  ✓ Stage {}: conditional completed", idx);
-            }
-        }
-    }
-
-    // Ensure all config outputs are present
-    for (name, output_def) in &config.outputs {
-        let tensor_name = output_def.tensor();
-        if !outputs.contains_key(tensor_name) {
-            debug!(
-                "Output '{}' (tensor '{}') not produced by pipeline",
-                name, tensor_name
-            );
-            if let Some(cached) = tensor_cache.get(tensor_name) {
-                outputs.insert(tensor_name.to_string(), OutputData::Tensor(cached.as_ref().clone()));
-            }
-        }
-    }
-
-    Ok(outputs)
 }
 
 /// Parse an input string as a tensor.
@@ -729,31 +684,6 @@ fn parse_input_tensor(input_str: &str) -> Result<Vec<f32>> {
     Ok(vec![value])
 }
 
-fn concrete_shape_from_dims(dims: &[DimSpec]) -> Vec<usize> {
-    dims.iter()
-        .map(|dim| match dim {
-            DimSpec::Concrete(size) => *size,
-            DimSpec::Symbolic(name) => {
-                debug!("Symbolic dim '{}' defaulting to 1", name);
-                1
-            }
-        })
-        .collect()
-}
-
-fn input_shape_for_node(node: &SerNode) -> Result<Vec<usize>> {
-    let dims = node.shape.as_ref().ok_or_else(|| {
-        anyhow::anyhow!("Input node {} has no shape information", node.id)
-    })?;
-    Ok(concrete_shape_from_dims(dims))
-}
-
-fn default_tensor_for_node(node: &SerNode) -> Result<Vec<f32>> {
-    let shape = input_shape_for_node(node)?;
-    let size: usize = shape.iter().product();
-    Ok(vec![0.0f32; size])
-}
-
 /// Load an image file as a tensor.
 fn load_image_as_tensor(path: &str) -> Result<Vec<f32>> {
     // Basic image loading - returns flattened RGB values normalized to [0, 1]
@@ -765,13 +695,12 @@ fn load_image_as_tensor(path: &str) -> Result<Vec<f32>> {
     Ok(vec![0.5f32; 224 * 224 * 3]) // Placeholder: 224x224x3 image
 }
 
-/// Execute a builtin operation.
-fn execute_builtin(
+/// Execute a builtin operation with full pipeline context.
+fn execute_builtin_with_context(
     name: &str,
     args: &HashMap<String, hologram_onnx_config::Expr>,
     output_names: &[String],
-    tensor_cache: &HashMap<String, Arc<Vec<f32>>>,
-    runtime_inputs: &HashMap<String, String>,
+    ctx: &mut PipelineContext,
 ) -> Result<HashMap<String, Vec<f32>>> {
     let mut outputs = HashMap::new();
 
@@ -793,24 +722,43 @@ fn execute_builtin(
         })
     };
 
+    // Helper to get arg as f32
+    let get_arg_f32 = |key: &str| -> Option<f32> {
+        args.get(key).and_then(|expr| {
+            match expr {
+                hologram_onnx_config::Expr::Literal(v) => v.as_f64().map(|f| f as f32),
+            }
+        })
+    };
+
+    // Helper to get arg as i64
+    let get_arg_i64 = |key: &str| -> Option<i64> {
+        args.get(key).and_then(|expr| {
+            match expr {
+                hologram_onnx_config::Expr::Literal(v) => v.as_i64(),
+            }
+        })
+    };
+
     let default_output = output_names.first()
         .map(|s| s.as_str())
         .unwrap_or("output");
 
     match name {
         "randn" | "random_normal" => {
-            // Generate random normal tensor
+            // Generate random normal tensor with optional seed
             let shape = get_arg_shape("shape")
                 .unwrap_or_else(|| vec![1, 4, 64, 64]); // Default latent shape
 
             let size: usize = shape.iter().product();
             use std::f32::consts::PI;
 
-            // Box-Muller transform for random normal
-            let mut rng_state = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_nanos() as u64)
-                .unwrap_or(42);
+            // Use seed from args or context
+            let seed = get_arg_i64("seed")
+                .map(|s| s as u64)
+                .unwrap_or(ctx.seed);
+
+            let mut rng_state = seed;
 
             let mut tensor = Vec::with_capacity(size);
             for _ in 0..size {
@@ -824,15 +772,16 @@ fn execute_builtin(
                 tensor.push(z);
             }
 
+            info!("  Generated random latent: {:?} ({} elements)", shape, size);
             outputs.insert(default_output.to_string(), tensor);
         }
 
         "concat" | "concatenate" => {
-            // Concatenate tensors
+            // Concatenate tensors along batch dimension
             let mut result = Vec::new();
             for tensor_expr in args.values() {
                 if let Some(tensor_ref) = tensor_expr.as_str()
-                    && let Some(cached) = tensor_cache.get(tensor_ref)
+                    && let Some(cached) = ctx.tensor_cache.get(tensor_ref)
                 {
                     result.extend(cached.as_ref().iter().copied());
                 }
@@ -841,17 +790,161 @@ fn execute_builtin(
             outputs.insert(default_output.to_string(), result);
         }
 
-        "encode_text" | "tokenize" => {
-            // Text encoding placeholder
-            let text_ref = get_arg_str("text").unwrap_or("");
-            let text = runtime_inputs.get(text_ref)
+        "scheduler_init" | "init_scheduler" => {
+            // Initialize the diffusion scheduler
+            let num_steps = get_arg_i64("steps")
+                .or_else(|| ctx.runtime_inputs.get("steps").and_then(|s| s.parse().ok()))
+                .unwrap_or(20) as usize;
+
+            info!("  Initializing DDIM scheduler with {} steps", num_steps);
+            ctx.scheduler = Some(DdimScheduler::new(num_steps));
+
+            // Output the timesteps for debugging
+            if let Some(ref scheduler) = ctx.scheduler {
+                outputs.insert(default_output.to_string(),
+                    scheduler.timesteps.iter().map(|&t| t as f32).collect());
+            }
+        }
+
+        "scheduler_step" | "denoise_step" => {
+            // Perform one DDIM denoising step
+            let latent_ref = get_arg_str("latent").or(get_arg_str("sample")).unwrap_or("latent");
+            let noise_ref = get_arg_str("noise_pred").or(get_arg_str("noise")).unwrap_or("noise_pred");
+
+            let latent = ctx.tensor_cache.get(latent_ref)
+                .map(|t| t.as_ref().clone())
+                .unwrap_or_else(|| {
+                    warn!("Latent tensor '{}' not found for scheduler step", latent_ref);
+                    vec![0.0f32; 1]
+                });
+
+            let noise_pred = ctx.tensor_cache.get(noise_ref)
+                .map(|t| t.as_ref().clone())
+                .unwrap_or_else(|| {
+                    warn!("Noise prediction '{}' not found for scheduler step", noise_ref);
+                    vec![0.0f32; latent.len()]
+                });
+
+            if let Some(ref scheduler) = ctx.scheduler {
+                let step_idx = scheduler.current_step;
+                let updated_latent = scheduler.step(&latent, &noise_pred, step_idx);
+                outputs.insert(default_output.to_string(), updated_latent);
+            } else {
+                warn!("Scheduler not initialized, cannot perform denoise step");
+                outputs.insert(default_output.to_string(), latent);
+            }
+        }
+
+        "cfg" | "classifier_free_guidance" => {
+            // Apply classifier-free guidance
+            let uncond_ref = get_arg_str("uncond").or(get_arg_str("unconditional")).unwrap_or("noise_uncond");
+            let cond_ref = get_arg_str("cond").or(get_arg_str("conditional")).unwrap_or("noise_cond");
+            let scale = get_arg_f32("scale").unwrap_or(ctx.guidance_scale);
+
+            let uncond = ctx.tensor_cache.get(uncond_ref)
+                .map(|t| t.as_ref().clone())
+                .unwrap_or_else(|| vec![0.0f32; 1]);
+
+            let cond = ctx.tensor_cache.get(cond_ref)
+                .map(|t| t.as_ref().clone())
+                .unwrap_or_else(|| vec![0.0f32; 1]);
+
+            let guided = apply_cfg(&uncond, &cond, scale);
+            outputs.insert(default_output.to_string(), guided);
+        }
+
+        "get_timestep" | "timestep" => {
+            // Get current timestep from scheduler
+            if let Some(ref scheduler) = ctx.scheduler {
+                let t = scheduler.current_timestep();
+                outputs.insert(default_output.to_string(), vec![t as f32]);
+            } else {
+                // Use loop variable if available
+                let step = ctx.loop_vars.get("step").copied().unwrap_or(0);
+                outputs.insert(default_output.to_string(), vec![step as f32]);
+            }
+        }
+
+        "scale_latent" | "vae_scale" => {
+            // Scale latent for VAE decoder (SD uses 1/0.18215)
+            let latent_ref = get_arg_str("latent").unwrap_or("latent");
+            let scale = get_arg_f32("scale").unwrap_or(1.0 / 0.18215);
+
+            if let Some(latent) = ctx.tensor_cache.get(latent_ref) {
+                let scaled: Vec<f32> = latent.iter().map(|&v| v * scale).collect();
+                outputs.insert(default_output.to_string(), scaled);
+            } else {
+                warn!("Latent '{}' not found for scaling", latent_ref);
+            }
+        }
+
+        "tokenize" | "encode_text" => {
+            // CLIP text tokenization
+            // For now, returns a simple token sequence
+            let text_ref = get_arg_str("text").unwrap_or("prompt");
+            let text = ctx.runtime_inputs.get(text_ref)
                 .map(|s| s.as_str())
-                .unwrap_or("");
+                .unwrap_or("a photo");
 
-            debug!("Encoding text: {}", text);
+            let max_length = get_arg_i64("max_length").unwrap_or(77) as usize;
 
-            // Return placeholder embeddings
-            outputs.insert(default_output.to_string(), vec![0.0f32; 77 * 768]); // CLIP-style embeddings
+            info!("  Tokenizing text: \"{}\"", text);
+
+            // Simple tokenization: convert chars to token IDs
+            // In a real implementation, this would use a proper BPE tokenizer
+            let mut tokens: Vec<f32> = Vec::with_capacity(max_length);
+
+            // Start token (49406 for CLIP)
+            tokens.push(49406.0);
+
+            // Convert text to pseudo-tokens (simplified)
+            for (i, c) in text.chars().take(max_length - 2).enumerate() {
+                // Simple mapping - in reality would use BPE vocabulary
+                let token_id = match c {
+                    'a'..='z' => 320 + (c as u32 - 'a' as u32),
+                    'A'..='Z' => 320 + (c as u32 - 'A' as u32),
+                    ' ' => 267,
+                    '.' => 269,
+                    ',' => 268,
+                    _ => 259, // Unknown token
+                };
+                tokens.push(token_id as f32);
+                if i >= max_length - 2 {
+                    break;
+                }
+            }
+
+            // End token (49407 for CLIP)
+            tokens.push(49407.0);
+
+            // Pad to max_length
+            while tokens.len() < max_length {
+                tokens.push(49407.0); // Pad with end token
+            }
+
+            outputs.insert(default_output.to_string(), tokens);
+        }
+
+        "zeros" => {
+            // Generate zeros tensor
+            let shape = get_arg_shape("shape").unwrap_or_else(|| vec![1]);
+            let size: usize = shape.iter().product();
+            outputs.insert(default_output.to_string(), vec![0.0f32; size]);
+        }
+
+        "ones" => {
+            // Generate ones tensor
+            let shape = get_arg_shape("shape").unwrap_or_else(|| vec![1]);
+            let size: usize = shape.iter().product();
+            outputs.insert(default_output.to_string(), vec![1.0f32; size]);
+        }
+
+        "copy" | "clone" => {
+            // Copy a tensor
+            let src_ref = get_arg_str("src").or(get_arg_str("input")).unwrap_or("");
+            if let Some(src) = ctx.tensor_cache.get(src_ref) {
+                outputs.insert(default_output.to_string(), src.as_ref().clone());
+            }
         }
 
         _ => {
@@ -1202,37 +1295,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let config_path = temp_dir.path().join("missing.toml");
 
-        let result = run_command(&config_path, &[], None, false, false);
+        let result = run_command(&config_path, &[], None);
         assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_concrete_shape_from_spec_symbolic_defaults() {
-        let input = SerNode {
-            id: 0,
-            node: SerNodeKind::Input {
-                name: "tokens".to_string(),
-            },
-            dtype: None,
-            shape: Some(vec![DimSpec::Concrete(2), DimSpec::Symbolic("n".to_string())]),
-        };
-
-        let shape = input_shape_for_node(&input).unwrap();
-        assert_eq!(shape, vec![2, 1]);
-    }
-
-    #[test]
-    fn test_default_tensor_for_input_size() {
-        let input = SerNode {
-            id: 1,
-            node: SerNodeKind::Input {
-                name: "tokens".to_string(),
-            },
-            dtype: None,
-            shape: Some(vec![DimSpec::Concrete(1), DimSpec::Concrete(77)]),
-        };
-
-        let data = default_tensor_for_node(&input).unwrap();
-        assert_eq!(data.len(), 77);
     }
 }

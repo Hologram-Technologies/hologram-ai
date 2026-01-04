@@ -1026,7 +1026,7 @@ fn f32_vec_to_bytes(values: &[f32]) -> Vec<u8> {
 }
 
 fn bytes_to_f32_vec(data: &[u8]) -> Result<Vec<f32>> {
-    if data.len() % 4 != 0 {
+    if data.len().rem_euclid(4) != 0 {
         return Err(OnnxError::SerializationError(
             "Packed weight data length is not a multiple of 4".into(),
         ));
@@ -1140,6 +1140,7 @@ fn unop_to_string(op: UnOp) -> String {
         UnOp::Tanh => "tanh",
         UnOp::ReLU => "relu",
         UnOp::GELU => "gelu",
+        UnOp::Erf => "erf",
     }
     .to_string()
 }
@@ -1262,9 +1263,9 @@ impl HoloModel {
         source_weight_id: usize,
         kind: PackedWeightKind,
     ) -> Option<&PackedWeightEntry> {
-        self.packed_weight_entries.iter().find(|entry| {
-            entry.source_weight_id == source_weight_id && entry.kind == kind
-        })
+        self.packed_weight_entries
+            .iter()
+            .find(|entry| entry.source_weight_id == source_weight_id && entry.kind == kind)
     }
 
     /// Get packed weight data by entry.
@@ -1726,10 +1727,7 @@ mod tests {
         );
 
         let kernel_values: Vec<f32> = (0..8).map(|v| v as f32).collect();
-        let kernel_bytes: Vec<u8> = kernel_values
-            .iter()
-            .flat_map(|v| v.to_le_bytes())
-            .collect();
+        let kernel_bytes: Vec<u8> = kernel_values.iter().flat_map(|v| v.to_le_bytes()).collect();
         let kernel = builder.add_tensor_const(vec![2, 1, 2, 2], kernel_bytes, ScalarType::F32);
         let conv = builder.conv2d(input, kernel, None, (1, 1), (0, 0), (1, 1), 1);
         builder.set_output(conv);

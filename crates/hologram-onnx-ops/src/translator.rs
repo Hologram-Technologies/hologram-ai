@@ -111,6 +111,8 @@ pub fn translate_onnx_op(
         "Concat" => translate_concat(inputs, attrs, shapes, builder),
         "Split" => translate_split(inputs, attrs, shapes, builder),
         "Flatten" => translate_flatten(inputs, attrs, shapes, builder),
+        "Expand" => translate_expand(inputs, attrs, shapes, builder),
+        "Range" => translate_range(inputs, attrs, shapes, builder),
 
         // Convolution operations
         "Conv" => translate_conv(inputs, attrs, shapes, builder),
@@ -133,6 +135,8 @@ pub fn translate_onnx_op(
         "ReduceMax" => translate_reduce_max(inputs, attrs, shapes, builder),
         "ReduceMin" => translate_reduce_min(inputs, attrs, shapes, builder),
         "ReduceProd" => translate_reduce_prod(inputs, attrs, shapes, builder),
+        "ArgMax" => translate_argmax(inputs, attrs, shapes, builder),
+        "ArgMin" => translate_argmin(inputs, attrs, shapes, builder),
 
         // Advanced operations
         "Attention" => translate_attention(inputs, attrs, shapes, builder),
@@ -148,6 +152,9 @@ pub fn translate_onnx_op(
         "Neg" => translate_neg(inputs, attrs, shapes, builder),
         "Abs" => translate_abs(inputs, attrs, shapes, builder),
         "Reciprocal" => translate_reciprocal(inputs, attrs, shapes, builder),
+        "Erf" => translate_erf(inputs, attrs, shapes, builder),
+        "Sin" => translate_sin(inputs, attrs, shapes, builder),
+        "Cos" => translate_cos(inputs, attrs, shapes, builder),
 
         // Indexing operations
         "Gather" => translate_gather(inputs, attrs, shapes, builder),

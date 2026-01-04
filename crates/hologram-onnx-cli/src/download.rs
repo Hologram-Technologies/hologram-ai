@@ -3,10 +3,19 @@
 //! This module provides functionality to download ONNX models from Hugging Face
 //! Model Hub, with progress indication. Supports recursive directory scanning
 //! to find ONNX files in subdirectories (e.g., for Stable Diffusion models).
+//!
+//! ## Authentication
+//!
+//! For gated/private models, set one of these environment variables:
+//! - `HF_TOKEN` - HuggingFace access token
+//! - `HUGGING_FACE_HUB_TOKEN` - Alternative token variable
+//!
+//! Get your token from: https://huggingface.co/settings/tokens
 
 use anyhow::{Context, Result};
 use indicatif::{ProgressBar, ProgressStyle};
 use reqwest::blocking::Client;
+use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION};
 use serde::Deserialize;
 use std::fs::{self, File};
 use std::io::Write;
@@ -55,6 +64,13 @@ struct FileInfo {
 /// # Ok(())
 /// # }
 /// ```
+/// Get HuggingFace token from environment variables.
+fn get_hf_token() -> Option<String> {
+    std::env::var("HF_TOKEN")
+        .ok()
+        .or_else(|| std::env::var("HUGGING_FACE_HUB_TOKEN").ok())
+}
+
 pub fn download_command(model_id: &str, output_dir: &Path, revision: Option<&str>) -> Result<()> {
     let revision = revision.unwrap_or("main");
 
@@ -70,9 +86,27 @@ pub fn download_command(model_id: &str, output_dir: &Path, revision: Option<&str
         )
     })?;
 
-    // Create HTTP client
+    // Check for authentication token
+    let hf_token = get_hf_token();
+    if hf_token.is_some() {
+        info!("Using HuggingFace authentication token");
+    } else {
+        debug!("No HF_TOKEN or HUGGING_FACE_HUB_TOKEN found - proceeding without authentication");
+    }
+
+    // Create HTTP client with optional auth header
+    let mut headers = HeaderMap::new();
+    if let Some(ref token) = hf_token {
+        headers.insert(
+            AUTHORIZATION,
+            HeaderValue::from_str(&format!("Bearer {}", token))
+                .context("Invalid HuggingFace token format")?,
+        );
+    }
+
     let client = Client::builder()
         .user_agent("hologram-onnx-cli/0.1.0")
+        .default_headers(headers)
         .build()
         .context("Failed to create HTTP client")?;
 
@@ -81,10 +115,15 @@ pub fn download_command(model_id: &str, output_dir: &Path, revision: Option<&str
     // Recursively fetch all files including subdirectories
     let all_files = fetch_files_recursive(&client, model_id, revision, "")?;
 
-    // Filter for ONNX files
+    // Filter for ONNX files and their external data
     let onnx_files: Vec<&FileInfo> = all_files
         .iter()
-        .filter(|f| f.path.ends_with(".onnx"))
+        .filter(|f| {
+            f.path.ends_with(".onnx") ||
+            f.path.ends_with(".onnx_data") ||
+            f.path.ends_with(".pb") ||
+            f.path.ends_with(".bin") && f.path.contains("model")
+        })
         .collect();
 
     if onnx_files.is_empty() {
@@ -181,12 +220,30 @@ fn fetch_files_recursive(
         .with_context(|| format!("Failed to fetch file list from: {}", api_url))?;
 
     if !response.status().is_success() {
+        let status = response.status();
+        let body = response
+            .text()
+            .unwrap_or_else(|_| "Unknown error".to_string());
+
+        if status == reqwest::StatusCode::UNAUTHORIZED {
+            anyhow::bail!(
+                "Authentication required for model: {}\n\
+                 Set HF_TOKEN or HUGGING_FACE_HUB_TOKEN environment variable.\n\
+                 Get your token from: https://huggingface.co/settings/tokens\n\
+                 \n\
+                 Example: HF_TOKEN=hf_xxx cargo run -p hologram-onnx-cli -- download ...\n\
+                 \n\
+                 Original error: HTTP {} - {}",
+                model_id,
+                status,
+                body
+            );
+        }
+
         anyhow::bail!(
             "Failed to fetch model info: HTTP {} - {}",
-            response.status(),
-            response
-                .text()
-                .unwrap_or_else(|_| "Unknown error".to_string())
+            status,
+            body
         );
     }
 

@@ -50,6 +50,7 @@ impl From<&CompilerConfig> for OnnxConfig {
             decompose_pooling: config.decompose_pooling,
             pack_weights: config.pack_weights,
             memory_budget: config.memory_budget,
+            enable_resize_upscaling: config.enable_resize_upscaling,
         }
     }
 }
@@ -77,7 +78,14 @@ impl From<&OnnxConfig> for CompilerConfig {
             decompose_pooling: config.decompose_pooling,
             pack_weights: config.pack_weights,
             memory_budget: config.memory_budget,
+            enable_resize_upscaling: config.enable_resize_upscaling,
             backend: None,
+            aggressive_fusion: false,
+            opt_level: 2,
+            auto_fuse: true,
+            use_fp16: false,
+            use_int8: false,
+            quantization_mode: "none".to_string(),
         }
     }
 }

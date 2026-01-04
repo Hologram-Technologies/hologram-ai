@@ -12,7 +12,7 @@ repository = "https://github.com/uor-framework/hologram-onnx"
 # Hologram dependencies (local paths)
 hologram-compiler = { path = "/hologram/crates/compiler" }
 hologram-core = { path = "/hologram/crates/core" }
-hologram-backend = { path = "/hologram/externals/hologram-backend" }
+hologram-backend = { path = "/hologram/crates/backend" }
 
 # Protobuf (existing)
 prost = "0.13"
@@ -61,7 +61,13 @@ license.workspace = true
 repository.workspace = true
 description = "Production ONNX runtime for hologram with full ISA optimization support"
 readme = "README.md"
-keywords = ["onnx", "hologram", "machine-learning", "neural-network", "compiler"]
+keywords = [
+    "onnx",
+    "hologram",
+    "machine-learning",
+    "neural-network",
+    "compiler",
+]
 categories = ["science", "machine-learning"]
 
 [dependencies]
@@ -116,7 +122,7 @@ text-output = ["hologram-onnx-config/text-output"]
 all-outputs = ["image-output", "audio-output", "text-output"]
 
 [patch."https://github.com/UOR-Foundation/hologram-backend.git"]
-hologram-backend = { path = "/hologram/externals/hologram-backend" }
+hologram-backend = { path = "/hologram/crates/backend" }
 
 [[bin]]
 name = "hologram-onnx-core"

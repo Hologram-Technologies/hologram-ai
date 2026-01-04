@@ -4,19 +4,21 @@
 //! - Loads an ONNX model from disk
 //! - Translates ONNX → hologram IR using the full translation pipeline
 //! - Applies decomposition pass (Conv2D → Im2col+GEMM)
-//! - Serializes the IR to .holo format for execution
-//! - Writes the resulting .holo and .weights files
+//! - Converts IR to OperationGraph and compiles to parallel schedule
+//! - Serializes to .holo format compatible with hologram runtime
 
 use anyhow::{Context, Result};
+use hologram_compiler::Compiler;
 use hologram_onnx_core::{
-    OnnxConfig, extract_opset_version, parse_model, validate_model,
-    serialize_ir_function,
+    OnnxConfig, ConversionOptions, extract_opset_version,
+    ir_to_operation_graph_streaming_with_options, parse_model, validate_model,
 };
+use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
 use tracing::{debug, info};
 
-use crate::translator::{apply_ir_decomposition, translate_graph_to_ir};
+use crate::translator::{apply_ir_decomposition, translate_graph_to_ir_with_path};
 
 /// Compile an ONNX model to .holo format.
 ///
@@ -28,10 +30,13 @@ use crate::translator::{apply_ir_decomposition, translate_graph_to_ir};
 /// * `partition_size` - Number of nodes per partition
 /// * `memory_budget` - Memory budget in MB
 /// * `weight_threshold` - Threshold for external weight storage (bytes)
+/// * `enable_resize_upscaling` - Enable Resize upscaling (false saves memory)
+/// * `input_shapes` - Optional map of input name -> concrete shape dimensions
 ///
 /// # Returns
 ///
 /// Returns Ok(()) on success, or an error if compilation fails.
+#[allow(clippy::too_many_arguments)]
 pub fn compile_command(
     input: &Path,
     output: &Path,
@@ -41,6 +46,8 @@ pub fn compile_command(
     weight_threshold: usize,
     decompose_conv2d: bool,
     decompose_pooling: bool,
+    enable_resize_upscaling: bool,
+    input_shapes: &HashMap<String, Vec<usize>>,
 ) -> Result<()> {
     info!("Compiling ONNX model: {}", input.display());
     debug!("Output path: {}", output.display());
@@ -49,13 +56,15 @@ pub fn compile_command(
     debug!("Weight threshold: {} bytes", weight_threshold);
     debug!("Decompose Conv2D: {}", decompose_conv2d);
     debug!("Decompose Pooling: {}", decompose_pooling);
+    debug!("Enable Resize Upscaling: {}", enable_resize_upscaling);
 
     // Read ONNX model
     info!("Reading ONNX model...");
     let onnx_bytes = fs::read(input)
         .with_context(|| format!("Failed to read ONNX model from {}", input.display()))?;
 
-    info!("ONNX model size: {} bytes", onnx_bytes.len());
+    let onnx_size = onnx_bytes.len();
+    info!("ONNX model size: {} bytes", onnx_size);
 
     // Create configuration
     let config = OnnxConfig {
@@ -66,6 +75,7 @@ pub fn compile_command(
         decompose_pooling,
         pack_weights: true,
         memory_budget,
+        enable_resize_upscaling,
     };
 
     config
@@ -74,9 +84,18 @@ pub fn compile_command(
 
     // Step 1: Parse and validate ONNX model
     info!("Parsing ONNX protobuf...");
-    let model = parse_model(&onnx_bytes).context("Failed to parse ONNX model")?;
+    let mut model = parse_model(&onnx_bytes).context("Failed to parse ONNX model")?;
+
+    // Free ONNX bytes - we have the parsed model now
+    drop(onnx_bytes);
+    debug!("Freed ONNX bytes ({} bytes)", onnx_size);
 
     validate_model(&model).context("Model validation failed")?;
+
+    // Apply input shapes if specified
+    if !input_shapes.is_empty() {
+        apply_input_shapes(&mut model, input_shapes)?;
+    }
 
     let opset_version = extract_opset_version(&model);
     info!("ONNX opset version: {}", opset_version);
@@ -87,46 +106,140 @@ pub fn compile_command(
         .as_ref()
         .ok_or_else(|| anyhow::anyhow!("Model has no graph"))?;
 
-    info!("Graph: {} ({} nodes)", graph.name, graph.node.len());
+    let graph_name = graph.name.clone();
+    let node_count = graph.node.len();
+    info!("Graph: {} ({} nodes)", graph_name, node_count);
 
-    // Step 2: Translate ONNX → IR with symbolic shapes
+    // Step 2: Translate ONNX → IR with symbolic shapes (with external data support)
     info!("Translating ONNX → IR...");
     let ir_func =
-        translate_graph_to_ir(graph, opset_version).context("Failed to translate ONNX to IR")?;
+        translate_graph_to_ir_with_path(graph, opset_version, Some(input))
+            .context("Failed to translate ONNX to IR")?;
+
+    // Free parsed ONNX model - we have the IR now
+    drop(model);
+    debug!("Freed parsed ONNX model");
 
     // Step 3: Apply decomposition pass
     info!("Applying decomposition pass...");
     let decomposed = apply_ir_decomposition(ir_func, &config).context("Decomposition failed")?;
 
+    // ir_func is moved into apply_ir_decomposition, no need to drop
+
     info!("Decomposition complete: {} IR nodes", decomposed.body.len());
 
-    // Step 4: Serialize IR to .holo format
-    info!("Serializing to .holo format...");
-    let (holo_bytes, weights_bytes) =
-        serialize_ir_function(&decomposed, weight_threshold, config.pack_weights)
-        .map_err(|e| anyhow::anyhow!("Serialization failed: {}", e))?;
+    // Step 4: Convert IR to OperationGraph with streaming weights
+    // This writes large tensors to an external .weights file to reduce memory usage
+    let weights_path = output.with_extension("weights");
+    info!("Converting IR to OperationGraph (streaming weights to {})...", weights_path.display());
 
-    info!("Compilation successful!");
-    info!("  .holo size: {} bytes", holo_bytes.len());
-    info!("  .weights size: {} bytes", weights_bytes.len());
+    let conversion_options = ConversionOptions {
+        weight_threshold_elements: config.weight_threshold / 4, // bytes to f32 elements
+        enable_resize_upscaling: config.enable_resize_upscaling,
+    };
 
-    // Write .holo file
-    let holo_path = output.with_extension("holo");
-    info!("Writing .holo file: {}", holo_path.display());
-    fs::write(&holo_path, &holo_bytes)
-        .with_context(|| format!("Failed to write .holo file to {}", holo_path.display()))?;
+    let op_graph = ir_to_operation_graph_streaming_with_options(
+        &decomposed,
+        &weights_path,
+        conversion_options,
+    )
+    .map_err(|e| anyhow::anyhow!("Failed to convert IR to OperationGraph: {}", e))?;
 
-    // Write .weights file if there are external weights
-    if !weights_bytes.is_empty() {
-        let weights_path = output.with_extension("weights");
-        info!("Writing .weights file: {}", weights_path.display());
-        fs::write(&weights_path, &weights_bytes)
-            .with_context(|| format!("Failed to write .weights file to {}", weights_path.display()))?;
-        info!("  Output: {}.weights", output.display());
+    // Free decomposed IR - we have the OperationGraph now
+    drop(decomposed);
+    debug!("Freed decomposed IR");
+
+    info!("OperationGraph: {} nodes", op_graph.len());
+
+    // Check if weights file was created
+    if weights_path.exists() {
+        let weights_size = fs::metadata(&weights_path).map(|m| m.len()).unwrap_or(0);
+        info!(
+            "External weights file: {} ({:.2} MB)",
+            weights_path.display(),
+            weights_size as f64 / (1024.0 * 1024.0)
+        );
     }
 
+    // Step 5: Compile to parallel schedule
+    info!("Compiling to parallel schedule...");
+    let compiler = Compiler::new();
+    let compiled = compiler
+        .compile_graph_parallel(op_graph)
+        .map_err(|e| anyhow::anyhow!("Failed to compile parallel schedule: {}", e))?;
+
+    // op_graph is moved into compile_graph_parallel, no need to drop
+
+    info!(
+        "Parallel schedule: {} levels, max parallelism {}",
+        compiled.schedule.levels.len(),
+        compiled.schedule.max_parallelism
+    );
+
+    // Step 6: Serialize to .holo format
+    let holo_path = output.with_extension("holo");
+    info!("Writing .holo file: {}", holo_path.display());
+
+    compiled
+        .to_holo(
+            holo_path
+                .to_str()
+                .ok_or_else(|| anyhow::anyhow!("Invalid output path"))?,
+        )
+        .map_err(|e| anyhow::anyhow!("Failed to write .holo file: {}", e))?;
+
+    // Get file size for logging
+    let holo_size = fs::metadata(&holo_path).map(|m| m.len()).unwrap_or(0);
+
     info!("✓ Compilation complete!");
-    info!("  Output: {}.holo", output.display());
+    info!("  Output: {} ({} bytes)", holo_path.display(), holo_size);
+
+    Ok(())
+}
+
+/// Apply concrete input shapes to an ONNX model.
+///
+/// This modifies the model's input definitions to have concrete dimensions
+/// instead of symbolic ones, which is necessary for proper buffer allocation
+/// during compilation and execution.
+fn apply_input_shapes(
+    model: &mut hologram_onnx_spec::ModelProto,
+    input_shapes: &HashMap<String, Vec<usize>>,
+) -> Result<()> {
+    use hologram_onnx_spec::tensor_shape_proto::dimension::Value as DimValue;
+    use hologram_onnx_spec::tensor_shape_proto::Dimension;
+
+    let graph = model
+        .graph
+        .as_mut()
+        .ok_or_else(|| anyhow::anyhow!("Model has no graph"))?;
+
+    for (name, dims) in input_shapes {
+        info!("Applying input shape: {} = {:?}", name, dims);
+
+        // Find the input by name
+        for input in &mut graph.input {
+            if input.name == *name {
+                // Get the tensor type
+                if let Some(ref mut type_proto) = input.r#type {
+                    if let Some(ref mut value) = type_proto.value {
+                        if let hologram_onnx_spec::type_proto::Value::TensorType(tensor_type) = value {
+                            // Create or modify the shape
+                            let shape = tensor_type.shape.get_or_insert_with(Default::default);
+                            shape.dim.clear();
+
+                            for &dim in dims {
+                                shape.dim.push(Dimension {
+                                    value: Some(DimValue::DimValue(dim as i64)),
+                                    denotation: String::new(),
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
 
     Ok(())
 }
@@ -142,7 +255,7 @@ mod tests {
         let input = temp_dir.path().join("missing.onnx");
         let output = temp_dir.path().join("output");
 
-        let result = compile_command(&input, &output, false, 500, None, 4096, true, true);
+        let result = compile_command(&input, &output, false, 500, None, 4096, true, true, true, &HashMap::new());
         assert!(result.is_err());
         assert!(
             result

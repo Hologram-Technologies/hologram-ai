@@ -4,7 +4,7 @@
 //! their structure, inputs, outputs, and operations.
 
 use anyhow::{Context, Result};
-use hologram_onnx_core::{extract_opset_version, inspect_holo_file, parse_model};
+use hologram_onnx_core::{extract_opset_version, parse_model};
 use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
@@ -196,12 +196,67 @@ fn get_tensor_type_string(value_info: &hologram_onnx_spec::ValueInfoProto) -> St
 
 /// Display information about a compiled .holo model.
 fn info_holo_command(model_path: &Path) -> Result<()> {
+    use hologram_compiler::graph::OperationGraph;
+
     info!("Reading HOLO model: {}", model_path.display());
 
-    let output = inspect_holo_file(model_path)
+    // Read and parse the rkyv-serialized .holo file
+    let holo_bytes = fs::read(model_path)
         .with_context(|| format!("Failed to read HOLO model from {}", model_path.display()))?;
 
-    println!("{}", output);
+    let graph = OperationGraph::from_bytes(&holo_bytes)
+        .with_context(|| "Failed to parse .holo file")?;
+
+    println!("\n╔════════════════════════════════════════════════════════════╗");
+    println!("║              HOLO Model Information                        ║");
+    println!("╚════════════════════════════════════════════════════════════╝");
+
+    println!("\n📄 Model Metadata:");
+    println!("  File: {}", model_path.display());
+    println!("  Size: {} bytes", holo_bytes.len());
+    println!("  Format: OperationGraph (rkyv binary)");
+
+    // Count nodes and operations
+    let nodes: Vec<_> = graph.nodes_toposorted().collect();
+    println!("\n📊 Graph:");
+    println!("  Nodes: {}", nodes.len());
+
+    // Count operation types
+    let mut op_counts: HashMap<String, usize> = HashMap::new();
+    for node in &nodes {
+        let op_name = format!("{:?}", node.op).split('(').next().unwrap_or("Unknown").split('{').next().unwrap_or("Unknown").trim().to_string();
+        *op_counts.entry(op_name).or_insert(0) += 1;
+    }
+
+    if !op_counts.is_empty() {
+        println!("\n⚙️  Operations:");
+        let mut ops: Vec<_> = op_counts.iter().collect();
+        ops.sort_by(|a, b| b.1.cmp(a.1).then(a.0.cmp(b.0)));
+
+        for (op_type, count) in ops {
+            println!("  - {:<20} : {} node(s)", op_type, count);
+        }
+    }
+
+    // Display inputs
+    let inputs = graph.input_names();
+    if !inputs.is_empty() {
+        println!("\n📥 Inputs ({}):", inputs.len());
+        for name in inputs {
+            println!("  - {}", name);
+        }
+    }
+
+    // Display outputs
+    let outputs = graph.output_names();
+    if !outputs.is_empty() {
+        println!("\n📤 Outputs ({}):", outputs.len());
+        for name in outputs {
+            println!("  - {}", name);
+        }
+    }
+
+    println!("\n");
     Ok(())
 }
 

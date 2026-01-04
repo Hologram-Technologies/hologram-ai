@@ -211,6 +211,102 @@ pub fn translate_reciprocal(
     Ok(result)
 }
 
+/// Translate ONNX Sin operation.
+///
+/// Sin: Y = sin(X) (element-wise sine)
+///
+/// # Performance
+///
+/// - **SIMD vectorization**: Uses vectorized sin implementation
+/// - Common in positional embeddings for transformers
+pub fn translate_sin(
+    inputs: &[NodeId],
+    _attrs: &[AttributeProto],
+    _shapes: &HashMap<String, SymbolicShape>,
+    builder: &mut IRBuilder,
+) -> Result<NodeId> {
+    if inputs.len() != 1 {
+        return Err(OnnxError::InvalidModel(format!(
+            "Sin expects 1 input, got {}",
+            inputs.len()
+        )));
+    }
+
+    let input = inputs[0];
+    debug!("Translating Sin operation");
+    trace!("Sin input: {:?}", input);
+
+    let result = builder.sin(input);
+
+    trace!("Created Sin node: {:?}", result);
+    Ok(result)
+}
+
+/// Translate ONNX Cos operation.
+///
+/// Cos: Y = cos(X) (element-wise cosine)
+///
+/// # Performance
+///
+/// - **SIMD vectorization**: Uses vectorized cos implementation
+/// - Common in positional embeddings for transformers
+pub fn translate_cos(
+    inputs: &[NodeId],
+    _attrs: &[AttributeProto],
+    _shapes: &HashMap<String, SymbolicShape>,
+    builder: &mut IRBuilder,
+) -> Result<NodeId> {
+    if inputs.len() != 1 {
+        return Err(OnnxError::InvalidModel(format!(
+            "Cos expects 1 input, got {}",
+            inputs.len()
+        )));
+    }
+
+    let input = inputs[0];
+    debug!("Translating Cos operation");
+    trace!("Cos input: {:?}", input);
+
+    let result = builder.cos(input);
+
+    trace!("Created Cos node: {:?}", result);
+    Ok(result)
+}
+
+/// Translate ONNX Erf operation.
+///
+/// Erf: Y = erf(X) (element-wise error function)
+///
+/// The error function is defined as:
+/// erf(x) = (2/√π) ∫₀ˣ e^(-t²) dt
+///
+/// # Performance
+///
+/// - **SIMD vectorization**: Uses optimized vectorized implementation
+/// - Common in GELU activation and transformer models
+pub fn translate_erf(
+    inputs: &[NodeId],
+    _attrs: &[AttributeProto],
+    _shapes: &HashMap<String, SymbolicShape>,
+    builder: &mut IRBuilder,
+) -> Result<NodeId> {
+    if inputs.len() != 1 {
+        return Err(OnnxError::InvalidModel(format!(
+            "Erf expects 1 input, got {}",
+            inputs.len()
+        )));
+    }
+
+    let input = inputs[0];
+    debug!("Translating Erf operation");
+    trace!("Erf input: {:?}", input);
+
+    let result = builder.erf(input);
+
+    trace!("Created Erf node: {:?}", result);
+    Ok(result)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

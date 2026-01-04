@@ -16,12 +16,44 @@
 //! ```
 
 use std::collections::HashMap;
+use std::path::Path;
 
 use hologram_compiler::expr::OpKind;
 use hologram_compiler::graph::{GraphBuilder, NodeId as GraphNodeId, OperationGraph, WeightRef};
-use hologram_compiler::ir::{BinOp, ConstValue, IRFunction, IRNode, NodeId as IRNodeId, ReduceOp, UnOp};
+use hologram_compiler::ir::{BinOp, ConstValue, IRFunction, IRNode, NodeId as IRNodeId, ReduceOp, Type, UnOp};
 
 use crate::{OnnxError, Result};
+
+/// Default threshold for streaming weights to external file (256KB in elements).
+/// Tensors larger than this will be written to the weights file.
+pub const DEFAULT_WEIGHT_THRESHOLD_ELEMENTS: usize = 64 * 1024; // 64K floats = 256KB
+
+/// Options for converting IR to OperationGraph.
+#[derive(Debug, Clone, Default)]
+pub struct ConversionOptions {
+    /// Threshold for streaming weights to external file (in elements).
+    pub weight_threshold_elements: usize,
+    /// Enable Resize upscaling. When false, Resize ops pass through without scaling.
+    pub enable_resize_upscaling: bool,
+}
+
+impl ConversionOptions {
+    /// Create default options with upscaling enabled.
+    pub fn new() -> Self {
+        Self {
+            weight_threshold_elements: DEFAULT_WEIGHT_THRESHOLD_ELEMENTS,
+            enable_resize_upscaling: true,
+        }
+    }
+
+    /// Create options with upscaling disabled (for memory-constrained systems).
+    pub fn without_resize_upscaling() -> Self {
+        Self {
+            weight_threshold_elements: DEFAULT_WEIGHT_THRESHOLD_ELEMENTS,
+            enable_resize_upscaling: false,
+        }
+    }
+}
 
 /// Convert an IRFunction to a hologram-compiler OperationGraph.
 ///
@@ -38,10 +70,11 @@ use crate::{OnnxError, Result};
 pub fn ir_to_operation_graph(ir_func: &IRFunction) -> Result<OperationGraph> {
     let mut builder = GraphBuilder::new();
     let mut id_map: HashMap<IRNodeId, GraphNodeId> = HashMap::new();
+    let default_options = ConversionOptions::new();
 
     // Process nodes in order (already topologically sorted)
     for entry in &ir_func.body {
-        let graph_id = convert_node(&mut builder, &entry.node, &id_map)?;
+        let graph_id = convert_node(&mut builder, &entry.node, &id_map, &default_options)?;
         id_map.insert(entry.id, graph_id);
     }
 
@@ -60,15 +93,185 @@ pub fn ir_to_operation_graph(ir_func: &IRFunction) -> Result<OperationGraph> {
     Ok(builder.build())
 }
 
+/// Convert an IRFunction to a hologram-compiler OperationGraph with streaming weights.
+///
+/// This variant streams large tensors to an external weights file instead of
+/// storing them inline in the graph, significantly reducing memory usage for
+/// large models.
+///
+/// # Arguments
+///
+/// * `ir_func` - The IR function to convert
+/// * `weights_path` - Path to write the external weights file
+/// * `threshold_elements` - Tensors with more elements than this are streamed to file
+///
+/// # Returns
+///
+/// An OperationGraph ready for scheduling and execution via `Compiler::compile_graph_parallel()`.
+/// Large weights are stored in the file at `weights_path`.
+pub fn ir_to_operation_graph_streaming(
+    ir_func: &IRFunction,
+    weights_path: impl AsRef<Path>,
+    threshold_elements: usize,
+) -> Result<OperationGraph> {
+    let options = ConversionOptions {
+        weight_threshold_elements: threshold_elements,
+        enable_resize_upscaling: true,
+    };
+    ir_to_operation_graph_streaming_with_options(ir_func, weights_path, options)
+}
+
+/// Convert an IRFunction to a hologram-compiler OperationGraph with streaming weights and options.
+///
+/// This variant allows fine-grained control over conversion behavior.
+///
+/// # Arguments
+///
+/// * `ir_func` - The IR function to convert
+/// * `weights_path` - Path to write the external weights file
+/// * `options` - Conversion options (weight threshold, resize upscaling, etc.)
+///
+/// # Returns
+///
+/// An OperationGraph ready for scheduling and execution via `Compiler::compile_graph_parallel()`.
+/// Large weights are stored in the file at `weights_path`.
+pub fn ir_to_operation_graph_streaming_with_options(
+    ir_func: &IRFunction,
+    weights_path: impl AsRef<Path>,
+    options: ConversionOptions,
+) -> Result<OperationGraph> {
+    let mut builder = GraphBuilder::with_weights_file(weights_path)
+        .map_err(|e| OnnxError::InvalidModel(format!("Failed to create weights file: {}", e)))?;
+
+    let mut id_map: HashMap<IRNodeId, GraphNodeId> = HashMap::new();
+
+    // Process nodes in order (already topologically sorted)
+    for entry in &ir_func.body {
+        let graph_id = convert_node_streaming(&mut builder, &entry.node, &id_map, &options)?;
+        id_map.insert(entry.id, graph_id);
+    }
+
+    // Set outputs
+    for (idx, output_id) in ir_func.outputs.iter().enumerate() {
+        if let Some(&graph_id) = id_map.get(output_id) {
+            let output_name = if ir_func.outputs.len() == 1 {
+                "output".to_string()
+            } else {
+                format!("output_{}", idx)
+            };
+            builder.set_output(&output_name, graph_id);
+        }
+    }
+
+    // Log streaming stats
+    let bytes_written = builder.weights_bytes_written();
+    if bytes_written > 0 {
+        tracing::info!(
+            "Streamed {} bytes ({:.2} MB) of weights to external file",
+            bytes_written,
+            bytes_written as f64 / (1024.0 * 1024.0)
+        );
+    }
+
+    Ok(builder.build())
+}
+
+/// Convert a single IR node to a graph node (streaming version).
+fn convert_node_streaming(
+    builder: &mut GraphBuilder,
+    node: &IRNode,
+    id_map: &HashMap<IRNodeId, GraphNodeId>,
+    options: &ConversionOptions,
+) -> Result<GraphNodeId> {
+    match node {
+        IRNode::Input { name, ty } => {
+            // Extract shape from type if available and concrete
+            let shape = extract_concrete_shape(ty);
+            if shape.is_empty() {
+                tracing::warn!("Adding input '{}' WITHOUT shape (this may cause buffer allocation issues)", name);
+                Ok(builder.add_input(name))
+            } else {
+                tracing::info!("Adding input '{}' WITH shape {:?}", name, shape);
+                Ok(builder.add_input_with_shape(name, shape))
+            }
+        }
+
+        IRNode::Constant { value, .. } => {
+            convert_constant_streaming(builder, value, options.weight_threshold_elements)
+        }
+
+        // All other nodes are handled the same as non-streaming
+        _ => convert_node(builder, node, id_map, options),
+    }
+}
+
+/// Extract concrete shape dimensions from an IR type.
+/// Returns empty vector if the type has no shape or has symbolic dimensions.
+fn extract_concrete_shape(ty: &Type) -> Vec<usize> {
+    if let Some(shape) = ty.shape() {
+        let dims: Vec<usize> = shape
+            .dims()
+            .iter()
+            .filter_map(|d| d.as_concrete())
+            .collect();
+        tracing::debug!(
+            "extract_concrete_shape: type={:?}, shape_dims={}, extracted_dims={:?}",
+            ty,
+            shape.dims().len(),
+            dims
+        );
+        dims
+    } else {
+        tracing::debug!("extract_concrete_shape: type={:?}, no shape", ty);
+        vec![]
+    }
+}
+
+/// Convert an IR constant to a graph node with streaming support.
+fn convert_constant_streaming(
+    builder: &mut GraphBuilder,
+    value: &ConstValue,
+    threshold_elements: usize,
+) -> Result<GraphNodeId> {
+    match value {
+        ConstValue::F32(v) => Ok(builder.add_constant(*v)),
+        ConstValue::F64(v) => Ok(builder.add_constant(*v as f32)),
+        ConstValue::I32(v) => Ok(builder.add_constant(*v as f32)),
+        ConstValue::I64(v) => Ok(builder.add_constant(*v as f32)),
+        ConstValue::Bool(v) => Ok(builder.add_constant(if *v { 1.0 } else { 0.0 })),
+        ConstValue::Tensor { shape, data } => {
+            // Convert bytes to f32 (assuming little-endian f32)
+            let floats: Vec<f32> = data
+                .chunks(4)
+                .map(|chunk| {
+                    let arr: [u8; 4] = chunk.try_into().unwrap_or([0; 4]);
+                    f32::from_le_bytes(arr)
+                })
+                .collect();
+
+            // Use streaming for large tensors
+            builder.add_tensor_streaming(floats, shape.clone(), threshold_elements)
+                .map_err(|e| OnnxError::InvalidModel(format!("Failed to stream weight: {}", e)))
+        }
+    }
+}
+
 /// Convert a single IR node to a graph node.
 fn convert_node(
     builder: &mut GraphBuilder,
     node: &IRNode,
     id_map: &HashMap<IRNodeId, GraphNodeId>,
+    options: &ConversionOptions,
 ) -> Result<GraphNodeId> {
     match node {
-        IRNode::Input { name, .. } => {
-            Ok(builder.add_input(name))
+        IRNode::Input { name, ty } => {
+            // Extract shape from type if available and concrete
+            let shape = extract_concrete_shape(ty);
+            if shape.is_empty() {
+                Ok(builder.add_input(name))
+            } else {
+                Ok(builder.add_input_with_shape(name, shape))
+            }
         }
 
         IRNode::Constant { value, .. } => {
@@ -349,8 +552,185 @@ fn convert_node(
             Err(OnnxError::InvalidModel("Phi nodes not supported in direct execution".into()))
         }
 
-        IRNode::Call { func, .. } => {
-            Err(OnnxError::InvalidModel(format!("Function call '{}' not supported in direct execution", func)))
+        IRNode::Call { func, args } => {
+            // Handle common ONNX operations that weren't lowered to IR primitives
+            handle_call_node(builder, func, args, id_map, options)
+        }
+    }
+}
+
+/// Handle IRNode::Call for common ONNX operations.
+///
+/// When the ONNX translator can't fully lower an operation (e.g., dynamic shapes),
+/// it creates a Call node. We map to available OpKind variants here.
+fn handle_call_node(
+    builder: &mut GraphBuilder,
+    func: &str,
+    args: &[IRNodeId],
+    id_map: &HashMap<IRNodeId, GraphNodeId>,
+    options: &ConversionOptions,
+) -> Result<GraphNodeId> {
+    let input_ids: Result<Vec<_>> = args.iter().map(|id| lookup_id(id_map, *id)).collect();
+    let input_ids = input_ids?;
+
+    match func {
+        // Operations with direct OpKind mappings
+        "onnx.Reshape" => {
+            if input_ids.len() >= 2 {
+                Ok(builder.add_op(OpKind::Reshape, vec![input_ids[0], input_ids[1]]))
+            } else if input_ids.len() == 1 {
+                Ok(builder.add_op(OpKind::Identity, vec![input_ids[0]]))
+            } else {
+                Err(OnnxError::InvalidModel("Reshape requires at least 1 input".into()))
+            }
+        }
+
+        "onnx.Concat" => Ok(builder.add_op(OpKind::Concat, input_ids)),
+
+        "onnx.Gather" => {
+            if input_ids.len() >= 2 {
+                Ok(builder.add_op(OpKind::Gather, input_ids))
+            } else {
+                Err(OnnxError::InvalidModel("Gather requires 2 inputs".into()))
+            }
+        }
+
+        "onnx.Slice" => {
+            if !input_ids.is_empty() {
+                Ok(builder.add_op(OpKind::Slice, input_ids))
+            } else {
+                Err(OnnxError::InvalidModel("Slice requires at least 1 input".into()))
+            }
+        }
+
+        "onnx.Resize" => {
+            if input_ids.is_empty() {
+                return Err(OnnxError::InvalidModel("Resize requires at least 1 input".into()));
+            }
+
+            tracing::debug!("Resize: {} inputs, enable_upscaling={}", input_ids.len(), options.enable_resize_upscaling);
+
+            // If upscaling is disabled, use identity scales (1x for all dims)
+            if !options.enable_resize_upscaling {
+                tracing::info!("Resize: upscaling disabled, using identity scales");
+                let identity_scales = vec![1000i64, 1000, 1000, 1000];
+                return Ok(builder.add_op_with_attr(OpKind::Resize, vec![input_ids[0]], identity_scales));
+            }
+
+            // ONNX Resize inputs: X, roi, scales, sizes
+            // Try to extract scales/sizes from constant tensor inputs
+            let mut scale_attrs: Vec<i64> = Vec::new();
+
+            // Check all inputs after the first one for scales/sizes constants
+            for (idx, &input_id) in input_ids.iter().enumerate().skip(1) {
+                if let Some((data, shape)) = builder.get_constant_tensor(input_id) {
+                    tracing::debug!("Resize: input[{}] id={} is constant data={:?} shape={:?}",
+                                   idx, input_id, data, shape);
+
+                    // Check if this looks like scales (floats around 1-4) or sizes (large integers)
+                    if !data.is_empty() && data.iter().any(|&v| v != 0.0) {
+                        // If values are small (0.5-8), treat as scales
+                        // If values are large (>8), treat as sizes
+                        let max_val = data.iter().map(|v| v.abs()).fold(0.0f32, f32::max);
+
+                        if max_val <= 8.0 {
+                            // Scales: store as 1000x fixed point
+                            scale_attrs = data.iter().map(|&v| (v * 1000.0) as i64).collect();
+                            tracing::info!("Resize: using scales {:?} from input[{}]", data, idx);
+                            break;
+                        } else {
+                            // Sizes: store as negative values
+                            scale_attrs = data.iter().map(|&v| -(v as i64)).collect();
+                            tracing::info!("Resize: using sizes {:?} from input[{}]", data, idx);
+                            break;
+                        }
+                    }
+                }
+            }
+
+            if !scale_attrs.is_empty() {
+                Ok(builder.add_op_with_attr(OpKind::Resize, vec![input_ids[0]], scale_attrs))
+            } else {
+                // Fallback: default 2x upscale (common in VAE decoders)
+                tracing::warn!("Resize: no scales/sizes found, using default 2x upscale");
+                // [1000, 1000, 2000, 2000] = 1x, 1x, 2x, 2x scale
+                let default_scales = vec![1000i64, 1000, 2000, 2000];
+                Ok(builder.add_op_with_attr(OpKind::Resize, vec![input_ids[0]], default_scales))
+            }
+        }
+
+        "onnx.Conv" => {
+            if input_ids.len() >= 2 {
+                Ok(builder.add_op(OpKind::Conv, input_ids))
+            } else {
+                Err(OnnxError::InvalidModel("Conv requires at least 2 inputs".into()))
+            }
+        }
+
+        "onnx.ConvTranspose" => {
+            if input_ids.len() >= 2 {
+                Ok(builder.add_op(OpKind::ConvTranspose, input_ids))
+            } else {
+                Err(OnnxError::InvalidModel("ConvTranspose requires at least 2 inputs".into()))
+            }
+        }
+
+        "onnx.Transpose" => {
+            if !input_ids.is_empty() {
+                Ok(builder.add_op(OpKind::Transpose, input_ids))
+            } else {
+                Err(OnnxError::InvalidModel("Transpose requires 1 input".into()))
+            }
+        }
+
+        "onnx.MatMul" => {
+            if input_ids.len() >= 2 {
+                Ok(builder.add_op(OpKind::MatMul, input_ids))
+            } else {
+                Err(OnnxError::InvalidModel("MatMul requires 2 inputs".into()))
+            }
+        }
+
+        "onnx.Softmax" => {
+            if !input_ids.is_empty() {
+                Ok(builder.add_op(OpKind::Softmax, input_ids))
+            } else {
+                Err(OnnxError::InvalidModel("Softmax requires 1 input".into()))
+            }
+        }
+
+        // Shape manipulation ops mapped to Reshape (semantically similar)
+        "onnx.Squeeze" | "onnx.Unsqueeze" | "onnx.Flatten" | "onnx.Expand" => {
+            if !input_ids.is_empty() {
+                tracing::debug!("Mapping {} to Reshape", func);
+                Ok(builder.add_op(OpKind::Reshape, input_ids))
+            } else {
+                Err(OnnxError::InvalidModel(format!("{} requires at least 1 input", func)))
+            }
+        }
+
+        // Operations that need runtime support - pass through first input
+        "onnx.Split" | "onnx.Pad" | "onnx.Tile" | "onnx.Shape" | "onnx.Size"
+        | "onnx.ConstantOfShape" | "onnx.NonZero" | "onnx.ScatterND" | "onnx.GatherND" => {
+            if !input_ids.is_empty() {
+                tracing::warn!("{} not fully supported, using pass-through", func);
+                Ok(builder.add_op(OpKind::Identity, vec![input_ids[0]]))
+            } else {
+                Err(OnnxError::InvalidModel(format!("{} requires at least 1 input", func)))
+            }
+        }
+
+        _ => {
+            // For unknown operations, use Identity as pass-through
+            if !input_ids.is_empty() {
+                tracing::warn!("Unknown call '{}', using identity pass-through", func);
+                Ok(builder.add_op(OpKind::Identity, vec![input_ids[0]]))
+            } else {
+                Err(OnnxError::InvalidModel(format!(
+                    "Function call '{}' not supported and has no inputs to pass through",
+                    func
+                )))
+            }
         }
     }
 }
@@ -426,6 +806,7 @@ fn unop_to_opkind(op: UnOp) -> OpKind {
         UnOp::Tanh => OpKind::Tanh,
         UnOp::ReLU => OpKind::ReLU,
         UnOp::GELU => OpKind::GELU,
+        UnOp::Erf => OpKind::Erf,
     }
 }
 

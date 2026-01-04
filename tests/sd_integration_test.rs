@@ -522,6 +522,8 @@ fn test_sd_config_validation() {
         partition_size: 200,       // Reasonable for 3000+ node UNet
         decompose_conv2d: true,
         decompose_pooling: true,
+        enable_resize_upscaling: true,
+        pack_weights: true,
         memory_budget: Some(4096), // 4GB for full pipeline
     };
 
@@ -534,6 +536,8 @@ fn test_sd_config_validation() {
         partition_size: 100, // Smaller partitions for memory constraints
         decompose_conv2d: true,
         decompose_pooling: true,
+        enable_resize_upscaling: true,
+        pack_weights: true,
         memory_budget: Some(2048), // 2GB limit
     };
 

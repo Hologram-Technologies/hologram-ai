@@ -71,12 +71,12 @@ pub use ops::pool::{
     translate_max_pool,
 };
 pub use ops::reduction::{
-    translate_reduce_max, translate_reduce_mean, translate_reduce_min, translate_reduce_prod,
-    translate_reduce_sum,
+    translate_argmax, translate_argmin, translate_reduce_max, translate_reduce_mean,
+    translate_reduce_min, translate_reduce_prod, translate_reduce_sum,
 };
 pub use ops::shape::{
-    translate_concat, translate_flatten, translate_reshape, translate_split, translate_squeeze,
-    translate_transpose, translate_unsqueeze,
+    translate_concat, translate_expand, translate_flatten, translate_range, translate_reshape,
+    translate_split, translate_squeeze, translate_transpose, translate_unsqueeze,
 };
 
 // Export utilities

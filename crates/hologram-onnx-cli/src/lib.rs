@@ -65,9 +65,15 @@ enum Commands {
         /// Weight threshold for external storage (bytes)
         #[arg(long, default_value = "4096")]
         weight_threshold: usize,
+
+        /// Input shapes for dynamic dimensions (e.g., "input_name=1,4,8,8")
+        #[arg(long = "input-shape", value_name = "NAME=DIMS")]
+        input_shapes: Vec<String>,
     },
 
     /// Run an ONNX pipeline from a unified config file
+    ///
+    /// Models must be pre-compiled with `hologram-onnx compile` before running.
     Run {
         /// Path to the unified config file (TOML)
         #[arg(short, long)]
@@ -80,14 +86,6 @@ enum Commands {
         /// Output directory for generated files
         #[arg(short, long)]
         output: Option<PathBuf>,
-
-        /// Force recompilation of all models
-        #[arg(long)]
-        recompile: bool,
-
-        /// Use parallel scheduler (rayon) instead of interpreter for faster execution
-        #[arg(long)]
-        parallel: bool,
     },
 
     /// Download ONNX model from Hugging Face
@@ -182,7 +180,26 @@ pub fn run() -> anyhow::Result<()> {
             partition_size,
             memory_budget,
             weight_threshold,
+            input_shapes,
         } => {
+            // Parse input shapes from "name=d1,d2,d3" format
+            let parsed_shapes: std::collections::HashMap<String, Vec<usize>> = input_shapes
+                .iter()
+                .filter_map(|s| {
+                    let parts: Vec<&str> = s.splitn(2, '=').collect();
+                    if parts.len() == 2 {
+                        let name = parts[0].to_string();
+                        let dims: Result<Vec<usize>, _> = parts[1]
+                            .split(',')
+                            .map(|d| d.trim().parse::<usize>())
+                            .collect();
+                        dims.ok().map(|d| (name, d))
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+
             // If a config file is provided, use it for compiler settings
             if let Some(config_path) = config {
                 compile_with_config(
@@ -209,6 +226,8 @@ pub fn run() -> anyhow::Result<()> {
                     weight_threshold,
                     true,
                     true,
+                    true, // enable_resize_upscaling
+                    &parsed_shapes,
                 )
             }
         }
@@ -217,9 +236,7 @@ pub fn run() -> anyhow::Result<()> {
             config,
             inputs,
             output,
-            recompile,
-            parallel,
-        } => run_command(&config, &inputs, output.as_deref(), recompile, parallel),
+        } => run_command(&config, &inputs, output.as_deref()),
 
         Commands::Download {
             model_id,
@@ -307,6 +324,8 @@ fn compile_with_config(
             weight_threshold,
             compiler_config.decompose_conv2d,
             compiler_config.decompose_pooling,
+            compiler_config.enable_resize_upscaling,
+            &std::collections::HashMap::new(), // No input shapes from config yet
         );
     }
 
@@ -350,6 +369,8 @@ fn compile_with_config(
             weight_threshold,
             compiler_config.decompose_conv2d,
             compiler_config.decompose_pooling,
+            compiler_config.enable_resize_upscaling,
+            &std::collections::HashMap::new(), // No input shapes from config yet
         )?;
     }
 
@@ -430,19 +451,16 @@ mod tests {
             "pipeline.toml",
             "-o",
             "output_dir",
-            "--recompile",
         ];
         let cli = Cli::try_parse_from(args).unwrap();
         match cli.command {
             Commands::Run {
                 config,
                 output,
-                recompile,
                 ..
             } => {
                 assert_eq!(config, PathBuf::from("pipeline.toml"));
                 assert_eq!(output, Some(PathBuf::from("output_dir")));
-                assert!(recompile);
             }
             _ => panic!("Expected Run command"),
         }
