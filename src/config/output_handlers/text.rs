@@ -7,8 +7,8 @@
 //! - **Skip special tokens**: Configurable filtering
 
 use crate::config::OutputHandlerConfig;
-use crate::error::ConfigError;
-use crate::output_handlers::{OutputHandler, ProcessedOutput, TensorData};
+use crate::config::error::ConfigError;
+use crate::config::output_handlers::{OutputHandler, ProcessedOutput, TensorData};
 use std::collections::HashMap;
 use std::fs;
 use std::path::Path;

@@ -1,10 +1,9 @@
 #![allow(missing_docs)]
-//! Serialization stubs for .holo format.
+//! Serialization types for .holo format.
 //!
-//! STUB MODULE: This module contains only type definitions and constants.
-//! The actual serialization functionality using old IR types has been removed
-//! in the simplified version. This needs to be reimplemented using the new
-//! hologram-ir types.
+//! This module contains type definitions and constants for the .holo file format.
+//! Full serialization functionality requires implementation when compilation support
+//! is added.
 
 use serde::{Deserialize, Serialize};
 use crate::{OnnxError, Result};
@@ -26,6 +25,7 @@ pub const HEADER_SIZE: usize = 40;
 pub const FLAG_EXTERNAL_WEIGHTS: u32 = 0x01;
 
 /// Flag: has compressed data
+#[allow(dead_code)] // Reserved for future use
 pub const FLAG_COMPRESSED: u32 = 0x02;
 
 // =============================================================================
@@ -146,27 +146,37 @@ pub struct PackedWeightEntry {
 }
 
 // =============================================================================
-// Stub Implementations (not functional in simplified version)
+// Serializer
 // =============================================================================
 
-/// Serializer for .holo format (STUB - not implemented)
+/// Serializer for .holo format.
+///
+/// Full serialization functionality requires implementation.
+#[allow(dead_code)]
 pub struct HoloSerializer {
     _phantom: std::marker::PhantomData<()>,
 }
 
+#[allow(dead_code)]
 impl HoloSerializer {
-    /// Create a new serializer (STUB)
+    /// Create a new serializer.
+    ///
+    /// # Arguments
+    /// * `_weight_threshold` - Threshold for externalizing weights
+    /// * `_pack_weights` - Whether to pack weights
     pub fn new(_weight_threshold: usize, _pack_weights: bool) -> Self {
         Self {
             _phantom: std::marker::PhantomData,
         }
     }
 
-    /// Serialize an operation graph (STUB - not implemented)
+    /// Serialize an operation graph to .holo format.
+    ///
+    /// # Returns
+    /// An error indicating serialization is not implemented.
     pub fn serialize(&mut self, _func: &hologram_ir::OperationGraph) -> Result<(Vec<u8>, Vec<u8>)> {
         Err(OnnxError::SerializationError(
-            "Serialization is not implemented in simplified version. \
-             This needs to be reimplemented using hologram-ir types.".to_string()
+            "Serialization requires implementation.".to_string()
         ))
     }
 }

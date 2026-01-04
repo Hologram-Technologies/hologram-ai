@@ -7,8 +7,8 @@
 //! - **Batch processing**: Process multiple pixels simultaneously
 
 use crate::config::OutputHandlerConfig;
+use crate::config::output_handlers::{ImageOutput, OutputHandler, ProcessedOutput, TensorData};
 use crate::error::ConfigError;
-use crate::output_handlers::{ImageOutput, OutputHandler, ProcessedOutput, TensorData};
 use image::{GrayImage, RgbImage, RgbaImage};
 use std::collections::HashMap;
 use std::path::Path;

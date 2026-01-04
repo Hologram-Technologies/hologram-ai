@@ -7,8 +7,8 @@
 //! - **Streaming**: WAV writing is buffered
 
 use crate::config::OutputHandlerConfig;
+use crate::config::output_handlers::{AudioOutput, OutputHandler, ProcessedOutput, TensorData};
 use crate::error::ConfigError;
-use crate::output_handlers::{AudioOutput, OutputHandler, ProcessedOutput, TensorData};
 use hound::{WavSpec, WavWriter};
 use std::collections::HashMap;
 use std::path::Path;

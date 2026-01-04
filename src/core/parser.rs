@@ -340,8 +340,8 @@ pub fn get_tensor_shape(value_info: &ValueInfoProto) -> Result<Vec<i64>> {
             match &dim.value {
                 Some(DimValue::DimValue(v)) if *v > 0 => *v,
                 _ => {
-                    // Symbolic dimension - return -1 as placeholder
-                    // The actual symbolic handling is done in shapes.rs
+                    // Symbolic dimension - return -1
+                    // Symbolic shape handling is done in shapes.rs
                     -1
                 }
             }

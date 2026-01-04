@@ -216,15 +216,15 @@ fn info_holo_command(model_path: &Path) -> Result<()> {
     println!("  Size: {} bytes", holo_bytes.len());
     println!("  Format: OperationGraph (rkyv binary)");
 
-    // Graph introspection not available in simplified version
+    // Graph introspection requires accessing the deserialized structure
     println!("\n📊 Graph:");
-    println!("  Nodes: (introspection not available in simplified version)");
+    println!("  Nodes: (introspection requires implementation)");
     println!("\n⚙️  Operations:");
-    println!("  (operation details not available in simplified version)");
+    println!("  (operation details require implementation)");
     println!("\n📥 Inputs:");
-    println!("  (input introspection not available in simplified version)");
+    println!("  (input introspection requires implementation)");
     println!("\n📤 Outputs:");
-    println!("  (output introspection not available in simplified version)");
+    println!("  (output introspection requires implementation)");
 
     // Stub to avoid unused variable warning
     let _ = graph;

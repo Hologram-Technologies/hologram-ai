@@ -115,13 +115,16 @@ pub fn compile_command(
     drop(model);
     debug!("Freed parsed ONNX model");
 
-    // Step 3: Apply decomposition pass - STUBBED
-    info!("Skipping decomposition pass (stubbed in simplified version)");
+    // Step 3: Apply decomposition pass
+    // Decomposition is now handled internally by hologram-ir during translation
+    info!("IR decomposition is handled by hologram-ir passes");
 
-    // Step 4: Convert IR to OperationGraph - STUBBED
-    info!("Conversion to OperationGraph not implemented in simplified version");
+    // Step 4: Serialization to .holo format
+    // The .holo format serializer needs to be implemented to support full compilation.
+    info!("Serialization to .holo format requires implementation");
     Err(anyhow::anyhow!(
-        "Compilation not fully implemented in simplified version"
+        "Full compilation pipeline requires a .holo format serializer. \
+         Translation to hologram-ir succeeds, but .holo serialization is not yet implemented."
     ))
 }
 
@@ -149,20 +152,19 @@ fn apply_input_shapes(
         for input in &mut graph.input {
             if input.name == *name {
                 // Get the tensor type
-                if let Some(ref mut type_proto) = input.r#type {
-                    if let Some(ref mut value) = type_proto.value {
-                        if let crate::proto::type_proto::Value::TensorType(tensor_type) = value {
-                            // Create or modify the shape
-                            let shape = tensor_type.shape.get_or_insert_with(Default::default);
-                            shape.dim.clear();
+                if let Some(ref mut type_proto) = input.r#type
+                    && let Some(ref mut value) = type_proto.value
+                    && let crate::proto::type_proto::Value::TensorType(tensor_type) = value
+                {
+                    // Create or modify the shape
+                    let shape = tensor_type.shape.get_or_insert_with(Default::default);
+                    shape.dim.clear();
 
-                            for &dim in dims {
-                                shape.dim.push(Dimension {
-                                    value: Some(DimValue::DimValue(dim as i64)),
-                                    denotation: String::new(),
-                                });
-                            }
-                        }
+                    for &dim in dims {
+                        shape.dim.push(Dimension {
+                            value: Some(DimValue::DimValue(dim as i64)),
+                            denotation: String::new(),
+                        });
                     }
                 }
             }

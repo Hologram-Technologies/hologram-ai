@@ -324,9 +324,7 @@ mod tests {
     use super::*;
     use crate::config::unified::{InputDef, InputSpec, InputType, ModelDef, OutputSpec};
 
-    // TODO: Update tests to use new CompilerConfig structure
     #[test]
-    #[ignore]
     fn test_compiler_config_to_onnx_config() {
         let compiler_config = CompilerConfig {
             weight_threshold: 8192,
@@ -336,10 +334,17 @@ mod tests {
             decompose_pooling: false,
             pack_weights: true,
             memory_budget: Some(8 * 1024),
+            enable_resize_upscaling: false,
             backend: Some("cuda".to_string()),
+            aggressive_fusion: false,
+            opt_level: 2,
+            auto_fuse: true,
+            use_fp16: false,
+            use_int8: false,
+            quantization_mode: "none".to_string(),
         };
 
-        let onnx_config: OnnxConfig = compiler_config.into();
+        let onnx_config: OnnxConfig = (&compiler_config).into();
 
         assert_eq!(onnx_config.weight_threshold, 8192);
         assert!(onnx_config.enable_partitioning);
@@ -348,10 +353,10 @@ mod tests {
         assert!(!onnx_config.decompose_pooling);
         assert!(onnx_config.pack_weights);
         assert_eq!(onnx_config.memory_budget, Some(8 * 1024));
+        assert!(!onnx_config.enable_resize_upscaling);
     }
 
     #[test]
-    #[ignore]
     fn test_onnx_config_to_compiler_config() {
         let onnx_config = OnnxConfig {
             weight_threshold: 4096,
@@ -361,6 +366,7 @@ mod tests {
             decompose_pooling: true,
             pack_weights: false,
             memory_budget: None,
+            enable_resize_upscaling: true,
         };
 
         let compiler_config: CompilerConfig = onnx_config.into();
@@ -373,6 +379,7 @@ mod tests {
         assert!(!compiler_config.pack_weights);
         assert_eq!(compiler_config.memory_budget, None);
         assert_eq!(compiler_config.backend, None);
+        assert!(compiler_config.enable_resize_upscaling);
     }
 
     #[test]
@@ -573,7 +580,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore]
     fn test_round_trip_compiler_config() {
         let original = CompilerConfig {
             weight_threshold: 8192,
@@ -583,12 +589,20 @@ mod tests {
             decompose_pooling: true,
             pack_weights: true,
             memory_budget: Some(4096),
+            enable_resize_upscaling: false,
             backend: None,
+            aggressive_fusion: true,
+            opt_level: 3,
+            auto_fuse: false,
+            use_fp16: true,
+            use_int8: false,
+            quantization_mode: "dynamic".to_string(),
         };
 
         let onnx: OnnxConfig = (&original).into();
         let back: CompilerConfig = onnx.into();
 
+        // Core fields that round-trip perfectly
         assert_eq!(original.weight_threshold, back.weight_threshold);
         assert_eq!(original.enable_partitioning, back.enable_partitioning);
         assert_eq!(original.partition_size, back.partition_size);
@@ -596,5 +610,10 @@ mod tests {
         assert_eq!(original.decompose_pooling, back.decompose_pooling);
         assert_eq!(original.pack_weights, back.pack_weights);
         assert_eq!(original.memory_budget, back.memory_budget);
+        assert_eq!(original.enable_resize_upscaling, back.enable_resize_upscaling);
+
+        // Note: Fields like backend, aggressive_fusion, opt_level, auto_fuse, use_fp16,
+        // use_int8, and quantization_mode have default values in the conversion and
+        // don't round-trip perfectly. This is expected behavior.
     }
 }

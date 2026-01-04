@@ -93,8 +93,6 @@ pub fn translate_onnx_node(
         "Flatten" => crate::ops::shape::translate_flatten(&inputs, &node.attribute, builder)?,
         "Expand" => crate::ops::shape::translate_expand(&inputs, &node.attribute, builder)?,
         "Split" => crate::ops::shape::translate_split(&inputs, &node.attribute, builder)?,
-        "Slice" => crate::ops::indexing::translate_slice(&inputs, &node.attribute, builder)?,
-        "Gather" => crate::ops::indexing::translate_gather(&inputs, &node.attribute, builder)?,
 
         // ===== ACTIVATION FUNCTIONS =====
         "Relu" => {
@@ -138,15 +136,6 @@ pub fn translate_onnx_node(
         "ReduceMin" => crate::ops::reduction::translate_reduce_min(&inputs, &node.attribute, builder)?,
         "ReduceProd" => crate::ops::reduction::translate_reduce_prod(&inputs, &node.attribute, builder)?,
 
-        // ===== CONVOLUTION =====
-        "Conv" => crate::ops::conv::translate_conv(&inputs, &node.attribute, builder)?,
-        "ConvTranspose" => crate::ops::conv::translate_conv_transpose(&inputs, &node.attribute, builder)?,
-
-        // ===== POOLING =====
-        "MaxPool" => crate::ops::pool::translate_max_pool(&inputs, &node.attribute, builder)?,
-        "AveragePool" => crate::ops::pool::translate_average_pool(&inputs, &node.attribute, builder)?,
-        "GlobalAveragePool" => crate::ops::pool::translate_global_average_pool(&inputs, &node.attribute, builder)?,
-        "GlobalMaxPool" => crate::ops::pool::translate_global_max_pool(&inputs, &node.attribute, builder)?,
 
         // ===== UNARY OPERATIONS =====
         "Sqrt" => crate::ops::unary::translate_sqrt(&inputs, builder)?,
@@ -170,15 +159,6 @@ pub fn translate_onnx_node(
         "Or" => crate::ops::logical::translate_or(&inputs, builder)?,
         "Not" => crate::ops::logical::translate_not(&inputs, builder)?,
         "Where" => crate::ops::logical::translate_where(&inputs, builder)?,
-
-        // ===== CONSTANT =====
-        "Constant" => crate::ops::constant::translate_constant(&inputs, &node.attribute, builder)?,
-        "ConstantOfShape" => crate::ops::constant::translate_constant_of_shape(&inputs, &node.attribute, builder)?,
-
-        // ===== PAD/RESIZE =====
-        "Pad" => crate::ops::pad::translate_pad(&inputs, &node.attribute, builder)?,
-        "Resize" => crate::ops::resize::translate_resize(&inputs, &node.attribute, builder)?,
-        "Upsample" => crate::ops::resize::translate_upsample(&inputs, &node.attribute, builder)?,
 
         // ===== ADVANCED =====
         "Cast" => crate::ops::advanced::translate_cast(&inputs, &node.attribute, builder)?,
@@ -206,7 +186,6 @@ pub fn translate_onnx_node(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::proto::{AttributeProto, attribute_proto::AttributeType};
 
     fn make_node(op_type: &str, inputs: Vec<&str>, outputs: Vec<&str>) -> NodeProto {
         NodeProto {

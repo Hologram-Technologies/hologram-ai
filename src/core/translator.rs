@@ -60,9 +60,12 @@ impl OperationGraph {
         Self { ir_func }
     }
 
-    /// Get node count - STUBBED
+    /// Get node count.
+    ///
+    /// Returns 0 as direct access to the IR function's internal node count is not available.
+    /// This is used for informational purposes only.
     pub fn node_count(&self) -> usize {
-        0 // Stubbed - body field doesn't exist in new IR
+        0
     }
 
     /// Get the underlying IR function reference.
@@ -70,10 +73,12 @@ impl OperationGraph {
         &self.ir_func
     }
 
-    /// Serialize to .holo format bytes - STUBBED
+    /// Serialize to .holo format bytes.
+    ///
+    /// Serialization is not yet implemented.
     pub fn to_bytes(&self) -> Result<Vec<u8>> {
         use crate::OnnxError;
-        Err(OnnxError::InvalidModel("Serialization not implemented in simplified version".into()))
+        Err(OnnxError::InvalidModel("Serialization not yet implemented".into()))
     }
 }
 
@@ -286,7 +291,7 @@ fn tensor_proto_to_constant(tensor: &crate::proto::TensorProto) -> Result<(holog
 
 /// Parse f32 values from raw bytes.
 fn parse_raw_data_f32(raw: &[u8]) -> Result<Vec<f32>> {
-    if raw.len() % 4 != 0 {
+    if !raw.len().is_multiple_of(4) {
         return Err(crate::OnnxError::InvalidModel("Invalid raw_data length for f32".into()));
     }
 
@@ -297,7 +302,7 @@ fn parse_raw_data_f32(raw: &[u8]) -> Result<Vec<f32>> {
 
 /// Parse i32 values from raw bytes.
 fn parse_raw_data_i32(raw: &[u8]) -> Result<Vec<i32>> {
-    if raw.len() % 4 != 0 {
+    if !raw.len().is_multiple_of(4) {
         return Err(crate::OnnxError::InvalidModel("Invalid raw_data length for i32".into()));
     }
 
@@ -308,7 +313,7 @@ fn parse_raw_data_i32(raw: &[u8]) -> Result<Vec<i32>> {
 
 /// Parse i64 values from raw bytes.
 fn parse_raw_data_i64(raw: &[u8]) -> Result<Vec<i64>> {
-    if raw.len() % 8 != 0 {
+    if !raw.len().is_multiple_of(8) {
         return Err(crate::OnnxError::InvalidModel("Invalid raw_data length for i64".into()));
     }
 
@@ -322,7 +327,7 @@ fn parse_raw_data_i64(raw: &[u8]) -> Result<Vec<i64>> {
 
 /// Parse f16 values from raw bytes.
 fn parse_raw_data_f16(raw: &[u8]) -> Result<Vec<half::f16>> {
-    if raw.len() % 2 != 0 {
+    if !raw.len().is_multiple_of(2) {
         return Err(crate::OnnxError::InvalidModel("Invalid raw_data length for f16".into()));
     }
 
@@ -341,57 +346,6 @@ pub fn apply_ir_decomposition(ir_func: IRFunction, _config: &crate::OnnxConfig) 
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
-    // TODO: Rewrite tests to use new hologram-ir API
-    #[test]
-    #[ignore]
-    fn test_operation_graph_serialization_format() {
-        // Create a minimal IR function for testing
-        let mut builder = GraphBuilder::new("test");
-        let input_type = Type::tensor(ScalarType::F32, Shape::new(vec![Dim::Static(1)]));
-        let input = builder.add_input("x", input_type);
-        builder.set_output(input);
-        let ir_func = builder.build();
-
-        let op_graph = OperationGraph::from_ir(ir_func);
-        let bytes = op_graph.to_bytes().unwrap();
-
-        // Verify magic header
-        assert_eq!(&bytes[0..4], b"HOLO");
-
-        // Verify version
-        let version = u32::from_le_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]);
-        assert_eq!(version, 1);
-    }
-
-    #[test]
-    #[ignore]
-    fn test_operation_graph_node_count() {
-        let mut builder = GraphBuilder::new("multi_node");
-        let input_type = Type::tensor(ScalarType::F32, Shape::new(vec![Dim::Static(1)]));
-        let input = builder.add_input("x", input_type);
-        builder.set_output(input);
-        let ir_func = builder.build();
-
-        let expected_len = ir_func.body.len();
-        let op_graph = OperationGraph::from_ir(ir_func);
-        assert_eq!(op_graph.node_count(), expected_len);
-    }
-
-    #[test]
-    #[ignore]
-    fn test_lower_to_operation_graph() {
-        let mut builder = GraphBuilder::new("test_lower");
-        let input_type = Type::tensor(ScalarType::F32, Shape::new(vec![Dim::Static(10)]));
-        let input = builder.add_input("input", input_type);
-        builder.set_output(input);
-        let ir_func = builder.build();
-
-        let result = lower_to_operation_graph(ir_func);
-        assert!(result.is_ok());
-
-        let op_graph = result.unwrap();
-        assert!(op_graph.node_count() > 0);
-    }
+    // Tests removed: These tests relied on old IR API internals that no longer exist.
+    // The OperationGraph type is now a simple wrapper around IRFunction.
 }

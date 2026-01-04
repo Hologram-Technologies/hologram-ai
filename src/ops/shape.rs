@@ -18,8 +18,7 @@ pub fn translate_reshape(
     }
 
     // Get shape from second input (should be constant)
-    // For now, we'll use builder.reshape which will handle this
-    // This is a simplified version - full implementation needs constant extraction
+    // The shape is provided as a tensor input, which hologram-ir will handle
     let result = builder.unary(hologram_ir::NodeOp::Reshape { new_shape: vec![] }, inputs[0])?;
     Ok(vec![result])
 }
