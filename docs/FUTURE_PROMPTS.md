@@ -1,23 +1,17 @@
-The `hologram` and it's `hologram-backend` dependency expose an ISA, are we using that with the onnx graph? We have a lot of optimizations there that we want to take advantage of.
+Please make sure that the intent of this library crate implements all the features as described in @docs/plans/onnx-integration.md 
 
-We also need to make sure we compile not just the graph, but the weights as well that can be used at runtime. We need to make sure we don't use too much memory in this process also so we don't hit an OOM error.
+The high-level goal is to be able to take an onnx graph and compile it to a `.holo` file (`OperationGraph`). We want to be able to run text-to-text and text-to-image onnx graphs (arbitrary onnx graphs) utilizing the `hologram` architecture.
 
-We also want to provide an output trait as different onnx graphs have different outputs. For instance there are ai models that are text->text, text->image, text->audio, etc. etc. We want to support all of those output shapes.
+We want to be able to accept arbitrary data size and shape (symbolic shapes). 
 
-Ideally we can configure all the runtime information in a config file. In a previous iteration, we had this working. I've added a doc that we used in the previous iteration of this project (don't need to create the same files, etc.) so use it to inform what we're doing with the configuration file. (@docs/config-output.md). I also added the @docs/output-handlers.md documenting the output handlers.
+We want to be able to serialize the weights and still keep all the compilation using lower memory and being able to be referenced at runtime efficiently.
 
-For loops, we have done some serious work in the `hologram` crate to take those loops from O^5-O^8 to O(1) (nested loops translated into a single operation/set of operations). 
+Since we're refactoring this project from the ground-up, I want you to make sure we're cleaned up and simplified as much as possible.
 
-We have fusion implemented in `hologram`, can we take advantage of that work in this crate?
+I also want you to ensure we have as close to 100% of test coverage as well as integration tests.
 
-We need to support symbolic shapes as we want to make sure we support any size and shape of input. This is a CRITICAL design. We fail if this doesn't work.
-
-We have a @docs/graph-partitioning.md doc that describes how we can nest large graphs into multiple nodes.
-
-For the `hologram-onnx-cli` can we have a download model as well?
+Implement ALL stubbed code, don't leave any TODOS or placeholders. Rewrite all the ignored tests or remove them completely if they don't matter anymore, are outdated, or don't test anything relevant anymore.
 
 ---
 
-We updated the `hologram` crate with a LOT of new isa operations that cover some of the numpy work you've added here. Can you rexamine the `hologram` library and rexamine what we're doing in this library that can utilize that work.
-
-We've made more ISA and `hologram` implementations that might reduce the work our ops have to do.
+Pleae add benchmarks that show how fast and how much we can run 

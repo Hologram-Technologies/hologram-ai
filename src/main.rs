@@ -1,3 +1,3 @@
 fn main() -> anyhow::Result<()> {
-    hologram_onnx_cli::run()
+    hologram_onnx::cli::run()
 }
