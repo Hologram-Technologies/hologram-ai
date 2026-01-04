@@ -1,35 +1,39 @@
 #![allow(missing_docs)]
-//! ONNX operations - STUBBED VERSION
+//! ONNX pooling operations.
 
 use hologram_ir::{GraphBuilder as IRBuilder, NodeIndex as NodeId};
-use crate::core::{OnnxError, Result, SymbolicShape};
+use crate::core::{OnnxError, Result};
 use crate::proto::AttributeProto;
-use std::collections::HashMap;
 
 
 pub fn translate_average_pool(
     _inputs: &[NodeId],
     _attrs: &[AttributeProto],
-    _shapes: &HashMap<String, SymbolicShape>,
     _builder: &mut IRBuilder,
-) -> Result<NodeId> {
-    Err(OnnxError::InvalidModel("Average Pool not implemented in simplified version".into()))
+) -> Result<Vec<NodeId>> {
+    Err(OnnxError::unsupported_op("AveragePool", 11))
 }
 
 pub fn translate_global_average_pool(
     _inputs: &[NodeId],
     _attrs: &[AttributeProto],
-    _shapes: &HashMap<String, SymbolicShape>,
     _builder: &mut IRBuilder,
-) -> Result<NodeId> {
-    Err(OnnxError::InvalidModel("Global Average Pool not implemented in simplified version".into()))
+) -> Result<Vec<NodeId>> {
+    Err(OnnxError::unsupported_op("GlobalAveragePool", 11))
+}
+
+pub fn translate_global_max_pool(
+    _inputs: &[NodeId],
+    _attrs: &[AttributeProto],
+    _builder: &mut IRBuilder,
+) -> Result<Vec<NodeId>> {
+    Err(OnnxError::unsupported_op("GlobalMaxPool", 11))
 }
 
 pub fn translate_max_pool(
     _inputs: &[NodeId],
     _attrs: &[AttributeProto],
-    _shapes: &HashMap<String, SymbolicShape>,
     _builder: &mut IRBuilder,
-) -> Result<NodeId> {
-    Err(OnnxError::InvalidModel("Max Pool not implemented in simplified version".into()))
+) -> Result<Vec<NodeId>> {
+    Err(OnnxError::unsupported_op("MaxPool", 11))
 }

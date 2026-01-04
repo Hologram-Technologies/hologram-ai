@@ -111,6 +111,10 @@ pub enum OnnxError {
     #[error("Hologram compiler error: {0}")]
     HologramError(String),
 
+    /// Hologram IR error.
+    #[error("Hologram IR error: {0}")]
+    IrError(#[from] hologram_ir::IrError),
+
     /// Internal error (should not happen).
     #[error("Internal error: {0}")]
     InternalError(String),

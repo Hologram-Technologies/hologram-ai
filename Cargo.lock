@@ -1076,6 +1076,7 @@ dependencies = [
  "rayon",
  "reqwest",
  "rkyv",
+ "rustc-hash",
  "serde",
  "serde_json",
  "tempfile",

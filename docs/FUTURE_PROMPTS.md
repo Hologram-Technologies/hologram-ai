@@ -14,4 +14,5 @@ Implement ALL stubbed code, don't leave any TODOS or placeholders. Rewrite all t
 
 ---
 
-Pleae add benchmarks that show how fast and how much we can run 
+Pleae add benchmarks that show how fast and how much we can run successfully.
+

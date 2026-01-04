@@ -7,9 +7,7 @@
 //! - Converts IR to OperationGraph and compiles to parallel schedule
 //! - Serializes to .holo format compatible with hologram runtime
 
-use crate::core::{
-    OnnxConfig, extract_opset_version, parse_model, validate_model,
-};
+use crate::core::{OnnxConfig, extract_opset_version, parse_model, validate_model};
 use anyhow::{Context, Result};
 use std::collections::HashMap;
 use std::fs;

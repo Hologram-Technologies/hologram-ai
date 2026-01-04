@@ -1,89 +1,199 @@
-#![allow(missing_docs)]
-//! ONNX operations - STUBBED VERSION
+//! ONNX logical operations.
+//!
+//! Note: hologram-ir doesn't have built-in comparison/logical ops.
+//! We use Custom operations to represent these for now.
 
-use hologram_ir::{GraphBuilder as IRBuilder, NodeIndex as NodeId};
-use crate::core::{OnnxError, Result, SymbolicShape};
-use crate::proto::AttributeProto;
-use std::collections::HashMap;
+use hologram_ir::{GraphBuilder, NodeIndex};
+use crate::core::{OnnxError, Result};
+use rustc_hash::FxHashMap;
 
-
-pub fn translate_and(
-    _inputs: &[NodeId],
-    _attrs: &[AttributeProto],
-    _shapes: &HashMap<String, SymbolicShape>,
-    _builder: &mut IRBuilder,
-) -> Result<NodeId> {
-    Err(OnnxError::InvalidModel("And not implemented in simplified version".into()))
-}
-
+/// Translate ONNX Equal to IR using Custom operation.
 pub fn translate_equal(
-    _inputs: &[NodeId],
-    _attrs: &[AttributeProto],
-    _shapes: &HashMap<String, SymbolicShape>,
-    _builder: &mut IRBuilder,
-) -> Result<NodeId> {
-    Err(OnnxError::InvalidModel("Equal not implemented in simplified version".into()))
+    inputs: &[NodeIndex],
+    builder: &mut GraphBuilder,
+) -> Result<Vec<NodeIndex>> {
+    if inputs.len() < 2 {
+        return Err(OnnxError::InvalidModel("Equal requires 2 inputs".into()));
+    }
+
+    // Get input node for shape/dtype info
+    let shape = {
+        let input_node = builder.graph().node(inputs[0])
+            .ok_or_else(|| OnnxError::InvalidModel("Invalid input node".into()))?;
+        input_node.shape.clone()
+    };
+
+    // Use Custom operation for Equal
+    let idx = builder.graph_mut().add_op(
+        hologram_ir::NodeOp::Custom {
+            name: "Equal".to_string(),
+            attrs: FxHashMap::default(),
+        },
+        shape,
+        hologram_ir::DType::Bool,
+    );
+    builder.graph_mut().connect(inputs[0], idx);
+    builder.graph_mut().connect(inputs[1], idx);
+
+    Ok(vec![idx])
 }
 
+/// Translate ONNX Greater to IR using Custom operation.
 pub fn translate_greater(
-    _inputs: &[NodeId],
-    _attrs: &[AttributeProto],
-    _shapes: &HashMap<String, SymbolicShape>,
-    _builder: &mut IRBuilder,
-) -> Result<NodeId> {
-    Err(OnnxError::InvalidModel("Greater not implemented in simplified version".into()))
+    inputs: &[NodeIndex],
+    builder: &mut GraphBuilder,
+) -> Result<Vec<NodeIndex>> {
+    if inputs.len() < 2 {
+        return Err(OnnxError::InvalidModel("Greater requires 2 inputs".into()));
+    }
+
+    let shape = {
+        let input_node = builder.graph().node(inputs[0])
+            .ok_or_else(|| OnnxError::InvalidModel("Invalid input node".into()))?;
+        input_node.shape.clone()
+    };
+
+    let idx = builder.graph_mut().add_op(
+        hologram_ir::NodeOp::Custom {
+            name: "Greater".to_string(),
+            attrs: FxHashMap::default(),
+        },
+        shape,
+        hologram_ir::DType::Bool,
+    );
+    builder.graph_mut().connect(inputs[0], idx);
+    builder.graph_mut().connect(inputs[1], idx);
+
+    Ok(vec![idx])
 }
 
-pub fn translate_greater_or_equal(
-    _inputs: &[NodeId],
-    _attrs: &[AttributeProto],
-    _shapes: &HashMap<String, SymbolicShape>,
-    _builder: &mut IRBuilder,
-) -> Result<NodeId> {
-    Err(OnnxError::InvalidModel("Greater Or Equal not implemented in simplified version".into()))
-}
-
+/// Translate ONNX Less to IR using Custom operation.
 pub fn translate_less(
-    _inputs: &[NodeId],
-    _attrs: &[AttributeProto],
-    _shapes: &HashMap<String, SymbolicShape>,
-    _builder: &mut IRBuilder,
-) -> Result<NodeId> {
-    Err(OnnxError::InvalidModel("Less not implemented in simplified version".into()))
+    inputs: &[NodeIndex],
+    builder: &mut GraphBuilder,
+) -> Result<Vec<NodeIndex>> {
+    if inputs.len() < 2 {
+        return Err(OnnxError::InvalidModel("Less requires 2 inputs".into()));
+    }
+
+    let shape = {
+        let input_node = builder.graph().node(inputs[0])
+            .ok_or_else(|| OnnxError::InvalidModel("Invalid input node".into()))?;
+        input_node.shape.clone()
+    };
+
+    let idx = builder.graph_mut().add_op(
+        hologram_ir::NodeOp::Custom {
+            name: "Less".to_string(),
+            attrs: FxHashMap::default(),
+        },
+        shape,
+        hologram_ir::DType::Bool,
+    );
+    builder.graph_mut().connect(inputs[0], idx);
+    builder.graph_mut().connect(inputs[1], idx);
+
+    Ok(vec![idx])
 }
 
-pub fn translate_less_or_equal(
-    _inputs: &[NodeId],
-    _attrs: &[AttributeProto],
-    _shapes: &HashMap<String, SymbolicShape>,
-    _builder: &mut IRBuilder,
-) -> Result<NodeId> {
-    Err(OnnxError::InvalidModel("Less Or Equal not implemented in simplified version".into()))
+/// Translate ONNX And to IR using Custom operation.
+pub fn translate_and(
+    inputs: &[NodeIndex],
+    builder: &mut GraphBuilder,
+) -> Result<Vec<NodeIndex>> {
+    if inputs.len() < 2 {
+        return Err(OnnxError::InvalidModel("And requires 2 inputs".into()));
+    }
+
+    let shape = {
+        let input_node = builder.graph().node(inputs[0])
+            .ok_or_else(|| OnnxError::InvalidModel("Invalid input node".into()))?;
+        input_node.shape.clone()
+    };
+
+    let idx = builder.graph_mut().add_op(
+        hologram_ir::NodeOp::Custom {
+            name: "And".to_string(),
+            attrs: FxHashMap::default(),
+        },
+        shape,
+        hologram_ir::DType::Bool,
+    );
+    builder.graph_mut().connect(inputs[0], idx);
+    builder.graph_mut().connect(inputs[1], idx);
+
+    Ok(vec![idx])
 }
 
-pub fn translate_not(
-    _inputs: &[NodeId],
-    _attrs: &[AttributeProto],
-    _shapes: &HashMap<String, SymbolicShape>,
-    _builder: &mut IRBuilder,
-) -> Result<NodeId> {
-    Err(OnnxError::InvalidModel("Not not implemented in simplified version".into()))
-}
-
+/// Translate ONNX Or to IR using Custom operation.
 pub fn translate_or(
-    _inputs: &[NodeId],
-    _attrs: &[AttributeProto],
-    _shapes: &HashMap<String, SymbolicShape>,
-    _builder: &mut IRBuilder,
-) -> Result<NodeId> {
-    Err(OnnxError::InvalidModel("Or not implemented in simplified version".into()))
+    inputs: &[NodeIndex],
+    builder: &mut GraphBuilder,
+) -> Result<Vec<NodeIndex>> {
+    if inputs.len() < 2 {
+        return Err(OnnxError::InvalidModel("Or requires 2 inputs".into()));
+    }
+
+    let shape = {
+        let input_node = builder.graph().node(inputs[0])
+            .ok_or_else(|| OnnxError::InvalidModel("Invalid input node".into()))?;
+        input_node.shape.clone()
+    };
+
+    let idx = builder.graph_mut().add_op(
+        hologram_ir::NodeOp::Custom {
+            name: "Or".to_string(),
+            attrs: FxHashMap::default(),
+        },
+        shape,
+        hologram_ir::DType::Bool,
+    );
+    builder.graph_mut().connect(inputs[0], idx);
+    builder.graph_mut().connect(inputs[1], idx);
+
+    Ok(vec![idx])
 }
 
+/// Translate ONNX Not to IR using Custom operation.
+pub fn translate_not(
+    inputs: &[NodeIndex],
+    builder: &mut GraphBuilder,
+) -> Result<Vec<NodeIndex>> {
+    if inputs.is_empty() {
+        return Err(OnnxError::InvalidModel("Not requires 1 input".into()));
+    }
+
+    let shape = {
+        let input_node = builder.graph().node(inputs[0])
+            .ok_or_else(|| OnnxError::InvalidModel("Invalid input node".into()))?;
+        input_node.shape.clone()
+    };
+
+    let idx = builder.graph_mut().add_op(
+        hologram_ir::NodeOp::Custom {
+            name: "Not".to_string(),
+            attrs: FxHashMap::default(),
+        },
+        shape,
+        hologram_ir::DType::Bool,
+    );
+    builder.graph_mut().connect(inputs[0], idx);
+
+    Ok(vec![idx])
+}
+
+/// Translate ONNX Where to IR.
+///
+/// Where(condition, x, y) = condition ? x : y
 pub fn translate_where(
-    _inputs: &[NodeId],
-    _attrs: &[AttributeProto],
-    _shapes: &HashMap<String, SymbolicShape>,
-    _builder: &mut IRBuilder,
-) -> Result<NodeId> {
-    Err(OnnxError::InvalidModel("Where not implemented in simplified version".into()))
+    inputs: &[NodeIndex],
+    builder: &mut GraphBuilder,
+) -> Result<Vec<NodeIndex>> {
+    if inputs.len() < 3 {
+        return Err(OnnxError::InvalidModel("Where requires 3 inputs (condition, x, y)".into()));
+    }
+
+    // Where: condition ? x : y
+    let result = builder.where_select(inputs[0], inputs[1], inputs[2])?;
+    Ok(vec![result])
 }

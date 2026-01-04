@@ -343,14 +343,6 @@ fn execute_stages(
                     "Model execution is not implemented in the simplified version. \
                      Parallel execution runtime needs to be reimplemented."
                 ));
-
-                // Stage completion (timing disabled in stub)
-                info!(
-                    "{}✓ Stage {}: {} (not executed - stub)",
-                    indent,
-                    idx,
-                    model_stage.model
-                );
             }
 
             StageDef::Builtin(builtin_stage) => {

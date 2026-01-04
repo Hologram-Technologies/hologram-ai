@@ -1,71 +1,95 @@
-#![allow(missing_docs)]
-//! ONNX operations - STUBBED VERSION
+//! ONNX reduction operations.
 
-use hologram_ir::{GraphBuilder as IRBuilder, NodeIndex as NodeId};
-use crate::core::{OnnxError, Result, SymbolicShape};
+use hologram_ir::{GraphBuilder, NodeIndex};
+use crate::core::{OnnxError, Result};
 use crate::proto::AttributeProto;
-use std::collections::HashMap;
+use crate::ops::utils::{parse_attr_int, parse_attr_ints};
 
-
-pub fn translate_argmax(
-    _inputs: &[NodeId],
-    _attrs: &[AttributeProto],
-    _shapes: &HashMap<String, SymbolicShape>,
-    _builder: &mut IRBuilder,
-) -> Result<NodeId> {
-    Err(OnnxError::InvalidModel("Argmax not implemented in simplified version".into()))
-}
-
-pub fn translate_argmin(
-    _inputs: &[NodeId],
-    _attrs: &[AttributeProto],
-    _shapes: &HashMap<String, SymbolicShape>,
-    _builder: &mut IRBuilder,
-) -> Result<NodeId> {
-    Err(OnnxError::InvalidModel("Argmin not implemented in simplified version".into()))
-}
-
-pub fn translate_reduce_max(
-    _inputs: &[NodeId],
-    _attrs: &[AttributeProto],
-    _shapes: &HashMap<String, SymbolicShape>,
-    _builder: &mut IRBuilder,
-) -> Result<NodeId> {
-    Err(OnnxError::InvalidModel("Reduce Max not implemented in simplified version".into()))
-}
-
+/// Translate ONNX ReduceMean to IR.
 pub fn translate_reduce_mean(
-    _inputs: &[NodeId],
-    _attrs: &[AttributeProto],
-    _shapes: &HashMap<String, SymbolicShape>,
-    _builder: &mut IRBuilder,
-) -> Result<NodeId> {
-    Err(OnnxError::InvalidModel("Reduce Mean not implemented in simplified version".into()))
+    inputs: &[NodeIndex],
+    attrs: &[AttributeProto],
+    builder: &mut GraphBuilder,
+) -> Result<Vec<NodeIndex>> {
+    if inputs.is_empty() {
+        return Err(OnnxError::InvalidModel("ReduceMean requires 1 input".into()));
+    }
+
+    let axes = parse_attr_ints(attrs, "axes", vec![])?;
+    let keepdims = parse_attr_int(attrs, "keepdims", 1)? != 0;
+
+    let axes_i32: Vec<i32> = axes.iter().map(|&x| x as i32).collect();
+    let result = builder.unary(hologram_ir::NodeOp::ReduceMean { axes: axes_i32, keepdims }, inputs[0])?;
+
+    Ok(vec![result])
 }
 
-pub fn translate_reduce_min(
-    _inputs: &[NodeId],
-    _attrs: &[AttributeProto],
-    _shapes: &HashMap<String, SymbolicShape>,
-    _builder: &mut IRBuilder,
-) -> Result<NodeId> {
-    Err(OnnxError::InvalidModel("Reduce Min not implemented in simplified version".into()))
-}
-
-pub fn translate_reduce_prod(
-    _inputs: &[NodeId],
-    _attrs: &[AttributeProto],
-    _shapes: &HashMap<String, SymbolicShape>,
-    _builder: &mut IRBuilder,
-) -> Result<NodeId> {
-    Err(OnnxError::InvalidModel("Reduce Prod not implemented in simplified version".into()))
-}
-
+/// Translate ONNX ReduceSum to IR.
 pub fn translate_reduce_sum(
-    _inputs: &[NodeId],
+    inputs: &[NodeIndex],
+    attrs: &[AttributeProto],
+    builder: &mut GraphBuilder,
+) -> Result<Vec<NodeIndex>> {
+    if inputs.is_empty() {
+        return Err(OnnxError::InvalidModel("ReduceSum requires 1 input".into()));
+    }
+
+    let axes = parse_attr_ints(attrs, "axes", vec![])?;
+    let keepdims = parse_attr_int(attrs, "keepdims", 1)? != 0;
+
+    let axes_i32: Vec<i32> = axes.iter().map(|&x| x as i32).collect();
+    let result = builder.unary(hologram_ir::NodeOp::ReduceSum { axes: axes_i32, keepdims }, inputs[0])?;
+
+    Ok(vec![result])
+}
+
+/// Translate ONNX ReduceMax to IR.
+pub fn translate_reduce_max(
+    inputs: &[NodeIndex],
+    attrs: &[AttributeProto],
+    builder: &mut GraphBuilder,
+) -> Result<Vec<NodeIndex>> {
+    if inputs.is_empty() {
+        return Err(OnnxError::InvalidModel("ReduceMax requires 1 input".into()));
+    }
+
+    let axes = parse_attr_ints(attrs, "axes", vec![])?;
+    let keepdims = parse_attr_int(attrs, "keepdims", 1)? != 0;
+
+    let axes_i32: Vec<i32> = axes.iter().map(|&x| x as i32).collect();
+    let result = builder.unary(hologram_ir::NodeOp::ReduceMax { axes: axes_i32, keepdims }, inputs[0])?;
+
+    Ok(vec![result])
+}
+
+/// Translate ONNX ReduceMin to IR.
+pub fn translate_reduce_min(
+    inputs: &[NodeIndex],
+    attrs: &[AttributeProto],
+    builder: &mut GraphBuilder,
+) -> Result<Vec<NodeIndex>> {
+    if inputs.is_empty() {
+        return Err(OnnxError::InvalidModel("ReduceMin requires 1 input".into()));
+    }
+
+    let axes = parse_attr_ints(attrs, "axes", vec![])?;
+    let keepdims = parse_attr_int(attrs, "keepdims", 1)? != 0;
+
+    let axes_i32: Vec<i32> = axes.iter().map(|&x| x as i32).collect();
+    let result = builder.unary(hologram_ir::NodeOp::ReduceMin { axes: axes_i32, keepdims }, inputs[0])?;
+
+    Ok(vec![result])
+}
+
+/// Translate ONNX ReduceProd to IR.
+/// Note: ReduceProd is not supported in hologram-ir.
+pub fn translate_reduce_prod(
+    _inputs: &[NodeIndex],
     _attrs: &[AttributeProto],
-    _shapes: &HashMap<String, SymbolicShape>,
-    _builder: &mut IRBuilder,
-) -> Result<NodeId> {
-    Err(OnnxError::InvalidModel("Reduce Sum not implemented in simplified version".into()))
+    _builder: &mut GraphBuilder,
+) -> Result<Vec<NodeIndex>> {
+    Err(OnnxError::UnsupportedOp {
+        op_type: "ReduceProd".into(),
+        opset_version: 13,
+    })
 }

@@ -3,11 +3,12 @@ FROM auser/hologram-devcontainer:latest as dev
 # Set environment variables for the container
 ENV RUST_BACKTRACE=1
 
-# Install mold linker for faster linking (up to 5-10x faster than default ld)
-# and sccache for caching compiled crates across clean builds
+# Install mold linker for faster linking (up to 5-10x faster than default ld),
+# sccache for caching compiled crates across clean builds, and just command runner
 USER root
 ARG MOLD_VERSION=2.34.1
 ARG SCCACHE_VERSION=0.12.0
+ARG JUST_VERSION=1.38.0
 RUN ARCH=$(uname -m) && \
     # Install mold
     if [ "$ARCH" = "x86_64" ]; then MOLD_ARCH="x86_64"; else MOLD_ARCH="aarch64"; fi && \
@@ -19,7 +20,11 @@ RUN ARCH=$(uname -m) && \
     # Install sccache
     curl -sL "https://github.com/mozilla/sccache/releases/download/v${SCCACHE_VERSION}/sccache-v${SCCACHE_VERSION}-${ARCH}-unknown-linux-musl.tar.gz" | tar xz -C /tmp && \
     mv /tmp/sccache-v${SCCACHE_VERSION}-${ARCH}-unknown-linux-musl/sccache /usr/local/bin/ && \
-    rm -rf /tmp/sccache-v${SCCACHE_VERSION}-${ARCH}-unknown-linux-musl
+    rm -rf /tmp/sccache-v${SCCACHE_VERSION}-${ARCH}-unknown-linux-musl && \
+    # Install just
+    curl -sL "https://github.com/casey/just/releases/download/${JUST_VERSION}/just-${JUST_VERSION}-${ARCH}-unknown-linux-musl.tar.gz" | tar xz -C /tmp && \
+    mv /tmp/just /usr/local/bin/ && \
+    rm -f /tmp/just.1 /tmp/CHANGELOG.md /tmp/LICENSE /tmp/README.md
 
 # Install GitHub CLI (gh) - https://github.com/cli/cli/blob/trunk/docs/install_linux.md#debian
 RUN mkdir -p -m 755 /etc/apt/keyrings && \

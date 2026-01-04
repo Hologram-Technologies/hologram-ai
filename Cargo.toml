@@ -36,6 +36,7 @@ thiserror = "2.0"
 anyhow = "1.0"
 bytemuck = { version = "1.14", features = ["derive"] }
 ahash = "0.8"
+rustc-hash = "2.0"
 tracing = "0.1"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"

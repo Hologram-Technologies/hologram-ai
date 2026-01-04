@@ -1,53 +1,35 @@
-#![allow(missing_docs)]
-//! ONNX operations - STUBBED VERSION
+//! ONNX advanced operations.
 
-use hologram_ir::{GraphBuilder as IRBuilder, NodeIndex as NodeId};
-use crate::core::{OnnxError, Result, SymbolicShape};
+use hologram_ir::{GraphBuilder, NodeIndex, DType};
+use crate::core::{OnnxError, Result};
 use crate::proto::AttributeProto;
-use std::collections::HashMap;
+use crate::ops::utils::parse_attr_int;
 
+/// Translate ONNX Cast to IR.
+pub fn translate_cast(
+    inputs: &[NodeIndex],
+    attrs: &[AttributeProto],
+    builder: &mut GraphBuilder,
+) -> Result<Vec<NodeIndex>> {
+    if inputs.is_empty() {
+        return Err(OnnxError::InvalidModel("Cast requires 1 input".into()));
+    }
 
-pub fn translate_attention(
-    _inputs: &[NodeId],
-    _attrs: &[AttributeProto],
-    _shapes: &HashMap<String, SymbolicShape>,
-    _builder: &mut IRBuilder,
-) -> Result<NodeId> {
-    Err(OnnxError::InvalidModel("Attention not implemented in simplified version".into()))
-}
+    let to_type = parse_attr_int(attrs, "to", 1)?;
 
-pub fn translate_gru(
-    _inputs: &[NodeId],
-    _attrs: &[AttributeProto],
-    _shapes: &HashMap<String, SymbolicShape>,
-    _builder: &mut IRBuilder,
-) -> Result<NodeId> {
-    Err(OnnxError::InvalidModel("Gru not implemented in simplified version".into()))
-}
+    // Convert ONNX type to DType
+    let dtype = match to_type {
+        1 => DType::F32,
+        2 => DType::U8,
+        3 => DType::I8,
+        6 => DType::I32,
+        7 => DType::I64,
+        10 => DType::F16,
+        11 => DType::F64,
+        _ => DType::F32,
+    };
 
-pub fn translate_lstm(
-    _inputs: &[NodeId],
-    _attrs: &[AttributeProto],
-    _shapes: &HashMap<String, SymbolicShape>,
-    _builder: &mut IRBuilder,
-) -> Result<NodeId> {
-    Err(OnnxError::InvalidModel("Lstm not implemented in simplified version".into()))
-}
+    let result = builder.cast(inputs[0], dtype)?;
 
-pub fn translate_multi_head_attention(
-    _inputs: &[NodeId],
-    _attrs: &[AttributeProto],
-    _shapes: &HashMap<String, SymbolicShape>,
-    _builder: &mut IRBuilder,
-) -> Result<NodeId> {
-    Err(OnnxError::InvalidModel("Multi Head Attention not implemented in simplified version".into()))
-}
-
-pub fn translate_rnn(
-    _inputs: &[NodeId],
-    _attrs: &[AttributeProto],
-    _shapes: &HashMap<String, SymbolicShape>,
-    _builder: &mut IRBuilder,
-) -> Result<NodeId> {
-    Err(OnnxError::InvalidModel("Rnn not implemented in simplified version".into()))
+    Ok(vec![result])
 }
