@@ -7,7 +7,7 @@ use hologram_onnx_core::{
     OnnxConfig, OnnxError, SymbolicShape, WeightData, extract_opset_version, parse_model,
     validate_model,
 };
-use hologram_onnx_spec::{
+use hologram_onnx::proto::{
     AttributeProto, GraphProto, ModelProto, NodeProto, TensorProto, TensorShapeProto, TypeProto,
     ValueInfoProto,
 };
@@ -16,13 +16,13 @@ use tempfile::NamedTempFile;
 
 /// Helper to create a ValueInfoProto with a tensor type.
 fn make_value_info(name: &str, dims: &[i64]) -> ValueInfoProto {
-    use hologram_onnx_spec::tensor_shape_proto::Dimension;
-    use hologram_onnx_spec::type_proto::Value;
+    use hologram_onnx::proto::tensor_shape_proto::Dimension;
+    use hologram_onnx::proto::type_proto::Value;
 
     let shape_dims: Vec<Dimension> = dims
         .iter()
         .map(|&d| Dimension {
-            value: Some(hologram_onnx_spec::tensor_shape_proto::dimension::Value::DimValue(d)),
+            value: Some(hologram_onnx::proto::tensor_shape_proto::dimension::Value::DimValue(d)),
             ..Default::default()
         })
         .collect();
@@ -30,7 +30,7 @@ fn make_value_info(name: &str, dims: &[i64]) -> ValueInfoProto {
     ValueInfoProto {
         name: name.to_string(),
         r#type: Some(TypeProto {
-            value: Some(Value::TensorType(hologram_onnx_spec::type_proto::Tensor {
+            value: Some(Value::TensorType(hologram_onnx::proto::type_proto::Tensor {
                 elem_type: 1, // FLOAT
                 shape: Some(TensorShapeProto { dim: shape_dims }),
             })),
@@ -46,15 +46,15 @@ fn make_symbolic_value_info(
     symbolic_dim_name: &str,
     concrete_dims: &[i64],
 ) -> ValueInfoProto {
-    use hologram_onnx_spec::tensor_shape_proto::Dimension;
-    use hologram_onnx_spec::type_proto::Value;
+    use hologram_onnx::proto::tensor_shape_proto::Dimension;
+    use hologram_onnx::proto::type_proto::Value;
 
     let mut shape_dims: Vec<Dimension> = Vec::new();
 
     // First dimension is symbolic (e.g., batch size)
     shape_dims.push(Dimension {
         value: Some(
-            hologram_onnx_spec::tensor_shape_proto::dimension::Value::DimParam(
+            hologram_onnx::proto::tensor_shape_proto::dimension::Value::DimParam(
                 symbolic_dim_name.to_string(),
             ),
         ),
@@ -64,7 +64,7 @@ fn make_symbolic_value_info(
     // Rest are concrete
     for &d in concrete_dims {
         shape_dims.push(Dimension {
-            value: Some(hologram_onnx_spec::tensor_shape_proto::dimension::Value::DimValue(d)),
+            value: Some(hologram_onnx::proto::tensor_shape_proto::dimension::Value::DimValue(d)),
             ..Default::default()
         });
     }
@@ -72,7 +72,7 @@ fn make_symbolic_value_info(
     ValueInfoProto {
         name: name.to_string(),
         r#type: Some(TypeProto {
-            value: Some(Value::TensorType(hologram_onnx_spec::type_proto::Tensor {
+            value: Some(Value::TensorType(hologram_onnx::proto::type_proto::Tensor {
                 elem_type: 1, // FLOAT
                 shape: Some(TensorShapeProto { dim: shape_dims }),
             })),
@@ -95,7 +95,7 @@ fn make_initializer(name: &str, dims: &[i64], data: Vec<f32>) -> TensorProto {
 
 /// Helper to create an AttributeProto with an integer value.
 fn make_int_attr(name: &str, value: i64) -> AttributeProto {
-    use hologram_onnx_spec::attribute_proto::AttributeType;
+    use hologram_onnx::proto::attribute_proto::AttributeType;
     AttributeProto {
         name: name.to_string(),
         i: value,
@@ -107,7 +107,7 @@ fn make_int_attr(name: &str, value: i64) -> AttributeProto {
 /// Helper to create an AttributeProto with an integer list.
 #[allow(dead_code)]
 fn make_ints_attr(name: &str, values: Vec<i64>) -> AttributeProto {
-    use hologram_onnx_spec::attribute_proto::AttributeType;
+    use hologram_onnx::proto::attribute_proto::AttributeType;
     AttributeProto {
         name: name.to_string(),
         ints: values,
@@ -134,7 +134,7 @@ fn create_minimal_model() -> ModelProto {
 
     ModelProto {
         ir_version: 9,
-        opset_import: vec![hologram_onnx_spec::OperatorSetIdProto {
+        opset_import: vec![hologram_onnx::proto::OperatorSetIdProto {
             domain: "".to_string(),
             version: 17,
         }],
@@ -182,7 +182,7 @@ fn create_linear_model() -> ModelProto {
 
     ModelProto {
         ir_version: 9,
-        opset_import: vec![hologram_onnx_spec::OperatorSetIdProto {
+        opset_import: vec![hologram_onnx::proto::OperatorSetIdProto {
             domain: "".to_string(),
             version: 17,
         }],
@@ -234,7 +234,7 @@ fn create_symbolic_batch_model() -> ModelProto {
 
     ModelProto {
         ir_version: 9,
-        opset_import: vec![hologram_onnx_spec::OperatorSetIdProto {
+        opset_import: vec![hologram_onnx::proto::OperatorSetIdProto {
             domain: "".to_string(),
             version: 17,
         }],
@@ -250,7 +250,7 @@ fn create_symbolic_batch_model() -> ModelProto {
 fn create_invalid_model_no_graph() -> ModelProto {
     ModelProto {
         ir_version: 9,
-        opset_import: vec![hologram_onnx_spec::OperatorSetIdProto {
+        opset_import: vec![hologram_onnx::proto::OperatorSetIdProto {
             domain: "".to_string(),
             version: 17,
         }],
@@ -278,7 +278,7 @@ fn create_invalid_model_no_inputs() -> ModelProto {
 
     ModelProto {
         ir_version: 9,
-        opset_import: vec![hologram_onnx_spec::OperatorSetIdProto {
+        opset_import: vec![hologram_onnx::proto::OperatorSetIdProto {
             domain: "".to_string(),
             version: 17,
         }],
@@ -305,7 +305,7 @@ fn create_invalid_model_no_outputs() -> ModelProto {
 
     ModelProto {
         ir_version: 9,
-        opset_import: vec![hologram_onnx_spec::OperatorSetIdProto {
+        opset_import: vec![hologram_onnx::proto::OperatorSetIdProto {
             domain: "".to_string(),
             version: 17,
         }],
@@ -371,12 +371,12 @@ fn test_parse_symbolic_batch_model() {
 
     // Verify symbolic shape is preserved
     let input_type = graph.input[0].r#type.as_ref().unwrap();
-    if let Some(hologram_onnx_spec::type_proto::Value::TensorType(tensor)) = &input_type.value {
+    if let Some(hologram_onnx::proto::type_proto::Value::TensorType(tensor)) = &input_type.value {
         let shape = tensor.shape.as_ref().unwrap();
         assert_eq!(shape.dim.len(), 2);
 
         // First dim should be symbolic
-        if let Some(hologram_onnx_spec::tensor_shape_proto::dimension::Value::DimParam(name)) =
+        if let Some(hologram_onnx::proto::tensor_shape_proto::dimension::Value::DimParam(name)) =
             &shape.dim[0].value
         {
             assert_eq!(name, "batch");
@@ -835,7 +835,7 @@ fn test_large_model_parsing() {
 
     let model = ModelProto {
         ir_version: 9,
-        opset_import: vec![hologram_onnx_spec::OperatorSetIdProto {
+        opset_import: vec![hologram_onnx::proto::OperatorSetIdProto {
             domain: "".to_string(),
             version: 17,
         }],

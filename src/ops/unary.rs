@@ -148,3 +148,137 @@ pub fn translate_tan(
     let result = builder.div(sin_x, cos_x)?;
     Ok(vec![result])
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use hologram_ir::{DType, Shape};
+
+    #[test]
+    fn test_translate_abs() {
+        let mut builder = GraphBuilder::new();
+        let input = builder.input("input", Shape::static_shape(&[3, 4]), DType::F32);
+
+        let result = translate_abs(&[input], &mut builder);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap().len(), 1);
+    }
+
+    #[test]
+    fn test_translate_abs_no_inputs() {
+        let mut builder = GraphBuilder::new();
+        let result = translate_abs(&[], &mut builder);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_translate_cos() {
+        let mut builder = GraphBuilder::new();
+        let input = builder.input("input", Shape::static_shape(&[2, 2]), DType::F32);
+
+        let result = translate_cos(&[input], &mut builder);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap().len(), 1);
+    }
+
+    #[test]
+    fn test_translate_sin() {
+        let mut builder = GraphBuilder::new();
+        let input = builder.input("input", Shape::static_shape(&[5]), DType::F32);
+
+        let result = translate_sin(&[input], &mut builder);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap().len(), 1);
+    }
+
+    #[test]
+    fn test_translate_tan() {
+        let mut builder = GraphBuilder::new();
+        let input = builder.input("input", Shape::static_shape(&[10, 10]), DType::F32);
+
+        let result = translate_tan(&[input], &mut builder);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap().len(), 1);
+    }
+
+    #[test]
+    fn test_translate_exp() {
+        let mut builder = GraphBuilder::new();
+        let input = builder.input("input", Shape::static_shape(&[8]), DType::F32);
+
+        let result = translate_exp(&[input], &mut builder);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap().len(), 1);
+    }
+
+    #[test]
+    fn test_translate_log() {
+        let mut builder = GraphBuilder::new();
+        let input = builder.input("input", Shape::static_shape(&[16]), DType::F32);
+
+        let result = translate_log(&[input], &mut builder);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap().len(), 1);
+    }
+
+    #[test]
+    fn test_translate_sqrt() {
+        let mut builder = GraphBuilder::new();
+        let input = builder.input("input", Shape::static_shape(&[3, 3, 3]), DType::F32);
+
+        let result = translate_sqrt(&[input], &mut builder);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap().len(), 1);
+    }
+
+    #[test]
+    fn test_translate_neg() {
+        let mut builder = GraphBuilder::new();
+        let input = builder.input("input", Shape::static_shape(&[7]), DType::F32);
+
+        let result = translate_neg(&[input], &mut builder);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap().len(), 1);
+    }
+
+    #[test]
+    fn test_translate_erf() {
+        let mut builder = GraphBuilder::new();
+        let input = builder.input("input", Shape::static_shape(&[12, 12]), DType::F32);
+
+        let result = translate_erf(&[input], &mut builder);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap().len(), 1);
+    }
+
+    #[test]
+    fn test_translate_reciprocal() {
+        let mut builder = GraphBuilder::new();
+        let input = builder.input("input", Shape::static_shape(&[4, 4]), DType::F32);
+
+        let result = translate_reciprocal(&[input], &mut builder);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap().len(), 1);
+    }
+
+    #[test]
+    fn test_translate_reciprocal_no_inputs() {
+        let mut builder = GraphBuilder::new();
+        let result = translate_reciprocal(&[], &mut builder);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_translate_sin_no_inputs() {
+        let mut builder = GraphBuilder::new();
+        let result = translate_sin(&[], &mut builder);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_translate_exp_no_inputs() {
+        let mut builder = GraphBuilder::new();
+        let result = translate_exp(&[], &mut builder);
+        assert!(result.is_err());
+    }
+}

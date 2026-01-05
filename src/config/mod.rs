@@ -41,15 +41,15 @@ use std::collections::HashMap;
 use std::path::Path;
 
 // Module declarations
-mod config;
 pub mod conversion;
 mod error;
 mod output_handlers;
+mod pipeline;
 pub mod unified;
 
 // Public exports
-pub use config::{ExecutionConfig, OutputHandlerConfig, PipelineConfig, StageConfig};
 pub use error::ConfigError;
+pub use pipeline::{ExecutionConfig, OutputHandlerConfig, PipelineConfig, StageConfig};
 
 // Unified configuration exports
 pub use output_handlers::{

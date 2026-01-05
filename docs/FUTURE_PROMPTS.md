@@ -18,19 +18,5 @@ Please add benchmarks that show how fast and how much we can run successfully.
 
 ---
 
-Notes like this need to be finished. I need you to actually implement the code, not just leave notes about simplified versions. I don't want simplified versions, I want full implementations. If they are no longer necessary, just remove the functions.
+I want you to look at the operations you just implemented here and look for corresponding operations that have now been implemented in `hologram` so that you don't have to re-implement them here
 
-Any notes like so indicate failure. 
-
-//! These operations are not yet implemented in the simplified version and will
-//! return errors when encountered during translation.
-
-There should be no simplified versions, placeholders, todos, etc.
-
-/// Translate ONNX DepthToSpace operation.
-///
-/// DepthToSpace rearranges data from the depth dimension into spatial dimensions,
-/// commonly used in super-resolution networks.
-///
-/// # Note
-/// Not implemented in simplified version.

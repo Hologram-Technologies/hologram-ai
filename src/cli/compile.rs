@@ -7,14 +7,12 @@
 //! - Converts IR to OperationGraph and compiles to parallel schedule
 //! - Serializes to .holo format compatible with hologram runtime
 
-use crate::core::{OnnxConfig, extract_opset_version, parse_model, validate_model};
+use crate::core::{OnnxConfig, parse_model};
 use anyhow::{Context, Result};
 use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
 use tracing::{debug, info};
-
-use crate::cli::translator::translate_graph_to_ir_with_path;
 
 /// Compile an ONNX model to .holo format.
 ///
@@ -56,11 +54,26 @@ pub fn compile_command(
 
     // Read ONNX model
     info!("Reading ONNX model...");
-    let onnx_bytes = fs::read(input)
+    let mut onnx_bytes = fs::read(input)
         .with_context(|| format!("Failed to read ONNX model from {}", input.display()))?;
 
     let onnx_size = onnx_bytes.len();
     info!("ONNX model size: {} bytes", onnx_size);
+
+    // Apply input shapes if specified (requires modifying the model before compilation)
+    if !input_shapes.is_empty() {
+        info!("Applying concrete input shapes...");
+        let mut model = parse_model(&onnx_bytes).context("Failed to parse ONNX model")?;
+        apply_input_shapes(&mut model, input_shapes)?;
+
+        // Re-serialize the modified model
+        use prost::Message;
+        onnx_bytes.clear();
+        model.encode(&mut onnx_bytes)
+            .context("Failed to re-encode ONNX model with concrete shapes")?;
+
+        info!("Model updated with concrete input shapes");
+    }
 
     // Create configuration
     let config = OnnxConfig {
@@ -78,54 +91,37 @@ pub fn compile_command(
         .validate()
         .map_err(|e| anyhow::anyhow!("Invalid configuration: {}", e))?;
 
-    // Step 1: Parse and validate ONNX model
-    info!("Parsing ONNX protobuf...");
-    let mut model = parse_model(&onnx_bytes).context("Failed to parse ONNX model")?;
+    // Compile using the OnnxCompiler API
+    info!("Starting compilation pipeline...");
+    let compiler = crate::OnnxCompiler::with_config(config);
+    let (holo_bytes, weight_bytes) = compiler
+        .compile(&onnx_bytes)
+        .context("ONNX compilation failed")?;
 
-    // Free ONNX bytes - we have the parsed model now
-    drop(onnx_bytes);
-    debug!("Freed ONNX bytes ({} bytes)", onnx_size);
+    info!(
+        "Compilation successful: {} bytes .holo, {} bytes .weights",
+        holo_bytes.len(),
+        weight_bytes.len()
+    );
 
-    validate_model(&model).context("Model validation failed")?;
+    // Write .holo file
+    let holo_path = output.with_extension("holo");
+    fs::write(&holo_path, &holo_bytes)
+        .with_context(|| format!("Failed to write .holo file to {}", holo_path.display()))?;
+    info!("Written: {}", holo_path.display());
 
-    // Apply input shapes if specified
-    if !input_shapes.is_empty() {
-        apply_input_shapes(&mut model, input_shapes)?;
+    // Write .weights file if not empty
+    if !weight_bytes.is_empty() {
+        let weights_path = output.with_extension("weights");
+        fs::write(&weights_path, &weight_bytes)
+            .with_context(|| format!("Failed to write .weights file to {}", weights_path.display()))?;
+        info!("Written: {}", weights_path.display());
+    } else {
+        debug!("No external weights to write");
     }
 
-    let opset_version = extract_opset_version(&model);
-    info!("ONNX opset version: {}", opset_version);
-
-    // Get the graph
-    let graph = model
-        .graph
-        .as_ref()
-        .ok_or_else(|| anyhow::anyhow!("Model has no graph"))?;
-
-    let graph_name = graph.name.clone();
-    let node_count = graph.node.len();
-    info!("Graph: {} ({} nodes)", graph_name, node_count);
-
-    // Step 2: Translate ONNX → IR with symbolic shapes (with external data support)
-    info!("Translating ONNX → IR...");
-    let _ir_func = translate_graph_to_ir_with_path(graph, opset_version, Some(input))
-        .context("Failed to translate ONNX to IR")?;
-
-    // Free parsed ONNX model - we have the IR now
-    drop(model);
-    debug!("Freed parsed ONNX model");
-
-    // Step 3: Apply decomposition pass
-    // Decomposition is now handled internally by hologram-ir during translation
-    info!("IR decomposition is handled by hologram-ir passes");
-
-    // Step 4: Serialization to .holo format
-    // The .holo format serializer needs to be implemented to support full compilation.
-    info!("Serialization to .holo format requires implementation");
-    Err(anyhow::anyhow!(
-        "Full compilation pipeline requires a .holo format serializer. \
-         Translation to hologram-ir succeeds, but .holo serialization is not yet implemented."
-    ))
+    info!("✓ Compilation complete!");
+    Ok(())
 }
 
 /// Apply concrete input shapes to an ONNX model.

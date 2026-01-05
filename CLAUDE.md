@@ -171,6 +171,34 @@ curl -sL https://raw.githubusercontent.com/onnx/onnx/main/onnx/onnx.proto3 \
 - Run with hologram CLI
 - Verify output correctness
 
+### ONNX Operation Implementation Requirements
+
+**CRITICAL: When implementing or updating ONNX operations, you MUST:**
+
+1. **Write comprehensive tests** for every operation translator:
+   - Test normal cases with various input shapes and data types
+   - Test edge cases (empty inputs, scalars, large tensors)
+   - Test error conditions (wrong input count, invalid attributes)
+   - Test constant folding paths (if applicable)
+   - Tests should go in the `#[cfg(test)] mod tests {}` section of the same file
+
+2. **Implement constant folding** when inputs are constants:
+   - Many ONNX operations (Shape, Gather, Cast, Concat, Unsqueeze, etc.) should perform constant folding
+   - If all inputs are `NodeOp::Constant`, compute the result at compile time and return a new `Constant`
+   - This enables shape inference chains to collapse: Shape → Gather → Cast → Range → all Constants
+   - Constant folding is essential for handling dynamic shape computations in models like T5
+
+3. **Example operation implementations with tests:**
+   - `src/ops/advanced.rs` - Range, Cast (with constant folding + tests)
+   - `src/ops/shape.rs` - Unsqueeze, Concat, Reshape (with constant folding + tests)
+   - `src/ops/constant.rs` - Shape, ConstantOfShape (with constant folding + tests)
+   - `src/ops/indexing.rs` - Gather (with constant folding)
+
+4. **Verify constant folding works**:
+   - Create a test with constant inputs
+   - Assert the result is a `NodeOp::Constant`
+   - Verify the constant data matches expected output
+
 ### Implementation Workflow
 
 1. **Read existing code first** - Never modify without understanding

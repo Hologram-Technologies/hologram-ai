@@ -75,10 +75,11 @@ impl OperationGraph {
 
     /// Serialize to .holo format bytes.
     ///
-    /// Serialization is not yet implemented.
+    /// Uses hologram-ir's rkyv-based serialization.
     pub fn to_bytes(&self) -> Result<Vec<u8>> {
-        use crate::OnnxError;
-        Err(OnnxError::InvalidModel("Serialization not yet implemented".into()))
+        self.ir_func
+            .to_bytes()
+            .map_err(|e| crate::OnnxError::IrError(e))
     }
 }
 

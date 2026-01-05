@@ -108,3 +108,196 @@ pub fn translate_instance_norm(
 
     Ok(vec![result])
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::proto::attribute_proto::AttributeType;
+    use hologram_ir::{DType, Shape};
+
+    fn make_float_attr(name: &str, value: f32) -> AttributeProto {
+        AttributeProto {
+            name: name.to_string(),
+            f: value,
+            r#type: AttributeType::Float as i32,
+            ..Default::default()
+        }
+    }
+
+    fn make_int_attr(name: &str, value: i64) -> AttributeProto {
+        AttributeProto {
+            name: name.to_string(),
+            i: value,
+            r#type: AttributeType::Int as i32,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn test_translate_layer_norm_basic() {
+        let mut builder = GraphBuilder::new();
+        let input = builder.input("input", Shape::static_shape(&[2, 3, 4]), DType::F32);
+
+        let attrs = vec![
+            make_float_attr("epsilon", 1e-5),
+            make_int_attr("axis", -1),
+        ];
+
+        let result = translate_layer_norm(&[input], &attrs, &mut builder);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap().len(), 1);
+    }
+
+    #[test]
+    fn test_translate_layer_norm_custom_axis() {
+        let mut builder = GraphBuilder::new();
+        let input = builder.input("input", Shape::static_shape(&[4, 5, 6]), DType::F32);
+
+        let attrs = vec![
+            make_float_attr("epsilon", 1e-6),
+            make_int_attr("axis", 1),
+        ];
+
+        let result = translate_layer_norm(&[input], &attrs, &mut builder);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap().len(), 1);
+    }
+
+    #[test]
+    fn test_translate_layer_norm_default_epsilon() {
+        let mut builder = GraphBuilder::new();
+        let input = builder.input("input", Shape::static_shape(&[2, 2, 2]), DType::F32);
+
+        let attrs = vec![make_int_attr("axis", -1)];
+
+        let result = translate_layer_norm(&[input], &attrs, &mut builder);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap().len(), 1);
+    }
+
+    #[test]
+    fn test_translate_layer_norm_no_inputs() {
+        let mut builder = GraphBuilder::new();
+        let attrs = vec![make_float_attr("epsilon", 1e-5)];
+
+        let result = translate_layer_norm(&[], &attrs, &mut builder);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_translate_batch_norm_basic() {
+        let mut builder = GraphBuilder::new();
+        let input = builder.input("input", Shape::static_shape(&[1, 3, 32, 32]), DType::F32);
+        let scale = builder.input("scale", Shape::static_shape(&[3]), DType::F32);
+        let bias = builder.input("bias", Shape::static_shape(&[3]), DType::F32);
+        let mean = builder.input("mean", Shape::static_shape(&[3]), DType::F32);
+        let var = builder.input("var", Shape::static_shape(&[3]), DType::F32);
+
+        let attrs = vec![
+            make_float_attr("epsilon", 1e-5),
+            make_float_attr("momentum", 0.9),
+        ];
+
+        let result = translate_batch_norm(&[input, scale, bias, mean, var], &attrs, &mut builder);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap().len(), 1);
+    }
+
+    #[test]
+    fn test_translate_batch_norm_custom_params() {
+        let mut builder = GraphBuilder::new();
+        let input = builder.input("input", Shape::static_shape(&[2, 64, 16, 16]), DType::F32);
+        let scale = builder.input("scale", Shape::static_shape(&[64]), DType::F32);
+        let bias = builder.input("bias", Shape::static_shape(&[64]), DType::F32);
+        let mean = builder.input("mean", Shape::static_shape(&[64]), DType::F32);
+        let var = builder.input("var", Shape::static_shape(&[64]), DType::F32);
+
+        let attrs = vec![
+            make_float_attr("epsilon", 1e-3),
+            make_float_attr("momentum", 0.99),
+        ];
+
+        let result = translate_batch_norm(&[input, scale, bias, mean, var], &attrs, &mut builder);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap().len(), 1);
+    }
+
+    #[test]
+    fn test_translate_batch_norm_insufficient_inputs() {
+        let mut builder = GraphBuilder::new();
+        let input = builder.input("input", Shape::static_shape(&[1, 3, 32, 32]), DType::F32);
+        let scale = builder.input("scale", Shape::static_shape(&[3]), DType::F32);
+
+        let attrs = vec![make_float_attr("epsilon", 1e-5)];
+
+        let result = translate_batch_norm(&[input, scale], &attrs, &mut builder);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_translate_group_norm_basic() {
+        let mut builder = GraphBuilder::new();
+        let input = builder.input("input", Shape::static_shape(&[1, 6, 8, 8]), DType::F32);
+        let scale = builder.input("scale", Shape::static_shape(&[6]), DType::F32);
+        let bias = builder.input("bias", Shape::static_shape(&[6]), DType::F32);
+
+        let attrs = vec![
+            make_float_attr("epsilon", 1e-5),
+            make_int_attr("num_groups", 2),
+        ];
+
+        let result = translate_group_norm(&[input, scale, bias], &attrs, &mut builder);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap().len(), 1);
+    }
+
+    #[test]
+    fn test_translate_group_norm_insufficient_inputs() {
+        let mut builder = GraphBuilder::new();
+        let input = builder.input("input", Shape::static_shape(&[1, 6, 8, 8]), DType::F32);
+
+        let attrs = vec![make_int_attr("num_groups", 2)];
+
+        let result = translate_group_norm(&[input], &attrs, &mut builder);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_translate_instance_norm_basic() {
+        let mut builder = GraphBuilder::new();
+        let input = builder.input("input", Shape::static_shape(&[1, 64, 32, 32]), DType::F32);
+        let scale = builder.input("scale", Shape::static_shape(&[64]), DType::F32);
+        let bias = builder.input("bias", Shape::static_shape(&[64]), DType::F32);
+
+        let attrs = vec![make_float_attr("epsilon", 1e-5)];
+
+        let result = translate_instance_norm(&[input, scale, bias], &attrs, &mut builder);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap().len(), 1);
+    }
+
+    #[test]
+    fn test_translate_instance_norm_custom_epsilon() {
+        let mut builder = GraphBuilder::new();
+        let input = builder.input("input", Shape::static_shape(&[2, 32, 16, 16]), DType::F32);
+        let scale = builder.input("scale", Shape::static_shape(&[32]), DType::F32);
+        let bias = builder.input("bias", Shape::static_shape(&[32]), DType::F32);
+
+        let attrs = vec![make_float_attr("epsilon", 1e-3)];
+
+        let result = translate_instance_norm(&[input, scale, bias], &attrs, &mut builder);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap().len(), 1);
+    }
+
+    #[test]
+    fn test_translate_instance_norm_insufficient_inputs() {
+        let mut builder = GraphBuilder::new();
+        let input = builder.input("input", Shape::static_shape(&[1, 64, 32, 32]), DType::F32);
+
+        let attrs = vec![make_float_attr("epsilon", 1e-5)];
+
+        let result = translate_instance_norm(&[input], &attrs, &mut builder);
+        assert!(result.is_err());
+    }
+}

@@ -77,6 +77,14 @@ pub fn translate_onnx_node(
             let result = builder.div(inputs[0], inputs[1])?;
             vec![result]
         }
+        "Min" => {
+            let result = builder.min(inputs[0], inputs[1])?;
+            vec![result]
+        }
+        "Max" => {
+            let result = builder.max(inputs[0], inputs[1])?;
+            vec![result]
+        }
         "MatMul" => {
             let result = builder.matmul(inputs[0], inputs[1])?;
             vec![result]
@@ -162,15 +170,44 @@ pub fn translate_onnx_node(
 
         // ===== ADVANCED =====
         "Cast" => crate::ops::advanced::translate_cast(&inputs, &node.attribute, builder)?,
-        "Identity" => {
-            // Identity is a no-op, just return input
-            vec![inputs[0]]
-        }
+        "Range" => crate::ops::advanced::translate_range(&inputs, &node.attribute, builder)?,
+        "Trilu" => crate::ops::advanced::translate_trilu(&inputs, &node.attribute, builder)?,
+        "Identity" => crate::ops::constant::translate_identity(&inputs, &node.attribute, builder)?,
+        "ConstantOfShape" => crate::ops::constant::translate_constant_of_shape(&inputs, &node.attribute, builder)?,
         "Dropout" => {
             // During inference, Dropout is identity
             // Return input and mask (mask is all ones, but we skip it)
             vec![inputs[0]]
         }
+
+        // ===== CONVOLUTION =====
+        "Conv" => crate::ops::conv::translate_conv(&inputs, &node.attribute, builder)?,
+        "ConvTranspose" => crate::ops::conv::translate_conv_transpose(&inputs, &node.attribute, builder)?,
+
+        // ===== POOLING =====
+        "MaxPool" => crate::ops::pool::translate_max_pool(&inputs, &node.attribute, builder)?,
+        "AveragePool" => crate::ops::pool::translate_average_pool(&inputs, &node.attribute, builder)?,
+        "GlobalAveragePool" => crate::ops::pool::translate_global_average_pool(&inputs, &node.attribute, builder)?,
+        "GlobalMaxPool" => crate::ops::pool::translate_global_max_pool(&inputs, &node.attribute, builder)?,
+
+        // ===== INDEXING =====
+        "Gather" => crate::ops::indexing::translate_gather(&inputs, &node.attribute, builder)?,
+        "Slice" => crate::ops::indexing::translate_slice(&inputs, &node.attribute, builder)?,
+        "GatherElements" => crate::ops::indexing::translate_gather_elements(&inputs, &node.attribute, builder)?,
+        "ScatterND" => crate::ops::indexing::translate_scatternd(&inputs, &node.attribute, builder)?,
+
+        // ===== PADDING =====
+        "Pad" => crate::ops::pad::translate_pad(&inputs, &node.attribute, builder)?,
+
+        // ===== RESIZE =====
+        "Resize" => crate::ops::resize::translate_resize(&inputs, &node.attribute, builder)?,
+        "Upsample" => crate::ops::resize::translate_upsample(&inputs, &node.attribute, builder)?,
+        "DepthToSpace" => crate::ops::resize::translate_depth_to_space(&inputs, &node.attribute, builder)?,
+        "SpaceToDepth" => crate::ops::resize::translate_space_to_depth(&inputs, &node.attribute, builder)?,
+
+        // ===== CONSTANTS =====
+        "Constant" => crate::ops::constant::translate_constant(&inputs, &node.attribute, builder)?,
+        "Shape" => crate::ops::constant::translate_shape_op(&inputs, &node.attribute, builder)?,
 
         // ===== UNSUPPORTED =====
         _ => {
@@ -225,6 +262,42 @@ mod tests {
         value_map.insert("x".to_string(), x);
 
         let node = make_node("Relu", vec!["x"], vec!["y"]);
+        let result = translate_onnx_node(&node, &mut builder, &mut value_map);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap().len(), 1);
+    }
+
+    #[test]
+    fn test_translate_min() {
+        let mut builder = GraphBuilder::new();
+        let mut value_map = HashMap::new();
+
+        // Create inputs
+        let a = builder.input("a", hologram_ir::Shape::static_shape(&[2, 3]), hologram_ir::DType::F32);
+        let b = builder.input("b", hologram_ir::Shape::static_shape(&[2, 3]), hologram_ir::DType::F32);
+        value_map.insert("a".to_string(), a);
+        value_map.insert("b".to_string(), b);
+
+        // Translate Min
+        let node = make_node("Min", vec!["a", "b"], vec!["c"]);
+        let result = translate_onnx_node(&node, &mut builder, &mut value_map);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap().len(), 1);
+    }
+
+    #[test]
+    fn test_translate_max() {
+        let mut builder = GraphBuilder::new();
+        let mut value_map = HashMap::new();
+
+        // Create inputs
+        let a = builder.input("a", hologram_ir::Shape::static_shape(&[2, 3]), hologram_ir::DType::F32);
+        let b = builder.input("b", hologram_ir::Shape::static_shape(&[2, 3]), hologram_ir::DType::F32);
+        value_map.insert("a".to_string(), a);
+        value_map.insert("b".to_string(), b);
+
+        // Translate Max
+        let node = make_node("Max", vec!["a", "b"], vec!["c"]);
         let result = translate_onnx_node(&node, &mut builder, &mut value_map);
         assert!(result.is_ok());
         assert_eq!(result.unwrap().len(), 1);

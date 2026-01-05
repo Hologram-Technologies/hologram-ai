@@ -18,7 +18,7 @@ use hologram_onnx_ops::{
     translate_mul, translate_onnx_op, translate_pow, translate_relu, translate_reshape,
     translate_sigmoid, translate_softmax, translate_tanh, translate_transpose,
 };
-use hologram_onnx_spec::{AttributeProto, attribute_proto::AttributeType};
+use hologram_onnx::proto::{AttributeProto, attribute_proto::AttributeType};
 use std::collections::HashMap;
 
 // ============================================================================

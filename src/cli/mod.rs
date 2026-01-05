@@ -71,15 +71,37 @@ enum Commands {
         input_shapes: Vec<String>,
     },
 
-    /// Run an ONNX pipeline from a unified config file
+    /// Run an ONNX pipeline from a unified config file or directly execute a .holo model
     ///
     /// Models must be pre-compiled with `hologram-onnx compile` before running.
+    ///
+    /// # Config-based execution (for Stable Diffusion pipelines):
+    /// hologram-onnx run --config pipeline.toml -i prompt="a dog" -i steps=20
+    ///
+    /// # Direct execution (for T5 models):
+    /// hologram-onnx run encoder.holo --prompt "Tell me a joke"
     Run {
-        /// Path to the unified config file (TOML)
-        #[arg(short, long)]
-        config: PathBuf,
+        /// Direct .holo model file (for simple inference)
+        #[arg(required_unless_present = "config")]
+        model: Option<PathBuf>,
 
-        /// Runtime inputs as key=value pairs
+        /// Path to the unified config file (TOML) for multi-model pipelines
+        #[arg(short, long)]
+        config: Option<PathBuf>,
+
+        /// Text prompt for T5/text models (simpler than --input)
+        #[arg(short, long)]
+        prompt: Option<String>,
+
+        /// Path to tokenizer.json for T5 models
+        #[arg(long, default_value = "tokenizer.json")]
+        tokenizer: PathBuf,
+
+        /// Maximum sequence length for tokenization
+        #[arg(long, default_value = "512")]
+        max_length: usize,
+
+        /// Runtime inputs as key=value pairs (for config-based pipelines)
         #[arg(short, long = "input", value_name = "NAME=VALUE")]
         inputs: Vec<String>,
 
@@ -233,10 +255,30 @@ pub fn run() -> anyhow::Result<()> {
         }
 
         Commands::Run {
+            model,
             config,
+            prompt,
+            tokenizer,
+            max_length,
             inputs,
             output,
-        } => run_command(&config, &inputs, output.as_deref()),
+        } => {
+            if let Some(config_path) = config {
+                // Config-based pipeline execution (existing mode)
+                run_command(&config_path, &inputs, output.as_deref())
+            } else if let Some(model_path) = model {
+                // Direct .holo execution with --prompt (new T5 mode)
+                run::run_direct_command(
+                    &model_path,
+                    prompt.as_deref(),
+                    &tokenizer,
+                    max_length,
+                    output.as_deref(),
+                )
+            } else {
+                anyhow::bail!("Either --config or model path must be specified")
+            }
+        }
 
         Commands::Download {
             model_id,

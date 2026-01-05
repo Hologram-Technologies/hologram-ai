@@ -197,3 +197,131 @@ pub fn translate_where(
     let result = builder.where_select(inputs[0], inputs[1], inputs[2])?;
     Ok(vec![result])
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use hologram_ir::{DType, Shape};
+
+    #[test]
+    fn test_translate_equal() {
+        let mut builder = GraphBuilder::new();
+        let input1 = builder.input("input1", Shape::static_shape(&[2, 3]), DType::F32);
+        let input2 = builder.input("input2", Shape::static_shape(&[2, 3]), DType::F32);
+
+        let result = translate_equal(&[input1, input2], &mut builder);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap().len(), 1);
+    }
+
+    #[test]
+    fn test_translate_equal_insufficient_inputs() {
+        let mut builder = GraphBuilder::new();
+        let input = builder.input("input", Shape::static_shape(&[2, 3]), DType::F32);
+
+        let result = translate_equal(&[input], &mut builder);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_translate_greater() {
+        let mut builder = GraphBuilder::new();
+        let input1 = builder.input("input1", Shape::static_shape(&[5, 5]), DType::F32);
+        let input2 = builder.input("input2", Shape::static_shape(&[5, 5]), DType::F32);
+
+        let result = translate_greater(&[input1, input2], &mut builder);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap().len(), 1);
+    }
+
+    #[test]
+    fn test_translate_less() {
+        let mut builder = GraphBuilder::new();
+        let input1 = builder.input("input1", Shape::static_shape(&[10]), DType::F32);
+        let input2 = builder.input("input2", Shape::static_shape(&[10]), DType::F32);
+
+        let result = translate_less(&[input1, input2], &mut builder);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap().len(), 1);
+    }
+
+    #[test]
+    fn test_translate_and() {
+        let mut builder = GraphBuilder::new();
+        let input1 = builder.input("input1", Shape::static_shape(&[4, 4]), DType::Bool);
+        let input2 = builder.input("input2", Shape::static_shape(&[4, 4]), DType::Bool);
+
+        let result = translate_and(&[input1, input2], &mut builder);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap().len(), 1);
+    }
+
+    #[test]
+    fn test_translate_or() {
+        let mut builder = GraphBuilder::new();
+        let input1 = builder.input("input1", Shape::static_shape(&[3, 3, 3]), DType::Bool);
+        let input2 = builder.input("input2", Shape::static_shape(&[3, 3, 3]), DType::Bool);
+
+        let result = translate_or(&[input1, input2], &mut builder);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap().len(), 1);
+    }
+
+    #[test]
+    fn test_translate_not() {
+        let mut builder = GraphBuilder::new();
+        let input = builder.input("input", Shape::static_shape(&[8, 8]), DType::Bool);
+
+        let result = translate_not(&[input], &mut builder);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap().len(), 1);
+    }
+
+    #[test]
+    fn test_translate_not_no_inputs() {
+        let mut builder = GraphBuilder::new();
+
+        let result = translate_not(&[], &mut builder);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_translate_where() {
+        let mut builder = GraphBuilder::new();
+        let condition = builder.input("condition", Shape::static_shape(&[2, 3]), DType::Bool);
+        let x = builder.input("x", Shape::static_shape(&[2, 3]), DType::F32);
+        let y = builder.input("y", Shape::static_shape(&[2, 3]), DType::F32);
+
+        let result = translate_where(&[condition, x, y], &mut builder);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap().len(), 1);
+    }
+
+    #[test]
+    fn test_translate_where_insufficient_inputs() {
+        let mut builder = GraphBuilder::new();
+        let condition = builder.input("condition", Shape::static_shape(&[2, 3]), DType::Bool);
+        let x = builder.input("x", Shape::static_shape(&[2, 3]), DType::F32);
+
+        let result = translate_where(&[condition, x], &mut builder);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_translate_greater_insufficient_inputs() {
+        let mut builder = GraphBuilder::new();
+        let input = builder.input("input", Shape::static_shape(&[2, 3]), DType::F32);
+
+        let result = translate_greater(&[input], &mut builder);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_translate_less_insufficient_inputs() {
+        let mut builder = GraphBuilder::new();
+        let input = builder.input("input", Shape::static_shape(&[2, 3]), DType::F32);
+
+        let result = translate_less(&[input], &mut builder);
+        assert!(result.is_err());
+    }
+}

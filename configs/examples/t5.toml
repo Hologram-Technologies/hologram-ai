@@ -1,0 +1,89 @@
+# T5 Text-to-Text Generation - Unified Config Format
+#
+# Demonstrates text-to-text generation with Google T5 model.
+# T5 is an encoder-decoder transformer for tasks like translation,
+# summarization, and question answering.
+#
+# Usage:
+#   hologram-onnx compile --config t5.toml
+#   hologram-onnx run --config t5.toml --text "translate English to French: Hello"
+#
+# Prerequisites:
+#   pip install optimum[exporters]
+#   optimum-cli export onnx \
+#     --model google/t5-small \
+#     --task text2text-generation-with-past \
+#     /workspace/models/t5-small/
+
+name = "t5-small"
+version = "1.0"
+description = "T5 encoder-decoder for text-to-text generation"
+
+# Pipeline inputs
+[inputs]
+text = { type = "text", default = "translate English to French: Hello, how are you?" }
+
+# Models
+[models]
+encoder = "/workspace/models/t5-small/encoder_model.onnx"
+decoder = "/workspace/models/t5-small/decoder_model.onnx"
+
+# Compiler settings
+[compiler]
+weight_threshold = 4096
+enable_partitioning = true
+partition_size = 200            # T5-small has ~600-800 nodes per component
+pack_weights = true
+memory_budget = 2048            # 2GB memory limit
+
+# Execution stages
+[[stages]]
+builtin = "tokenize"
+args = { text = "text", tokenizer = "/workspace/models/t5-small/tokenizer.json" }
+outputs = ["input_ids"]
+
+[[stages]]
+model = "encoder"
+inputs = { input_ids = "input_ids" }
+outputs = ["encoder_hidden_states"]
+
+# Note: Full auto-regressive decoder loop requires runtime support
+# For now, this demonstrates compilation and single-step forward pass
+[[stages]]
+builtin = "init_decoder"
+args = { start_token = 0 }  # PAD token as start
+outputs = ["decoder_input_ids"]
+
+# Future: Auto-regressive generation loop
+# [[stages]]
+# over = "range(512)"  # max_output_length
+# as = "step"
+#
+# [[stages.stages]]
+# model = "decoder"
+# inputs = {
+#     input_ids = "decoder_input_ids",
+#     encoder_hidden_states = "encoder_hidden_states"
+# }
+# outputs = ["logits"]
+#
+# [[stages.stages]]
+# builtin = "argmax"
+# args = { tensor = "logits", dim = -1 }
+# outputs = ["next_token"]
+#
+# [[stages.stages]]
+# builtin = "append"
+# args = { array = "decoder_input_ids", value = "next_token" }
+# outputs = ["decoder_input_ids"]
+#
+# [[stages.stages]]
+# builtin = "check_eos"
+# args = { token = "next_token", eos_token = 1 }
+# outputs = ["should_stop"]
+
+# Output handler for text
+[outputs]
+result = { tensor = "encoder_hidden_states", handler = "json" }
+# Future: Once decoder loop is implemented
+# translation = { tensor = "decoder_input_ids", handler = "text", tokenizer = "/workspace/models/t5-small/tokenizer.json" }

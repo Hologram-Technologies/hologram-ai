@@ -25,7 +25,7 @@ use std::collections::HashMap;
 
 use crate::core::OnnxConfig;
 
-use super::config::{
+use super::pipeline::{
     ExecutionConfig, OutputHandlerConfig, PipelineConfig, PipelineMetadata, StageConfig,
 };
 use super::unified::{
