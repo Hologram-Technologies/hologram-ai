@@ -972,6 +972,7 @@ dependencies = [
  "ndarray",
  "parking_lot",
  "rayon",
+ "rkyv",
  "rustc-hash",
  "rustfft",
  "thiserror 2.0.17",
