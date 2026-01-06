@@ -1,0 +1,177 @@
+# T5 Interactive Run Configuration
+#
+# This config demonstrates two ways to run T5 models:
+#
+# 1. Direct execution (simple):
+#    cargo run --features text-output -- run \
+#      models/t5-small/compiled/encoder.holo \
+#      --prompt "Tell me a joke" \
+#      --tokenizer models/t5-small/tokenizer.json
+#
+# 2. Config-based execution (full pipeline):
+#    cargo run --features text-output -- run \
+#      --config configs/examples/t5-interactive.toml \
+#      -i prompt="Translate English to French: Hello world"
+
+name = "T5 Text Generation Pipeline"
+description = "Interactive T5 encoder-decoder pipeline with tokenization"
+
+# =============================================================================
+# Model Definitions
+# =============================================================================
+
+[models.encoder]
+# T5 encoder - converts input text to hidden states
+path = "models/t5-small/encoder_model.onnx"
+precompiled = "models/t5-small/compiled/encoder.holo"
+
+[models.decoder]
+# T5 decoder - generates output text autoregressively
+path = "models/t5-small/decoder_model.onnx"
+precompiled = "models/t5-small/compiled/decoder.holo"
+
+# =============================================================================
+# Input Definitions
+# =============================================================================
+
+[inputs.prompt]
+type = "string"
+description = "Text prompt for the model"
+default = "Translate English to French: Hello, how are you?"
+
+[inputs.max_length]
+type = "int"
+description = "Maximum sequence length for generation"
+default = 128
+
+[inputs.num_beams]
+type = "int"
+description = "Number of beams for beam search"
+default = 4
+
+[inputs.temperature]
+type = "float"
+description = "Sampling temperature (higher = more random)"
+default = 1.0
+
+# =============================================================================
+# Pipeline Stages
+# =============================================================================
+
+# Stage 1: Tokenize input prompt
+[[stages]]
+type = "builtin"
+builtin = "tokenize"
+outputs = ["input_ids", "attention_mask"]
+
+[stages.args]
+text = "prompt"
+max_length = 512
+tokenizer_path = "models/t5-small/tokenizer.json"
+
+# Stage 2: Run T5 encoder
+[[stages]]
+type = "model"
+model = "encoder"
+inputs = { input_ids = "input_ids", attention_mask = "attention_mask" }
+outputs = ["encoder_hidden_states"]
+
+# Stage 3: Initialize decoder
+[[stages]]
+type = "builtin"
+builtin = "init_decoder_input"
+outputs = ["decoder_input_ids"]
+
+[stages.args]
+start_token_id = 0
+batch_size = 1
+
+# Stage 4: Autoregressive generation loop
+[[stages]]
+type = "loop"
+over = "range(max_length)"
+as_var = "step"
+
+# Nested stage: Run decoder for one step
+[[stages.stages]]
+type = "model"
+model = "decoder"
+inputs = {
+    input_ids = "decoder_input_ids",
+    encoder_hidden_states = "encoder_hidden_states",
+    encoder_attention_mask = "attention_mask"
+}
+outputs = ["logits"]
+
+# Nested stage: Sample next token
+[[stages.stages]]
+type = "builtin"
+builtin = "sample_token"
+outputs = ["next_token"]
+
+[stages.stages.args]
+logits = "logits"
+temperature = "temperature"
+
+# Nested stage: Append to sequence
+[[stages.stages]]
+type = "builtin"
+builtin = "append_token"
+outputs = ["decoder_input_ids"]
+
+[stages.stages.args]
+sequence = "decoder_input_ids"
+token = "next_token"
+
+# Nested stage: Check for end token
+[[stages.stages]]
+type = "conditional"
+condition = "next_token == 1"  # EOS token
+
+[[stages.stages.then_stages]]
+type = "builtin"
+builtin = "break_loop"
+
+# Stage 5: Detokenize output
+[[stages]]
+type = "builtin"
+builtin = "detokenize"
+outputs = ["generated_text"]
+
+[stages.args]
+token_ids = "decoder_input_ids"
+tokenizer_path = "models/t5-small/tokenizer.json"
+
+# =============================================================================
+# Output Definitions
+# =============================================================================
+
+[outputs.text]
+tensor = "generated_text"
+handler = "text"
+description = "Generated text output"
+
+[outputs.tokens]
+tensor = "decoder_input_ids"
+handler = "json"
+description = "Generated token IDs (for debugging)"
+
+# =============================================================================
+# Compiler Settings (for compiling the models)
+# =============================================================================
+
+[compiler]
+enable_partitioning = true
+partition_size = 200
+memory_budget = 4096  # MB
+decompose_conv2d = false
+decompose_pooling = false
+enable_resize_upscaling = true
+
+# =============================================================================
+# Runtime Settings
+# =============================================================================
+
+[runtime]
+device = "cpu"
+num_threads = 4

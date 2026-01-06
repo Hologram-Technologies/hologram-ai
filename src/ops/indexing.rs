@@ -61,32 +61,30 @@ pub fn translate_gather(
 
         // Try to perform constant folding for common cases
         // Case 1: Gathering from 1D array with scalar index
-        if let (ConstantData::I64(values), ConstantData::I64(idx_values)) = (data_const, indices_const) {
-            if data_node.shape.rank() == 1 && indices_node.shape.rank() == 0 && axis == 0 {
-                let idx = idx_values[0] as usize;
-                if idx < values.len() {
-                    let gathered_value = values[idx];
-                    let result = builder.constant(
-                        ConstantData::I64(vec![gathered_value]),
-                        Shape::static_shape(&[])  // scalar output
-                    );
-                    return Ok(vec![result]);
-                }
+        if let (ConstantData::I64(values), ConstantData::I64(idx_values)) = (data_const, indices_const)
+            && data_node.shape.rank() == 1 && indices_node.shape.rank() == 0 && axis == 0 {
+            let idx = idx_values[0] as usize;
+            if idx < values.len() {
+                let gathered_value = values[idx];
+                let result = builder.constant(
+                    ConstantData::I64(vec![gathered_value]),
+                    Shape::static_shape(&[])  // scalar output
+                );
+                return Ok(vec![result]);
             }
         }
 
         // Case 2: Gathering from 1D I32 array with scalar index
-        if let (ConstantData::I32(values), ConstantData::I64(idx_values)) = (data_const, indices_const) {
-            if data_node.shape.rank() == 1 && indices_node.shape.rank() == 0 && axis == 0 {
-                let idx = idx_values[0] as usize;
-                if idx < values.len() {
-                    let gathered_value = values[idx];
-                    let result = builder.constant(
-                        ConstantData::I32(vec![gathered_value]),
-                        Shape::static_shape(&[])  // scalar output
-                    );
-                    return Ok(vec![result]);
-                }
+        if let (ConstantData::I32(values), ConstantData::I64(idx_values)) = (data_const, indices_const)
+            && data_node.shape.rank() == 1 && indices_node.shape.rank() == 0 && axis == 0 {
+            let idx = idx_values[0] as usize;
+            if idx < values.len() {
+                let gathered_value = values[idx];
+                let result = builder.constant(
+                    ConstantData::I32(vec![gathered_value]),
+                    Shape::static_shape(&[])  // scalar output
+                );
+                return Ok(vec![result]);
             }
         }
     }

@@ -475,7 +475,7 @@ mod tests {
         let cli = Cli::try_parse_from(args).unwrap();
         match cli.command {
             Commands::Run { config, inputs, .. } => {
-                assert_eq!(config, PathBuf::from("pipeline.toml"));
+                assert_eq!(config, Some(PathBuf::from("pipeline.toml")));
                 assert_eq!(inputs.len(), 2);
                 assert!(inputs.contains(&"prompt=hello".to_string()));
                 assert!(inputs.contains(&"steps=50".to_string()));
@@ -501,7 +501,7 @@ mod tests {
                 output,
                 ..
             } => {
-                assert_eq!(config, PathBuf::from("pipeline.toml"));
+                assert_eq!(config, Some(PathBuf::from("pipeline.toml")));
                 assert_eq!(output, Some(PathBuf::from("output_dir")));
             }
             _ => panic!("Expected Run command"),

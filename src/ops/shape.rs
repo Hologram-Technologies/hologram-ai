@@ -49,8 +49,8 @@ pub fn translate_reshape(
     if let Some(shape_values) = new_shape {
         // Static reshape path (optimization when shape is constant)
         // Only use this if there's no -1 or special handling needed
-        let has_infer = shape_values.iter().any(|&v| v == -1);
-        let has_zero = allow_zero && shape_values.iter().any(|&v| v == 0);
+        let has_infer = shape_values.contains(&-1);
+        let has_zero = allow_zero && shape_values.contains(&0);
 
         if !has_infer && !has_zero {
             // Simple static reshape
@@ -178,13 +178,8 @@ pub fn translate_concat(
 
                         for &idx in inputs.iter() {
                             let node = builder.graph().node(idx).unwrap();
-                            if let NodeOp::Constant { data } = &node.op {
-                                if let ConstantData::I64(values) = data {
-                                    result_values.extend_from_slice(values);
-                                } else {
-                                    all_i64 = false;
-                                    break;
-                                }
+                            if let NodeOp::Constant { data: ConstantData::I64(values) } = &node.op {
+                                result_values.extend_from_slice(values);
                             } else {
                                 all_i64 = false;
                                 break;
@@ -204,13 +199,8 @@ pub fn translate_concat(
 
                         for &idx in inputs.iter() {
                             let node = builder.graph().node(idx).unwrap();
-                            if let NodeOp::Constant { data } = &node.op {
-                                if let ConstantData::I32(values) = data {
-                                    result_values.extend_from_slice(values);
-                                } else {
-                                    all_i32 = false;
-                                    break;
-                                }
+                            if let NodeOp::Constant { data: ConstantData::I32(values) } = &node.op {
+                                result_values.extend_from_slice(values);
                             } else {
                                 all_i32 = false;
                                 break;

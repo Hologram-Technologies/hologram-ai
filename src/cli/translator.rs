@@ -45,6 +45,7 @@ pub fn translate_graph_to_ir(graph: &GraphProto, _opset_version: i64) -> Result<
 ///
 /// External data support is not yet implemented. This function currently
 /// behaves the same as `translate_graph_to_ir`.
+#[allow(dead_code)]
 pub fn translate_graph_to_ir_with_path(
     graph: &GraphProto,
     _opset_version: i64,

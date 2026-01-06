@@ -79,7 +79,7 @@ impl OperationGraph {
     pub fn to_bytes(&self) -> Result<Vec<u8>> {
         self.ir_func
             .to_bytes()
-            .map_err(|e| crate::OnnxError::IrError(e))
+            .map_err(crate::OnnxError::IrError)
     }
 }
 
