@@ -22,11 +22,9 @@ I want you to look at the operations you just implemented here and look for corr
 
 ---
 
-I want you to implement the full cached ISA programs per kernel signature. We don't want anything slower. Always prefer the faster version. Don't regenerate the ISA everytime. That feels just wrong.
+Should I implement the updates to the `hologram` library using a prompt for the `hologram` library instead of you directory adding them?
 
-For phase 1: don't we already have an ISA-based GEMM kernel? Is that a fused operation in the first place?
-
-I need you to review all the kernels currently implemented (fused or simplified) in `hologram` and not reimplement them in this library.
+I don't actually think we need those wrappers in the `hologram-backend` crate in the first place. Shouldn't those wrappers be implemented here, not in the dependency?
 
 ---
 
