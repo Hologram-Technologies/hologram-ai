@@ -172,6 +172,8 @@ struct PipelineContext<'a> {
     seed: u64,
     /// Runtime configuration
     runtime_config: &'a RuntimeConfig,
+    /// Generated outputs (e.g., detokenized text) for output handlers
+    generated_outputs: HashMap<String, String>,
 }
 
 // serde_json is used for parsing input tensors via serde_json::from_str
@@ -289,6 +291,7 @@ fn execute_pipeline(
         guidance_scale,
         seed,
         runtime_config: &config.runtime,
+        generated_outputs: HashMap::new(),
     };
 
     // Execute all stages
@@ -334,13 +337,25 @@ fn execute_stages(
                     indent, idx, model_stage.model
                 );
 
-                let _stage_start = Instant::now();
+                let stage_start = Instant::now();
 
-                // Model execution requires a hologram runtime implementation
-                let _ = holo_path; // Silence unused warning
-                return Err(anyhow::anyhow!(
-                    "Model execution requires a hologram runtime implementation."
-                ));
+                // Execute model using hologram runtime
+                let outputs = execute_model_stage(
+                    holo_path,
+                    &model_stage.inputs,
+                    &model_stage.outputs,
+                    ctx,
+                )?;
+
+                // Cache outputs
+                for (name, tensor) in outputs {
+                    ctx.tensor_cache.insert(name, Arc::new(tensor));
+                }
+
+                info!(
+                    "{}✓ Stage {}: {} completed in {:?}",
+                    indent, idx, model_stage.model, stage_start.elapsed()
+                );
             }
 
             StageDef::Builtin(builtin_stage) => {
@@ -900,11 +915,179 @@ fn execute_builtin_with_context(
             }
         }
 
+        "init_decoder_input" => {
+            // Create initial decoder input with start token
+            let start_token = get_arg_i64("start_token_id").unwrap_or(0);
+            let batch_size = get_arg_i64("batch_size").unwrap_or(1) as usize;
+
+            let decoder_input = vec![start_token as f32; batch_size];
+            outputs.insert(default_output.to_string(), decoder_input);
+            info!("  Initialized decoder with start token: {}", start_token);
+        }
+
+        "sample_token" => {
+            // Sample next token from logits (greedy argmax for now)
+            let logits_ref = get_arg_str("logits").unwrap_or("logits");
+            let temperature = get_arg_f32("temperature").unwrap_or(1.0);
+
+            let logits = ctx.tensor_cache.get(logits_ref)
+                .map(|t| t.as_ref().clone())
+                .unwrap_or_else(|| vec![0.0f32]);
+
+            // Get last token's logits (assuming shape [batch, seq_len, vocab_size])
+            let vocab_size = 32128; // T5 vocab size
+            let last_logits = if logits.len() >= vocab_size {
+                &logits[logits.len() - vocab_size..]
+            } else {
+                &logits[..]
+            };
+
+            // Apply temperature
+            let scaled: Vec<f32> = last_logits.iter()
+                .map(|&x| x / temperature)
+                .collect();
+
+            // Softmax
+            let max = scaled.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+            let exps: Vec<f32> = scaled.iter().map(|&x| (x - max).exp()).collect();
+            let sum: f32 = exps.iter().sum();
+            let _probs: Vec<f32> = exps.iter().map(|&e| e / sum).collect();
+
+            // Argmax (greedy sampling for MVP)
+            let next_token_id = scaled.iter()
+                .enumerate()
+                .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
+                .map(|(idx, _)| idx)
+                .unwrap_or(0);
+
+            debug!("  Sampled token: {}", next_token_id);
+            outputs.insert(default_output.to_string(), vec![next_token_id as f32]);
+        }
+
+        "append_token" => {
+            // Append token to sequence
+            let sequence_ref = get_arg_str("sequence").unwrap_or("decoder_input_ids");
+            let token_ref = get_arg_str("token").unwrap_or("next_token");
+
+            let mut sequence = ctx.tensor_cache.get(sequence_ref)
+                .map(|t| t.as_ref().clone())
+                .unwrap_or_else(|| vec![]);
+
+            let token = ctx.tensor_cache.get(token_ref)
+                .and_then(|t| t.first().copied())
+                .unwrap_or(0.0);
+
+            sequence.push(token);
+            debug!("  Appended token {}, sequence length: {}", token, sequence.len());
+            outputs.insert(default_output.to_string(), sequence);
+        }
+
+        #[cfg(feature = "text-output")]
+        "detokenize" => {
+            // Detokenize token IDs to text
+            let token_ids_ref = get_arg_str("token_ids").unwrap_or("decoder_input_ids");
+            let tokenizer_path = get_arg_str("tokenizer_path")
+                .ok_or_else(|| anyhow::anyhow!("detokenize requires tokenizer_path"))?;
+
+            let token_ids_f32 = ctx.tensor_cache.get(token_ids_ref)
+                .map(|t| t.as_ref().clone())
+                .unwrap_or_else(Vec::new);
+
+            let token_ids: Vec<u32> = token_ids_f32.iter().map(|&f| f as u32).collect();
+
+            // Load tokenizer
+            use tokenizers::Tokenizer;
+            let tokenizer = Tokenizer::from_file(tokenizer_path)
+                .map_err(|e| anyhow::anyhow!("Failed to load tokenizer: {}", e))?;
+
+            // Decode
+            let text = tokenizer.decode(&token_ids, true)
+                .map_err(|e| anyhow::anyhow!("Detokenization failed: {}", e))?;
+
+            info!("  Generated text: \"{}\"", text);
+
+            // Store text in generated outputs for output handler
+            ctx.generated_outputs.insert("generated_text".to_string(), text.clone());
+
+            // Return text length as tensor (for compatibility)
+            outputs.insert(default_output.to_string(), vec![text.len() as f32]);
+        }
+
+        #[cfg(not(feature = "text-output"))]
+        "detokenize" => {
+            return Err(anyhow::anyhow!(
+                "detokenize builtin requires 'text-output' feature. \
+                 Rebuild with: cargo build --features text-output"
+            ));
+        }
+
         _ => {
             warn!("Unknown builtin operation: {}", name);
         }
     }
 
+    Ok(outputs)
+}
+
+/// Execute a compiled .holo model with given inputs/outputs.
+///
+/// This function:
+/// 1. Loads and compiles the .holo file to BackendPlan
+/// 2. Resolves input tensors from pipeline context
+/// 3. Executes the model using ModelExecutor
+/// 4. Returns output tensors
+fn execute_model_stage(
+    holo_path: &Path,
+    input_mapping: &HashMap<String, crate::config::Expr>,
+    output_names: &[String],
+    ctx: &mut PipelineContext,
+) -> Result<HashMap<String, Vec<f32>>> {
+    use crate::runtime::{ModelExecutor, Tensor, infer_tensor_shape};
+
+    // Load and compile model
+    info!("  Loading model: {}", holo_path.display());
+    let mut executor = ModelExecutor::from_holo_file(holo_path)
+        .with_context(|| format!("Failed to load model from {}", holo_path.display()))?;
+
+    // Prepare input tensors
+    let mut input_tensors = HashMap::new();
+    for (model_input_name, tensor_ref_expr) in input_mapping {
+        // Extract string reference from Expr
+        let tensor_ref = tensor_ref_expr.as_str()
+            .ok_or_else(|| anyhow::anyhow!("Input mapping must be string references"))?;
+
+        // Resolve tensor from cache
+        let tensor_data = resolve_tensor_ref(tensor_ref, ctx)?;
+
+        // Infer shape from input name
+        let shape = infer_tensor_shape(&tensor_data, model_input_name)?;
+
+        let tensor = Tensor::new(tensor_data, shape);
+        let numel = tensor.numel();
+        input_tensors.insert(model_input_name.clone(), tensor);
+
+        debug!("  Input '{}': {} elements", model_input_name, numel);
+    }
+
+    // Execute model
+    info!("  Executing model with {} inputs", input_tensors.len());
+    let output_tensors = executor.execute(input_tensors)
+        .with_context(|| "Model execution failed")?;
+
+    // Extract outputs
+    let mut outputs = HashMap::new();
+    for output_name in output_names {
+        if let Some(tensor) = output_tensors.get(output_name) {
+            outputs.insert(output_name.clone(), tensor.to_f32().to_vec());
+            debug!("  Output '{}': {} elements", output_name, tensor.numel());
+        } else if let Some(tensor) = output_tensors.get("output") {
+            // Fallback to default output name
+            outputs.insert(output_name.clone(), tensor.to_f32().to_vec());
+            debug!("  Output '{}' (default): {} elements", output_name, tensor.numel());
+        }
+    }
+
+    info!("  Model execution completed successfully");
     Ok(outputs)
 }
 

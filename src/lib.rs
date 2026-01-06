@@ -95,6 +95,7 @@ pub mod cli;
 pub mod config;
 pub mod core;
 pub mod ops;
+pub mod runtime;
 
 // Re-export main types at crate root for convenience
 pub use core::{
