@@ -21,38 +21,27 @@ description = "Interactive T5 encoder-decoder pipeline with tokenization"
 # =============================================================================
 
 [models.encoder]
-# T5 encoder - converts input text to hidden states
-path = "models/t5-small/encoder_model.onnx"
-precompiled = "models/t5-small/compiled/encoder.holo"
+# T5 encoder - converts input text to hidden states (paths relative to config file)
+path = "../../models/t5-small/encoder_model.onnx"
+precompiled = "../../models/t5-small/compiled/encoder.holo"
 
 [models.decoder]
-# T5 decoder - generates output text autoregressively
-path = "models/t5-small/decoder_model.onnx"
-precompiled = "models/t5-small/compiled/decoder.holo"
+# T5 decoder - generates output text autoregressively (paths relative to config file)
+path = "../../models/t5-small/decoder_model.onnx"
+precompiled = "../../models/t5-small/compiled/decoder.holo"
 
 # =============================================================================
 # Input Definitions
 # =============================================================================
 
-[inputs.prompt]
-type = "string"
-description = "Text prompt for the model"
-default = "Translate English to French: Hello, how are you?"
+# Simple string inputs (just default values)
+[inputs]
+prompt = "Translate English to French: Hello, how are you?"
 
-[inputs.max_length]
-type = "int"
-description = "Maximum sequence length for generation"
-default = 128
-
-[inputs.num_beams]
-type = "int"
-description = "Number of beams for beam search"
-default = 4
-
-[inputs.temperature]
-type = "float"
-description = "Sampling temperature (higher = more random)"
-default = 1.0
+# For typed inputs with constraints, use full spec:
+# [inputs.max_length]
+# type = "int"
+# default = 128
 
 # =============================================================================
 # Pipeline Stages
@@ -96,11 +85,7 @@ as_var = "step"
 [[stages.stages]]
 type = "model"
 model = "decoder"
-inputs = {
-    input_ids = "decoder_input_ids",
-    encoder_hidden_states = "encoder_hidden_states",
-    encoder_attention_mask = "attention_mask"
-}
+inputs = { input_ids = "decoder_input_ids", encoder_hidden_states = "encoder_hidden_states", encoder_attention_mask = "attention_mask" }
 outputs = ["logits"]
 
 # Nested stage: Sample next token

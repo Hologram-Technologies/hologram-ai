@@ -10,20 +10,19 @@
 name = "T5 Simple Test"
 description = "Minimal T5 configuration for testing"
 
-# Models
+# Models (paths relative to config file location)
 [models.encoder]
-path = "models/t5-small/encoder_model.onnx"
-precompiled = "models/t5-small/compiled/encoder.holo"
+path = "../../models/t5-small/encoder_model.onnx"
+precompiled = "../../models/t5-small/compiled/encoder.holo"
 
 [models.decoder]
-path = "models/t5-small/decoder_model.onnx"
-precompiled = "models/t5-small/compiled/decoder.holo"
+path = "../../models/t5-small/decoder_model.onnx"
+precompiled = "../../models/t5-small/compiled/decoder.holo"
 
 # Inputs
-[inputs.prompt]
-type = "string"
-description = "Input text prompt"
-default = "Translate English to French: Hello, how are you?"
+# Simple string input (just default value)
+[inputs]
+prompt = "Translate English to French: Hello, how are you?"
 
 # Simple pipeline - just demonstrates model loading
 [[stages]]
