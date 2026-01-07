@@ -1,0 +1,57 @@
+# T5 Text Generation Pipeline
+#
+# Full encoder-decoder pipeline with auto-regressive generation
+#
+# Usage:
+#   cargo run --release -- run --config configs/t5-generate.toml
+
+name = "T5 Text Generation"
+description = "End-to-end text generation with T5"
+
+# Input
+[inputs]
+prompt = "Tell me a joke about programming"
+
+# Models
+[models.encoder]
+path = "../models/t5-small/encoder_model.onnx"
+precompiled = "../models/t5-small/compiled/encoder.holo"
+
+[models.decoder]
+path = "../models/t5-small/decoder_model.onnx"
+precompiled = "../models/t5-small/compiled/decoder.holo"
+
+# Pipeline stages
+[[stages]]
+type = "builtin"
+builtin = "tokenize"
+outputs = ["input_ids", "attention_mask"]
+
+[stages.args]
+text = "prompt"
+max_length = 128
+tokenizer_path = "../models/t5-small/tokenizer.json"
+
+[[stages]]
+type = "model"
+model = "encoder"
+inputs = { input_ids = "input_ids", attention_mask = "attention_mask" }
+outputs = ["encoder_hidden_states"]
+
+[[stages]]
+type = "builtin"
+builtin = "generate"
+outputs = ["generated_ids"]
+
+[stages.args]
+model = "decoder"
+encoder_hidden_states = "encoder_hidden_states"
+encoder_attention_mask = "attention_mask"
+max_new_tokens = 50
+start_token_id = 0  # PAD token
+
+# Output
+[outputs.result]
+tensor = "generated_ids"
+handler = "json"
+description = "Generated token IDs"

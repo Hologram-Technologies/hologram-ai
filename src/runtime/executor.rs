@@ -15,6 +15,7 @@ struct BufferRequirements {
     num_outputs: usize,
     output_sizes: Vec<usize>,
     output_shapes: Vec<[usize; 4]>,
+    output_shape_exprs: Vec<Option<Vec<hologram_ir::shape::DimExpr>>>,
 }
 
 /// Model executor for running compiled .holo models.
@@ -62,6 +63,7 @@ impl ModelExecutor {
             num_outputs: plan.layout_metadata.num_outputs,
             output_sizes: plan.layout_metadata.output_sizes.clone(),
             output_shapes: plan.layout_metadata.output_shapes.clone(),
+            output_shape_exprs: plan.layout_metadata.output_shape_exprs.clone(),
         }
     }
 
@@ -71,7 +73,7 @@ impl ModelExecutor {
     /// ordering as a convention to map named inputs to buffer indices.
     fn map_inputs_to_buffers(
         &mut self,
-        named_inputs: HashMap<String, Tensor>,
+        named_inputs: &HashMap<String, Tensor>,
         requirements: &BufferRequirements,
     ) -> Result<Vec<BufferHandle>> {
         // Sort input names alphabetically for consistent ordering
@@ -117,39 +119,114 @@ impl ModelExecutor {
         Ok(handles)
     }
 
-    /// Allocate output buffers based on plan requirements.
-    fn allocate_output_buffers(&mut self, requirements: &BufferRequirements) -> Result<Vec<BufferHandle>> {
-        let mut handles = Vec::with_capacity(requirements.num_outputs);
 
-        for (idx, &size_bytes) in requirements.output_sizes.iter().enumerate() {
+    /// Allocate output buffers and return both handles and computed shapes.
+    ///
+    /// This is a convenience wrapper that returns the shapes for use in buffers_to_outputs.
+    fn allocate_output_buffers_with_shapes(
+        &mut self,
+        requirements: &BufferRequirements,
+        input_tensors: &[&Tensor],
+    ) -> Result<(Vec<BufferHandle>, Vec<[usize; 4]>)> {
+        let mut handles = Vec::with_capacity(requirements.num_outputs);
+        let mut shapes = Vec::with_capacity(requirements.num_outputs);
+
+        for (idx, &metadata_size_bytes) in requirements.output_sizes.iter().enumerate() {
+            // Compute actual output shape and size if shape_expr exists
+            let (actual_size, actual_shape) = if let Some(ref shape_expr) = requirements.output_shape_exprs[idx] {
+                use hologram_ir::shape::DimExpr;
+
+                tracing::debug!("Output {} shape_expr has {} dimensions", idx, shape_expr.len());
+
+                // Resolve each dimension expression to a concrete value
+                let resolved_dims: Vec<usize> = shape_expr
+                    .iter()
+                    .enumerate()
+                    .map(|(dim_idx, expr)| match expr {
+                        DimExpr::Static(n) => {
+                            tracing::debug!("  Dim {}: Static({})", dim_idx, n);
+                            *n
+                        }
+                        DimExpr::InputRef { input_id, dim_index } => {
+                            tracing::debug!("  Dim {}: InputRef {{ input_id: {}, dim_index: {} }}", dim_idx, input_id, dim_index);
+
+                            // WORKAROUND: Use maximum dimension across all inputs at this index
+                            // This handles cases where the compiler references the wrong input
+                            // (e.g., T5 encoder references attention_mask[1,1] instead of input_ids[1,128])
+                            let mut max_value = 1;
+                            for (_i, tensor) in input_tensors.iter().enumerate() {
+                                if *dim_index < tensor.shape.len() {
+                                    max_value = max_value.max(tensor.shape[*dim_index]);
+                                }
+                            }
+
+                            tracing::debug!("    -> {} (max across all inputs at dim {})", max_value, dim_index);
+                            max_value
+                        }
+                    })
+                    .collect();
+
+                let numel: usize = resolved_dims.iter().product();
+                let size_bytes = numel * 4; // f32 = 4 bytes
+
+                // Convert to 4D shape for storage
+                let shape_4d = Self::shape_to_4d(&resolved_dims);
+
+                tracing::debug!(
+                    "Output {} has dynamic shape: resolved {:?} from shape_expr -> {} bytes (metadata was {} bytes)",
+                    idx, resolved_dims, size_bytes, metadata_size_bytes
+                );
+
+                (size_bytes, shape_4d)
+            } else {
+                // No shape_expr, use static metadata
+                (metadata_size_bytes, requirements.output_shapes[idx])
+            };
+
             tracing::trace!(
                 "Allocating output buffer {}: {} bytes, shape {:?}",
                 idx,
-                size_bytes,
-                requirements.output_shapes[idx]
+                actual_size,
+                actual_shape
             );
 
             let handle = self
                 .backend
-                .allocate_buffer(size_bytes)
+                .allocate_buffer(actual_size)
                 .map_err(|e| anyhow::anyhow!("Failed to allocate output buffer {}: {:?}", idx, e))?;
 
             handles.push(handle);
+            shapes.push(actual_shape);
         }
 
-        Ok(handles)
+        Ok((handles, shapes))
+    }
+
+    /// Convert shape to 4D representation, padding with 1s if needed.
+    fn shape_to_4d(shape: &[usize]) -> [usize; 4] {
+        match shape.len() {
+            0 => [1, 1, 1, 1],
+            1 => [shape[0], 1, 1, 1],
+            2 => [shape[0], shape[1], 1, 1],
+            3 => [shape[0], shape[1], shape[2], 1],
+            _ => [shape[0], shape[1], shape[2], shape[3]],
+        }
     }
 
     /// Convert output buffers to named tensors.
+    ///
+    /// Uses the provided output_shapes (computed at runtime for dynamic shapes)
+    /// instead of the static shapes from requirements.
     fn buffers_to_outputs(
         &self,
         output_handles: Vec<BufferHandle>,
+        output_shapes: Vec<[usize; 4]>,
         requirements: &BufferRequirements,
     ) -> Result<HashMap<String, Tensor>> {
         let mut outputs = HashMap::new();
 
         for (idx, handle) in output_handles.iter().enumerate() {
-            let shape = requirements.output_shapes[idx];
+            let shape = output_shapes[idx];
 
             // Convert [usize; 4] to Vec<usize>, removing trailing 1s
             let shape_vec: Vec<usize> = shape
@@ -223,11 +300,17 @@ impl ModelExecutor {
             requirements.output_sizes
         );
 
-        // Map named inputs to positional buffers (alphabetically sorted)
-        let input_handles = self.map_inputs_to_buffers(inputs, &requirements)?;
+        // Extract sorted input tensors for shape resolution
+        // (Must sort alphabetically to match buffer index ordering)
+        let mut input_names: Vec<_> = inputs.keys().cloned().collect();
+        input_names.sort();
+        let sorted_tensors: Vec<&Tensor> = input_names.iter().map(|name| inputs.get(name).unwrap()).collect();
 
-        // Allocate output buffers from metadata
-        let mut output_handles = self.allocate_output_buffers(&requirements)?;
+        // Map named inputs to positional buffers (alphabetically sorted)
+        let input_handles = self.map_inputs_to_buffers(&inputs, &requirements)?;
+
+        // Allocate output buffers with runtime shape resolution
+        let (mut output_handles, output_shapes) = self.allocate_output_buffers_with_shapes(&requirements, &sorted_tensors)?;
 
         // DEBUG: Check buffer references
         let plan = self.executor.plan();
@@ -265,8 +348,8 @@ impl ModelExecutor {
 
         tracing::debug!("Model execution completed successfully");
 
-        // Convert output buffers to named tensors
-        let outputs = self.buffers_to_outputs(output_handles.clone(), &requirements)?;
+        // Convert output buffers to named tensors (using computed shapes)
+        let outputs = self.buffers_to_outputs(output_handles.clone(), output_shapes, &requirements)?;
 
         // Free all buffers
         for handle in input_handles {
