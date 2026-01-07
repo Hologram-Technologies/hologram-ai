@@ -185,19 +185,30 @@ pub fn translate_graph_to_ir(graph: &crate::proto::GraphProto) -> Result<IRFunct
         }
     }
 
-    // Step 4: Set up outputs
+    // Step 4: Set up outputs with declared shapes
     debug!("Processing {} graph outputs", graph.output.len());
     for output in &graph.output {
         let output_node = value_map.get(&output.name).ok_or_else(|| {
             crate::OnnxError::InvalidModel(format!("Graph output '{}' not found in value map", output.name))
         })?;
 
-        trace!("Adding output '{}'", output.name);
-        builder.output(&output.name, *output_node)?;
+        // Extract declared shape from ONNX ValueInfoProto to preserve symbolic dimensions
+        let declared_shape = crate::core::SymbolicShape::from_value_info(output)
+            .ok()
+            .map(|s| s.into_inner());
+
+        trace!("Adding output '{}' with declared shape {:?}", output.name, declared_shape);
+        builder.output_with_shape(&output.name, *output_node, declared_shape)?;
     }
 
-    debug!("Graph translation complete");
-    Ok(builder.build())
+    let ir_func = builder.build();
+
+    // Debug: Check if edges were created
+    debug!("Graph translation complete: {} nodes, {} edges",
+        ir_func.inner().node_count(),
+        ir_func.inner().edge_count());
+
+    Ok(ir_func)
 }
 
 /// Extract DType from ONNX ValueInfoProto.

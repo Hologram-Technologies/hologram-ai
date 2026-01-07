@@ -233,10 +233,16 @@ impl OnnxCompiler {
         let ir_func = translate_graph_to_ir(graph)?;
         info!("IR translation complete");
 
-        // Step 3: Serialize to .holo format
-        debug!("Serializing to .holo format");
-        let operation_graph = core::lower_to_operation_graph(ir_func)?;
-        let holo_bytes = operation_graph.to_bytes()?;
+        // Step 3: Compile to BackendPlan using hologram-compiler
+        debug!("Compiling IR to BackendPlan");
+
+        // ir_func is already hologram_ir::OperationGraph (aliased as IRFunction)
+        let backend_type = hologram_backend::BackendType::Cpu; // Default to CPU
+        let plan = hologram_compiler::compile_ir(&ir_func, backend_type)
+            .map_err(|e| OnnxError::IrTranslationError(format!("Failed to compile IR: {:?}", e)))?;
+
+        debug!("Serializing BackendPlan to .holo format");
+        let holo_bytes = serialize_backend_plan(&plan)?;
 
         // Weight data extraction (embedded for now, external storage pending backend integration)
         let weight_bytes = Vec::new();
@@ -284,9 +290,13 @@ impl OnnxCompiler {
         debug!("Translating ONNX to IR");
         let ir_func = translate_graph_to_ir(graph)?;
 
-        // Serialize
-        let operation_graph = core::lower_to_operation_graph(ir_func)?;
-        let holo_bytes = operation_graph.to_bytes()?;
+        // Compile to BackendPlan using hologram-compiler
+        debug!("Compiling IR to BackendPlan");
+        let backend_type = hologram_backend::BackendType::Cpu; // Default to CPU
+        let plan = hologram_compiler::compile_ir(&ir_func, backend_type)
+            .map_err(|e| OnnxError::IrTranslationError(format!("Failed to compile IR: {:?}", e)))?;
+
+        let holo_bytes = serialize_backend_plan(&plan)?;
         let weight_bytes = Vec::new();
 
         info!(
@@ -302,6 +312,32 @@ impl Default for OnnxCompiler {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// Serialize a BackendPlan to .holo format bytes.
+///
+/// This function:
+/// 1. Converts BackendPlan to SerializableBackendPlan (kernel IDs)
+/// 2. Serializes using rkyv zero-copy format
+/// 3. Prepends HOLO_MAGIC bytes ([b'H', b'O', b'L', b'P'])
+///
+/// The resulting bytes can be written to a .holo file and later loaded
+/// by both hologram and hologram-onnx runtimes.
+fn serialize_backend_plan(plan: &hologram_backend::BackendPlan) -> Result<Vec<u8>> {
+    // Convert to serializable form (function pointers → kernel IDs)
+    let serializable = plan.to_serializable();
+
+    // Serialize using rkyv
+    let plan_bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&serializable)
+        .map(|bytes| bytes.to_vec())
+        .map_err(|e| OnnxError::IrTranslationError(format!("Failed to serialize BackendPlan: {}", e)))?;
+
+    // Prepend magic bytes
+    let mut holo_bytes = Vec::with_capacity(4 + plan_bytes.len());
+    holo_bytes.extend_from_slice(&hologram_compiler::HOLO_MAGIC);
+    holo_bytes.extend_from_slice(&plan_bytes);
+
+    Ok(holo_bytes)
 }
 
 /// Convenience function to compile ONNX model to .holo format.

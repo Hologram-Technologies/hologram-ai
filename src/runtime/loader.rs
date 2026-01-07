@@ -1,17 +1,14 @@
-//! Loading and compiling .holo files to executable BackendPlan.
+//! Loading .holo files to executable BackendPlan.
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use std::path::Path;
 
-use hologram_ir::OperationGraph;
-
-/// Load a .holo file and compile it to an executable BackendPlan.
+/// Load a .holo file to an executable BackendPlan.
 ///
-/// This function performs the critical bridge from IR to execution:
-/// 1. Read .holo file bytes
-/// 2. Deserialize to OperationGraph (IR representation)
-/// 3. Convert IR → CompileGraph (compiler representation)
-/// 4. Compile CompileGraph → BackendPlan (executable)
+/// This function loads a pre-compiled .holo file and prepares it for execution:
+/// 1. Read and deserialize .holo file using hologram's runtime API
+/// 2. Resolve kernel IDs to function pointers based on CPU capabilities
+/// 3. Create appropriate backend (with fallback to CPU if needed)
 ///
 /// # Arguments
 /// * `path` - Path to .holo file
@@ -23,8 +20,7 @@ use hologram_ir::OperationGraph;
 /// Returns error if:
 /// - File cannot be read
 /// - Deserialization fails (corrupted .holo file)
-/// - IR → CompileGraph conversion fails (unsupported operations)
-/// - Backend compilation fails
+/// - Backend creation fails
 pub fn load_and_compile_holo(
     path: &Path,
 ) -> Result<(
@@ -33,52 +29,27 @@ pub fn load_and_compile_holo(
 )> {
     tracing::info!("Loading .holo file: {}", path.display());
 
-    // Step 1: Read .holo file
-    let holo_bytes = std::fs::read(path)
-        .with_context(|| format!("Failed to read .holo file: {}", path.display()))?;
+    // Use hologram's read_holo() API
+    // This automatically:
+    // 1. Verifies magic bytes
+    // 2. Deserializes SerializableBackendPlan
+    // 3. Resolves kernel IDs to function pointers based on CPU capabilities
+    let plan = hologram_compiler::read_holo(path)
+        .map_err(|e| anyhow::anyhow!("Failed to load .holo file: {:?}", e))?;
 
-    tracing::debug!("Read {} bytes from .holo file", holo_bytes.len());
+    tracing::debug!("Deserialized BackendPlan from .holo file");
 
-    // Step 2: Deserialize to OperationGraph (IR)
-    let ir_graph = OperationGraph::from_bytes(&holo_bytes)
-        .map_err(|e| anyhow::anyhow!("Failed to deserialize .holo file: {:?}", e))?;
-
-    tracing::debug!("Deserialized OperationGraph from .holo file");
-
-    // Step 3: Convert IR → CompileGraph
-    let compile_graph = hologram_compiler::convert_from_ir(&ir_graph)
-        .map_err(|e| anyhow::anyhow!("IR → CompileGraph conversion failed: {:?}", e))?;
-
-    tracing::debug!("Converted IR to CompileGraph");
-
-    // Step 4: Create backend
-    let backend = hologram_backend::create_best_backend();
-    let backend_type = backend.backend_type();
-
-    // Create capabilities matching the backend type
-    let caps = match backend_type {
-        hologram_backend::BackendType::Cpu => hologram_backend::BackendCapabilities::cpu(),
-        hologram_backend::BackendType::Cuda => hologram_backend::BackendCapabilities::cuda(0),
-        hologram_backend::BackendType::Metal => hologram_backend::BackendCapabilities::metal(),
-        hologram_backend::BackendType::WebGpu => hologram_backend::BackendCapabilities::webgpu(),
-        hologram_backend::BackendType::Custom(_) => {
-            // For custom backends, default to CPU capabilities
-            hologram_backend::BackendCapabilities::cpu()
+    // Use hologram's backend creation with proper fallback handling
+    let backend = match hologram_backend::create_backend(plan.backend_type.clone()) {
+        Ok(backend) => backend,
+        Err(e) => {
+            tracing::warn!("Failed to create backend: {}. Falling back to CPU", e);
+            hologram_backend::create_best_backend()
         }
     };
 
-    tracing::info!("Using backend: {:?}", backend_type);
-
-    // Step 5: Compile CompileGraph → BackendPlan
-    let pipeline_config = hologram_compiler::PipelineConfig::default();
-    let pipeline =
-        hologram_compiler::CompilationPipeline::with_config(backend_type, pipeline_config);
-
-    let plan = pipeline
-        .compile(&compile_graph, &caps)
-        .map_err(|e| anyhow::anyhow!("BackendPlan compilation failed: {:?}", e))?;
-
-    tracing::info!("Successfully compiled BackendPlan from .holo file");
+    tracing::info!("Using backend: {:?}", backend.backend_type());
+    tracing::info!("Successfully loaded BackendPlan from .holo file");
 
     Ok((plan, backend))
 }
