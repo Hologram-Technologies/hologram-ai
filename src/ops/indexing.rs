@@ -48,48 +48,15 @@ pub fn translate_gather(
     // Parse axis attribute (default is 0 in ONNX)
     let axis = parse_attr_int(attrs, "axis", 0)? as i32;
 
-    // Constant folding: if both data and indices are constants, compute gather at compile time
-    use hologram_ir::{NodeOp, ConstantData, Shape};
+    // FIXME: Constant folding disabled due to kernel ID assignment issue
+    // When constant folding creates a Constant node, the compiler incorrectly
+    // assigns it a Gather kernel ID, causing runtime failures.
+    // The folded constant node has 0 input_refs but the Gather kernel expects 2 inputs.
+    //
+    // TODO: Re-enable constant folding after fixing kernel ID assignment to properly
+    // distinguish between Constant nodes and Gather nodes in the compiler.
 
-    let data_node = builder.graph().node(data)
-        .ok_or_else(|| OnnxError::InvalidModel("Gather: data input not found".to_string()))?;
-    let indices_node = builder.graph().node(indices)
-        .ok_or_else(|| OnnxError::InvalidModel("Gather: indices input not found".to_string()))?;
-
-    if let (NodeOp::Constant { data: data_const }, NodeOp::Constant { data: indices_const }) =
-        (&data_node.op, &indices_node.op) {
-
-        // Try to perform constant folding for common cases
-        // Case 1: Gathering from 1D array with scalar index
-        if let (ConstantData::I64(values), ConstantData::I64(idx_values)) = (data_const, indices_const)
-            && data_node.shape.rank() == 1 && indices_node.shape.rank() == 0 && axis == 0 {
-            let idx = idx_values[0] as usize;
-            if idx < values.len() {
-                let gathered_value = values[idx];
-                let result = builder.constant(
-                    ConstantData::I64(vec![gathered_value]),
-                    Shape::static_shape(&[])  // scalar output
-                );
-                return Ok(vec![result]);
-            }
-        }
-
-        // Case 2: Gathering from 1D I32 array with scalar index
-        if let (ConstantData::I32(values), ConstantData::I64(idx_values)) = (data_const, indices_const)
-            && data_node.shape.rank() == 1 && indices_node.shape.rank() == 0 && axis == 0 {
-            let idx = idx_values[0] as usize;
-            if idx < values.len() {
-                let gathered_value = values[idx];
-                let result = builder.constant(
-                    ConstantData::I32(vec![gathered_value]),
-                    Shape::static_shape(&[])  // scalar output
-                );
-                return Ok(vec![result]);
-            }
-        }
-    }
-
-    // No constant folding possible, create regular gather node
+    // Create regular gather node (with proper edges from inputs)
     let result = builder.gather(data, indices, axis)?;
 
     Ok(vec![result])
