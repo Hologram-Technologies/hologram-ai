@@ -847,8 +847,7 @@ fn execute_builtin_with_context(
         }
 
         "tokenize" | "encode_text" => {
-            // CLIP text tokenization
-            // For now, returns a simple token sequence
+            // Text tokenization for T5 or CLIP models
             let text_ref = get_arg_str("text").unwrap_or("prompt");
             let text = ctx.runtime_inputs.get(text_ref)
                 .map(|s| s.as_str())
@@ -862,35 +861,77 @@ fn execute_builtin_with_context(
             // In a real implementation, this would use a proper BPE tokenizer
             let mut tokens: Vec<f32> = Vec::with_capacity(max_length);
 
-            // Start token (49406 for CLIP)
-            tokens.push(49406.0);
+            // Detect model type from output names or max_length
+            let is_t5 = max_length > 77 || output_names.contains(&"attention_mask".to_string());
 
-            // Convert text to token IDs using simple character mapping
-            for (i, c) in text.chars().take(max_length - 2).enumerate() {
-                // Simple mapping - in reality would use BPE vocabulary
-                let token_id = match c {
-                    'a'..='z' => 320 + (c as u32 - 'a' as u32),
-                    'A'..='Z' => 320 + (c as u32 - 'A' as u32),
-                    ' ' => 267,
-                    '.' => 269,
-                    ',' => 268,
-                    _ => 259, // Unknown token
-                };
-                tokens.push(token_id as f32);
-                if i >= max_length - 2 {
-                    break;
+            if is_t5 {
+                // T5 tokenization
+                // Convert text to token IDs using simple character mapping
+                for c in text.chars().take(max_length) {
+                    // Simple mapping - in reality would use SentencePiece vocabulary
+                    let token_id = match c {
+                        'a'..='z' => 100 + (c as u32 - 'a' as u32),
+                        'A'..='Z' => 100 + (c as u32 - 'A' as u32),
+                        ' ' => 3,
+                        '.' => 5,
+                        ',' => 6,
+                        '?' => 58,
+                        '!' => 55,
+                        _ => 3, // Space token for unknown
+                    };
+                    tokens.push(token_id as f32);
                 }
+
+                // Pad to max_length with PAD token (0)
+                let actual_len = tokens.len();
+                while tokens.len() < max_length {
+                    tokens.push(0.0); // PAD token
+                }
+
+                // Create attention mask: 1 for real tokens, 0 for padding
+                let attention_mask: Vec<f32> = (0..max_length)
+                    .map(|i| if i < actual_len { 1.0 } else { 0.0 })
+                    .collect();
+
+                // Output both input_ids and attention_mask
+                if output_names.len() >= 2 {
+                    outputs.insert(output_names[0].clone(), tokens);
+                    outputs.insert(output_names[1].clone(), attention_mask);
+                } else {
+                    outputs.insert(default_output.to_string(), tokens);
+                }
+            } else {
+                // CLIP tokenization (original behavior)
+                // Start token (49406 for CLIP)
+                tokens.push(49406.0);
+
+                // Convert text to token IDs using simple character mapping
+                for (i, c) in text.chars().take(max_length - 2).enumerate() {
+                    // Simple mapping - in reality would use BPE vocabulary
+                    let token_id = match c {
+                        'a'..='z' => 320 + (c as u32 - 'a' as u32),
+                        'A'..='Z' => 320 + (c as u32 - 'A' as u32),
+                        ' ' => 267,
+                        '.' => 269,
+                        ',' => 268,
+                        _ => 259, // Unknown token
+                    };
+                    tokens.push(token_id as f32);
+                    if i >= max_length - 2 {
+                        break;
+                    }
+                }
+
+                // End token (49407 for CLIP)
+                tokens.push(49407.0);
+
+                // Pad to max_length
+                while tokens.len() < max_length {
+                    tokens.push(49407.0); // Pad with end token
+                }
+
+                outputs.insert(default_output.to_string(), tokens);
             }
-
-            // End token (49407 for CLIP)
-            tokens.push(49407.0);
-
-            // Pad to max_length
-            while tokens.len() < max_length {
-                tokens.push(49407.0); // Pad with end token
-            }
-
-            outputs.insert(default_output.to_string(), tokens);
         }
 
         "zeros" => {
@@ -1019,6 +1060,140 @@ fn execute_builtin_with_context(
                 "detokenize builtin requires 'text-output' feature. \
                  Rebuild with: cargo build --features text-output"
             ));
+        }
+
+        "generate" => {
+            // Auto-regressive text generation
+            //
+            // This builtin implements the full generation loop for encoder-decoder models.
+            // It repeatedly calls the decoder to generate tokens one by one.
+            //
+            // Required args:
+            //   - model: decoder model name
+            //   - encoder_hidden_states: encoder outputs
+            //   - encoder_attention_mask: attention mask
+            //
+            // Optional args:
+            //   - max_new_tokens: maximum number of tokens to generate (default: 50)
+            //   - start_token_id: initial token (default: 0 - PAD token for T5)
+            //   - eos_token_id: end-of-sequence token to stop generation (default: 1 - EOS)
+            //   - temperature: sampling temperature (default: 1.0, greedy)
+
+            let model_name = get_arg_str("model")
+                .ok_or_else(|| anyhow::anyhow!("generate requires 'model' argument"))?;
+
+            let max_new_tokens = get_arg_i64("max_new_tokens").unwrap_or(50) as usize;
+            let start_token_id = get_arg_i64("start_token_id").unwrap_or(0) as u32;
+            let eos_token_id = get_arg_i64("eos_token_id").unwrap_or(1) as u32;
+            let temperature = get_arg_f32("temperature").unwrap_or(1.0);
+
+            // Get encoder outputs from context
+            let encoder_hidden_states_ref = get_arg_str("encoder_hidden_states")
+                .ok_or_else(|| anyhow::anyhow!("generate requires 'encoder_hidden_states'"))?;
+            let encoder_attention_mask_ref = get_arg_str("encoder_attention_mask")
+                .ok_or_else(|| anyhow::anyhow!("generate requires 'encoder_attention_mask'"))?;
+
+            let encoder_hidden_states = ctx.tensor_cache.get(encoder_hidden_states_ref)
+                .ok_or_else(|| anyhow::anyhow!("Encoder hidden states '{}' not found", encoder_hidden_states_ref))?
+                .clone();
+
+            let encoder_attention_mask = ctx.tensor_cache.get(encoder_attention_mask_ref)
+                .ok_or_else(|| anyhow::anyhow!("Encoder attention mask '{}' not found", encoder_attention_mask_ref))?
+                .clone();
+
+            info!("  Starting auto-regressive generation:");
+            info!("    Model: {}", model_name);
+            info!("    Max new tokens: {}", max_new_tokens);
+            info!("    Start token: {}", start_token_id);
+            info!("    EOS token: {}", eos_token_id);
+
+            // Initialize decoder input with start token
+            let mut generated_tokens: Vec<u32> = vec![start_token_id];
+
+            // Generation loop
+            for step in 0..max_new_tokens {
+                debug!("  Generation step {}/{}", step + 1, max_new_tokens);
+
+                // Convert tokens to f32 for model input
+                let decoder_input_ids: Vec<f32> = generated_tokens.iter()
+                    .map(|&t| t as f32)
+                    .collect();
+
+                // Store inputs in context for model execution
+                ctx.tensor_cache.insert("_gen_decoder_input_ids".to_string(), Arc::new(decoder_input_ids));
+                ctx.tensor_cache.insert("_gen_encoder_hidden_states".to_string(), encoder_hidden_states.clone());
+                ctx.tensor_cache.insert("_gen_encoder_attention_mask".to_string(), encoder_attention_mask.clone());
+
+                // Prepare decoder inputs
+                let mut decoder_inputs = HashMap::new();
+                decoder_inputs.insert("input_ids".to_string(), crate::config::Expr::string("_gen_decoder_input_ids"));
+                decoder_inputs.insert("encoder_hidden_states".to_string(), crate::config::Expr::string("_gen_encoder_hidden_states"));
+                decoder_inputs.insert("encoder_attention_mask".to_string(), crate::config::Expr::string("_gen_encoder_attention_mask"));
+
+                // Get decoder model path
+                let decoder_model = ctx.holo_models.get(model_name)
+                    .ok_or_else(|| anyhow::anyhow!("Decoder model '{}' not found", model_name))?;
+
+                // Execute decoder
+                // Note: .holo files don't store output names, so we get generic names
+                // "output_0" = logits, "output_1..24" = key-value caches
+                let decoder_outputs = execute_model_stage(
+                    decoder_model,
+                    &decoder_inputs,
+                    &["output_0".to_string()],  // Request first output (logits)
+                    ctx,
+                )?;
+
+                // Get logits (first output)
+                let logits = decoder_outputs.get("output_0")
+                    .ok_or_else(|| anyhow::anyhow!("Decoder did not produce logits (output_0)"))?;
+
+                // Sample next token from last position's logits
+                // Logits shape: [batch=1, seq_len, vocab_size=32128]
+                let vocab_size = 32128;
+                let seq_len = generated_tokens.len();
+
+                // Get logits for the last token
+                let last_token_start = (seq_len - 1) * vocab_size;
+                let last_token_logits = if logits.len() >= last_token_start + vocab_size {
+                    &logits[last_token_start..last_token_start + vocab_size]
+                } else {
+                    // Fallback: use last vocab_size elements
+                    &logits[logits.len().saturating_sub(vocab_size)..]
+                };
+
+                // Apply temperature and sample
+                let scaled: Vec<f32> = last_token_logits.iter()
+                    .map(|&x| x / temperature)
+                    .collect();
+
+                // Greedy sampling (argmax)
+                let next_token_id = scaled.iter()
+                    .enumerate()
+                    .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
+                    .map(|(idx, _)| idx as u32)
+                    .unwrap_or(0);
+
+                debug!("    Sampled token: {}", next_token_id);
+
+                // Check for EOS
+                if next_token_id == eos_token_id {
+                    info!("  Generation stopped at step {} (EOS token)", step + 1);
+                    break;
+                }
+
+                // Append to sequence
+                generated_tokens.push(next_token_id);
+            }
+
+            info!("  Generated {} tokens total", generated_tokens.len());
+
+            // Convert to f32 for output
+            let output_tokens: Vec<f32> = generated_tokens.iter()
+                .map(|&t| t as f32)
+                .collect();
+
+            outputs.insert(default_output.to_string(), output_tokens);
         }
 
         _ => {
