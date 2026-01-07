@@ -50,3 +50,8 @@ Convert ONNX models to Hologram IR format.
 ```bash
 hologram-onnx convert model.onnx -o model.ir
 hologram-onnx compile model.onnx -o model.holo --backend cpu
+```
+
+---
+
+Now models themselves have weights, which can be really large. We need to be able to take weights and serialize them using memory maps so we don't have to load all the weights into memory when running a model. For big models, like Stable Diffusion we have Gb of weight files. We need to make sure this works for large models.

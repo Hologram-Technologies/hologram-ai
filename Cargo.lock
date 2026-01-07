@@ -967,6 +967,7 @@ name = "hologram-backend"
 version = "0.1.0"
 dependencies = [
  "hologram-common",
+ "hologram-ir",
  "hologram-isa",
  "hologram-lookup",
  "ndarray",
@@ -976,6 +977,7 @@ dependencies = [
  "rustc-hash",
  "rustfft",
  "thiserror 2.0.17",
+ "tracing",
 ]
 
 [[package]]
@@ -1004,6 +1006,7 @@ dependencies = [
  "sha2",
  "tar",
  "toml",
+ "tracing",
  "tree-sitter",
  "tree-sitter-python",
  "tree-sitter-typescript",
