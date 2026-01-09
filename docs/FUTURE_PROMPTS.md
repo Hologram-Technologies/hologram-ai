@@ -58,4 +58,4 @@ If this doesn't work in the next few attempts, can you pause so we can restructu
 
 ---
 
-I would prefer that any model can be built using the `hologram-ai` tools without having to generate a custom builder for each one. So I don't want a `Qwen2Builder`, `LlamaBuilder`, etc. I want to be able to read the formats and build the `OperationGraph` through the tooling provided in this crate already.
+If I completely restructure this app using the @specs/plans/24-gguf-safetensors-support.md can you write a prompt in @specs/plans/ so that we can continue this work on the onnx graph with T5, even through we have a new structure.
