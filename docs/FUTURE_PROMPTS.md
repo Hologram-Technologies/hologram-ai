@@ -54,4 +54,8 @@ Can you continue debugging, compiling, and running the T5 model that gives us th
 
 ---
 
-If we need to set the `input-shapes`, that's okay... we need to get this working
+If this doesn't work in the next few attempts, can you pause so we can restructure this crate entirely. But I'd prefer to get T5 working before a big restructure, but 
+
+---
+
+I would prefer that any model can be built using the `hologram-ai` tools without having to generate a custom builder for each one. So I don't want a `Qwen2Builder`, `LlamaBuilder`, etc. I want to be able to read the formats and build the `OperationGraph` through the tooling provided in this crate already.

@@ -30,11 +30,11 @@ precompiled = "../models/t5-small/compiled/tokenizer.holo"
 
 [models.encoder]
 path = "../models/t5-small/encoder_model.onnx"
-precompiled = "../models/t5-small/compiled/encoder_bundle.holo"
+precompiled = "../models/t5-small/compiled/encoder.holo"
 
 [models.decoder]
 path = "../models/t5-small/decoder_model.onnx"
-precompiled = "../models/t5-small/compiled/decoder_bundle.holo"
+precompiled = "../models/t5-small/compiled/decoder.holo"
 
 # Pipeline stages
 [[stages]]

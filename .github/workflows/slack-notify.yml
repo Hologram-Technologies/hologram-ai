@@ -1,0 +1,175 @@
+name: Slack Notification
+
+on:
+  push:
+    branches: [main, master]
+
+jobs:
+  changelog-to-slack:
+    name: Changelog → Slack
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Collect changelog and post to Slack
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          GITHUB_SERVER: ${{ github.server_url }}
+          GITHUB_REPO: ${{ github.repository }}
+          GITHUB_SHA: ${{ github.sha }}
+        shell: bash
+        run: |
+          if [ -z "$SLACK_WEBHOOK_URL" ]; then
+            echo "SLACK_WEBHOOK_URL not set, skipping Slack notification"
+            exit 0
+          fi
+
+          # Get the previous tag (or first commit if no tags exist)
+          PREV_TAG=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || git rev-list --max-parents=0 HEAD)
+
+          # Count commits
+          COMMIT_COUNT=$(git rev-list --count ${PREV_TAG}..HEAD)
+
+          # Categorize commits by leading verb
+          ADDED=""
+          FIXED=""
+          UPDATED=""
+          OTHER=""
+          ADDED_COUNT=0
+          FIXED_COUNT=0
+          UPDATED_COUNT=0
+          OTHER_COUNT=0
+
+          COMMIT_URL_BASE="${GITHUB_SERVER}/${GITHUB_REPO}/commit"
+
+          while IFS= read -r line; do
+            hash=$(echo "$line" | cut -d' ' -f1)
+            msg=$(echo "$line" | cut -d' ' -f2-)
+            first_word=$(echo "$msg" | awk '{print $1}')
+            linked="• <${COMMIT_URL_BASE}/${hash}|${hash}> ${msg}"
+
+            case "$first_word" in
+              Add|Add:|Implement|Implement:|Create|Create:|Introduce|Introduce:)
+                ADDED="${ADDED}${linked}\n"
+                ADDED_COUNT=$((ADDED_COUNT + 1))
+                ;;
+              Fix|Fix:|Fixes|Fixes:|Fixed|Fixed:)
+                FIXED="${FIXED}${linked}\n"
+                FIXED_COUNT=$((FIXED_COUNT + 1))
+                ;;
+              Update|Update:|Updates|Updates:|Refactor|Refactor:|Improve|Improve:|Rename|Rename:|Move|Move:|Clean|Clean:|Remove|Remove:|Apply|Apply:)
+                UPDATED="${UPDATED}${linked}\n"
+                UPDATED_COUNT=$((UPDATED_COUNT + 1))
+                ;;
+              *)
+                OTHER="${OTHER}${linked}\n"
+                OTHER_COUNT=$((OTHER_COUNT + 1))
+                ;;
+            esac
+          done < <(git log --format="%h %s" --no-merges ${PREV_TAG}..HEAD)
+
+          # Build categorized changelog (limit each category to 3 items)
+          CHANGELOG=""
+
+          if [ -n "$ADDED" ]; then
+            CHANGELOG="${CHANGELOG}*✨ Added (${ADDED_COUNT})*\n$(echo -e "$ADDED" | head -3)"
+            if [ "$ADDED_COUNT" -gt 3 ]; then
+              CHANGELOG="${CHANGELOG}• _...and $((ADDED_COUNT - 3)) more_\n"
+            fi
+            CHANGELOG="${CHANGELOG}\n"
+          fi
+
+          if [ -n "$FIXED" ]; then
+            CHANGELOG="${CHANGELOG}*🐛 Fixed (${FIXED_COUNT})*\n$(echo -e "$FIXED" | head -3)"
+            if [ "$FIXED_COUNT" -gt 3 ]; then
+              CHANGELOG="${CHANGELOG}• _...and $((FIXED_COUNT - 3)) more_\n"
+            fi
+            CHANGELOG="${CHANGELOG}\n"
+          fi
+
+          if [ -n "$UPDATED" ]; then
+            CHANGELOG="${CHANGELOG}*🔧 Changed (${UPDATED_COUNT})*\n$(echo -e "$UPDATED" | head -3)"
+            if [ "$UPDATED_COUNT" -gt 3 ]; then
+              CHANGELOG="${CHANGELOG}• _...and $((UPDATED_COUNT - 3)) more_\n"
+            fi
+            CHANGELOG="${CHANGELOG}\n"
+          fi
+
+          if [ -n "$OTHER" ]; then
+            CHANGELOG="${CHANGELOG}*📋 Other (${OTHER_COUNT})*\n$(echo -e "$OTHER" | head -3)"
+            if [ "$OTHER_COUNT" -gt 3 ]; then
+              CHANGELOG="${CHANGELOG}• _...and $((OTHER_COUNT - 3)) more_\n"
+            fi
+          fi
+
+          # Extract affected crates from diff
+          AFFECTED_CRATES=$(git diff --name-only ${PREV_TAG}..HEAD | grep -E '^crates/[^/]+/' | sed 's|crates/\([^/]*\)/.*|\1|' | sort -u | tr '\n' ', ' | sed 's/,$//' | sed 's/,/, /g')
+
+          # Build summary line with breakdown
+          SUMMARY="${COMMIT_COUNT} commits"
+          BREAKDOWN=""
+          [ "$ADDED_COUNT" -gt 0 ] && BREAKDOWN="${BREAKDOWN}${ADDED_COUNT} added"
+          [ "$FIXED_COUNT" -gt 0 ] && BREAKDOWN="${BREAKDOWN:+${BREAKDOWN}, }${FIXED_COUNT} fixed"
+          [ "$UPDATED_COUNT" -gt 0 ] && BREAKDOWN="${BREAKDOWN:+${BREAKDOWN}, }${UPDATED_COUNT} changed"
+          [ -n "$BREAKDOWN" ] && SUMMARY="${SUMMARY} (${BREAKDOWN})"
+
+          # Build affected line if crates were touched
+          AFFECTED_LINE=""
+          if [ -n "$AFFECTED_CRATES" ]; then
+            AFFECTED_LINE="📦 *Affected:* ${AFFECTED_CRATES}"
+          fi
+
+          # Build JSON payload using jq for proper escaping
+          jq -n \
+            --arg prev_tag "$PREV_TAG" \
+            --arg changelog "$CHANGELOG" \
+            --arg diff_url "${GITHUB_SERVER}/${GITHUB_REPO}/compare/${PREV_TAG}...${GITHUB_SHA}" \
+            --arg summary "$SUMMARY" \
+            --arg affected "$AFFECTED_LINE" \
+            '{
+              blocks: (
+                [
+                  {
+                    type: "header",
+                    text: {
+                      type: "plain_text",
+                      text: "📦 hologram-ai Push to main",
+                      emoji: true
+                    }
+                  },
+                  {
+                    type: "divider"
+                  },
+                  {
+                    type: "section",
+                    text: {
+                      type: "mrkdwn",
+                      text: ("*📝 Changelog* (since " + $prev_tag + ")\n\n" + $changelog)
+                    }
+                  }
+                ]
+                + (if $affected != "" then [{
+                    type: "context",
+                    elements: [{
+                      type: "mrkdwn",
+                      text: $affected
+                    }]
+                  }] else [] end)
+                + [{
+                    type: "context",
+                    elements: [{
+                      type: "mrkdwn",
+                      text: ("🔗 <" + $diff_url + "|View diff> • " + $summary)
+                    }]
+                  }]
+              )
+            }' > slack-payload.json
+
+          curl -sf -X POST \
+            -H "Content-type: application/json" \
+            --data @slack-payload.json \
+            "$SLACK_WEBHOOK_URL"
