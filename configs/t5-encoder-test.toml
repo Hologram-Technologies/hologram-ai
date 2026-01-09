@@ -1,0 +1,41 @@
+# T5 Encoder Test
+# Tests only the encoder to verify it produces sensible output
+
+name = "T5 Encoder Test"
+description = "Test encoder output quality"
+
+[inputs]
+prompt = "tell me a joke"
+
+[tokenizer]
+type = "sentencepiece"
+vocab_path = "models/t5-small/tokenizer.json"
+max_length = 512
+pad_token_id = 0
+eos_token_id = 1
+unk_token_id = 2
+
+[models.encoder]
+path = "../models/t5-small/encoder_model.onnx"
+precompiled = "../models/t5-small/compiled/encoder_bundle.holo"
+
+[[stages]]
+type = "builtin"
+builtin = "tokenize"
+outputs = ["input_ids", "attention_mask"]
+
+[stages.args]
+text = "prompt"
+max_length = 128
+tokenizer_path = "../models/t5-small/tokenizer.json"
+
+[[stages]]
+type = "model"
+model = "encoder"
+inputs = { input_ids = "input_ids", attention_mask = "attention_mask" }
+outputs = ["encoder_hidden_states"]
+
+[outputs.result]
+tensor = "encoder_hidden_states"
+handler = "debug"
+description = "Encoder hidden states"

@@ -59,7 +59,7 @@ pub use output_handlers::{
 pub use unified::{
     BuiltinStage, CompilerConfig, ConditionalStage, DimExpr, Expr, InputDef, InputSpec, InputType,
     LoopStage, ModelDef, ModelSpec, ModelStage, OutputDef, OutputHandlerType, OutputSpec,
-    RuntimeConfig, StageDef, UnifiedConfig,
+    PipelineBundleConfig, RuntimeConfig, StageDef, UnifiedConfig,
 };
 
 // Feature-gated handler exports

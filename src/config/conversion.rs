@@ -10,7 +10,7 @@
 //!
 //! ```rust,ignore
 //! use crate::config::{UnifiedConfig, conversion};
-//! use crate::core::OnnxConfig;
+//! use hologram_onnx::core::OnnxConfig;
 //!
 //! let unified = UnifiedConfig::from_file("pipeline.toml")?;
 //!

@@ -34,7 +34,7 @@
 //! # Example
 //!
 //! ```rust,ignore
-//! use crate::core::bundle::{HoloBundle, BundleBuilder};
+//! use hologram_onnx::core::bundle::{HoloBundle, BundleBuilder};
 //!
 //! // Create a bundle
 //! let mut builder = BundleBuilder::new();
@@ -774,5 +774,989 @@ mod tests {
         // Should fail checksum verification
         let result = HoloBundle::from_bytes(&buf);
         assert!(result.is_err());
+    }
+}
+
+// =============================================================================
+// Unified Bundle Format (HOLB) - Single model with embedded weights
+// =============================================================================
+//
+// This format is for single-model bundles that combine the computation graph
+// and weights into a single file with page-aligned weights for efficient mmap.
+//
+// Layout:
+// +================================+
+// |  Bundle Header (64 bytes)      |  Magic: "HOLB", offsets, checksums
+// +================================+
+// |  Graph Section (HOLP data)     |  Existing hologram format bytes
+// +--------------------------------+
+// |  Padding to 4KB boundary       |
+// +================================+
+// |  Weights Section               |  Page-aligned for mmap
+// +================================+
+
+use crate::core::serialization::{HoloBundleHeader, HoloFormat, BUNDLE_HEADER_SIZE};
+
+/// Writer for creating unified bundle files (HOLB format).
+///
+/// The writer accumulates graph and weight bytes, then produces a properly
+/// formatted bundle with page-aligned weights section.
+#[derive(Debug, Default)]
+pub struct UnifiedBundleWriter {
+    graph_bytes: Vec<u8>,
+    weights_bytes: Vec<u8>,
+}
+
+impl UnifiedBundleWriter {
+    /// Create a new unified bundle writer.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Set the graph section bytes (HOLP format data).
+    pub fn set_graph_bytes(&mut self, bytes: Vec<u8>) {
+        self.graph_bytes = bytes;
+    }
+
+    /// Set the weights section bytes.
+    pub fn set_weights_bytes(&mut self, bytes: Vec<u8>) {
+        self.weights_bytes = bytes;
+    }
+
+    /// Get the graph bytes.
+    pub fn graph_bytes(&self) -> &[u8] {
+        &self.graph_bytes
+    }
+
+    /// Get the weights bytes.
+    pub fn weights_bytes(&self) -> &[u8] {
+        &self.weights_bytes
+    }
+
+    /// Calculate the total bundle size including padding.
+    pub fn total_size(&self) -> usize {
+        let header_size = BUNDLE_HEADER_SIZE;
+        let graph_size = self.graph_bytes.len();
+        let weights_offset = HoloBundleHeader::calculate_weights_offset(graph_size as u64) as usize;
+        let weights_size = self.weights_bytes.len();
+
+        if weights_size > 0 {
+            weights_offset + weights_size
+        } else {
+            header_size + graph_size
+        }
+    }
+
+    /// Finish writing and produce the bundle bytes.
+    ///
+    /// This creates the final bundle with:
+    /// - Header with checksums
+    /// - Graph section
+    /// - Padding to page boundary
+    /// - Weights section (if present)
+    pub fn finish(self) -> Vec<u8> {
+        let graph_size = self.graph_bytes.len() as u64;
+        let weights_size = self.weights_bytes.len() as u64;
+
+        // Create header
+        let mut header = HoloBundleHeader::new(graph_size, weights_size);
+
+        // Calculate checksums
+        let graph_checksum = crc32_checksum(&self.graph_bytes);
+        let weights_checksum = if weights_size > 0 {
+            crc32_checksum(&self.weights_bytes)
+        } else {
+            0
+        };
+        header.set_checksums(graph_checksum, weights_checksum);
+
+        // Calculate total size and allocate
+        let total_size = self.total_size();
+        let mut output = Vec::with_capacity(total_size);
+
+        // Write header
+        output.extend_from_slice(&header.to_bytes());
+
+        // Write graph
+        output.extend_from_slice(&self.graph_bytes);
+
+        // Write padding to page boundary (if we have weights)
+        if weights_size > 0 {
+            let weights_offset = header.weights_offset as usize;
+            output.resize(weights_offset, 0);
+
+            // Write weights
+            output.extend_from_slice(&self.weights_bytes);
+        }
+
+        output
+    }
+
+    /// Finish and write directly to a file.
+    pub fn write_to_file(self, path: &Path) -> Result<usize> {
+        let bundle = self.finish();
+        let size = bundle.len();
+
+        let mut file = File::create(path).map_err(|e| {
+            io_error(format!("Failed to create unified bundle file: {}", e))
+        })?;
+
+        file.write_all(&bundle).map_err(|e| {
+            io_error(format!("Failed to write unified bundle: {}", e))
+        })?;
+
+        Ok(size)
+    }
+}
+
+/// Reader for unified bundle files (HOLB format).
+///
+/// Provides zero-copy access to bundle sections. Can work with borrowed bytes
+/// or memory-mapped files.
+#[derive(Debug)]
+pub struct UnifiedBundleReader<'a> {
+    header: HoloBundleHeader,
+    data: &'a [u8],
+}
+
+impl<'a> UnifiedBundleReader<'a> {
+    /// Create a reader from a byte slice.
+    ///
+    /// Parses and validates the header. The data slice must remain valid
+    /// for the lifetime of the reader.
+    pub fn from_bytes(data: &'a [u8]) -> Result<Self> {
+        if data.len() < BUNDLE_HEADER_SIZE {
+            return Err(OnnxError::InvalidModel("Unified bundle too small for header".into()));
+        }
+
+        // Check format
+        let format = HoloFormat::detect(&data[0..4]);
+        if !format.is_bundle() {
+            return Err(OnnxError::InvalidModel(format!(
+                "Not a unified bundle file. Detected format: {:?}",
+                format
+            )));
+        }
+
+        // Parse header
+        let header = HoloBundleHeader::from_bytes(data)?;
+        header.validate()?;
+
+        // Validate data size
+        let required_size = if header.has_weights() {
+            header.weights_offset as usize + header.weights_size as usize
+        } else {
+            header.graph_offset as usize + header.graph_size as usize
+        };
+
+        if data.len() < required_size {
+            return Err(OnnxError::InvalidModel(format!(
+                "Unified bundle truncated: need {} bytes, have {}",
+                required_size,
+                data.len()
+            )));
+        }
+
+        Ok(Self { header, data })
+    }
+
+    /// Get the bundle header.
+    pub fn header(&self) -> &HoloBundleHeader {
+        &self.header
+    }
+
+    /// Get the graph section bytes.
+    pub fn graph_bytes(&self) -> &'a [u8] {
+        let start = self.header.graph_offset as usize;
+        let end = start + self.header.graph_size as usize;
+        &self.data[start..end]
+    }
+
+    /// Get the weights section bytes.
+    ///
+    /// Returns an empty slice if no weights are present.
+    pub fn weights_bytes(&self) -> &'a [u8] {
+        if !self.header.has_weights() {
+            return &[];
+        }
+        let start = self.header.weights_offset as usize;
+        let end = start + self.header.weights_size as usize;
+        &self.data[start..end]
+    }
+
+    /// Get the offset to the weights section for memory-mapping.
+    ///
+    /// This offset can be used with `PlanExecutor::with_mmap_constants_at_offset`
+    /// to create an executor that reads weights directly from the mmap'd bundle.
+    ///
+    /// Returns `None` if no weights are present.
+    pub fn weights_mmap_offset(&self) -> Option<usize> {
+        if self.header.has_weights() {
+            Some(self.header.weights_offset as usize)
+        } else {
+            None
+        }
+    }
+
+    /// Verify the graph section checksum.
+    pub fn verify_graph_checksum(&self) -> bool {
+        let actual = crc32_checksum(self.graph_bytes());
+        actual == self.header.graph_checksum
+    }
+
+    /// Verify the weights section checksum.
+    ///
+    /// Returns `true` if no weights are present.
+    pub fn verify_weights_checksum(&self) -> bool {
+        if !self.header.has_weights() {
+            return true;
+        }
+        let actual = crc32_checksum(self.weights_bytes());
+        actual == self.header.weights_checksum
+    }
+
+    /// Verify all checksums.
+    pub fn verify_checksums(&self) -> bool {
+        self.verify_graph_checksum() && self.verify_weights_checksum()
+    }
+
+    /// Get the total bundle size.
+    pub fn total_size(&self) -> usize {
+        self.data.len()
+    }
+
+    /// Get the graph size.
+    pub fn graph_size(&self) -> usize {
+        self.header.graph_size as usize
+    }
+
+    /// Get the weights size.
+    pub fn weights_size(&self) -> usize {
+        self.header.weights_size as usize
+    }
+}
+
+/// Load a unified bundle from a file path.
+///
+/// This reads the entire file into memory. For large files, consider
+/// memory-mapping instead.
+pub fn read_unified_bundle_file(path: &Path) -> Result<Vec<u8>> {
+    fs::read(path).map_err(|e| {
+        io_error(format!("Failed to read unified bundle file '{}': {}", path.display(), e))
+    })
+}
+
+// =============================================================================
+// Unified Bundle Tests
+// =============================================================================
+
+#[cfg(test)]
+mod unified_bundle_tests {
+    use super::*;
+    use crate::core::serialization::PAGE_SIZE;
+
+    #[test]
+    fn test_unified_writer_empty() {
+        let writer = UnifiedBundleWriter::new();
+        let bundle = writer.finish();
+
+        // Should have just header (64 bytes)
+        assert_eq!(bundle.len(), BUNDLE_HEADER_SIZE);
+
+        // Verify header
+        let header = HoloBundleHeader::from_bytes(&bundle).unwrap();
+        assert_eq!(header.graph_size, 0);
+        assert_eq!(header.weights_size, 0);
+    }
+
+    #[test]
+    fn test_unified_writer_graph_only() {
+        let mut writer = UnifiedBundleWriter::new();
+        let graph = b"test graph data";
+        writer.set_graph_bytes(graph.to_vec());
+        let bundle = writer.finish();
+
+        // Should have header + graph
+        assert_eq!(bundle.len(), BUNDLE_HEADER_SIZE + graph.len());
+
+        // Verify we can read it back
+        let reader = UnifiedBundleReader::from_bytes(&bundle).unwrap();
+        assert_eq!(reader.graph_bytes(), graph);
+        assert!(reader.weights_bytes().is_empty());
+    }
+
+    #[test]
+    fn test_unified_writer_with_weights() {
+        let mut writer = UnifiedBundleWriter::new();
+        let graph = b"test graph data for the model";
+        let weights = b"weight data here - pretend this is big";
+
+        writer.set_graph_bytes(graph.to_vec());
+        writer.set_weights_bytes(weights.to_vec());
+        let bundle = writer.finish();
+
+        // Verify structure
+        let reader = UnifiedBundleReader::from_bytes(&bundle).unwrap();
+        assert_eq!(reader.graph_bytes(), graph);
+        assert_eq!(reader.weights_bytes(), weights);
+
+        // Verify weights are page-aligned
+        let weights_offset = reader.weights_mmap_offset().unwrap();
+        assert_eq!(weights_offset % PAGE_SIZE, 0);
+
+        // Verify checksums
+        assert!(reader.verify_checksums());
+    }
+
+    #[test]
+    fn test_unified_reader_invalid_magic() {
+        let mut data = vec![0u8; 128];
+        data[0..4].copy_from_slice(b"XXXX");
+
+        let result = UnifiedBundleReader::from_bytes(&data);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_unified_reader_too_small() {
+        let data = vec![0u8; 32]; // Less than header size
+
+        let result = UnifiedBundleReader::from_bytes(&data);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_unified_reader_truncated() {
+        // Create a valid bundle
+        let mut writer = UnifiedBundleWriter::new();
+        writer.set_graph_bytes(vec![1, 2, 3, 4, 5]);
+        let bundle = writer.finish();
+
+        // Truncate it
+        let truncated = &bundle[..bundle.len() - 2];
+
+        let result = UnifiedBundleReader::from_bytes(truncated);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_unified_roundtrip_large_graph() {
+        let mut writer = UnifiedBundleWriter::new();
+
+        // Create graph that spans multiple pages
+        let graph: Vec<u8> = (0..10000).map(|i| (i % 256) as u8).collect();
+        writer.set_graph_bytes(graph.clone());
+
+        let bundle = writer.finish();
+        let reader = UnifiedBundleReader::from_bytes(&bundle).unwrap();
+
+        assert_eq!(reader.graph_bytes(), &graph[..]);
+        assert!(reader.verify_checksums());
+    }
+
+    #[test]
+    fn test_unified_roundtrip_with_weights() {
+        let mut writer = UnifiedBundleWriter::new();
+
+        // Simulate real model data
+        let graph: Vec<u8> = (0..5000).map(|i| (i % 256) as u8).collect();
+        let weights: Vec<u8> = (0..100000).map(|i| ((i * 7) % 256) as u8).collect();
+
+        writer.set_graph_bytes(graph.clone());
+        writer.set_weights_bytes(weights.clone());
+
+        let bundle = writer.finish();
+        let reader = UnifiedBundleReader::from_bytes(&bundle).unwrap();
+
+        assert_eq!(reader.graph_bytes(), &graph[..]);
+        assert_eq!(reader.weights_bytes(), &weights[..]);
+        assert!(reader.verify_checksums());
+
+        // Verify mmap offset is usable
+        let offset = reader.weights_mmap_offset().unwrap();
+        assert!(offset > 0);
+        assert_eq!(offset % PAGE_SIZE, 0);
+    }
+
+    #[test]
+    fn test_unified_checksum_verification() {
+        let mut writer = UnifiedBundleWriter::new();
+        writer.set_graph_bytes(b"test data".to_vec());
+        writer.set_weights_bytes(b"weight data".to_vec());
+        let mut bundle = writer.finish();
+
+        // Verify checksums work
+        let reader = UnifiedBundleReader::from_bytes(&bundle).unwrap();
+        assert!(reader.verify_graph_checksum());
+        assert!(reader.verify_weights_checksum());
+
+        // Corrupt the graph
+        bundle[BUNDLE_HEADER_SIZE] ^= 0xFF;
+        let reader = UnifiedBundleReader::from_bytes(&bundle).unwrap();
+        assert!(!reader.verify_graph_checksum());
+    }
+
+    #[test]
+    fn test_unified_total_size_calculation() {
+        let mut writer = UnifiedBundleWriter::new();
+        let graph = vec![0u8; 1000];
+        let weights = vec![0u8; 5000];
+
+        writer.set_graph_bytes(graph);
+        writer.set_weights_bytes(weights);
+
+        let expected_weights_offset = HoloBundleHeader::calculate_weights_offset(1000) as usize;
+        let expected_total = expected_weights_offset + 5000;
+
+        assert_eq!(writer.total_size(), expected_total);
+
+        let bundle = writer.finish();
+        assert_eq!(bundle.len(), expected_total);
+    }
+}
+
+// =============================================================================
+// Pipeline Bundle Format (HOLM) - Multi-model with embedded weights
+// =============================================================================
+//
+// This format packages multiple HOLB bundles into a single file, enabling
+// deployment of complete ML pipelines (encoder, decoder, tokenizer) as a
+// single artifact with efficient per-model mmap access.
+//
+// Layout:
+// +================================+
+// |  Pipeline Header (64 bytes)    |  Magic: "HOLM", model count, flags
+// +================================+
+// |  Model Index (variable)        |  Per-model: name, offset, size, checksum
+// +--------------------------------+
+// |  Padding to 4KB boundary       |
+// +================================+
+// |  Model 0 (HOLB bundle)         |  Complete HOLB with graph+weights
+// +================================+
+// |  Model 1 (HOLB bundle)         |  Complete HOLB with graph+weights
+// +================================+
+// |  ...                           |
+// +================================+
+
+use crate::core::serialization::{
+    HoloPipelineHeader, PipelineModelEntry,
+    PIPELINE_HEADER_SIZE, PAGE_SIZE,
+};
+
+/// Writer for creating pipeline bundle files (HOLM format).
+///
+/// The writer accumulates multiple HOLB bundles by name, then produces
+/// a properly formatted pipeline bundle with page-aligned model sections.
+///
+/// # Example
+///
+/// ```rust,ignore
+/// let mut writer = PipelineBundleWriter::new();
+/// writer.add_model("encoder", encoder_holb_bytes)?;
+/// writer.add_model("decoder", decoder_holb_bytes)?;
+/// writer.add_model("tokenizer", tokenizer_holb_bytes)?;
+/// writer.write_to_file("t5-pipeline.holo")?;
+/// ```
+#[derive(Debug, Default)]
+pub struct PipelineBundleWriter {
+    models: Vec<(String, Vec<u8>)>,
+}
+
+impl PipelineBundleWriter {
+    /// Create a new pipeline bundle writer.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Add a model to the pipeline.
+    ///
+    /// The model bytes should be a complete HOLB bundle (or raw bytes
+    /// that will be stored as-is).
+    pub fn add_model(&mut self, name: &str, holb_bytes: Vec<u8>) -> Result<()> {
+        // Check for duplicate names
+        if self.models.iter().any(|(n, _)| n == name) {
+            return Err(OnnxError::InvalidModel(format!(
+                "Duplicate model name in pipeline: {}",
+                name
+            )));
+        }
+        self.models.push((name.to_string(), holb_bytes));
+        Ok(())
+    }
+
+    /// Get the number of models in the pipeline.
+    pub fn model_count(&self) -> usize {
+        self.models.len()
+    }
+
+    /// Get the model names in order.
+    pub fn model_names(&self) -> Vec<&str> {
+        self.models.iter().map(|(n, _)| n.as_str()).collect()
+    }
+
+    /// Calculate the serialized index size.
+    fn index_size(&self) -> usize {
+        self.models
+            .iter()
+            .map(|(name, _)| {
+                let entry = PipelineModelEntry::new(name.clone(), 0, 0, 0);
+                entry.serialized_size()
+            })
+            .sum()
+    }
+
+    /// Calculate the total bundle size.
+    pub fn total_size(&self) -> usize {
+        let index_size = self.index_size();
+        let models_offset = HoloPipelineHeader::calculate_models_offset(index_size as u64) as usize;
+
+        // Each model is page-aligned within the models section
+        let mut current_offset = models_offset;
+        for (_, data) in &self.models {
+            current_offset += data.len();
+            // Round up to page boundary for next model (except last)
+            current_offset = current_offset.div_ceil(PAGE_SIZE) * PAGE_SIZE;
+        }
+
+        // Adjust for last model not needing padding
+        if !self.models.is_empty() {
+            let last_size = self.models.last().unwrap().1.len();
+            current_offset -= PAGE_SIZE - (last_size % PAGE_SIZE);
+            if last_size.is_multiple_of(PAGE_SIZE) {
+                current_offset += PAGE_SIZE;
+            }
+        }
+
+        current_offset
+    }
+
+    /// Finish writing and produce the pipeline bundle bytes.
+    pub fn finish(self) -> Vec<u8> {
+        // Handle empty bundle case
+        if self.models.is_empty() {
+            let header = HoloPipelineHeader::new(0, 0);
+            return header.to_bytes().to_vec();
+        }
+
+        let index_size = self.index_size();
+        let models_offset = HoloPipelineHeader::calculate_models_offset(index_size as u64) as usize;
+
+        // Build index entries with calculated offsets
+        let mut entries = Vec::with_capacity(self.models.len());
+        let mut current_model_offset = models_offset;
+
+        for (name, data) in &self.models {
+            let checksum = crc32_checksum(data);
+            entries.push(PipelineModelEntry::new(
+                name.clone(),
+                current_model_offset as u64,
+                data.len() as u64,
+                checksum,
+            ));
+            // Next model starts at page boundary
+            current_model_offset += data.len();
+            current_model_offset = current_model_offset.div_ceil(PAGE_SIZE) * PAGE_SIZE;
+        }
+
+        // Serialize index
+        let mut index_bytes = Vec::with_capacity(index_size);
+        for entry in &entries {
+            index_bytes.extend_from_slice(&entry.to_bytes());
+        }
+
+        // Calculate models total size
+        let models_total_size: u64 = self.models.iter().map(|(_, d)| d.len() as u64).sum();
+
+        // Create header
+        let mut header = HoloPipelineHeader::new(self.models.len() as u32, index_size as u64);
+        header.set_models_total_size(models_total_size);
+        header.set_index_checksum(crc32_checksum(&index_bytes));
+
+        // Calculate total size
+        let last_model_end = if let Some(last_entry) = entries.last() {
+            (last_entry.offset + last_entry.size) as usize
+        } else {
+            models_offset
+        };
+
+        // Allocate output buffer
+        let mut output = Vec::with_capacity(last_model_end);
+
+        // Write header
+        output.extend_from_slice(&header.to_bytes());
+
+        // Write index
+        output.extend_from_slice(&index_bytes);
+
+        // Pad to models offset
+        output.resize(models_offset, 0);
+
+        // Write models (each at its page-aligned offset)
+        for (i, (_, data)) in self.models.iter().enumerate() {
+            let target_offset = entries[i].offset as usize;
+            // Pad if needed
+            if output.len() < target_offset {
+                output.resize(target_offset, 0);
+            }
+            output.extend_from_slice(data);
+        }
+
+        output
+    }
+
+    /// Finish and write directly to a file.
+    pub fn write_to_file(self, path: &Path) -> Result<usize> {
+        let bundle = self.finish();
+        let size = bundle.len();
+
+        let mut file = File::create(path).map_err(|e| {
+            io_error(format!("Failed to create pipeline bundle file: {}", e))
+        })?;
+
+        file.write_all(&bundle).map_err(|e| {
+            io_error(format!("Failed to write pipeline bundle: {}", e))
+        })?;
+
+        Ok(size)
+    }
+}
+
+/// Reader for pipeline bundle files (HOLM format).
+///
+/// Provides zero-copy access to individual models within the pipeline.
+/// Can work with borrowed bytes or memory-mapped files.
+///
+/// # Example
+///
+/// ```rust,ignore
+/// let data = std::fs::read("t5-pipeline.holo")?;
+/// let reader = PipelineBundleReader::from_bytes(&data)?;
+///
+/// println!("Models: {:?}", reader.model_names());
+///
+/// let encoder = reader.get_model("encoder")?;
+/// let plan = hologram::compiler::read_holo_from_bytes(encoder.graph_bytes())?;
+/// ```
+#[derive(Debug)]
+pub struct PipelineBundleReader<'a> {
+    header: HoloPipelineHeader,
+    entries: Vec<PipelineModelEntry>,
+    data: &'a [u8],
+}
+
+impl<'a> PipelineBundleReader<'a> {
+    /// Create a reader from a byte slice.
+    ///
+    /// Parses and validates the header and index. The data slice must
+    /// remain valid for the lifetime of the reader.
+    pub fn from_bytes(data: &'a [u8]) -> Result<Self> {
+        if data.len() < PIPELINE_HEADER_SIZE {
+            return Err(OnnxError::InvalidModel("Pipeline bundle too small for header".into()));
+        }
+
+        // Parse header
+        let header = HoloPipelineHeader::from_bytes(data)?;
+        header.validate()?;
+
+        // Validate we have enough data for index
+        let index_end = header.index_offset as usize + header.index_size as usize;
+        if data.len() < index_end {
+            return Err(OnnxError::InvalidModel(format!(
+                "Pipeline bundle truncated: index requires {} bytes, have {}",
+                index_end,
+                data.len()
+            )));
+        }
+
+        // Parse index entries
+        let index_data = &data[header.index_offset as usize..index_end];
+        let mut entries = Vec::with_capacity(header.model_count as usize);
+        let mut offset = 0;
+
+        for _ in 0..header.model_count {
+            let (entry, consumed) = PipelineModelEntry::from_bytes(&index_data[offset..])?;
+            entries.push(entry);
+            offset += consumed;
+        }
+
+        // Validate all models are within bounds
+        for entry in &entries {
+            let model_end = entry.offset as usize + entry.size as usize;
+            if model_end > data.len() {
+                return Err(OnnxError::InvalidModel(format!(
+                    "Pipeline model '{}' extends beyond file: {} > {}",
+                    entry.name,
+                    model_end,
+                    data.len()
+                )));
+            }
+        }
+
+        Ok(Self {
+            header,
+            entries,
+            data,
+        })
+    }
+
+    /// Get the pipeline header.
+    pub fn header(&self) -> &HoloPipelineHeader {
+        &self.header
+    }
+
+    /// Get the number of models in the pipeline.
+    pub fn model_count(&self) -> usize {
+        self.entries.len()
+    }
+
+    /// Get the model names in order.
+    pub fn model_names(&self) -> Vec<&str> {
+        self.entries.iter().map(|e| e.name.as_str()).collect()
+    }
+
+    /// Get the index entry for a model by name.
+    pub fn get_entry(&self, name: &str) -> Option<&PipelineModelEntry> {
+        self.entries.iter().find(|e| e.name == name)
+    }
+
+    /// Get the raw bytes for a model by name.
+    pub fn get_model_bytes(&self, name: &str) -> Option<&'a [u8]> {
+        self.get_entry(name).map(|entry| {
+            let start = entry.offset as usize;
+            let end = start + entry.size as usize;
+            &self.data[start..end]
+        })
+    }
+
+    /// Get a UnifiedBundleReader for a model by name.
+    ///
+    /// Returns None if the model doesn't exist or isn't a valid HOLB bundle.
+    pub fn get_model(&self, name: &str) -> Option<UnifiedBundleReader<'a>> {
+        let bytes = self.get_model_bytes(name)?;
+        UnifiedBundleReader::from_bytes(bytes).ok()
+    }
+
+    /// Get the offset to a model's data within the pipeline file.
+    ///
+    /// This can be used for mmap-based loading of individual models.
+    pub fn get_model_offset(&self, name: &str) -> Option<usize> {
+        self.get_entry(name).map(|e| e.offset as usize)
+    }
+
+    /// Verify the index checksum.
+    pub fn verify_index_checksum(&self) -> bool {
+        let index_start = self.header.index_offset as usize;
+        let index_end = index_start + self.header.index_size as usize;
+        let actual = crc32_checksum(&self.data[index_start..index_end]);
+        actual == self.header.index_checksum
+    }
+
+    /// Verify a specific model's checksum.
+    pub fn verify_model_checksum(&self, name: &str) -> Option<bool> {
+        self.get_entry(name).map(|entry| {
+            let bytes = self.get_model_bytes(name).unwrap();
+            let actual = crc32_checksum(bytes);
+            actual == entry.checksum
+        })
+    }
+
+    /// Verify all checksums.
+    pub fn verify_all_checksums(&self) -> bool {
+        if !self.verify_index_checksum() {
+            return false;
+        }
+        for entry in &self.entries {
+            if let Some(false) = self.verify_model_checksum(&entry.name) {
+                return false;
+            }
+        }
+        true
+    }
+
+    /// Get the total pipeline bundle size.
+    pub fn total_size(&self) -> usize {
+        self.data.len()
+    }
+}
+
+// =============================================================================
+// Pipeline Bundle Tests
+// =============================================================================
+
+#[cfg(test)]
+mod pipeline_bundle_tests {
+    use super::*;
+
+    fn create_mock_holb(graph: &[u8], weights: &[u8]) -> Vec<u8> {
+        let mut writer = UnifiedBundleWriter::new();
+        writer.set_graph_bytes(graph.to_vec());
+        writer.set_weights_bytes(weights.to_vec());
+        writer.finish()
+    }
+
+    #[test]
+    fn test_pipeline_writer_empty() {
+        let writer = PipelineBundleWriter::new();
+        assert_eq!(writer.model_count(), 0);
+        assert!(writer.model_names().is_empty());
+
+        let bundle = writer.finish();
+        // Should have just header (64 bytes)
+        assert_eq!(bundle.len(), PIPELINE_HEADER_SIZE);
+    }
+
+    #[test]
+    fn test_pipeline_writer_single_model() {
+        let mut writer = PipelineBundleWriter::new();
+        let holb = create_mock_holb(b"test graph", b"test weights");
+
+        writer.add_model("encoder", holb.clone()).unwrap();
+        assert_eq!(writer.model_count(), 1);
+        assert_eq!(writer.model_names(), vec!["encoder"]);
+
+        let bundle = writer.finish();
+
+        // Verify we can read it back
+        let reader = PipelineBundleReader::from_bytes(&bundle).unwrap();
+        assert_eq!(reader.model_count(), 1);
+        assert_eq!(reader.model_names(), vec!["encoder"]);
+
+        let encoder_bytes = reader.get_model_bytes("encoder").unwrap();
+        assert_eq!(encoder_bytes, &holb[..]);
+    }
+
+    #[test]
+    fn test_pipeline_writer_multiple_models() {
+        let mut writer = PipelineBundleWriter::new();
+
+        let encoder = create_mock_holb(b"encoder graph", b"encoder weights");
+        let decoder = create_mock_holb(b"decoder graph", b"decoder weights");
+        let tokenizer = create_mock_holb(b"tokenizer", b"");
+
+        writer.add_model("encoder", encoder.clone()).unwrap();
+        writer.add_model("decoder", decoder.clone()).unwrap();
+        writer.add_model("tokenizer", tokenizer.clone()).unwrap();
+
+        assert_eq!(writer.model_count(), 3);
+
+        let bundle = writer.finish();
+        let reader = PipelineBundleReader::from_bytes(&bundle).unwrap();
+
+        assert_eq!(reader.model_count(), 3);
+        assert_eq!(reader.model_names(), vec!["encoder", "decoder", "tokenizer"]);
+
+        // Verify each model
+        assert_eq!(reader.get_model_bytes("encoder").unwrap(), &encoder[..]);
+        assert_eq!(reader.get_model_bytes("decoder").unwrap(), &decoder[..]);
+        assert_eq!(reader.get_model_bytes("tokenizer").unwrap(), &tokenizer[..]);
+    }
+
+    #[test]
+    fn test_pipeline_duplicate_model_name() {
+        let mut writer = PipelineBundleWriter::new();
+        writer.add_model("encoder", vec![1, 2, 3]).unwrap();
+        let result = writer.add_model("encoder", vec![4, 5, 6]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_pipeline_model_alignment() {
+        let mut writer = PipelineBundleWriter::new();
+
+        // Create models of various sizes
+        let model1 = vec![0u8; 1000];
+        let model2 = vec![0u8; 2000];
+
+        writer.add_model("m1", model1).unwrap();
+        writer.add_model("m2", model2).unwrap();
+
+        let bundle = writer.finish();
+        let reader = PipelineBundleReader::from_bytes(&bundle).unwrap();
+
+        // First model offset should be page-aligned
+        let m1_offset = reader.get_model_offset("m1").unwrap();
+        assert_eq!(m1_offset % PAGE_SIZE, 0);
+
+        // Second model offset should also be page-aligned
+        let m2_offset = reader.get_model_offset("m2").unwrap();
+        assert_eq!(m2_offset % PAGE_SIZE, 0);
+    }
+
+    #[test]
+    fn test_pipeline_checksum_verification() {
+        let mut writer = PipelineBundleWriter::new();
+        let holb = create_mock_holb(b"test", b"data");
+        writer.add_model("test", holb).unwrap();
+
+        let mut bundle = writer.finish();
+        let reader = PipelineBundleReader::from_bytes(&bundle).unwrap();
+
+        // All checksums should be valid
+        assert!(reader.verify_index_checksum());
+        assert_eq!(reader.verify_model_checksum("test"), Some(true));
+        assert!(reader.verify_all_checksums());
+
+        // Corrupt the model data
+        let model_offset = reader.get_model_offset("test").unwrap();
+        bundle[model_offset] ^= 0xFF;
+
+        let reader2 = PipelineBundleReader::from_bytes(&bundle).unwrap();
+        assert_eq!(reader2.verify_model_checksum("test"), Some(false));
+        assert!(!reader2.verify_all_checksums());
+    }
+
+    #[test]
+    fn test_pipeline_get_unified_bundle_reader() {
+        let mut writer = PipelineBundleWriter::new();
+        let holb = create_mock_holb(b"test graph data", b"test weight data");
+        writer.add_model("encoder", holb).unwrap();
+
+        let bundle = writer.finish();
+        let reader = PipelineBundleReader::from_bytes(&bundle).unwrap();
+
+        // Should be able to get a UnifiedBundleReader for the model
+        let encoder_reader = reader.get_model("encoder").unwrap();
+        assert_eq!(encoder_reader.graph_bytes(), b"test graph data");
+        assert_eq!(encoder_reader.weights_bytes(), b"test weight data");
+    }
+
+    #[test]
+    fn test_pipeline_reader_too_small() {
+        let small = [0u8; 32];
+        assert!(PipelineBundleReader::from_bytes(&small).is_err());
+    }
+
+    #[test]
+    fn test_pipeline_reader_truncated_index() {
+        let mut writer = PipelineBundleWriter::new();
+        writer.add_model("test", vec![1, 2, 3]).unwrap();
+        let bundle = writer.finish();
+
+        // Truncate after header
+        let truncated = &bundle[..PIPELINE_HEADER_SIZE + 5];
+        assert!(PipelineBundleReader::from_bytes(truncated).is_err());
+    }
+
+    #[test]
+    fn test_pipeline_reader_truncated_model() {
+        let mut writer = PipelineBundleWriter::new();
+        writer.add_model("test", vec![0u8; 1000]).unwrap();
+        let bundle = writer.finish();
+
+        // Truncate the model data
+        let truncated = &bundle[..bundle.len() - 100];
+        assert!(PipelineBundleReader::from_bytes(truncated).is_err());
+    }
+
+    #[test]
+    fn test_pipeline_nonexistent_model() {
+        let mut writer = PipelineBundleWriter::new();
+        writer.add_model("encoder", vec![1, 2, 3]).unwrap();
+        let bundle = writer.finish();
+
+        let reader = PipelineBundleReader::from_bytes(&bundle).unwrap();
+        assert!(reader.get_model_bytes("decoder").is_none());
+        assert!(reader.get_entry("decoder").is_none());
+        assert!(reader.get_model_offset("decoder").is_none());
     }
 }

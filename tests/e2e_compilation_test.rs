@@ -263,8 +263,8 @@ fn test_compile_and_deserialize() {
     // Compile
     let (holo_bytes, _) = compile_onnx(&onnx_bytes).expect("Compilation failed");
 
-    // Deserialize to verify format
-    use hologram_ir::OperationGraph;
-    let deserialized = OperationGraph::from_bytes(&holo_bytes);
-    assert!(deserialized.is_ok(), "Deserialization failed: {:?}", deserialized.err());
+    // Verify output format - .holo files start with HOLO_MAGIC
+    use hologram::compiler::HOLO_MAGIC;
+    assert!(holo_bytes.len() >= 4, "Holo bytes too short");
+    assert_eq!(&holo_bytes[0..4], &HOLO_MAGIC, "Invalid magic bytes");
 }

@@ -1,6 +1,6 @@
 //! ONNX normalization operations.
 
-use hologram_ir::{GraphBuilder, NodeIndex};
+use hologram::ir::{GraphBuilder, NodeIndex};
 use crate::core::{OnnxError, Result};
 use crate::proto::AttributeProto;
 use crate::ops::utils::{parse_attr_float, parse_attr_int};
@@ -31,7 +31,7 @@ pub fn translate_layer_norm(
     };
 
     let result = builder.unary(
-        hologram_ir::NodeOp::LayerNorm { epsilon, axes },
+        hologram::ir::NodeOp::LayerNorm { epsilon, axes },
         inputs[0]
     )?;
 
@@ -53,7 +53,7 @@ pub fn translate_batch_norm(
 
     // BatchNorm: (x - mean) / sqrt(var + eps) * scale + bias
     let result = builder.unary(
-        hologram_ir::NodeOp::BatchNorm { epsilon, momentum },
+        hologram::ir::NodeOp::BatchNorm { epsilon, momentum },
         inputs[0]
     )?;
 
@@ -78,7 +78,7 @@ pub fn translate_group_norm(
     let axes = vec![-2, -1]; // Normalize over last 2 dims
 
     let result = builder.unary(
-        hologram_ir::NodeOp::LayerNorm { epsilon, axes },
+        hologram::ir::NodeOp::LayerNorm { epsilon, axes },
         inputs[0]
     )?;
 
@@ -102,7 +102,7 @@ pub fn translate_instance_norm(
     let axes = vec![-2, -1];
 
     let result = builder.unary(
-        hologram_ir::NodeOp::LayerNorm { epsilon, axes },
+        hologram::ir::NodeOp::LayerNorm { epsilon, axes },
         inputs[0]
     )?;
 
@@ -113,7 +113,7 @@ pub fn translate_instance_norm(
 mod tests {
     use super::*;
     use crate::proto::attribute_proto::AttributeType;
-    use hologram_ir::{DType, Shape};
+    use hologram::ir::{DType, Shape};
 
     fn make_float_attr(name: &str, value: f32) -> AttributeProto {
         AttributeProto {

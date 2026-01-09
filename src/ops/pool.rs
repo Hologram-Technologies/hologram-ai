@@ -6,7 +6,7 @@
 //! - GlobalAveragePool: Global average pooling
 //! - GlobalMaxPool: Global max pooling (returns unsupported error)
 
-use hologram_ir::{GraphBuilder, NodeIndex, Padding};
+use hologram::ir::{GraphBuilder, NodeIndex, Padding};
 use crate::core::{OnnxError, Result};
 use crate::proto::AttributeProto;
 use crate::ops::utils::{parse_attr_ints};
@@ -80,7 +80,7 @@ pub fn translate_max_pool(
     let padding = parse_padding(&pads)?;
 
     // Create max pool node
-    use hologram_ir::NodeOp;
+    use hologram::ir::NodeOp;
     let result = builder.unary(NodeOp::MaxPool2d { kernel, stride, padding }, input)?;
 
     Ok(vec![result])
@@ -149,7 +149,7 @@ pub fn translate_average_pool(
     let padding = parse_padding(&pads)?;
 
     // Create average pool node
-    use hologram_ir::NodeOp;
+    use hologram::ir::NodeOp;
     let result = builder.unary(NodeOp::AvgPool2d { kernel, stride, padding }, input)?;
 
     Ok(vec![result])
@@ -188,7 +188,7 @@ pub fn translate_global_average_pool(
     let input = inputs[0];
 
     // Create global average pool node
-    use hologram_ir::NodeOp;
+    use hologram::ir::NodeOp;
     let result = builder.unary(NodeOp::GlobalAvgPool, input)?;
 
     Ok(vec![result])
@@ -261,7 +261,7 @@ fn parse_padding(pads: &[i64]) -> Result<Padding> {
 mod tests {
     use super::*;
     use crate::proto::attribute_proto::AttributeType;
-    use hologram_ir::{DType, Shape};
+    use hologram::ir::{DType, Shape};
 
     fn make_ints_attr(name: &str, values: Vec<i64>) -> AttributeProto {
         AttributeProto {

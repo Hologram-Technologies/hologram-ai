@@ -31,7 +31,7 @@ use tracing::{debug, trace, warn};
 /// # Examples
 ///
 /// ```no_run
-/// use crate::core::parse_model;
+/// use hologram_onnx::core::parse_model;
 /// use std::fs;
 ///
 /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -78,7 +78,7 @@ pub fn parse_model(bytes: &[u8]) -> Result<ModelProto> {
 /// # Examples
 ///
 /// ```no_run
-/// use crate::core::{parse_model, validate_model};
+/// use hologram_onnx::core::{parse_model, validate_model};
 /// use std::fs;
 ///
 /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -244,7 +244,7 @@ fn validate_node(
 /// # Examples
 ///
 /// ```no_run
-/// use crate::core::{parse_model, extract_opset_version};
+/// use hologram_onnx::core::{parse_model, extract_opset_version};
 /// use std::fs;
 ///
 /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -291,7 +291,7 @@ pub fn extract_opset_version(model: &ModelProto) -> i64 {
 /// # Examples
 ///
 /// ```no_run
-/// use crate::core::{parse_model, get_tensor_shape};
+/// use hologram_onnx::core::{parse_model, get_tensor_shape};
 ///
 /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// let bytes = std::fs::read("model.onnx")?;

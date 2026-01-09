@@ -2,7 +2,7 @@
 //!
 //! Implements translators for Reshape, Transpose, Concat, Squeeze, Unsqueeze, etc.
 
-use hologram_ir::{GraphBuilder, NodeIndex};
+use hologram::ir::{GraphBuilder, NodeIndex};
 use crate::core::{OnnxError, Result};
 use crate::proto::AttributeProto;
 use crate::ops::utils::{parse_attr_int, parse_attr_ints};
@@ -20,6 +20,9 @@ pub fn translate_reshape(
         return Err(OnnxError::InvalidModel("Reshape requires 2 inputs (data, shape)".into()));
     }
 
+    // Debug: Log reshape inputs
+    tracing::debug!("Reshape: inputs[0]={:?}, inputs[1]={:?}", inputs[0], inputs[1]);
+
     // Check for allowzero attribute (ONNX opset 14+)
     let allow_zero = attrs
         .iter()
@@ -28,7 +31,7 @@ pub fn translate_reshape(
         .unwrap_or(false);
 
     // Get shape from second input
-    use hologram_ir::NodeOp;
+    use hologram::ir::NodeOp;
 
     let shape_node = builder.graph().node(inputs[1])
         .ok_or_else(|| OnnxError::InvalidModel("Reshape: shape input not found".to_string()))?;
@@ -36,7 +39,7 @@ pub fn translate_reshape(
     // Check if shape is constant - if so, use static reshape for optimization
     let new_shape = match &shape_node.op {
         NodeOp::Constant { data } => {
-            use hologram_ir::ConstantData;
+            use hologram::ir::ConstantData;
             match data {
                 ConstantData::I64(values) => Some(values.clone()),
                 ConstantData::I32(values) => Some(values.iter().map(|&v| v as i64).collect()),
@@ -67,26 +70,146 @@ pub fn translate_reshape(
 }
 
 /// Translate ONNX Transpose to IR.
+///
+/// Supports constant folding: if the input is a Constant, the transpose
+/// is performed at compile time.
 pub fn translate_transpose(
     inputs: &[NodeIndex],
     attrs: &[AttributeProto],
     builder: &mut GraphBuilder,
 ) -> Result<Vec<NodeIndex>> {
+    use hologram::ir::{Dim, NodeOp, Shape};
+
     if inputs.is_empty() {
         return Err(OnnxError::InvalidModel("Transpose requires 1 input".into()));
     }
 
-    let perm = parse_attr_ints(attrs, "perm", vec![])?;
-    let perm_i32: Vec<i32> = perm.iter().map(|&x| x as i32).collect();
+    // Get the input node
+    let input_node = builder.graph().node(inputs[0])
+        .ok_or_else(|| OnnxError::InvalidModel("Transpose: input not found".to_string()))?;
 
-    let result = if perm_i32.is_empty() {
+    // Determine permutation
+    let perm = parse_attr_ints(attrs, "perm", vec![])?;
+    let perm: Vec<usize> = if perm.is_empty() {
         // Default: reverse all axes
-        builder.unary(hologram_ir::NodeOp::Transpose { perm: vec![] }, inputs[0])?
+        (0..input_node.shape.rank()).rev().collect()
     } else {
-        builder.transpose(inputs[0], perm_i32)?
+        perm.iter().map(|&x| x as usize).collect()
     };
 
+    // Check if input is a Constant for constant folding
+    if let NodeOp::Constant { data } = &input_node.op {
+        // Get input shape dimensions as static values
+        let in_dims: Vec<usize> = input_node.shape.dims.iter()
+            .map(|d| d.static_value().unwrap_or(1))
+            .collect();
+
+        // Calculate output shape
+        let out_dims: Vec<Dim> = perm.iter()
+            .map(|&p| Dim::Static(in_dims[p]))
+            .collect();
+        let out_shape = Shape::new(out_dims);
+
+        // Perform the transpose
+        let transposed_data = transpose_constant_data(data, &in_dims, &perm);
+
+        tracing::debug!(
+            "Transpose: constant folding {:?} with perm {:?} -> shape {:?}",
+            in_dims, perm, out_shape
+        );
+
+        let result = builder.constant(transposed_data, out_shape);
+        return Ok(vec![result]);
+    }
+
+    // Non-constant path: emit transpose op
+    let perm_i32: Vec<i32> = perm.iter().map(|&x| x as i32).collect();
+    let result = builder.transpose(inputs[0], perm_i32)?;
+
     Ok(vec![result])
+}
+
+/// Transpose constant data according to permutation.
+fn transpose_constant_data(
+    data: &hologram::ir::ConstantData,
+    in_dims: &[usize],
+    perm: &[usize],
+) -> hologram::ir::ConstantData {
+    use hologram::ir::ConstantData;
+
+    match data {
+        ConstantData::F32(values) => {
+            ConstantData::F32(transpose_nd(values, in_dims, perm))
+        }
+        ConstantData::F64(values) => {
+            ConstantData::F64(transpose_nd(values, in_dims, perm))
+        }
+        ConstantData::I32(values) => {
+            ConstantData::I32(transpose_nd(values, in_dims, perm))
+        }
+        ConstantData::I64(values) => {
+            ConstantData::I64(transpose_nd(values, in_dims, perm))
+        }
+        ConstantData::Bool(values) => {
+            ConstantData::Bool(transpose_nd(values, in_dims, perm))
+        }
+        ConstantData::U8(values) => {
+            ConstantData::U8(transpose_nd(values, in_dims, perm))
+        }
+    }
+}
+
+/// Generic N-dimensional transpose.
+fn transpose_nd<T: Clone>(data: &[T], in_dims: &[usize], perm: &[usize]) -> Vec<T> {
+    let ndim = in_dims.len();
+    if ndim == 0 || data.is_empty() {
+        return data.to_vec();
+    }
+
+    // Calculate output dimensions
+    let out_dims: Vec<usize> = perm.iter().map(|&p| in_dims[p]).collect();
+
+    // Calculate strides for input tensor
+    let mut in_strides = vec![1usize; ndim];
+    for i in (0..ndim - 1).rev() {
+        in_strides[i] = in_strides[i + 1] * in_dims[i + 1];
+    }
+
+    // Calculate strides for output tensor
+    let mut out_strides = vec![1usize; ndim];
+    for i in (0..ndim - 1).rev() {
+        out_strides[i] = out_strides[i + 1] * out_dims[i + 1];
+    }
+
+    let total_elements: usize = out_dims.iter().product();
+    let mut result = Vec::with_capacity(total_elements);
+
+    // For each output position, compute corresponding input position
+    for out_idx in 0..total_elements {
+        // Convert flat index to multi-dimensional index in output space
+        let mut out_coords = vec![0usize; ndim];
+        let mut remaining = out_idx;
+        for i in 0..ndim {
+            out_coords[i] = remaining / out_strides[i];
+            remaining %= out_strides[i];
+        }
+
+        // Map output coordinates to input coordinates using inverse permutation
+        let mut in_coords = vec![0usize; ndim];
+        for i in 0..ndim {
+            in_coords[perm[i]] = out_coords[i];
+        }
+
+        // Convert multi-dimensional index to flat index in input space
+        let in_idx: usize = in_coords.iter()
+            .zip(in_strides.iter())
+            .map(|(&c, &s)| c * s)
+            .sum();
+
+        result.push(data[in_idx].clone());
+    }
+
+    result
 }
 
 /// Translate ONNX Concat to IR.
@@ -155,7 +278,7 @@ pub fn translate_concat(
     }
 
     // Constant folding: if all inputs are constants with same type, concatenate at compile time
-    use hologram_ir::{NodeOp, ConstantData, Shape};
+    use hologram::ir::{NodeOp, ConstantData, Shape};
 
     let all_constants = inputs.iter().all(|&idx| {
         if let Some(node) = builder.graph().node(idx) {
@@ -260,7 +383,7 @@ pub fn translate_unsqueeze(
     let data = inputs[0];
 
     // Get the data node for potential constant folding
-    use hologram_ir::NodeOp;
+    use hologram::ir::NodeOp;
     let data_node = builder.graph().node(data)
         .ok_or_else(|| OnnxError::InvalidModel("Unsqueeze: input node not found".to_string()))?;
 
@@ -271,9 +394,9 @@ pub fn translate_unsqueeze(
             .ok_or_else(|| OnnxError::InvalidModel("Unsqueeze: axes input not found".to_string()))?;
 
         // Extract axes from constant
-        use hologram_ir::NodeOp;
+        use hologram::ir::NodeOp;
         if let NodeOp::Constant { data: constant_data } = &axes_node.op {
-            use hologram_ir::ConstantData;
+            use hologram::ir::ConstantData;
             match constant_data {
                 ConstantData::I64(values) => values.iter().map(|&v| v as i32).collect(),
                 ConstantData::I32(values) => values.clone(),
@@ -302,7 +425,7 @@ pub fn translate_unsqueeze(
     let input_dtype = input_node.dtype;
 
     // Build output shape by inserting dimensions of size 1 at specified axes
-    use hologram_ir::Dim;
+    use hologram::ir::Dim;
     let input_dims = &input_shape.dims;
     let output_rank = input_dims.len() + axes.len();
     let mut output_dims = Vec::with_capacity(output_rank);
@@ -332,13 +455,13 @@ pub fn translate_unsqueeze(
         }
     }
 
-    let output_shape = hologram_ir::Shape::new(output_dims);
+    let output_shape = hologram::ir::Shape::new(output_dims);
     tracing::debug!("Unsqueeze: axes = {:?}, normalized_axes = {:?}, input shape = {:?} (rank {}), output shape = {:?} (rank {})",
                    axes, normalized_axes, input_shape, input_dims.len(), output_shape, output_rank);
 
     // Constant folding: if input is a constant, create unsqueezed constant
     if let NodeOp::Constant { data: const_data } = &data_node.op {
-        use hologram_ir::ConstantData;
+        use hologram::ir::ConstantData;
 
         // For constants, we just need to update the shape - the data stays the same
         // because unsqueeze adds dimensions of size 1
@@ -359,7 +482,7 @@ pub fn translate_unsqueeze(
 
     // No constant folding, add unsqueeze node with computed shape
     let result = builder.graph_mut().add_op(
-        hologram_ir::NodeOp::Unsqueeze { axes: axes.clone() },
+        hologram::ir::NodeOp::Unsqueeze { axes: axes.clone() },
         output_shape,
         input_dtype
     );
@@ -382,7 +505,7 @@ pub fn translate_flatten(
 
     // Flatten reshapes to 2D
     // For now, use unary reshape operation
-    let result = builder.unary(hologram_ir::NodeOp::Reshape { new_shape: vec![] }, inputs[0])?;
+    let result = builder.unary(hologram::ir::NodeOp::Reshape { new_shape: vec![] }, inputs[0])?;
 
     Ok(vec![result])
 }
@@ -424,10 +547,147 @@ pub fn translate_split(
     Ok(vec![inputs[0]])
 }
 
+/// Translate ONNX Tile to IR.
+///
+/// Tile replicates the input tensor `repeats` times along each dimension.
+/// Inputs: [data, repeats]
+/// - data: The input tensor
+/// - repeats: 1D tensor of int64 with the number of repeats per dimension
+pub fn translate_tile(
+    inputs: &[NodeIndex],
+    _attrs: &[AttributeProto],
+    builder: &mut GraphBuilder,
+) -> Result<Vec<NodeIndex>> {
+    if inputs.len() != 2 {
+        return Err(OnnxError::InvalidModel("Tile requires 2 inputs (data, repeats)".into()));
+    }
+
+    use hologram::ir::{NodeOp, ConstantData, Shape};
+
+    let data_node = builder.graph().node(inputs[0])
+        .ok_or_else(|| OnnxError::InvalidModel("Tile: data input not found".to_string()))?;
+    let data_shape = data_node.shape.clone();
+    let _data_dtype = data_node.dtype;
+
+    let repeats_node = builder.graph().node(inputs[1])
+        .ok_or_else(|| OnnxError::InvalidModel("Tile: repeats input not found".to_string()))?;
+
+    // Get the repeats values (must be a constant for compile-time shape inference)
+    let repeats: Vec<i64> = match &repeats_node.op {
+        NodeOp::Constant { data } => {
+            match data {
+                ConstantData::I64(vals) => vals.clone(),
+                ConstantData::I32(vals) => vals.iter().map(|&v| v as i64).collect(),
+                _ => return Err(OnnxError::InvalidModel("Tile: repeats must be integer type".into())),
+            }
+        }
+        _ => {
+            // For dynamic repeats, delegate to IR Tile op which preserves rank with dynamic dims.
+            let tiled = builder.tile(inputs[0], inputs[1])?;
+            return Ok(vec![tiled]);
+        }
+    };
+
+    // Compute output shape: output_dim[i] = input_dim[i] * repeats[i]
+    let input_dims = &data_shape.dims;
+    if input_dims.len() != repeats.len() {
+        return Err(OnnxError::InvalidModel(format!(
+            "Tile: repeats length ({}) must match input rank ({})",
+            repeats.len(), input_dims.len()
+        )));
+    }
+
+    let output_dims: Vec<hologram::ir::Dim> = input_dims.iter()
+        .zip(repeats.iter())
+        .map(|(dim, &rep)| {
+            match dim {
+                hologram::ir::Dim::Static(n) => {
+                    hologram::ir::Dim::Static((*n as i64 * rep) as usize)
+                }
+                hologram::ir::Dim::Symbolic(name) => {
+                    // For symbolic dims, we'd need to create a new expression
+                    // For now, just keep it symbolic
+                    hologram::ir::Dim::Symbolic(name.clone())
+                }
+                hologram::ir::Dim::Dynamic => hologram::ir::Dim::Dynamic,
+            }
+        })
+        .collect();
+
+    let output_shape = Shape { dims: output_dims };
+
+    // Check if input is a constant - if so, tile at compile time
+    if let NodeOp::Constant {
+        data: ConstantData::F32(input_data),
+    } = &data_node.op
+    {
+        // Constant folding for tile
+        let input_dims_concrete: Vec<usize> = input_dims.iter()
+            .filter_map(|d| match d {
+                hologram::ir::Dim::Static(n) => Some(*n),
+                _ => None,
+            })
+            .collect();
+
+        if input_dims_concrete.len() == input_dims.len() {
+            // All dims are static, we can tile at compile time
+            let output_dims_concrete: Vec<usize> = output_shape.dims.iter()
+                .filter_map(|d| match d {
+                    hologram::ir::Dim::Static(n) => Some(*n),
+                    _ => None,
+                })
+                .collect();
+
+            if output_dims_concrete.len() == output_shape.dims.len() {
+                // Perform the tile operation
+                let output_size: usize = output_dims_concrete.iter().product();
+                let mut output_data = vec![0.0f32; output_size];
+
+                // For each position in output, find corresponding input position
+                for (out_idx, out_val) in output_data.iter_mut().enumerate() {
+                    // Convert linear index to multi-dimensional indices
+                    let mut remaining = out_idx;
+                    let mut out_coords = vec![0usize; output_dims_concrete.len()];
+                    for i in (0..output_dims_concrete.len()).rev() {
+                        out_coords[i] = remaining % output_dims_concrete[i];
+                        remaining /= output_dims_concrete[i];
+                    }
+
+                    // Map to input coordinates using modulo
+                    let in_coords: Vec<usize> = out_coords.iter()
+                        .zip(input_dims_concrete.iter())
+                        .map(|(&out_c, &in_dim)| out_c % in_dim)
+                        .collect();
+
+                    // Convert back to linear index
+                    let mut in_idx = 0;
+                    let mut stride = 1;
+                    for i in (0..input_dims_concrete.len()).rev() {
+                        in_idx += in_coords[i] * stride;
+                        stride *= input_dims_concrete[i];
+                    }
+
+                    *out_val = input_data[in_idx];
+                }
+
+                let output_node = builder.constant(
+                    ConstantData::F32(output_data),
+                    output_shape,
+                );
+                return Ok(vec![output_node]);
+            }
+        }
+    }
+
+    // Runtime tile for non-constant data
+    let tiled = builder.tile(inputs[0], inputs[1])?;
+    Ok(vec![tiled])
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use hologram_ir::{DType, Shape};
+    use hologram::ir::{DType, Shape};
 
     #[test]
     fn test_translate_transpose() {
@@ -436,7 +696,11 @@ mod tests {
 
         let result = translate_transpose(&[x], &[], &mut builder);
         assert!(result.is_ok());
-        assert_eq!(result.unwrap().len(), 1);
+        let outputs = result.unwrap();
+        assert_eq!(outputs.len(), 1);
+
+        let node = builder.graph().node(outputs[0]).unwrap();
+        assert_eq!(node.shape.dims, Shape::static_shape(&[4, 3, 2]).dims);
     }
 
     #[test]
@@ -474,15 +738,15 @@ mod tests {
         // Verify output shape is [1, 2, 3, 1]
         let node = builder.graph().node(output[0]).unwrap();
         assert_eq!(node.shape.rank(), 4);
-        assert_eq!(node.shape.dims[0], hologram_ir::Dim::Static(1));
-        assert_eq!(node.shape.dims[1], hologram_ir::Dim::Static(2));
-        assert_eq!(node.shape.dims[2], hologram_ir::Dim::Static(3));
-        assert_eq!(node.shape.dims[3], hologram_ir::Dim::Static(1));
+        assert_eq!(node.shape.dims[0], hologram::ir::Dim::Static(1));
+        assert_eq!(node.shape.dims[1], hologram::ir::Dim::Static(2));
+        assert_eq!(node.shape.dims[2], hologram::ir::Dim::Static(3));
+        assert_eq!(node.shape.dims[3], hologram::ir::Dim::Static(1));
     }
 
     #[test]
     fn test_translate_unsqueeze_with_input_tensor() {
-        use hologram_ir::ConstantData;
+        use hologram::ir::ConstantData;
 
         let mut builder = GraphBuilder::new();
         let x = builder.input("x", Shape::static_shape(&[2, 3]), DType::F32);
@@ -501,9 +765,9 @@ mod tests {
         // Verify output shape is [2, 1, 3]
         let node = builder.graph().node(output[0]).unwrap();
         assert_eq!(node.shape.rank(), 3);
-        assert_eq!(node.shape.dims[0], hologram_ir::Dim::Static(2));
-        assert_eq!(node.shape.dims[1], hologram_ir::Dim::Static(1));
-        assert_eq!(node.shape.dims[2], hologram_ir::Dim::Static(3));
+        assert_eq!(node.shape.dims[0], hologram::ir::Dim::Static(2));
+        assert_eq!(node.shape.dims[1], hologram::ir::Dim::Static(1));
+        assert_eq!(node.shape.dims[2], hologram::ir::Dim::Static(3));
     }
 
     #[test]
@@ -530,14 +794,14 @@ mod tests {
         // Verify output shape is [2, 3, 1]
         let node = builder.graph().node(output[0]).unwrap();
         assert_eq!(node.shape.rank(), 3);
-        assert_eq!(node.shape.dims[0], hologram_ir::Dim::Static(2));
-        assert_eq!(node.shape.dims[1], hologram_ir::Dim::Static(3));
-        assert_eq!(node.shape.dims[2], hologram_ir::Dim::Static(1));
+        assert_eq!(node.shape.dims[0], hologram::ir::Dim::Static(2));
+        assert_eq!(node.shape.dims[1], hologram::ir::Dim::Static(3));
+        assert_eq!(node.shape.dims[2], hologram::ir::Dim::Static(1));
     }
 
     #[test]
     fn test_translate_unsqueeze_scalar_to_1d() {
-        use hologram_ir::ConstantData;
+        use hologram::ir::ConstantData;
 
         let mut builder = GraphBuilder::new();
         // Create a scalar (rank-0 tensor)
@@ -557,7 +821,7 @@ mod tests {
         // Verify output shape is [1]
         let node = builder.graph().node(output[0]).unwrap();
         assert_eq!(node.shape.rank(), 1);
-        assert_eq!(node.shape.dims[0], hologram_ir::Dim::Static(1));
+        assert_eq!(node.shape.dims[0], hologram::ir::Dim::Static(1));
     }
 
     #[test]

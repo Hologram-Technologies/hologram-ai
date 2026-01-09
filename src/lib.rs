@@ -69,7 +69,9 @@
 //!     partition_size: 500,            // Nodes per partition
 //!     decompose_conv2d: true,         // Conv2D → Im2col+GEMM
 //!     decompose_pooling: true,        // Pooling decomposition
+//!     pack_weights: true,             // Use packed weights when supported
 //!     memory_budget: Some(8 * 1024),  // 8 GB limit
+//!     enable_resize_upscaling: true,  // Enable Resize upscaling
 //! };
 //!
 //! let compiler = OnnxCompiler::with_config(config);
@@ -96,15 +98,17 @@ pub mod config;
 pub mod core;
 pub mod ops;
 pub mod runtime;
+pub mod tokenizers;
 
 // Re-export main types at crate root for convenience
 pub use core::{
-    Dim, OnnxConfig, OnnxError, Result, Shape, SymbolicShape, apply_ir_decomposition, parse_model,
-    translate_graph_to_ir, validate_model,
+    Dim, GraphPartition, GraphPartitioner, OnnxConfig, OnnxError, Result, Shape, SymbolicShape,
+    WeightData, apply_ir_decomposition, extract_opset_version, parse_model, translate_graph_to_ir,
+    validate_model,
 };
 
 // Re-export hologram-ir types for convenience
-pub use hologram_ir::{GraphBuilder, NodeIndex, OperationGraph};
+pub use hologram::ir::{GraphBuilder, NodeIndex, OperationGraph};
 
 /// Main ONNX compiler interface.
 ///
@@ -166,7 +170,9 @@ impl OnnxCompiler {
     ///     partition_size: 1000,
     ///     decompose_conv2d: true,
     ///     decompose_pooling: true,
+    ///     pack_weights: true,
     ///     memory_budget: Some(16 * 1024), // 16 GB
+    ///     enable_resize_upscaling: true,
     /// };
     ///
     /// let compiler = OnnxCompiler::with_config(config);
@@ -237,15 +243,31 @@ impl OnnxCompiler {
         debug!("Compiling IR to BackendPlan");
 
         // ir_func is already hologram_ir::OperationGraph (aliased as IRFunction)
-        let backend_type = hologram_backend::BackendType::Cpu; // Default to CPU
-        let plan = hologram_compiler::compile_ir(&ir_func, backend_type)
+        let backend_type = hologram::BackendType::Cpu; // Default to CPU
+        let mut plan = hologram::compiler::compile_ir(&ir_func, backend_type)
             .map_err(|e| OnnxError::IrTranslationError(format!("Failed to compile IR: {:?}", e)))?;
+
+        // Extract constant_data to external weights file if above threshold.
+        // The executor will use memory-mapped access to load these on demand.
+        let weight_bytes = if plan.constant_data.len() > self.config.weight_threshold {
+            info!(
+                "Extracting {} bytes of constant data to external weights file (threshold: {} bytes)",
+                plan.constant_data.len(),
+                self.config.weight_threshold
+            );
+            // Take constant_data out of plan, leaving empty Vec in its place.
+            // BufferRef::Constant offsets remain valid since they index into the weights file.
+            std::mem::take(&mut plan.constant_data)
+        } else {
+            debug!(
+                "Keeping {} bytes of constant data embedded in .holo file",
+                plan.constant_data.len()
+            );
+            Vec::new()
+        };
 
         debug!("Serializing BackendPlan to .holo format");
         let holo_bytes = serialize_backend_plan(&plan)?;
-
-        // Weight data extraction (embedded for now, external storage pending backend integration)
-        let weight_bytes = Vec::new();
 
         info!(
             "Compilation complete: {} bytes .holo, {} bytes .weights",
@@ -292,19 +314,96 @@ impl OnnxCompiler {
 
         // Compile to BackendPlan using hologram-compiler
         debug!("Compiling IR to BackendPlan");
-        let backend_type = hologram_backend::BackendType::Cpu; // Default to CPU
-        let plan = hologram_compiler::compile_ir(&ir_func, backend_type)
+        let backend_type = hologram::BackendType::Cpu; // Default to CPU
+        let mut plan = hologram::compiler::compile_ir(&ir_func, backend_type)
             .map_err(|e| OnnxError::IrTranslationError(format!("Failed to compile IR: {:?}", e)))?;
 
+        // Extract constant_data to external weights file if above threshold
+        let weight_bytes = if plan.constant_data.len() > self.config.weight_threshold {
+            info!(
+                "Extracting {} bytes of constant data to external weights file",
+                plan.constant_data.len()
+            );
+            std::mem::take(&mut plan.constant_data)
+        } else {
+            Vec::new()
+        };
+
         let holo_bytes = serialize_backend_plan(&plan)?;
-        let weight_bytes = Vec::new();
 
         info!(
-            "Partitioned compilation complete: {} bytes .holo",
-            holo_bytes.len()
+            "Partitioned compilation complete: {} bytes .holo, {} bytes .weights",
+            holo_bytes.len(),
+            weight_bytes.len()
         );
 
         Ok((holo_bytes, weight_bytes))
+    }
+
+    /// Compile ONNX model to a unified bundle (HOLB format).
+    ///
+    /// This creates a single-file bundle with embedded weights. The weights
+    /// section is page-aligned for efficient memory-mapping when loaded.
+    ///
+    /// # Arguments
+    /// * `onnx_bytes` - Raw bytes of the ONNX model protobuf
+    ///
+    /// # Returns
+    /// A `Vec<u8>` containing the complete bundle (graph + weights)
+    ///
+    /// # Errors
+    /// Returns [`OnnxError`] if compilation fails.
+    pub fn compile_to_bundle(&self, onnx_bytes: &[u8]) -> Result<Vec<u8>> {
+        use tracing::{debug, info};
+
+        info!("Starting ONNX compilation to unified bundle");
+
+        // Step 1: Parse and validate ONNX model
+        debug!("Parsing ONNX protobuf");
+        let model = parse_model(onnx_bytes)?;
+        validate_model(&model)?;
+        let opset_version = core::extract_opset_version(&model);
+        info!("ONNX opset version: {}", opset_version);
+
+        // Get the graph
+        let graph = model
+            .graph
+            .as_ref()
+            .ok_or_else(|| OnnxError::InvalidModel("Model has no graph".into()))?;
+
+        // Step 2: Translate ONNX → IR with symbolic shapes
+        debug!("Translating ONNX to IR");
+        let ir_func = translate_graph_to_ir(graph)?;
+        info!("IR translation complete");
+
+        // Step 3: Compile to BackendPlan using hologram-compiler
+        debug!("Compiling IR to BackendPlan");
+        let backend_type = hologram::BackendType::Cpu;
+        let mut plan = hologram::compiler::compile_ir(&ir_func, backend_type)
+            .map_err(|e| OnnxError::IrTranslationError(format!("Failed to compile IR: {:?}", e)))?;
+
+        // Extract weights from plan (they'll be embedded in the bundle)
+        let weight_bytes = std::mem::take(&mut plan.constant_data);
+        info!("Extracted {} bytes of weights for bundle", weight_bytes.len());
+
+        // Step 4: Serialize plan to HOLP format (without weights)
+        debug!("Serializing BackendPlan");
+        let graph_bytes = serialize_backend_plan(&plan)?;
+
+        // Step 5: Create unified bundle
+        debug!("Creating unified bundle");
+        let mut writer = core::UnifiedBundleWriter::new();
+        writer.set_graph_bytes(graph_bytes);
+        writer.set_weights_bytes(weight_bytes);
+        let bundle = writer.finish();
+
+        info!(
+            "Compilation to bundle complete: {} bytes total ({} bytes graph + weights)",
+            bundle.len(),
+            bundle.len()
+        );
+
+        Ok(bundle)
     }
 }
 
@@ -323,7 +422,7 @@ impl Default for OnnxCompiler {
 ///
 /// The resulting bytes can be written to a .holo file and later loaded
 /// by both hologram and hologram-onnx runtimes.
-fn serialize_backend_plan(plan: &hologram_backend::BackendPlan) -> Result<Vec<u8>> {
+fn serialize_backend_plan(plan: &hologram::backend::BackendPlan) -> Result<Vec<u8>> {
     // Convert to serializable form (function pointers → kernel IDs)
     let serializable = plan.to_serializable();
 
@@ -334,7 +433,7 @@ fn serialize_backend_plan(plan: &hologram_backend::BackendPlan) -> Result<Vec<u8
 
     // Prepend magic bytes
     let mut holo_bytes = Vec::with_capacity(4 + plan_bytes.len());
-    holo_bytes.extend_from_slice(&hologram_compiler::HOLO_MAGIC);
+    holo_bytes.extend_from_slice(&hologram::compiler::HOLO_MAGIC);
     holo_bytes.extend_from_slice(&plan_bytes);
 
     Ok(holo_bytes)

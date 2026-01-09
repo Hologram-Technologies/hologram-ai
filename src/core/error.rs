@@ -113,7 +113,7 @@ pub enum OnnxError {
 
     /// Hologram IR error.
     #[error("Hologram IR error: {0}")]
-    IrError(#[from] hologram_ir::IrError),
+    IrError(#[from] hologram::IrError),
 
     /// Internal error (should not happen).
     #[error("Internal error: {0}")]
@@ -131,7 +131,7 @@ impl OnnxError {
     /// # Examples
     ///
     /// ```
-    /// use crate::core::OnnxError;
+    /// use hologram_onnx::core::OnnxError;
     ///
     /// let err = OnnxError::unsupported_op("CustomOp", 13);
     /// assert!(err.to_string().contains("CustomOp"));
@@ -153,7 +153,7 @@ impl OnnxError {
     /// # Examples
     ///
     /// ```
-    /// use crate::core::OnnxError;
+    /// use hologram_onnx::core::OnnxError;
     ///
     /// let err = OnnxError::invalid_attribute("axis", "must be non-negative");
     /// assert!(err.to_string().contains("axis"));
@@ -175,7 +175,7 @@ impl OnnxError {
     /// # Examples
     ///
     /// ```
-    /// use crate::core::OnnxError;
+    /// use hologram_onnx::core::OnnxError;
     ///
     /// let err = OnnxError::shape_mismatch(
     ///     vec!["N", "784"],
@@ -200,7 +200,7 @@ impl OnnxError {
     /// # Examples
     ///
     /// ```
-    /// use crate::core::OnnxError;
+    /// use hologram_onnx::core::OnnxError;
     ///
     /// let err = OnnxError::memory_budget_exceeded(12000, 8000);
     /// assert!(err.to_string().contains("12000 MB"));
@@ -214,7 +214,7 @@ impl OnnxError {
     /// # Examples
     ///
     /// ```
-    /// use crate::core::OnnxError;
+    /// use hologram_onnx::core::OnnxError;
     ///
     /// let err = OnnxError::unsupported_op("CustomOp", 13);
     /// assert!(err.is_unsupported_op());
@@ -231,7 +231,7 @@ impl OnnxError {
     /// # Examples
     ///
     /// ```
-    /// use crate::core::OnnxError;
+    /// use hologram_onnx::core::OnnxError;
     ///
     /// let err = OnnxError::ShapeInferenceError("failed".into());
     /// assert!(err.is_shape_error());
@@ -253,7 +253,7 @@ impl OnnxError {
     /// # Examples
     ///
     /// ```
-    /// use crate::core::OnnxError;
+    /// use hologram_onnx::core::OnnxError;
     ///
     /// let err = OnnxError::memory_budget_exceeded(12000, 8000);
     /// assert!(err.is_memory_error());

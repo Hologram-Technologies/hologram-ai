@@ -2,7 +2,7 @@
 //!
 //! Implements translators for unary mathematical operations.
 
-use hologram_ir::{GraphBuilder, NodeIndex};
+use hologram::ir::{GraphBuilder, NodeIndex};
 use crate::core::{OnnxError, Result};
 
 /// Translate ONNX Abs to IR.
@@ -14,7 +14,7 @@ pub fn translate_abs(
         return Err(OnnxError::InvalidModel("Abs requires 1 input".into()));
     }
 
-    let result = builder.unary(hologram_ir::NodeOp::Abs, inputs[0])?;
+    let result = builder.unary(hologram::ir::NodeOp::Abs, inputs[0])?;
     Ok(vec![result])
 }
 
@@ -27,7 +27,7 @@ pub fn translate_cos(
         return Err(OnnxError::InvalidModel("Cos requires 1 input".into()));
     }
 
-    let result = builder.unary(hologram_ir::NodeOp::Cos, inputs[0])?;
+    let result = builder.unary(hologram::ir::NodeOp::Cos, inputs[0])?;
     Ok(vec![result])
 }
 
@@ -53,7 +53,7 @@ pub fn translate_exp(
         return Err(OnnxError::InvalidModel("Exp requires 1 input".into()));
     }
 
-    let result = builder.unary(hologram_ir::NodeOp::Exp, inputs[0])?;
+    let result = builder.unary(hologram::ir::NodeOp::Exp, inputs[0])?;
     Ok(vec![result])
 }
 
@@ -66,7 +66,7 @@ pub fn translate_log(
         return Err(OnnxError::InvalidModel("Log requires 1 input".into()));
     }
 
-    let result = builder.unary(hologram_ir::NodeOp::Log, inputs[0])?;
+    let result = builder.unary(hologram::ir::NodeOp::Log, inputs[0])?;
     Ok(vec![result])
 }
 
@@ -96,8 +96,8 @@ pub fn translate_reciprocal(
 
     // Decompose: 1 / x
     let one = builder.constant(
-        hologram_ir::ConstantData::F32(vec![1.0]),
-        hologram_ir::Shape::static_shape(&[1]),
+        hologram::ir::ConstantData::F32(vec![1.0]),
+        hologram::ir::Shape::static_shape(&[1]),
     );
 
     let result = builder.div(one, inputs[0])?;
@@ -113,7 +113,7 @@ pub fn translate_sin(
         return Err(OnnxError::InvalidModel("Sin requires 1 input".into()));
     }
 
-    let result = builder.unary(hologram_ir::NodeOp::Sin, inputs[0])?;
+    let result = builder.unary(hologram::ir::NodeOp::Sin, inputs[0])?;
     Ok(vec![result])
 }
 
@@ -126,7 +126,7 @@ pub fn translate_sqrt(
         return Err(OnnxError::InvalidModel("Sqrt requires 1 input".into()));
     }
 
-    let result = builder.unary(hologram_ir::NodeOp::Sqrt, inputs[0])?;
+    let result = builder.unary(hologram::ir::NodeOp::Sqrt, inputs[0])?;
     Ok(vec![result])
 }
 
@@ -142,8 +142,8 @@ pub fn translate_tan(
     }
 
     // Decompose: tan(x) = sin(x) / cos(x)
-    let sin_x = builder.unary(hologram_ir::NodeOp::Sin, inputs[0])?;
-    let cos_x = builder.unary(hologram_ir::NodeOp::Cos, inputs[0])?;
+    let sin_x = builder.unary(hologram::ir::NodeOp::Sin, inputs[0])?;
+    let cos_x = builder.unary(hologram::ir::NodeOp::Cos, inputs[0])?;
 
     let result = builder.div(sin_x, cos_x)?;
     Ok(vec![result])
@@ -152,7 +152,7 @@ pub fn translate_tan(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use hologram_ir::{DType, Shape};
+    use hologram::ir::{DType, Shape};
 
     #[test]
     fn test_translate_abs() {

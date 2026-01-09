@@ -14,7 +14,7 @@
 /// # Examples
 ///
 /// ```
-/// use crate::core::OnnxConfig;
+/// use hologram_onnx::core::OnnxConfig;
 ///
 /// // Default configuration
 /// let config = OnnxConfig::default();
@@ -130,7 +130,7 @@ pub struct OnnxConfig {
     /// Set this to prevent OOM kills on systems with limited RAM:
     ///
     /// ```
-    /// use crate::core::OnnxConfig;
+    /// use hologram_onnx::core::OnnxConfig;
     ///
     /// // Limit compilation to 8 GB
     /// let config = OnnxConfig {
@@ -180,7 +180,7 @@ impl OnnxConfig {
     /// # Examples
     ///
     /// ```
-    /// use crate::core::OnnxConfig;
+    /// use hologram_onnx::core::OnnxConfig;
     ///
     /// let config = OnnxConfig::new();
     /// assert_eq!(config.weight_threshold, 4096);
@@ -199,7 +199,7 @@ impl OnnxConfig {
     /// # Examples
     ///
     /// ```
-    /// use crate::core::OnnxConfig;
+    /// use hologram_onnx::core::OnnxConfig;
     ///
     /// let config = OnnxConfig::for_large_model();
     /// assert!(config.enable_partitioning);
@@ -231,7 +231,7 @@ impl OnnxConfig {
     /// # Examples
     ///
     /// ```
-    /// use crate::core::OnnxConfig;
+    /// use hologram_onnx::core::OnnxConfig;
     ///
     /// let config = OnnxConfig::for_small_model();
     /// assert!(!config.enable_partitioning);
@@ -264,7 +264,7 @@ impl OnnxConfig {
     /// # Examples
     ///
     /// ```
-    /// use crate::core::OnnxConfig;
+    /// use hologram_onnx::core::OnnxConfig;
     ///
     /// let config = OnnxConfig::default();
     /// assert!(config.validate().is_ok());

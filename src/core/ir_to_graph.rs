@@ -4,7 +4,7 @@
 //! The actual translation is now handled directly by hologram-ir.
 
 use std::path::Path;
-use hologram_ir::OperationGraph;
+use hologram::ir::OperationGraph;
 use crate::Result;
 
 /// Default threshold for streaming weights to external file (256KB in elements).

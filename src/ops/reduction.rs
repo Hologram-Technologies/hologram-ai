@@ -1,6 +1,6 @@
 //! ONNX reduction operations.
 
-use hologram_ir::{GraphBuilder, NodeIndex};
+use hologram::ir::{GraphBuilder, NodeIndex};
 use crate::core::{OnnxError, Result};
 use crate::proto::AttributeProto;
 use crate::ops::utils::{parse_attr_int, parse_attr_ints};
@@ -19,7 +19,7 @@ pub fn translate_reduce_mean(
     let keepdims = parse_attr_int(attrs, "keepdims", 1)? != 0;
 
     let axes_i32: Vec<i32> = axes.iter().map(|&x| x as i32).collect();
-    let result = builder.unary(hologram_ir::NodeOp::ReduceMean { axes: axes_i32, keepdims }, inputs[0])?;
+    let result = builder.unary(hologram::ir::NodeOp::ReduceMean { axes: axes_i32, keepdims }, inputs[0])?;
 
     Ok(vec![result])
 }
@@ -38,7 +38,7 @@ pub fn translate_reduce_sum(
     let keepdims = parse_attr_int(attrs, "keepdims", 1)? != 0;
 
     let axes_i32: Vec<i32> = axes.iter().map(|&x| x as i32).collect();
-    let result = builder.unary(hologram_ir::NodeOp::ReduceSum { axes: axes_i32, keepdims }, inputs[0])?;
+    let result = builder.unary(hologram::ir::NodeOp::ReduceSum { axes: axes_i32, keepdims }, inputs[0])?;
 
     Ok(vec![result])
 }
@@ -57,7 +57,7 @@ pub fn translate_reduce_max(
     let keepdims = parse_attr_int(attrs, "keepdims", 1)? != 0;
 
     let axes_i32: Vec<i32> = axes.iter().map(|&x| x as i32).collect();
-    let result = builder.unary(hologram_ir::NodeOp::ReduceMax { axes: axes_i32, keepdims }, inputs[0])?;
+    let result = builder.unary(hologram::ir::NodeOp::ReduceMax { axes: axes_i32, keepdims }, inputs[0])?;
 
     Ok(vec![result])
 }
@@ -76,7 +76,7 @@ pub fn translate_reduce_min(
     let keepdims = parse_attr_int(attrs, "keepdims", 1)? != 0;
 
     let axes_i32: Vec<i32> = axes.iter().map(|&x| x as i32).collect();
-    let result = builder.unary(hologram_ir::NodeOp::ReduceMin { axes: axes_i32, keepdims }, inputs[0])?;
+    let result = builder.unary(hologram::ir::NodeOp::ReduceMin { axes: axes_i32, keepdims }, inputs[0])?;
 
     Ok(vec![result])
 }
@@ -98,7 +98,7 @@ pub fn translate_reduce_prod(
 mod tests {
     use super::*;
     use crate::proto::attribute_proto::AttributeType;
-    use hologram_ir::{DType, Shape};
+    use hologram::ir::{DType, Shape};
 
     fn make_int_attr(name: &str, value: i64) -> AttributeProto {
         AttributeProto {

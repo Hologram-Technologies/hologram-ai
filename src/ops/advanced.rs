@@ -1,6 +1,6 @@
 //! ONNX advanced operations.
 
-use hologram_ir::{GraphBuilder, NodeIndex, DType};
+use hologram::ir::{GraphBuilder, NodeIndex, DType};
 use crate::core::{OnnxError, Result};
 use crate::proto::AttributeProto;
 use crate::ops::utils::parse_attr_int;
@@ -30,7 +30,7 @@ pub fn translate_cast(
     };
 
     // Constant folding: if input is a constant, cast it at compile time
-    use hologram_ir::{NodeOp, ConstantData};
+    use hologram::ir::{NodeOp, ConstantData};
 
     let input_node = builder.graph().node(inputs[0])
         .ok_or_else(|| OnnxError::InvalidModel("Cast: input not found".to_string()))?;
@@ -118,7 +118,7 @@ pub fn translate_range(
         .ok_or_else(|| OnnxError::InvalidModel("Range: delta input not found".to_string()))?;
 
     // Check if all inputs are constants - if so, use constant folding (optimization)
-    use hologram_ir::{NodeOp, ConstantData, Shape};
+    use hologram::ir::{NodeOp, ConstantData, Shape};
 
     let all_constants = matches!(start_node.op, NodeOp::Constant { .. })
         && matches!(limit_node.op, NodeOp::Constant { .. })
@@ -328,7 +328,7 @@ pub fn translate_trilu(
 mod tests {
     use super::*;
     use crate::proto::attribute_proto::AttributeType;
-    use hologram_ir::Shape;
+    use hologram::ir::Shape;
 
     fn make_int_attr(name: &str, value: i64) -> AttributeProto {
         AttributeProto {
@@ -405,7 +405,7 @@ mod tests {
 
     #[test]
     fn test_translate_range_i64_ascending() {
-        use hologram_ir::ConstantData;
+        use hologram::ir::ConstantData;
 
         let mut builder = GraphBuilder::new();
         let start = builder.constant(ConstantData::I64(vec![3]), Shape::static_shape(&[]));
@@ -419,7 +419,7 @@ mod tests {
 
         // Verify the generated constant: [3, 6]
         let node = builder.graph().node(output[0]).unwrap();
-        if let hologram_ir::NodeOp::Constant { data } = &node.op {
+        if let hologram::ir::NodeOp::Constant { data } = &node.op {
             if let ConstantData::I64(values) = data {
                 assert_eq!(values, &vec![3, 6]);
             } else {
@@ -432,7 +432,7 @@ mod tests {
 
     #[test]
     fn test_translate_range_i64_descending() {
-        use hologram_ir::ConstantData;
+        use hologram::ir::ConstantData;
 
         let mut builder = GraphBuilder::new();
         let start = builder.constant(ConstantData::I64(vec![10]), Shape::static_shape(&[]));
@@ -446,7 +446,7 @@ mod tests {
 
         // Verify the generated constant: [10, 8, 6]
         let node = builder.graph().node(output[0]).unwrap();
-        if let hologram_ir::NodeOp::Constant { data } = &node.op {
+        if let hologram::ir::NodeOp::Constant { data } = &node.op {
             if let ConstantData::I64(values) = data {
                 assert_eq!(values, &vec![10, 8, 6]);
             } else {
@@ -459,7 +459,7 @@ mod tests {
 
     #[test]
     fn test_translate_range_f32() {
-        use hologram_ir::ConstantData;
+        use hologram::ir::ConstantData;
 
         let mut builder = GraphBuilder::new();
         let start = builder.constant(ConstantData::F32(vec![0.0]), Shape::static_shape(&[]));
@@ -473,7 +473,7 @@ mod tests {
 
         // Verify the generated constant: [0.0, 0.25, 0.5, 0.75]
         let node = builder.graph().node(output[0]).unwrap();
-        if let hologram_ir::NodeOp::Constant { data } = &node.op {
+        if let hologram::ir::NodeOp::Constant { data } = &node.op {
             if let ConstantData::F32(values) = data {
                 assert_eq!(values.len(), 4);
                 assert!((values[0] - 0.0).abs() < 1e-6);
@@ -490,7 +490,7 @@ mod tests {
 
     #[test]
     fn test_translate_range_empty_sequence() {
-        use hologram_ir::ConstantData;
+        use hologram::ir::ConstantData;
 
         let mut builder = GraphBuilder::new();
         let start = builder.constant(ConstantData::I64(vec![10]), Shape::static_shape(&[]));
@@ -504,7 +504,7 @@ mod tests {
 
         // Verify empty sequence
         let node = builder.graph().node(output[0]).unwrap();
-        if let hologram_ir::NodeOp::Constant { data } = &node.op {
+        if let hologram::ir::NodeOp::Constant { data } = &node.op {
             if let ConstantData::I64(values) = data {
                 assert_eq!(values.len(), 0);
             } else {
@@ -517,7 +517,7 @@ mod tests {
 
     #[test]
     fn test_translate_range_zero_delta_error() {
-        use hologram_ir::ConstantData;
+        use hologram::ir::ConstantData;
 
         let mut builder = GraphBuilder::new();
         let start = builder.constant(ConstantData::I64(vec![0]), Shape::static_shape(&[]));
@@ -531,7 +531,7 @@ mod tests {
 
     #[test]
     fn test_translate_range_wrong_input_count() {
-        use hologram_ir::ConstantData;
+        use hologram::ir::ConstantData;
 
         let mut builder = GraphBuilder::new();
         let start = builder.constant(ConstantData::I64(vec![0]), Shape::static_shape(&[]));
@@ -544,7 +544,7 @@ mod tests {
 
     #[test]
     fn test_translate_range_type_mismatch() {
-        use hologram_ir::ConstantData;
+        use hologram::ir::ConstantData;
 
         let mut builder = GraphBuilder::new();
         let start = builder.constant(ConstantData::I64(vec![0]), Shape::static_shape(&[]));

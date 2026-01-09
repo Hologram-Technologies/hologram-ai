@@ -196,7 +196,7 @@ fn get_tensor_type_string(value_info: &crate::proto::ValueInfoProto) -> String {
 
 /// Display information about a compiled .holo model.
 fn info_holo_command(model_path: &Path) -> Result<()> {
-    use hologram_ir::OperationGraph;
+    use hologram::ir::OperationGraph;
 
     info!("Reading HOLO model: {}", model_path.display());
 

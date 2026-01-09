@@ -963,10 +963,29 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fc0fef456e4baa96da950455cd02c081ca953b141298e41db3fc7e36b1da849c"
 
 [[package]]
+name = "hologram"
+version = "0.1.0"
+dependencies = [
+ "hologram-backend",
+ "hologram-common",
+ "hologram-compiler",
+ "hologram-core",
+ "hologram-error",
+ "hologram-ir",
+ "hologram-isa",
+ "hologram-lookup",
+ "hologram-registry",
+ "libc",
+ "petgraph 0.6.5",
+ "rayon",
+]
+
+[[package]]
 name = "hologram-backend"
 version = "0.1.0"
 dependencies = [
  "hologram-common",
+ "hologram-core",
  "hologram-ir",
  "hologram-isa",
  "hologram-lookup",
@@ -1067,10 +1086,7 @@ dependencies = [
  "clap",
  "criterion",
  "half",
- "hologram-backend",
- "hologram-compiler",
- "hologram-core",
- "hologram-ir",
+ "hologram",
  "hound",
  "image",
  "indicatif",
@@ -1092,6 +1108,18 @@ dependencies = [
  "toml",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "hologram-registry"
+version = "0.1.0"
+dependencies = [
+ "hologram-common",
+ "hologram-error",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.17",
+ "tokio",
 ]
 
 [[package]]

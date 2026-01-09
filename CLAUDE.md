@@ -95,6 +95,92 @@ curl -sL https://raw.githubusercontent.com/onnx/onnx/main/onnx/onnx.proto3 \
   -o crates/hologram-onnx-spec/proto/onnx.proto3
 ```
 
+## Pure Hologram Architecture Principle
+
+**CRITICAL: This is the foundational principle of hologram-onnx**
+
+### Core Philosophy
+
+**Everything runs through hologram.** The entire point of hologram is to be a unified computational compiler and runtime. This principle is non-negotiable.
+
+### What This Means
+
+1. **No External Runtime Dependencies for Core Functionality**
+   - Do NOT add dependencies like `tokenizers`, `ndarray`, `candle`, etc. for runtime execution
+   - All computational operations must compile to hologram IR
+   - All execution must go through hologram backend
+   - External crates are acceptable ONLY for:
+     - Build-time tools (prost-build, etc.)
+     - Development utilities (testing, benchmarking)
+     - Data loading/parsing (serde, image loading, etc.)
+
+2. **Compilation Target: .holo Files**
+   - Tokenizers compile to .holo → execute on hologram backend
+   - Models compile to .holo → execute on hologram backend
+   - Post-processing compiles to .holo → execute on hologram backend
+   - Everything is a computational graph executed by hologram
+
+3. **Temporary Pure Rust Implementations**
+   - When hologram_ir lacks necessary operations (Gather, String ops, etc.):
+     - Implement algorithms in **pure Rust** (std library only)
+     - Document as bridge until hologram_ir gains operations
+     - Plan migration path to full hologram_ir implementation
+   - Example: SentencePiece tokenizer implemented in pure Rust until hologram_ir supports string operations
+
+4. **The Vision**
+   ```
+   Everything is a .holo file:
+   ├── tokenizer.holo       (text → tokens)   Future: Full hologram_ir
+   ├── encoder.holo         (tokens → hidden)  ✅ Working now
+   ├── decoder.holo         (hidden → logits)  ✅ Working now
+   └── post_process.holo    (logits → output)  Future: Full hologram_ir
+
+   All execute on hologram backend.
+   All benefit from hologram optimizations.
+   All are config-driven and cacheable.
+   ```
+
+5. **Implementation Guidelines**
+   - When implementing new functionality (tokenizers, custom ops, etc.):
+     - First: Check if hologram_ir operations exist
+     - If YES: Implement via hologram IR compilation
+     - If NO: Implement in pure Rust (std only), document as bridge
+     - Never: Add external runtime dependencies
+   - Create issues/plans for hologram_ir enhancements needed
+   - Maintain compilation to .holo even for bridge implementations
+
+### Why This Matters
+
+- **Unified optimization**: All operations benefit from hologram's SIMD kernels
+- **Zero-copy execution**: Hologram workspace management
+- **Consistent architecture**: One backend, one format, one execution model
+- **Future-proof**: When hologram_ir gains operations, migrate seamlessly
+
+### Examples
+
+**✅ CORRECT - Pure Rust Implementation**:
+```rust
+// Implement SentencePiece unigram algorithm in pure Rust
+// Uses only std::collections, no external tokenizer crates
+impl SentencePieceTokenizer {
+    fn tokenize_unigram(&self, text: &str) -> Vec<u32> {
+        // Full Viterbi implementation in pure Rust
+        // ...
+    }
+}
+```
+
+**❌ WRONG - External Runtime Dependency**:
+```rust
+use tokenizers::Tokenizer;  // NO! External runtime dep
+
+impl SentencePieceTokenizer {
+    fn encode(&self, text: &str) -> Vec<u32> {
+        self.hf_tokenizer.encode(text, false)  // NO!
+    }
+}
+```
+
 ## Documentation Guidelines
 
 ### Working Documents Location
@@ -106,6 +192,19 @@ curl -sL https://raw.githubusercontent.com/onnx/onnx/main/onnx/onnx.proto3 \
 ### Code Quality Standards
 
 **CRITICAL: These standards are MANDATORY and NON-NEGOTIABLE**
+
+#### Production-Ready Code ONLY
+
+**ABSOLUTE REQUIREMENT: Every piece of code in this project MUST be production-ready.**
+
+- **NO stubs** - Period. Nothing is a stub.
+- **NO TODOs** - Every function is complete.
+- **NO placeholders** - All code is real, working code.
+- **NO "simplistic" implementations** - Full, proper implementations only.
+- **NO "in a real implementation" comments** - This IS the real implementation.
+- **NO shortcuts** - Do it right or don't do it.
+
+Any code that contains phrases like "in production you would...", "a real implementation would...", "simplified for demonstration", or similar disclaimers is **UNACCEPTABLE**. If you're writing it, write it properly. If a feature isn't ready, don't include it at all.
 
 1. **NO TODOs, Placeholders, or Stubs**
    - Every function MUST be fully implemented
@@ -120,12 +219,16 @@ curl -sL https://raw.githubusercontent.com/onnx/onnx/main/onnx/onnx.proto3 \
    - All error paths must be handled
    - No temporary workarounds
 
-3. **Tests Required**
-   - Write tests for EVERY module and function
+3. **Tests Required - Maximum Coverage**
+   - **Write tests for ALL methods and functions** - aim for the highest test coverage possible
+   - Every public function MUST have at least one test
+   - Every private function with non-trivial logic MUST have tests
    - Unit tests in module files or `tests/` subdirectory
    - Integration tests in top-level `tests/` directory
    - Include edge cases and error conditions
    - Test symbolic shapes with variable dimensions
+   - Test all code paths, including error paths
+   - No code should be merged without corresponding tests
 
 4. **Documentation**
    - All public APIs MUST have rustdoc comments

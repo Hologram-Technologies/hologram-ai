@@ -20,11 +20,8 @@ name = "hologram-onnx"
 path = "src/main.rs"
 
 [dependencies]
-# Hologram dependencies (local paths)
-hologram-ir = { path = "/hologram/crates/ir" }
-hologram-compiler = { path = "/hologram/crates/compiler" }
-hologram-core = { path = "/hologram/crates/core" }
-hologram-backend = { path = "/hologram/crates/backend" }
+# Hologram dependency (unified crate)
+hologram = { path = "/hologram" }
 
 # Protobuf
 prost = "0.13"
@@ -55,6 +52,7 @@ clap = { version = "4.5", features = ["derive"] }
 reqwest = { version = "0.12", features = ["blocking", "json"] }
 indicatif = "0.17"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tempfile = "3.8"  # For compile-pipeline temp directory
 
 # Feature-gated output handlers
 image = { version = "0.25", optional = true }
@@ -65,7 +63,6 @@ tokenizers = { version = "0.20", optional = true }
 prost-build = "0.13"
 
 [dev-dependencies]
-tempfile = "3.8"
 criterion = { version = "0.5", features = ["html_reports"] }
 
 [features]
@@ -77,18 +74,6 @@ all-outputs = ["image-output", "audio-output", "text-output"]
 
 [patch."https://github.com/UOR-Foundation/hologram-backend.git"]
 hologram-backend = { path = "/hologram/crates/backend" }
-
-[[bench]]
-name = "conv_bench"
-harness = false
-
-[[bench]]
-name = "shape_bench"
-harness = false
-
-[[bench]]
-name = "compilation_bench"
-harness = false
 
 [[bench]]
 name = "execution_bench"

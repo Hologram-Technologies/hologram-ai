@@ -26,6 +26,7 @@ use tracing::{debug, info};
 /// * `weight_threshold` - Threshold for external weight storage (bytes)
 /// * `enable_resize_upscaling` - Enable Resize upscaling (false saves memory)
 /// * `input_shapes` - Optional map of input name -> concrete shape dimensions
+/// * `bundle` - Create a unified bundle with embedded weights (HOLB format)
 ///
 /// # Returns
 ///
@@ -42,9 +43,11 @@ pub fn compile_command(
     decompose_pooling: bool,
     enable_resize_upscaling: bool,
     input_shapes: &HashMap<String, Vec<usize>>,
+    bundle: bool,
 ) -> Result<()> {
     info!("Compiling ONNX model: {}", input.display());
     debug!("Output path: {}", output.display());
+    debug!("Output format: {}", if bundle { "unified bundle (HOLB)" } else { "separate files (HOLP + weights)" });
     debug!("Partitioning: {}", partition);
     debug!("Partition size: {}", partition_size);
     debug!("Weight threshold: {} bytes", weight_threshold);
@@ -94,33 +97,50 @@ pub fn compile_command(
     // Compile using the OnnxCompiler API
     info!("Starting compilation pipeline...");
     let compiler = crate::OnnxCompiler::with_config(config);
-    let (holo_bytes, weight_bytes) = compiler
-        .compile(&onnx_bytes)
-        .context("ONNX compilation failed")?;
 
-    info!(
-        "Compilation successful: {} bytes .holo, {} bytes .weights",
-        holo_bytes.len(),
-        weight_bytes.len()
-    );
+    if bundle {
+        // Compile to unified bundle (HOLB format)
+        let bundle_bytes = compiler
+            .compile_to_bundle(&onnx_bytes)
+            .context("ONNX compilation to bundle failed")?;
 
-    // Write .holo file
-    let holo_path = output.with_extension("holo");
-    fs::write(&holo_path, &holo_bytes)
-        .with_context(|| format!("Failed to write .holo file to {}", holo_path.display()))?;
-    info!("Written: {}", holo_path.display());
+        info!("Compilation successful: {} bytes unified bundle", bundle_bytes.len());
 
-    // Write .weights file if not empty
-    if !weight_bytes.is_empty() {
-        let weights_path = output.with_extension("weights");
-        fs::write(&weights_path, &weight_bytes)
-            .with_context(|| format!("Failed to write .weights file to {}", weights_path.display()))?;
-        info!("Written: {}", weights_path.display());
+        // Write .holo bundle file
+        let holo_path = output.with_extension("holo");
+        fs::write(&holo_path, &bundle_bytes)
+            .with_context(|| format!("Failed to write bundle to {}", holo_path.display()))?;
+        info!("Written: {} (unified bundle)", holo_path.display());
     } else {
-        debug!("No external weights to write");
+        // Compile to separate files (HOLP + weights)
+        let (holo_bytes, weight_bytes) = compiler
+            .compile(&onnx_bytes)
+            .context("ONNX compilation failed")?;
+
+        info!(
+            "Compilation successful: {} bytes .holo, {} bytes .weights",
+            holo_bytes.len(),
+            weight_bytes.len()
+        );
+
+        // Write .holo file
+        let holo_path = output.with_extension("holo");
+        fs::write(&holo_path, &holo_bytes)
+            .with_context(|| format!("Failed to write .holo file to {}", holo_path.display()))?;
+        info!("Written: {}", holo_path.display());
+
+        // Write .weights file if not empty
+        if !weight_bytes.is_empty() {
+            let weights_path = output.with_extension("weights");
+            fs::write(&weights_path, &weight_bytes)
+                .with_context(|| format!("Failed to write .weights file to {}", weights_path.display()))?;
+            info!("Written: {}", weights_path.display());
+        } else {
+            debug!("No external weights to write");
+        }
     }
 
-    info!("✓ Compilation complete!");
+    info!("Compilation complete!");
     Ok(())
 }
 
@@ -192,6 +212,7 @@ mod tests {
             true,
             true,
             &HashMap::new(),
+            false, // bundle
         );
         assert!(result.is_err());
         assert!(

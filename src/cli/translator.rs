@@ -7,7 +7,7 @@
 
 use crate::core::OnnxError;
 use crate::proto::GraphProto;
-use hologram_ir::OperationGraph as IRFunction;
+use hologram::ir::OperationGraph as IRFunction;
 
 type Result<T> = std::result::Result<T, OnnxError>;
 

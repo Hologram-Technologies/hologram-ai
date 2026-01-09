@@ -2,7 +2,7 @@
 //!
 //! This module provides helper functions for creating types in tests.
 
-use hologram_ir::types::{ScalarType, TensorType, Type};
+use hologram::ir::types::{ScalarType, TensorType, Type};
 
 /// Create a tensor type with F32 elements and the given shape.
 ///

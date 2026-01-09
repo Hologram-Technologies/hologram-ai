@@ -4,18 +4,20 @@ use anyhow::Result;
 use std::collections::HashMap;
 use std::path::Path;
 
-use super::loader::load_and_compile_holo;
+use super::loader::{load_holo_auto, load_with_external_weights};
 use super::tensors::Tensor;
 
-use hologram_backend::{BufferHandle, PlanExecutor, ProgramBackend};
+use hologram::backend::{BufferHandle, PlanExecutor, ProgramBackend};
 
 /// Buffer requirements from BackendPlan metadata.
 struct BufferRequirements {
     num_inputs: usize,
     num_outputs: usize,
+    input_sizes: Vec<usize>,
+    input_shapes: Vec<[usize; 4]>,
     output_sizes: Vec<usize>,
     output_shapes: Vec<[usize; 4]>,
-    output_shape_exprs: Vec<Option<Vec<hologram_ir::shape::DimExpr>>>,
+    output_shape_exprs: Vec<Option<Vec<hologram::DimExpr>>>,
 }
 
 /// Model executor for running compiled .holo models.
@@ -41,17 +43,42 @@ impl ModelExecutor {
     /// # Returns
     /// ModelExecutor ready for execution
     pub fn from_holo_file(path: &Path) -> Result<Self> {
-        // Load and compile .holo → BackendPlan
-        let (plan, backend) = load_and_compile_holo(path)?;
+        let (executor, backend) = load_holo_auto(path)?;
+        Ok(Self { executor, backend })
+    }
 
-        // Create plan executor (PlanExecutor takes ownership of plan)
-        let executor = PlanExecutor::new(plan, &*backend)
-            .map_err(|e| anyhow::anyhow!("Failed to create PlanExecutor: {:?}", e))?;
+    /// Create a new executor from .holo and .weights files.
+    ///
+    /// This loads the .holo file and creates an executor that uses memory-mapped
+    /// access to the external weights file. This enables lazy loading of large
+    /// weights (GB-sized) without loading them all into memory.
+    ///
+    /// # Arguments
+    /// * `holo_path` - Path to compiled .holo file
+    /// * `weights_path` - Path to external .weights file (will be memory-mapped)
+    ///
+    /// # Returns
+    /// ModelExecutor ready for execution with external weights
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// use std::path::Path;
+    ///
+    /// // Load model with external weights
+    /// let mut executor = ModelExecutor::from_holo_with_weights(
+    ///     Path::new("large_model.holo"),
+    ///     Path::new("large_model.weights"),
+    /// )?;
+    ///
+    /// // Execute as normal
+    /// let outputs = executor.execute(inputs)?;
+    /// ```
+    pub fn from_holo_with_weights(holo_path: &Path, weights_path: &Path) -> Result<Self> {
+        // Load .holo and create executor with mmap'd weights
+        let (executor, backend) = load_with_external_weights(holo_path, weights_path)?;
 
-        Ok(Self {
-            executor,
-            backend,
-        })
+        Ok(Self { executor, backend })
     }
 
     /// Get buffer requirements from the plan.
@@ -61,6 +88,8 @@ impl ModelExecutor {
         BufferRequirements {
             num_inputs: plan.layout_metadata.num_inputs,
             num_outputs: plan.layout_metadata.num_outputs,
+            input_sizes: plan.layout_metadata.input_sizes.clone(),
+            input_shapes: plan.layout_metadata.input_shapes.clone(),
             output_sizes: plan.layout_metadata.output_sizes.clone(),
             output_shapes: plan.layout_metadata.output_shapes.clone(),
             output_shape_exprs: plan.layout_metadata.output_shape_exprs.clone(),
@@ -109,6 +138,20 @@ impl ModelExecutor {
                 tensor.size_bytes()
             );
 
+            if let Some(&expected) = requirements.input_sizes.get(idx) {
+                let actual = tensor.size_bytes();
+                if expected != 0 && expected > actual {
+                    return Err(anyhow::anyhow!(
+                        "Input '{}' size mismatch: got {} bytes, expected at least {} bytes (shape {:?}, plan shape {:?})",
+                        name,
+                        actual,
+                        expected,
+                        tensor.shape,
+                        requirements.input_shapes.get(idx)
+                    ));
+                }
+            }
+
             let handle = self.tensor_to_buffer_handle(tensor)?;
             handles.push(handle);
 
@@ -134,7 +177,7 @@ impl ModelExecutor {
         for (idx, &metadata_size_bytes) in requirements.output_sizes.iter().enumerate() {
             // Compute actual output shape and size if shape_expr exists
             let (actual_size, actual_shape) = if let Some(ref shape_expr) = requirements.output_shape_exprs[idx] {
-                use hologram_ir::shape::DimExpr;
+                use hologram::DimExpr;
 
                 tracing::debug!("Output {} shape_expr has {} dimensions", idx, shape_expr.len());
 
@@ -154,7 +197,7 @@ impl ModelExecutor {
                             // This handles cases where the compiler references the wrong input
                             // (e.g., T5 encoder references attention_mask[1,1] instead of input_ids[1,128])
                             let mut max_value = 1;
-                            for (_i, tensor) in input_tensors.iter().enumerate() {
+                            for tensor in input_tensors.iter() {
                                 if *dim_index < tensor.shape.len() {
                                     max_value = max_value.max(tensor.shape[*dim_index]);
                                 }
@@ -341,6 +384,14 @@ impl ModelExecutor {
             output_handles.len()
         );
 
+        // DEBUG: Verify input tensors have valid data BEFORE upload
+        for (name, tensor) in &inputs {
+            let data = tensor.to_f32();
+            let non_zero = data.iter().filter(|&&x| x != 0.0).count();
+            tracing::info!("Input '{}': {} values, {} non-zero, first 10: {:?}",
+                name, data.len(), non_zero, &data.iter().take(10).copied().collect::<Vec<f32>>());
+        }
+
         // Execute the plan
         self.executor
             .execute(&input_handles, &mut output_handles, &mut *self.backend)
@@ -406,26 +457,20 @@ mod tests {
     use super::*;
 
     #[test]
-    #[ignore] // Requires compiled model
     fn test_executor_creation() {
         let encoder_path = Path::new("models/t5-small/compiled/encoder.holo");
 
-        if !encoder_path.exists() {
-            return;
-        }
+        assert!(encoder_path.exists(), "Missing encoder.holo for test");
 
         let result = ModelExecutor::from_holo_file(encoder_path);
         assert!(result.is_ok());
     }
 
     #[test]
-    #[ignore] // Requires compiled model
     fn test_buffer_requirements() {
         let encoder_path = Path::new("models/t5-small/compiled/encoder.holo");
 
-        if !encoder_path.exists() {
-            return;
-        }
+        assert!(encoder_path.exists(), "Missing encoder.holo for test");
 
         let executor = ModelExecutor::from_holo_file(encoder_path).unwrap();
         let reqs = executor.get_buffer_requirements();
@@ -436,25 +481,32 @@ mod tests {
     }
 
     #[test]
-    #[ignore] // Requires compiled model
     fn test_encoder_execution() {
         let encoder_path = Path::new("models/t5-small/compiled/encoder.holo");
 
-        if !encoder_path.exists() {
-            return;
-        }
+        assert!(encoder_path.exists(), "Missing encoder.holo for test");
 
         let mut executor = ModelExecutor::from_holo_file(encoder_path).unwrap();
 
-        // T5 encoder inputs (alphabetically: attention_mask, input_ids)
+        let layout = executor.executor.plan().layout_metadata.clone();
+        assert_eq!(layout.num_inputs, 2);
+
         let mut inputs = HashMap::new();
+
+        // Expected sizes are in bytes; inputs are I64 (8 bytes each).
+        let input_ids_len = layout.input_sizes[0] / std::mem::size_of::<i64>();
+        let mask_len = layout.input_sizes[1] / std::mem::size_of::<i64>();
+
+        let input_ids = vec![0u32; input_ids_len];
+        let attention_mask = vec![1u32; mask_len];
+
         inputs.insert(
             "input_ids".to_string(),
-            Tensor::from_token_ids(&vec![0, 123, 456, 1], vec![1, 4]),
+            Tensor::from_token_ids(&input_ids, vec![1, input_ids_len]),
         );
         inputs.insert(
             "attention_mask".to_string(),
-            Tensor::ones(vec![1, 4]),
+            Tensor::from_token_ids(&attention_mask, vec![1, mask_len]),
         );
 
         let result = executor.execute(inputs);

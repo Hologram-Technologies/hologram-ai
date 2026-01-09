@@ -102,7 +102,18 @@
       "Bash(RUST_BACKTRACE=0 cargo run:*)",
       "Bash(target/debug/hologram-onnx compile:*)",
       "Bash(RUST_LOG=warn cargo run:*)",
-      "Bash(RUST_LOG=trace cargo run:*)"
+      "Bash(RUST_LOG=trace cargo run:*)",
+      "Bash(models/t5-small/compiled/tokenizer.holo )",
+      "Bash(models/t5-small/compiled/encoder.holo )",
+      "Bash(models/t5-small/compiled/decoder.holo )",
+      "Bash(git -C /workspace log --oneline -20)",
+      "Bash(git -C /workspace diff HEAD~2 HEAD -- src/runtime/executor.rs)",
+      "Bash(git -C /workspace diff ad13933 6c3b9dc -- src/runtime/executor.rs)",
+      "Bash(git -C /workspace show ad13933:src/runtime/executor.rs)",
+      "Bash(printenv:*)",
+      "Bash(rm -f /workspace/models/t5-small/compiled/encoder.holo /workspace/models/t5-small/compiled/encoder.weights rm -f /workspace/models/t5-small/compiled/decoder.holo /workspace/models/t5-small/compiled/decoder.weights cargo run --release -- compile /workspace/models/t5-small/encoder_model.onnx -o /workspace/models/t5-small/compiled/encoder)",
+      "Bash(./target/release/hologram-onnx bundle-pipeline:*)",
+      "Bash(git reset:*)"
     ]
   }
 }

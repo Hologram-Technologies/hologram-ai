@@ -36,12 +36,12 @@
 //!
 //! For parsing and validation only (this crate):
 //! ```ignore
-//! use crate::core::{parse_model, validate_model};
+//! use hologram_onnx::core::{parse_model, validate_model};
 //! let model = parse_model(&onnx_bytes)?;
 //! validate_model(&model)?;
 //! ```
 
-use hologram_ir::{DType, OperationGraph as IRFunction};
+use hologram::ir::{DType, OperationGraph as IRFunction};
 
 use crate::Result;
 
@@ -98,7 +98,7 @@ impl OperationGraph {
 /// # Example
 ///
 /// ```ignore
-/// use crate::core::lower_to_operation_graph;
+/// use hologram_onnx::core::lower_to_operation_graph;
 ///
 /// let ir_func = translate_graph_to_ir(&graph, opset)?;
 /// let ir_func = apply_ir_decomposition(ir_func, &config)?;
@@ -132,17 +132,17 @@ pub fn lower_to_operation_graph(ir_func: IRFunction) -> Result<OperationGraph> {
 /// - Shape inference fails
 /// - Invalid ONNX graph structure
 pub fn translate_graph_to_ir(graph: &crate::proto::GraphProto) -> Result<IRFunction> {
-    use hologram_ir::GraphBuilder;
+    use hologram::ir::GraphBuilder;
     use crate::ops::translator::translate_onnx_node;
     use std::collections::HashMap;
     use tracing::{debug, trace};
 
     let mut builder = GraphBuilder::new();
-    let mut value_map: HashMap<String, hologram_ir::NodeIndex> = HashMap::new();
+    let mut value_map: HashMap<String, hologram::NodeIndex> = HashMap::new();
 
     // Step 1: Process inputs with symbolic shapes
     debug!("Processing {} graph inputs", graph.input.len());
-    for input in &graph.input {
+    for (i, input) in graph.input.iter().enumerate() {
         let shape = crate::core::SymbolicShape::from_value_info(input)?;
 
         // Determine dtype from ONNX type
@@ -151,6 +151,12 @@ pub fn translate_graph_to_ir(graph: &crate::proto::GraphProto) -> Result<IRFunct
         trace!("Adding input '{}': shape={:?}, dtype={:?}", input.name, shape, dtype);
         let node_idx = builder.input(&input.name, shape.into_inner(), dtype);
         value_map.insert(input.name.clone(), node_idx);
+
+        // Debug: Log input_ids mapping specifically
+        if input.name == "input_ids" {
+            debug!("INPUT_IDS MAPPING: '{}' (ONNX input {}) -> NodeIndex({:?})",
+                input.name, i, node_idx);
+        }
     }
 
     // Step 2: Process initializers (constants/weights)
@@ -173,6 +179,17 @@ pub fn translate_graph_to_ir(graph: &crate::proto::GraphProto) -> Result<IRFunct
     debug!("Processing {} graph nodes", graph.node.len());
     for (idx, node) in graph.node.iter().enumerate() {
         trace!("Translating node {}/{}: {} ({})", idx + 1, graph.node.len(), node.name, node.op_type);
+
+        // Debug: Log when input_ids is used
+        for input_name in &node.input {
+            if input_name == "input_ids" {
+                let input_node_idx = value_map.get(input_name);
+                debug!(
+                    "NODE {} ({}) USES input_ids: value_map['input_ids'] = {:?}",
+                    idx, node.op_type, input_node_idx
+                );
+            }
+        }
 
         // Translate this ONNX node to IR operations
         let output_indices = translate_onnx_node(node, &mut builder, &mut value_map)?;
@@ -252,8 +269,8 @@ fn onnx_dtype_to_hologram(onnx_type: i32) -> Result<DType> {
 }
 
 /// Convert ONNX TensorProto to hologram ConstantData and Shape.
-fn tensor_proto_to_constant(tensor: &crate::proto::TensorProto) -> Result<(hologram_ir::ConstantData, hologram_ir::Shape)> {
-    use hologram_ir::{ConstantData, Dim, Shape};
+fn tensor_proto_to_constant(tensor: &crate::proto::TensorProto) -> Result<(hologram::ConstantData, hologram::Shape)> {
+    use hologram::ir::{ConstantData, Dim, Shape};
 
     // Extract shape
     let shape = Shape::new(

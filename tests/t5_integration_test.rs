@@ -13,16 +13,33 @@ use std::path::PathBuf;
 use hologram_onnx::{
     SymbolicShape, parse_model, validate_model,
 };
-use hologram_onnx::core::extract_opset_version;
-use hologram_ir::Dim;
+use hologram_onnx::core::{HOLB_MAGIC, HOLP_MAGIC, extract_opset_version};
+use hologram::Dim;
 use tempfile::TempDir;
 
 fn hologram_onnx_bin() -> std::path::PathBuf {
-    std::env::var("CARGO_BIN_EXE_hologram-onnx")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|err| {
-            panic!("CARGO_BIN_EXE_hologram-onnx not set: {}", err)
-        })
+    // Try env var first (set by cargo test for binary crates)
+    if let Ok(path) = std::env::var("CARGO_BIN_EXE_hologram-onnx") {
+        return std::path::PathBuf::from(path);
+    }
+
+    // Fall back to target directory relative to manifest
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let debug_bin = manifest_dir.join("target/debug/hologram-onnx");
+    if debug_bin.exists() {
+        return debug_bin;
+    }
+
+    let release_bin = manifest_dir.join("target/release/hologram-onnx");
+    if release_bin.exists() {
+        return release_bin;
+    }
+
+    panic!(
+        "hologram-onnx binary not found. Run `cargo build` first.\n\
+         Searched:\n  - {:?}\n  - {:?}",
+        debug_bin, release_bin
+    );
 }
 
 // ============================================================================
@@ -264,12 +281,21 @@ fn test_t5_encoder_critical_operations() {
     // = 6 * 6 = 36+ MatMuls
     assert!(matmul_count >= 20, "T5 encoder should have many MatMul ops");
 
-    // Each layer has 2 LayerNorms (after attention + after FFN)
-    // = 6 * 2 = 12 LayerNorms
-    assert!(
-        layer_norm_count >= 10,
-        "T5 encoder should have many LayerNorm ops"
-    );
+    // T5 models can use fused LayerNormalization OR decompose it into
+    // primitive ops (ReduceMean, Sub, Pow, Sqrt, Div, Mul, Add).
+    // hologram-onnx supports both patterns.
+    let reduce_mean_count = graph.node.iter().filter(|n| n.op_type == "ReduceMean").count();
+
+    if layer_norm_count >= 10 {
+        eprintln!("  Using fused LayerNormalization ops");
+    } else if reduce_mean_count >= 10 {
+        eprintln!("  ReduceMean: {} (decomposed LayerNorm pattern)", reduce_mean_count);
+    } else {
+        panic!(
+            "T5 encoder should have normalization ops (fused LayerNorm: {}, ReduceMean: {})",
+            layer_norm_count, reduce_mean_count
+        );
+    }
 
     // Each layer has 1 Softmax (for attention)
     // = 6 Softmax
@@ -318,10 +344,10 @@ fn test_t5_encoder_compilation() {
 
     let holo_content = fs::read(&holo_path).expect("Should read .holo file");
     assert!(!holo_content.is_empty(), ".holo file should not be empty");
-    assert_eq!(
-        &holo_content[0..4],
-        b"HOLO",
-        "Should have HOLO magic header"
+    let magic = &holo_content[0..4];
+    assert!(
+        magic == HOLB_MAGIC || magic == HOLP_MAGIC,
+        "Should have HOLB or HOLP magic header"
     );
 
     eprintln!(
@@ -502,10 +528,10 @@ fn test_t5_decoder_compilation() {
 
     let holo_content = fs::read(&holo_path).expect("Should read .holo file");
     assert!(!holo_content.is_empty(), ".holo file should not be empty");
-    assert_eq!(
-        &holo_content[0..4],
-        b"HOLO",
-        "Should have HOLO magic header"
+    let magic = &holo_content[0..4];
+    assert!(
+        magic == HOLB_MAGIC || magic == HOLP_MAGIC,
+        "Should have HOLB or HOLP magic header"
     );
 
     eprintln!(

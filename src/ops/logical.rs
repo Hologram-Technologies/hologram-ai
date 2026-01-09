@@ -3,7 +3,7 @@
 //! Note: hologram-ir doesn't have built-in comparison/logical ops.
 //! We use Custom operations to represent these for now.
 
-use hologram_ir::{GraphBuilder, NodeIndex};
+use hologram::ir::{GraphBuilder, NodeIndex};
 use crate::core::{OnnxError, Result};
 use rustc_hash::FxHashMap;
 
@@ -25,12 +25,12 @@ pub fn translate_equal(
 
     // Use Custom operation for Equal
     let idx = builder.graph_mut().add_op(
-        hologram_ir::NodeOp::Custom {
+        hologram::ir::NodeOp::Custom {
             name: "Equal".to_string(),
             attrs: FxHashMap::default(),
         },
         shape,
-        hologram_ir::DType::Bool,
+        hologram::ir::DType::Bool,
     );
     builder.graph_mut().connect(inputs[0], idx);
     builder.graph_mut().connect(inputs[1], idx);
@@ -54,12 +54,12 @@ pub fn translate_greater(
     };
 
     let idx = builder.graph_mut().add_op(
-        hologram_ir::NodeOp::Custom {
+        hologram::ir::NodeOp::Custom {
             name: "Greater".to_string(),
             attrs: FxHashMap::default(),
         },
         shape,
-        hologram_ir::DType::Bool,
+        hologram::ir::DType::Bool,
     );
     builder.graph_mut().connect(inputs[0], idx);
     builder.graph_mut().connect(inputs[1], idx);
@@ -83,12 +83,70 @@ pub fn translate_less(
     };
 
     let idx = builder.graph_mut().add_op(
-        hologram_ir::NodeOp::Custom {
+        hologram::ir::NodeOp::Custom {
             name: "Less".to_string(),
             attrs: FxHashMap::default(),
         },
         shape,
-        hologram_ir::DType::Bool,
+        hologram::ir::DType::Bool,
+    );
+    builder.graph_mut().connect(inputs[0], idx);
+    builder.graph_mut().connect(inputs[1], idx);
+
+    Ok(vec![idx])
+}
+
+/// Translate ONNX LessOrEqual to IR using Custom operation.
+pub fn translate_less_or_equal(
+    inputs: &[NodeIndex],
+    builder: &mut GraphBuilder,
+) -> Result<Vec<NodeIndex>> {
+    if inputs.len() < 2 {
+        return Err(OnnxError::InvalidModel("LessOrEqual requires 2 inputs".into()));
+    }
+
+    let shape = {
+        let input_node = builder.graph().node(inputs[0])
+            .ok_or_else(|| OnnxError::InvalidModel("Invalid input node".into()))?;
+        input_node.shape.clone()
+    };
+
+    let idx = builder.graph_mut().add_op(
+        hologram::ir::NodeOp::Custom {
+            name: "LessOrEqual".to_string(),
+            attrs: FxHashMap::default(),
+        },
+        shape,
+        hologram::ir::DType::Bool,
+    );
+    builder.graph_mut().connect(inputs[0], idx);
+    builder.graph_mut().connect(inputs[1], idx);
+
+    Ok(vec![idx])
+}
+
+/// Translate ONNX GreaterOrEqual to IR using Custom operation.
+pub fn translate_greater_or_equal(
+    inputs: &[NodeIndex],
+    builder: &mut GraphBuilder,
+) -> Result<Vec<NodeIndex>> {
+    if inputs.len() < 2 {
+        return Err(OnnxError::InvalidModel("GreaterOrEqual requires 2 inputs".into()));
+    }
+
+    let shape = {
+        let input_node = builder.graph().node(inputs[0])
+            .ok_or_else(|| OnnxError::InvalidModel("Invalid input node".into()))?;
+        input_node.shape.clone()
+    };
+
+    let idx = builder.graph_mut().add_op(
+        hologram::ir::NodeOp::Custom {
+            name: "GreaterOrEqual".to_string(),
+            attrs: FxHashMap::default(),
+        },
+        shape,
+        hologram::ir::DType::Bool,
     );
     builder.graph_mut().connect(inputs[0], idx);
     builder.graph_mut().connect(inputs[1], idx);
@@ -112,12 +170,12 @@ pub fn translate_and(
     };
 
     let idx = builder.graph_mut().add_op(
-        hologram_ir::NodeOp::Custom {
+        hologram::ir::NodeOp::Custom {
             name: "And".to_string(),
             attrs: FxHashMap::default(),
         },
         shape,
-        hologram_ir::DType::Bool,
+        hologram::ir::DType::Bool,
     );
     builder.graph_mut().connect(inputs[0], idx);
     builder.graph_mut().connect(inputs[1], idx);
@@ -141,12 +199,12 @@ pub fn translate_or(
     };
 
     let idx = builder.graph_mut().add_op(
-        hologram_ir::NodeOp::Custom {
+        hologram::ir::NodeOp::Custom {
             name: "Or".to_string(),
             attrs: FxHashMap::default(),
         },
         shape,
-        hologram_ir::DType::Bool,
+        hologram::ir::DType::Bool,
     );
     builder.graph_mut().connect(inputs[0], idx);
     builder.graph_mut().connect(inputs[1], idx);
@@ -170,12 +228,12 @@ pub fn translate_not(
     };
 
     let idx = builder.graph_mut().add_op(
-        hologram_ir::NodeOp::Custom {
+        hologram::ir::NodeOp::Custom {
             name: "Not".to_string(),
             attrs: FxHashMap::default(),
         },
         shape,
-        hologram_ir::DType::Bool,
+        hologram::ir::DType::Bool,
     );
     builder.graph_mut().connect(inputs[0], idx);
 
@@ -201,7 +259,7 @@ pub fn translate_where(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use hologram_ir::{DType, Shape};
+    use hologram::ir::{DType, Shape};
 
     #[test]
     fn test_translate_equal() {

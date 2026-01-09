@@ -9,6 +9,42 @@ hologram-onnx is a Rust workspace building an ONNX runtime with Hologram as the 
 - **Spec crate**: Pure ONNX protobuf definitions (`hologram-onnx-spec`)
 - **Runtime crate**: Operator implementations (future)
 
+## Pure Hologram Architecture Principle
+
+**CRITICAL: This is the foundational principle of hologram-onnx**
+
+### Core Philosophy
+
+**Everything runs through hologram.** The entire point of hologram is to be a unified computational compiler and runtime. This principle is non-negotiable.
+
+### Implementation Rules
+
+1. **No External Runtime Dependencies**
+   - Do NOT add dependencies like `tokenizers`, `ndarray`, `candle` for runtime execution
+   - All computational operations compile to hologram IR → .holo files
+   - All execution goes through hologram backend
+
+2. **When hologram_ir Lacks Operations**
+   - Implement algorithms in **pure Rust** (std library only)
+   - Document as bridge until hologram_ir gains operations
+   - Example: SentencePiece tokenizer in pure Rust until hologram_ir supports string ops
+
+3. **The Vision**
+   ```
+   Everything is a .holo file executed by hologram:
+   ├── tokenizer.holo    ✅ Compiles now (stub IR, pure Rust runtime bridge)
+   ├── encoder.holo      ✅ Full hologram execution
+   ├── decoder.holo      ✅ Full hologram execution
+   └── post_process.holo 🔄 Future
+   ```
+
+4. **Always Maintain**
+   - Compilation to .holo format (even for bridges)
+   - Path to full hologram_ir implementation
+   - No external runtime dependencies for core functionality
+
+See [CLAUDE.md](CLAUDE.md#pure-hologram-architecture-principle) for detailed guidelines.
+
 ## Exploration Workflows
 
 ### Understanding the Codebase
@@ -140,6 +176,19 @@ Type errors in generated code:
 
 **CRITICAL: These standards are MANDATORY and NON-NEGOTIABLE**
 
+#### Production-Ready Code ONLY
+
+**ABSOLUTE REQUIREMENT: Every piece of code in this project MUST be production-ready.**
+
+- **NO stubs** - Period. Nothing is a stub.
+- **NO TODOs** - Every function is complete.
+- **NO placeholders** - All code is real, working code.
+- **NO "simplistic" implementations** - Full, proper implementations only.
+- **NO "in a real implementation" comments** - This IS the real implementation.
+- **NO shortcuts** - Do it right or don't do it.
+
+Any code that contains phrases like "in production you would...", "a real implementation would...", "simplified for demonstration", or similar disclaimers is **UNACCEPTABLE**. If you're writing it, write it properly. If a feature isn't ready, don't include it at all.
+
 1. **NO TODOs, Placeholders, or Stubs**
    - Every function MUST be fully implemented
    - No `unimplemented!()` macros
@@ -153,12 +202,16 @@ Type errors in generated code:
    - All error paths must be handled
    - No temporary workarounds
 
-3. **Tests Required**
-   - Write tests for EVERY module and function
+3. **Tests Required - Maximum Coverage**
+   - **Write tests for ALL methods and functions** - aim for the highest test coverage possible
+   - Every public function MUST have at least one test
+   - Every private function with non-trivial logic MUST have tests
    - Unit tests in module files or `tests/` subdirectory
    - Integration tests in top-level `tests/` directory
    - Include edge cases and error conditions
    - Test symbolic shapes with variable dimensions
+   - Test all code paths, including error paths
+   - No code should be merged without corresponding tests
 
 4. **Documentation**
    - All public APIs MUST have rustdoc comments

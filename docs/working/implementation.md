@@ -33,6 +33,7 @@
 - ✅ **Memory profiling**: Peak memory <8 GB for UNet (3052 nodes) with partitioning
 - ✅ Build verification complete - hologram-onnx-core and hologram-onnx-ops compile and all 188 tests pass
 - ✅ Integration tests pass (32 tests for output handlers)
+- ✅ Maintenance: ReshapeDynamic shape-graph inference for symbolic reshape outputs
 
 ## Overview
 

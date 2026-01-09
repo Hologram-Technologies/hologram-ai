@@ -5,7 +5,7 @@
 //! - Slice: Slice tensor along axes
 //! - GatherElements: Gather elements (returns unsupported if not in hologram-ir)
 
-use hologram_ir::{GraphBuilder, NodeIndex};
+use hologram::ir::{GraphBuilder, NodeIndex};
 use crate::core::{OnnxError, Result};
 use crate::proto::AttributeProto;
 use crate::ops::utils::{parse_attr_int, parse_attr_ints};
@@ -48,15 +48,8 @@ pub fn translate_gather(
     // Parse axis attribute (default is 0 in ONNX)
     let axis = parse_attr_int(attrs, "axis", 0)? as i32;
 
-    // FIXME: Constant folding disabled due to kernel ID assignment issue
-    // When constant folding creates a Constant node, the compiler incorrectly
-    // assigns it a Gather kernel ID, causing runtime failures.
-    // The folded constant node has 0 input_refs but the Gather kernel expects 2 inputs.
-    //
-    // TODO: Re-enable constant folding after fixing kernel ID assignment to properly
-    // distinguish between Constant nodes and Gather nodes in the compiler.
-
-    // Create regular gather node (with proper edges from inputs)
+    // Create gather node - constant folding is handled by the IR constant_fold pass.
+    // The compiler correctly assigns NOOP kernel to constant nodes with weight data.
     let result = builder.gather(data, indices, axis)?;
 
     Ok(vec![result])
@@ -121,14 +114,14 @@ pub fn translate_slice(
         let ends_node = builder.graph().node(inputs[2])
             .ok_or_else(|| OnnxError::InvalidModel("Slice: ends node not found".to_string()))?;
 
-        let starts_is_constant = matches!(starts_node.op, hologram_ir::NodeOp::Constant { .. });
-        let ends_is_constant = matches!(ends_node.op, hologram_ir::NodeOp::Constant { .. });
+        let starts_is_constant = matches!(starts_node.op, hologram::ir::NodeOp::Constant { .. });
+        let ends_is_constant = matches!(ends_node.op, hologram::ir::NodeOp::Constant { .. });
 
         // Check axes if provided
         let axes_is_constant = if inputs.len() > 3 {
             let axes_node = builder.graph().node(inputs[3])
                 .ok_or_else(|| OnnxError::InvalidModel("Slice: axes node not found".to_string()))?;
-            matches!(axes_node.op, hologram_ir::NodeOp::Constant { .. })
+            matches!(axes_node.op, hologram::ir::NodeOp::Constant { .. })
         } else {
             true  // No axes input = all axes constant (default)
         };
@@ -137,7 +130,7 @@ pub fn translate_slice(
         let steps_is_constant = if inputs.len() > 4 {
             let steps_node = builder.graph().node(inputs[4])
                 .ok_or_else(|| OnnxError::InvalidModel("Slice: steps node not found".to_string()))?;
-            matches!(steps_node.op, hologram_ir::NodeOp::Constant { .. })
+            matches!(steps_node.op, hologram::ir::NodeOp::Constant { .. })
         } else {
             true  // No steps input = all steps constant (default = 1)
         };
@@ -155,8 +148,8 @@ pub fn translate_slice(
         }
 
         // All inputs are constants - extract for constant folding
-        let starts_vals = if let hologram_ir::NodeOp::Constant { data } = &starts_node.op {
-            use hologram_ir::ConstantData;
+        let starts_vals = if let hologram::ir::NodeOp::Constant { data } = &starts_node.op {
+            use hologram::ir::ConstantData;
             match data {
                 ConstantData::I64(values) => values.clone(),
                 ConstantData::I32(values) => values.iter().map(|&v| v as i64).collect(),
@@ -168,8 +161,8 @@ pub fn translate_slice(
             unreachable!("starts_is_constant check above ensures this is Constant");
         };
 
-        let ends_vals = if let hologram_ir::NodeOp::Constant { data } = &ends_node.op {
-            use hologram_ir::ConstantData;
+        let ends_vals = if let hologram::ir::NodeOp::Constant { data } = &ends_node.op {
+            use hologram::ir::ConstantData;
             match data {
                 ConstantData::I64(values) => values.clone(),
                 ConstantData::I32(values) => values.iter().map(|&v| v as i64).collect(),
@@ -185,8 +178,8 @@ pub fn translate_slice(
             let axes_node = builder.graph().node(inputs[3])
                 .ok_or_else(|| OnnxError::InvalidModel("Slice: axes node not found".to_string()))?;
 
-            if let hologram_ir::NodeOp::Constant { data } = &axes_node.op {
-                use hologram_ir::ConstantData;
+            if let hologram::ir::NodeOp::Constant { data } = &axes_node.op {
+                use hologram::ir::ConstantData;
                 match data {
                     ConstantData::I64(values) => values.clone(),
                     ConstantData::I32(values) => values.iter().map(|&v| v as i64).collect(),
@@ -237,7 +230,7 @@ pub fn translate_slice(
 
     // Static path - constant folding (optimization)
     tracing::debug!("Slice: static path (constant folding)");
-    use hologram_ir::NodeOp;
+    use hologram::ir::NodeOp;
     let result = builder.unary(NodeOp::Slice { starts, ends, axes }, data)?;
 
     Ok(vec![result])
@@ -325,7 +318,7 @@ pub fn translate_scatternd(
 mod tests {
     use super::*;
     use crate::proto::attribute_proto::AttributeType;
-    use hologram_ir::{DType, Shape};
+    use hologram::ir::{DType, Shape};
 
     fn make_int_attr(name: &str, value: i64) -> AttributeProto {
         AttributeProto {

@@ -3,7 +3,7 @@
 //! This module provides translators for basic arithmetic operations like Add, Sub, Mul,
 //! Div, MatMul, Gemm, and Pow.
 
-use hologram_ir::{GraphBuilder, NodeIndex};
+use hologram::ir::{GraphBuilder, NodeIndex};
 use crate::core::{OnnxError, Result};
 use crate::proto::AttributeProto;
 use crate::ops::utils::{parse_attr_float, parse_attr_int};
@@ -78,7 +78,7 @@ pub fn translate_pow(
     }
 
     // Pow is a binary operation with broadcasting
-    let result = builder.binary(hologram_ir::NodeOp::Pow, inputs[0], inputs[1])?;
+    let result = builder.binary(hologram::ir::NodeOp::Pow, inputs[0], inputs[1])?;
 
     Ok(vec![result])
 }
@@ -87,7 +87,7 @@ pub fn translate_pow(
 mod tests {
     use super::*;
     use crate::proto::attribute_proto::AttributeType;
-    use hologram_ir::{DType, Shape};
+    use hologram::ir::{DType, Shape};
 
     fn make_float_attr(name: &str, value: f32) -> AttributeProto {
         AttributeProto {

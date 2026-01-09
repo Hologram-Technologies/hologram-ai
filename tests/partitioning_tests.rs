@@ -7,8 +7,8 @@
 //! - Topological ordering is preserved
 //! - Memory usage stays within bounds
 
-use hologram_onnx_core::{GraphPartition, GraphPartitioner};
-use hologram_onnx_spec::{
+use hologram_onnx::{GraphPartition, GraphPartitioner};
+use hologram_onnx::proto::{
     AttributeProto, GraphProto, NodeProto, TensorShapeProto, TypeProto, ValueInfoProto,
 };
 use std::collections::HashSet;
@@ -441,13 +441,13 @@ fn create_unet_style_graph(depth: usize, nodes_per_level: usize) -> GraphProto {
 
 /// Helper to create a ValueInfoProto.
 fn make_value_info(name: &str, dims: &[i64]) -> ValueInfoProto {
-    use hologram_onnx_spec::tensor_shape_proto::Dimension;
-    use hologram_onnx_spec::type_proto::Value;
+    use hologram_onnx::proto::tensor_shape_proto::Dimension;
+    use hologram_onnx::proto::type_proto::Value;
 
     let shape_dims: Vec<Dimension> = dims
         .iter()
         .map(|&d| Dimension {
-            value: Some(hologram_onnx_spec::tensor_shape_proto::dimension::Value::DimValue(d)),
+            value: Some(hologram_onnx::proto::tensor_shape_proto::dimension::Value::DimValue(d)),
             ..Default::default()
         })
         .collect();
@@ -455,7 +455,7 @@ fn make_value_info(name: &str, dims: &[i64]) -> ValueInfoProto {
     ValueInfoProto {
         name: name.to_string(),
         r#type: Some(TypeProto {
-            value: Some(Value::TensorType(hologram_onnx_spec::type_proto::Tensor {
+            value: Some(Value::TensorType(hologram_onnx::proto::type_proto::Tensor {
                 elem_type: 1, // FLOAT
                 shape: Some(TensorShapeProto { dim: shape_dims }),
             })),

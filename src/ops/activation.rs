@@ -3,7 +3,7 @@
 //! Implements translators for neural network activation functions including
 //! Softmax, Clip, LeakyReLU, ELU, SELU, PReLU, and Swish.
 
-use hologram_ir::{GraphBuilder, NodeIndex};
+use hologram::ir::{GraphBuilder, NodeIndex};
 use crate::core::{OnnxError, Result};
 use crate::proto::AttributeProto;
 use crate::ops::utils::{parse_attr_int, parse_attr_float};
@@ -77,12 +77,12 @@ pub fn translate_leaky_relu(
     // LeakyReLU(x) = max(0, x) + alpha * min(0, x)
     // Decompose into: max(x, alpha * x)
     let alpha_const = builder.constant(
-        hologram_ir::ConstantData::F32(vec![alpha]),
-        hologram_ir::Shape::static_shape(&[1]),
+        hologram::ir::ConstantData::F32(vec![alpha]),
+        hologram::ir::Shape::static_shape(&[1]),
     );
 
     let scaled = builder.mul(inputs[0], alpha_const)?;
-    let result = builder.binary(hologram_ir::NodeOp::Max, inputs[0], scaled)?;
+    let result = builder.binary(hologram::ir::NodeOp::Max, inputs[0], scaled)?;
 
     Ok(vec![result])
 }
@@ -106,24 +106,24 @@ pub fn translate_elu(
 
     // Create constants
     let zero = builder.constant(
-        hologram_ir::ConstantData::F32(vec![0.0]),
-        hologram_ir::Shape::static_shape(&[1]),
+        hologram::ir::ConstantData::F32(vec![0.0]),
+        hologram::ir::Shape::static_shape(&[1]),
     );
     let alpha_const = builder.constant(
-        hologram_ir::ConstantData::F32(vec![alpha]),
-        hologram_ir::Shape::static_shape(&[1]),
+        hologram::ir::ConstantData::F32(vec![alpha]),
+        hologram::ir::Shape::static_shape(&[1]),
     );
     let one = builder.constant(
-        hologram_ir::ConstantData::F32(vec![1.0]),
-        hologram_ir::Shape::static_shape(&[1]),
+        hologram::ir::ConstantData::F32(vec![1.0]),
+        hologram::ir::Shape::static_shape(&[1]),
     );
 
     // Positive part: max(0, x) = x where x >= 0
-    let positive_part = builder.binary(hologram_ir::NodeOp::Max, inputs[0], zero)?;
+    let positive_part = builder.binary(hologram::ir::NodeOp::Max, inputs[0], zero)?;
 
     // Negative part: alpha * (exp(min(0, x)) - 1)
-    let negative_part_input = builder.binary(hologram_ir::NodeOp::Min, inputs[0], zero)?;
-    let exp_x = builder.unary(hologram_ir::NodeOp::Exp, negative_part_input)?;
+    let negative_part_input = builder.binary(hologram::ir::NodeOp::Min, inputs[0], zero)?;
+    let exp_x = builder.unary(hologram::ir::NodeOp::Exp, negative_part_input)?;
     let exp_minus_one = builder.sub(exp_x, one)?;
     let negative_part = builder.mul(alpha_const, exp_minus_one)?;
 
@@ -151,30 +151,30 @@ pub fn translate_selu(
     // SELU = gamma * ELU(x, alpha)
     // First compute ELU using decomposition
     let zero = builder.constant(
-        hologram_ir::ConstantData::F32(vec![0.0]),
-        hologram_ir::Shape::static_shape(&[1]),
+        hologram::ir::ConstantData::F32(vec![0.0]),
+        hologram::ir::Shape::static_shape(&[1]),
     );
     let alpha_const = builder.constant(
-        hologram_ir::ConstantData::F32(vec![alpha]),
-        hologram_ir::Shape::static_shape(&[1]),
+        hologram::ir::ConstantData::F32(vec![alpha]),
+        hologram::ir::Shape::static_shape(&[1]),
     );
     let one = builder.constant(
-        hologram_ir::ConstantData::F32(vec![1.0]),
-        hologram_ir::Shape::static_shape(&[1]),
+        hologram::ir::ConstantData::F32(vec![1.0]),
+        hologram::ir::Shape::static_shape(&[1]),
     );
 
     // ELU decomposition
-    let positive_part = builder.binary(hologram_ir::NodeOp::Max, inputs[0], zero)?;
-    let negative_part_input = builder.binary(hologram_ir::NodeOp::Min, inputs[0], zero)?;
-    let exp_x = builder.unary(hologram_ir::NodeOp::Exp, negative_part_input)?;
+    let positive_part = builder.binary(hologram::ir::NodeOp::Max, inputs[0], zero)?;
+    let negative_part_input = builder.binary(hologram::ir::NodeOp::Min, inputs[0], zero)?;
+    let exp_x = builder.unary(hologram::ir::NodeOp::Exp, negative_part_input)?;
     let exp_minus_one = builder.sub(exp_x, one)?;
     let negative_part = builder.mul(alpha_const, exp_minus_one)?;
     let elu = builder.add(positive_part, negative_part)?;
 
     // Scale by gamma
     let gamma_const = builder.constant(
-        hologram_ir::ConstantData::F32(vec![gamma]),
-        hologram_ir::Shape::static_shape(&[1]),
+        hologram::ir::ConstantData::F32(vec![gamma]),
+        hologram::ir::Shape::static_shape(&[1]),
     );
     let result = builder.mul(elu, gamma_const)?;
 
@@ -195,12 +195,12 @@ pub fn translate_prelu(
 
     // PReLU(x, slope) = max(0, x) + slope * min(0, x)
     let zero = builder.constant(
-        hologram_ir::ConstantData::F32(vec![0.0]),
-        hologram_ir::Shape::static_shape(&[1]),
+        hologram::ir::ConstantData::F32(vec![0.0]),
+        hologram::ir::Shape::static_shape(&[1]),
     );
 
-    let pos_part = builder.binary(hologram_ir::NodeOp::Max, inputs[0], zero)?;
-    let neg_part = builder.binary(hologram_ir::NodeOp::Min, inputs[0], zero)?;
+    let pos_part = builder.binary(hologram::ir::NodeOp::Max, inputs[0], zero)?;
+    let neg_part = builder.binary(hologram::ir::NodeOp::Min, inputs[0], zero)?;
     let scaled_neg = builder.mul(inputs[1], neg_part)?;
     let result = builder.add(pos_part, scaled_neg)?;
 
@@ -228,7 +228,7 @@ pub fn translate_swish(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use hologram_ir::{DType, Shape};
+    use hologram::ir::{DType, Shape};
 
     #[test]
     fn test_translate_softmax() {

@@ -5,7 +5,7 @@
 //! - Variable sequence lengths (Dim::Dynamic)
 //! - Mixed static and symbolic dimensions
 
-use hologram_ir::{GraphBuilder, DType, Shape, Dim};
+use hologram::ir::{GraphBuilder, DType, Shape, Dim};
 use hologram_onnx::ops::*;
 use hologram_onnx::proto::attribute_proto::AttributeType;
 use hologram_onnx::proto::AttributeProto;

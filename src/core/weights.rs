@@ -15,7 +15,7 @@
 //! # Examples
 //!
 //! ```no_run
-//! use crate::core::{WeightData, parse_model};
+//! use hologram_onnx::core::{WeightData, parse_model};
 //! use std::fs;
 //!
 //! # fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -50,6 +50,8 @@ use std::hash::{Hash, Hasher};
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::Path;
 
+use super::weights_format::{WeightDType, WeightsFileWriter};
+
 /// Reference to external weight data.
 ///
 /// This lightweight structure points to a location in the external
@@ -62,12 +64,27 @@ pub struct WeightRef {
     pub length: usize,
 }
 
+/// Extended weight reference with full metadata for mmap serialization.
+///
+/// Used when serializing to HOLW format, which requires
+/// dtype and shape information for each weight.
+#[derive(Debug, Clone)]
+pub struct MmapWeightEntry {
+    /// Basic reference (offset, length)
+    pub weight_ref: WeightRef,
+    /// Data type of the weight
+    pub dtype: WeightDType,
+    /// Tensor shape
+    pub shape: Vec<usize>,
+}
+
 /// Weight data manager with deduplication.
 ///
 /// Manages weight extraction from ONNX models with:
 /// - **Streaming extraction**: No full model load required
 /// - **O(1) deduplication**: Hash-based duplicate detection
 /// - **Zero-copy serialization**: Direct byte writing
+/// - **HOLW format support**: Serialize with full metadata
 ///
 /// # Performance
 ///
@@ -81,6 +98,8 @@ pub struct WeightData {
     buffer: Vec<u8>,
     /// Weight name → (offset, length)
     refs: AHashMap<String, WeightRef>,
+    /// Weight name → full entry with metadata (for HOLW serialization)
+    entries: AHashMap<String, MmapWeightEntry>,
     /// Weight hash → offset (for deduplication)
     hash_to_offset: AHashMap<u64, u64>,
 }
@@ -91,7 +110,7 @@ impl WeightData {
     /// # Examples
     ///
     /// ```
-    /// use crate::core::WeightData;
+    /// use hologram_onnx::core::WeightData;
     ///
     /// let weights = WeightData::new();
     /// assert_eq!(weights.len(), 0);
@@ -100,6 +119,7 @@ impl WeightData {
         Self {
             buffer: Vec::new(),
             refs: AHashMap::new(),
+            entries: AHashMap::new(),
             hash_to_offset: AHashMap::new(),
         }
     }
@@ -124,7 +144,7 @@ impl WeightData {
     /// # Examples
     ///
     /// ```
-    /// use crate::core::WeightData;
+    /// use hologram_onnx::core::WeightData;
     ///
     /// let mut weights = WeightData::new();
     /// let data = vec![1.0, 2.0, 3.0];
@@ -135,6 +155,32 @@ impl WeightData {
     /// assert_eq!(ref1.offset, ref2.offset); // Same offset - deduplicated
     /// ```
     pub fn add_weight(&mut self, name: &str, data: Vec<f32>) -> WeightRef {
+        // Default to f32 dtype and 1D shape
+        self.add_weight_with_metadata(name, data.clone(), &[data.len()], WeightDType::F32)
+    }
+
+    /// Add weight data with full metadata.
+    ///
+    /// This is the primary method for adding weights with shape and dtype information,
+    /// which is required for HOLW format serialization.
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - Weight identifier
+    /// * `data` - Weight values (f32)
+    /// * `shape` - Tensor shape
+    /// * `dtype` - Data type
+    ///
+    /// # Returns
+    ///
+    /// Reference to the weight data location.
+    pub fn add_weight_with_metadata(
+        &mut self,
+        name: &str,
+        data: Vec<f32>,
+        shape: &[usize],
+        dtype: WeightDType,
+    ) -> WeightRef {
         // Compute hash of weight data (O(weight_size))
         let hash = Self::hash_data(&data);
 
@@ -147,6 +193,14 @@ impl WeightData {
             };
 
             self.refs.insert(name.to_string(), weight_ref);
+            self.entries.insert(
+                name.to_string(),
+                MmapWeightEntry {
+                    weight_ref,
+                    dtype,
+                    shape: shape.to_vec(),
+                },
+            );
             return weight_ref;
         }
 
@@ -164,6 +218,14 @@ impl WeightData {
 
         // Update indices (both O(1))
         self.refs.insert(name.to_string(), weight_ref);
+        self.entries.insert(
+            name.to_string(),
+            MmapWeightEntry {
+                weight_ref,
+                dtype,
+                shape: shape.to_vec(),
+            },
+        );
         self.hash_to_offset.insert(hash, offset);
 
         weight_ref
@@ -184,12 +246,78 @@ impl WeightData {
         self.refs.get(name).copied()
     }
 
+    /// Get full entry with metadata for a named weight.
+    ///
+    /// **O(1) operation** using hash map lookup.
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - Weight identifier
+    ///
+    /// # Returns
+    ///
+    /// Weight entry with metadata if found, None otherwise.
+    pub fn get_entry(&self, name: &str) -> Option<&MmapWeightEntry> {
+        self.entries.get(name)
+    }
+
+    /// Get the raw weight buffer.
+    ///
+    /// This is the concatenated bytes of all weights.
+    pub fn buffer(&self) -> &[u8] {
+        &self.buffer
+    }
+
+    /// Serialize to HOLW format.
+    ///
+    /// Creates a properly formatted HOLW file with:
+    /// - Header with magic bytes and metadata
+    /// - Index section with weight names, shapes, and offsets
+    /// - Page-aligned data section for efficient mmap
+    ///
+    /// # Returns
+    ///
+    /// Complete HOLW file bytes ready to write to disk.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// let mut weights = WeightData::new();
+    /// weights.add_weight_with_metadata("layer.weight", data, &[768, 768], WeightDType::F32);
+    ///
+    /// let holw_bytes = weights.serialize_to_holw();
+    /// std::fs::write("model.weights", holw_bytes)?;
+    /// ```
+    pub fn serialize_to_holw(&self) -> Vec<u8> {
+        let mut writer = WeightsFileWriter::new();
+
+        // Add all weights with their metadata
+        for (name, entry) in &self.entries {
+            // Extract the bytes for this weight from the buffer
+            let start = entry.weight_ref.offset as usize;
+            let size_bytes = entry.weight_ref.length * entry.dtype.element_size();
+            let end = start + size_bytes;
+
+            if end <= self.buffer.len() {
+                let weight_bytes = &self.buffer[start..end];
+                writer.add_weight(name, weight_bytes, &entry.shape, entry.dtype);
+            }
+        }
+
+        writer.finish()
+    }
+
+    /// Iterate over all weight names.
+    pub fn weight_names(&self) -> impl Iterator<Item = &str> {
+        self.refs.keys().map(|s| s.as_str())
+    }
+
     /// Get number of unique weights.
     ///
     /// # Examples
     ///
     /// ```
-    /// use crate::core::WeightData;
+    /// use hologram_onnx::core::WeightData;
     ///
     /// let mut weights = WeightData::new();
     /// weights.add_weight("w1", vec![1.0]);
@@ -213,7 +341,7 @@ impl WeightData {
     /// # Examples
     ///
     /// ```
-    /// use crate::core::WeightData;
+    /// use hologram_onnx::core::WeightData;
     ///
     /// let mut weights = WeightData::new();
     /// weights.add_weight("w1", vec![1.0, 2.0, 3.0]); // 12 bytes
@@ -247,7 +375,7 @@ impl WeightData {
     /// # Examples
     ///
     /// ```no_run
-    /// use crate::core::WeightData;
+    /// use hologram_onnx::core::WeightData;
     ///
     /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
     /// let mut weights = WeightData::new();
@@ -291,8 +419,8 @@ impl WeightData {
     /// # Examples
     ///
     /// ```no_run
-    /// use crate::core::WeightData;
-    /// use crate::proto::TensorProto;
+    /// use hologram_onnx::core::WeightData;
+    /// use hologram_onnx::proto::TensorProto;
     ///
     /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
     /// // Assume we have a TensorProto

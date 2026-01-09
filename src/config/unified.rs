@@ -86,6 +86,14 @@ pub struct UnifiedConfig {
     #[serde(default)]
     pub runtime: RuntimeConfig,
 
+    /// Pipeline bundle configuration (for HOLM format)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pipeline: Option<PipelineBundleConfig>,
+
+    /// Tokenizer configuration
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tokenizer: Option<crate::tokenizers::TokenizerConfig>,
+
     /// Execution stages (auto-generated from models if not specified)
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub stages: Vec<StageDef>,
@@ -361,6 +369,17 @@ impl ModelDef {
             .unwrap_or("model")
             .to_string()
     }
+
+    /// Get the model type if specified.
+    ///
+    /// Returns "onnx" or "tokenizer"/"sentencepiece" to indicate how the
+    /// model should be compiled.
+    pub fn model_type(&self) -> Option<&str> {
+        match self {
+            Self::Path(_) => None,
+            Self::Full(spec) => spec.model_type.as_deref(),
+        }
+    }
 }
 
 /// Full model specification.
@@ -376,6 +395,14 @@ pub struct ModelSpec {
     /// Optional ONNX opset version
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub opset: Option<u32>,
+
+    /// Model type: "onnx" (default) or "tokenizer"
+    ///
+    /// Used by compile-pipeline to determine how to compile the model.
+    /// - "onnx": Standard ONNX model compilation
+    /// - "tokenizer" or "sentencepiece": Tokenizer JSON compilation
+    #[serde(default, skip_serializing_if = "Option::is_none", rename = "type")]
+    pub model_type: Option<String>,
 }
 
 // =============================================================================
@@ -536,6 +563,57 @@ pub struct RuntimeConfig {
     /// Enable verbose execution logging (shows per-level timing).
     #[serde(default)]
     pub verbose: bool,
+}
+
+// =============================================================================
+// Pipeline Bundle Configuration
+// =============================================================================
+
+/// Pipeline bundle configuration for HOLM format.
+///
+/// When a pipeline bundle is specified, models are loaded from the single
+/// HOLM bundle file instead of individual .holo files. This enables:
+/// - Single-file deployment (~300MB for full T5 pipeline)
+/// - Per-model memory-mapped weights
+/// - Simpler distribution and caching
+///
+/// # Example
+///
+/// ```toml
+/// [pipeline]
+/// bundle = "models/t5-pipeline.holo"
+///
+/// [models.encoder]
+/// # No path needed - loaded from bundle by name
+///
+/// [models.decoder]
+/// # No path needed - loaded from bundle by name
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PipelineBundleConfig {
+    /// Path to the pipeline bundle (HOLM format).
+    ///
+    /// When specified, models are loaded from this bundle instead of
+    /// individual .holo files. Model names in the config must match
+    /// the names stored in the bundle.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bundle: Option<String>,
+
+    /// Verify bundle checksums on load (default: true).
+    ///
+    /// Disabling this can speed up loading but removes integrity checks.
+    #[serde(default = "default_true")]
+    pub verify_checksums: bool,
+}
+
+impl Default for PipelineBundleConfig {
+    fn default() -> Self {
+        Self {
+            bundle: None,
+            verify_checksums: true,
+        }
+    }
 }
 
 // =============================================================================

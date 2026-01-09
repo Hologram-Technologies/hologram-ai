@@ -3,7 +3,7 @@
 //! This module provides the central translation function that dispatches
 //! ONNX operations to their specific translators based on the operation type.
 
-use hologram_ir::{GraphBuilder, NodeIndex};
+use hologram::ir::{GraphBuilder, NodeIndex};
 use crate::core::{OnnxError, Result};
 use crate::proto::NodeProto;
 use std::collections::HashMap;
@@ -101,6 +101,7 @@ pub fn translate_onnx_node(
         "Flatten" => crate::ops::shape::translate_flatten(&inputs, &node.attribute, builder)?,
         "Expand" => crate::ops::shape::translate_expand(&inputs, &node.attribute, builder)?,
         "Split" => crate::ops::shape::translate_split(&inputs, &node.attribute, builder)?,
+        "Tile" => crate::ops::shape::translate_tile(&inputs, &node.attribute, builder)?,
 
         // ===== ACTIVATION FUNCTIONS =====
         "Relu" => {
@@ -163,6 +164,8 @@ pub fn translate_onnx_node(
         "Equal" => crate::ops::logical::translate_equal(&inputs, builder)?,
         "Greater" => crate::ops::logical::translate_greater(&inputs, builder)?,
         "Less" => crate::ops::logical::translate_less(&inputs, builder)?,
+        "LessOrEqual" => crate::ops::logical::translate_less_or_equal(&inputs, builder)?,
+        "GreaterOrEqual" => crate::ops::logical::translate_greater_or_equal(&inputs, builder)?,
         "And" => crate::ops::logical::translate_and(&inputs, builder)?,
         "Or" => crate::ops::logical::translate_or(&inputs, builder)?,
         "Not" => crate::ops::logical::translate_not(&inputs, builder)?,
@@ -241,8 +244,8 @@ mod tests {
         let mut value_map = HashMap::new();
 
         // Create inputs
-        let a = builder.input("a", hologram_ir::Shape::static_shape(&[2, 3]), hologram_ir::DType::F32);
-        let b = builder.input("b", hologram_ir::Shape::static_shape(&[2, 3]), hologram_ir::DType::F32);
+        let a = builder.input("a", hologram::ir::Shape::static_shape(&[2, 3]), hologram::ir::DType::F32);
+        let b = builder.input("b", hologram::ir::Shape::static_shape(&[2, 3]), hologram::ir::DType::F32);
         value_map.insert("a".to_string(), a);
         value_map.insert("b".to_string(), b);
 
@@ -258,7 +261,7 @@ mod tests {
         let mut builder = GraphBuilder::new();
         let mut value_map = HashMap::new();
 
-        let x = builder.input("x", hologram_ir::Shape::static_shape(&[1, 10]), hologram_ir::DType::F32);
+        let x = builder.input("x", hologram::ir::Shape::static_shape(&[1, 10]), hologram::ir::DType::F32);
         value_map.insert("x".to_string(), x);
 
         let node = make_node("Relu", vec!["x"], vec!["y"]);
@@ -273,8 +276,8 @@ mod tests {
         let mut value_map = HashMap::new();
 
         // Create inputs
-        let a = builder.input("a", hologram_ir::Shape::static_shape(&[2, 3]), hologram_ir::DType::F32);
-        let b = builder.input("b", hologram_ir::Shape::static_shape(&[2, 3]), hologram_ir::DType::F32);
+        let a = builder.input("a", hologram::ir::Shape::static_shape(&[2, 3]), hologram::ir::DType::F32);
+        let b = builder.input("b", hologram::ir::Shape::static_shape(&[2, 3]), hologram::ir::DType::F32);
         value_map.insert("a".to_string(), a);
         value_map.insert("b".to_string(), b);
 
@@ -291,8 +294,8 @@ mod tests {
         let mut value_map = HashMap::new();
 
         // Create inputs
-        let a = builder.input("a", hologram_ir::Shape::static_shape(&[2, 3]), hologram_ir::DType::F32);
-        let b = builder.input("b", hologram_ir::Shape::static_shape(&[2, 3]), hologram_ir::DType::F32);
+        let a = builder.input("a", hologram::ir::Shape::static_shape(&[2, 3]), hologram::ir::DType::F32);
+        let b = builder.input("b", hologram::ir::Shape::static_shape(&[2, 3]), hologram::ir::DType::F32);
         value_map.insert("a".to_string(), a);
         value_map.insert("b".to_string(), b);
 
@@ -308,7 +311,7 @@ mod tests {
         let mut builder = GraphBuilder::new();
         let mut value_map = HashMap::new();
 
-        let x = builder.input("x", hologram_ir::Shape::static_shape(&[1, 10]), hologram_ir::DType::F32);
+        let x = builder.input("x", hologram::ir::Shape::static_shape(&[1, 10]), hologram::ir::DType::F32);
         value_map.insert("x".to_string(), x);
 
         let node = make_node("Identity", vec!["x"], vec!["y"]);
@@ -324,7 +327,7 @@ mod tests {
         let mut builder = GraphBuilder::new();
         let mut value_map = HashMap::new();
 
-        let x = builder.input("x", hologram_ir::Shape::static_shape(&[1, 10]), hologram_ir::DType::F32);
+        let x = builder.input("x", hologram::ir::Shape::static_shape(&[1, 10]), hologram::ir::DType::F32);
         value_map.insert("x".to_string(), x);
 
         let node = make_node("UnsupportedOp", vec!["x"], vec!["y"]);

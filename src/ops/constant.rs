@@ -6,7 +6,7 @@
 //! - Identity: Pass-through operation
 //! - Shape: Get shape of tensor (not yet fully supported)
 
-use hologram_ir::{GraphBuilder, NodeIndex, ConstantData, DType, Shape};
+use hologram::ir::{GraphBuilder, NodeIndex, ConstantData, DType, Shape};
 use crate::core::{OnnxError, Result};
 use crate::proto::{AttributeProto, TensorProto};
 use crate::ops::utils::parse_attr_tensor;
@@ -94,7 +94,7 @@ pub fn translate_constant_of_shape(
     let shape_node = builder.graph().node(inputs[0])
         .ok_or_else(|| OnnxError::InvalidModel("ConstantOfShape: shape input not found".to_string()))?;
 
-    use hologram_ir::{NodeOp, ConstantData, Shape, DType};
+    use hologram::ir::{NodeOp, ConstantData, Shape, DType};
 
     // Get the fill value from attributes (default is 0.0 as float32)
     let (fill_value_data, _fill_dtype) = if let Some(value_attr) = attrs.iter().find(|a| a.name == "value") {
@@ -286,7 +286,7 @@ pub fn translate_shape_op(
     }
 
     // Optimization: If all dimensions in the range are static, do constant folding
-    use hologram_ir::Dim;
+    use hologram::ir::Dim;
     let dims = &input_node.shape.dims;
     let mut all_static = true;
     let mut shape_values = Vec::new();
@@ -439,7 +439,7 @@ fn extract_constant_from_tensor(tensor: &TensorProto) -> Result<(ConstantData, D
 mod tests {
     use super::*;
     use crate::proto::attribute_proto::AttributeType;
-    use hologram_ir::NodeOp;
+    use hologram::ir::NodeOp;
 
     fn make_tensor_attr(name: &str, tensor: TensorProto) -> AttributeProto {
         AttributeProto {
@@ -541,8 +541,8 @@ mod tests {
         // Verify output is a 2x3 tensor filled with 0.0 (default)
         let node = builder.graph().node(output[0]).unwrap();
         assert_eq!(node.shape.dims.len(), 2);
-        assert_eq!(node.shape.dims[0], hologram_ir::Dim::Static(2));
-        assert_eq!(node.shape.dims[1], hologram_ir::Dim::Static(3));
+        assert_eq!(node.shape.dims[0], hologram::ir::Dim::Static(2));
+        assert_eq!(node.shape.dims[1], hologram::ir::Dim::Static(3));
 
         if let NodeOp::Constant { data } = &node.op {
             if let ConstantData::F32(values) = data {
@@ -690,7 +690,7 @@ mod tests {
 
     #[test]
     fn test_translate_shape_op_symbolic() {
-        use hologram_ir::Dim;
+        use hologram::ir::Dim;
 
         let mut builder = GraphBuilder::new();
 

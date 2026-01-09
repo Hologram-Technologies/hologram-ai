@@ -24,7 +24,7 @@
 //! # Example
 //!
 //! ```rust,ignore
-//! use crate::core::partitioning::GraphPartitioner;
+//! use hologram_onnx::core::partitioning::GraphPartitioner;
 //!
 //! let partitioner = GraphPartitioner::new(); // 500 nodes per partition (default)
 //! let partitions = partitioner.partition(&graph)?;

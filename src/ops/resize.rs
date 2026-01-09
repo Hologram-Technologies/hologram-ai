@@ -6,7 +6,7 @@
 //! - DepthToSpace: Rearrange depth to spatial dimensions (not supported)
 //! - SpaceToDepth: Rearrange spatial to depth dimensions (not supported)
 
-use hologram_ir::{GraphBuilder, NodeIndex, ResizeMode, CoordinateTransform};
+use hologram::ir::{GraphBuilder, NodeIndex, ResizeMode, CoordinateTransform};
 use crate::core::{OnnxError, Result};
 use crate::proto::AttributeProto;
 use crate::ops::utils::{parse_attr_string_or, parse_attr_floats, parse_attr_ints};
@@ -245,7 +245,7 @@ pub fn translate_space_to_depth(
 mod tests {
     use super::*;
     use crate::proto::attribute_proto::AttributeType;
-    use hologram_ir::{DType, Shape};
+    use hologram::ir::{DType, Shape};
 
     fn make_string_attr(name: &str, value: &str) -> AttributeProto {
         AttributeProto {

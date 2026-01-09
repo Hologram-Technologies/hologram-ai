@@ -7,15 +7,14 @@
 //! - Element-wise operation IR creation
 
 use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
-use hologram_compiler::ir::{IRBuilder, ScalarType, Type};
-use hologram_compiler::shapes::Shape;
+use hologram::ir::{DType, GraphBuilder, Padding, Shape};
 
 // =============================================================================
 // Helper Functions
 // =============================================================================
 
-fn f32_tensor(dims: &[usize]) -> Type {
-    Type::tensor(ScalarType::F32, Shape::concrete(dims.to_vec()))
+fn f32_shape(dims: &[usize]) -> Shape {
+    Shape::static_shape(dims)
 }
 
 // =============================================================================
@@ -52,12 +51,20 @@ fn bench_conv2d_execution(c: &mut Criterion) {
             |b, (input, kernel)| {
                 b.iter(|| {
                     // Create IR for Conv2D
-                    let mut builder = IRBuilder::new("bench");
-                    let x = builder.add_input("X", f32_tensor(input));
-                    let w = builder.add_input("W", f32_tensor(kernel));
-                    let result =
-                        builder.conv2d(black_box(x), black_box(w), None, (1, 1), (0, 0), (1, 1), 1);
-                    builder.set_output(result);
+                    let mut builder = GraphBuilder::new();
+                    let x = builder.input("X", f32_shape(input), DType::F32);
+                    let w = builder.input("W", f32_shape(kernel), DType::F32);
+                    let result = builder
+                        .conv2d(
+                            black_box(x),
+                            black_box(w),
+                            (kernel[2], kernel[3]),
+                            (1, 1),
+                            Padding::Valid,
+                            1,
+                        )
+                        .unwrap();
+                    builder.output("Y", result).unwrap();
                     black_box(builder.build())
                 });
             },
@@ -93,11 +100,11 @@ fn bench_matmul_execution(c: &mut Criterion) {
             &(m, n, k),
             |b, &(m, n, k)| {
                 b.iter(|| {
-                    let mut builder = IRBuilder::new("bench");
-                    let a = builder.add_input("A", f32_tensor(&[m, k]));
-                    let b_val = builder.add_input("B", f32_tensor(&[k, n]));
-                    let result = builder.matmul(black_box(a), black_box(b_val));
-                    builder.set_output(result);
+                    let mut builder = GraphBuilder::new();
+                    let a = builder.input("A", f32_shape(&[m, k]), DType::F32);
+                    let b_val = builder.input("B", f32_shape(&[k, n]), DType::F32);
+                    let result = builder.matmul(black_box(a), black_box(b_val)).unwrap();
+                    builder.output("Y", result).unwrap();
                     black_box(builder.build())
                 });
             },
@@ -131,16 +138,18 @@ fn bench_batched_matmul(c: &mut Criterion) {
             &(num_heads, seq_len, head_dim),
             |b, &(num_heads, seq_len, head_dim)| {
                 b.iter(|| {
-                    let mut builder = IRBuilder::new("bench");
+                    let mut builder = GraphBuilder::new();
 
                     // Q and K tensors: [batch, num_heads, seq_len, head_dim]
-                    let q = builder.add_input("Q", f32_tensor(&[1, num_heads, seq_len, head_dim]));
-                    let k = builder.add_input("K", f32_tensor(&[1, num_heads, seq_len, head_dim]));
+                    let q = builder.input("Q", f32_shape(&[1, num_heads, seq_len, head_dim]), DType::F32);
+                    let k = builder.input("K", f32_shape(&[1, num_heads, seq_len, head_dim]), DType::F32);
 
                     // Transpose K for Q*K^T
-                    let k_t = builder.transpose(black_box(k), Some(vec![0, 1, 3, 2]));
-                    let result = builder.matmul(black_box(q), black_box(k_t));
-                    builder.set_output(result);
+                    let k_t = builder
+                        .transpose(black_box(k), vec![0, 1, 3, 2])
+                        .unwrap();
+                    let result = builder.matmul(black_box(q), black_box(k_t)).unwrap();
+                    builder.output("Y", result).unwrap();
                     black_box(builder.build())
                 });
             },
@@ -170,10 +179,10 @@ fn bench_elementwise_ops(c: &mut Criterion) {
         // Single operation
         group.bench_with_input(BenchmarkId::new("relu", name), &elements, |b, &elements| {
             b.iter(|| {
-                let mut builder = IRBuilder::new("bench");
-                let x = builder.add_input("X", f32_tensor(&[1, elements]));
-                let result = builder.relu(black_box(x));
-                builder.set_output(result);
+                let mut builder = GraphBuilder::new();
+                let x = builder.input("X", f32_shape(&[1, elements]), DType::F32);
+                let result = builder.relu(black_box(x)).unwrap();
+                builder.output("Y", result).unwrap();
                 black_box(builder.build())
             });
         });
@@ -184,12 +193,12 @@ fn bench_elementwise_ops(c: &mut Criterion) {
             &elements,
             |b, &elements| {
                 b.iter(|| {
-                    let mut builder = IRBuilder::new("bench");
-                    let x = builder.add_input("X", f32_tensor(&[1, elements]));
-                    let bias = builder.add_input("B", f32_tensor(&[1, elements]));
-                    let added = builder.add(black_box(x), black_box(bias));
-                    let result = builder.relu(black_box(added));
-                    builder.set_output(result);
+                    let mut builder = GraphBuilder::new();
+                    let x = builder.input("X", f32_shape(&[1, elements]), DType::F32);
+                    let bias = builder.input("B", f32_shape(&[1, elements]), DType::F32);
+                    let added = builder.add(black_box(x), black_box(bias)).unwrap();
+                    let result = builder.relu(black_box(added)).unwrap();
+                    builder.output("Y", result).unwrap();
                     black_box(builder.build())
                 });
             },
@@ -219,11 +228,11 @@ fn bench_loop_instructions(c: &mut Criterion) {
 
         group.bench_with_input(BenchmarkId::new("add_chain", name), &count, |b, &count| {
             b.iter(|| {
-                let mut builder = IRBuilder::new("bench");
-                let x = builder.add_input("X", f32_tensor(&[count]));
-                let y = builder.add_input("Y", f32_tensor(&[count]));
-                let result = builder.add(black_box(x), black_box(y));
-                builder.set_output(result);
+                let mut builder = GraphBuilder::new();
+                let x = builder.input("X", f32_shape(&[count]), DType::F32);
+                let y = builder.input("Y", f32_shape(&[count]), DType::F32);
+                let result = builder.add(black_box(x), black_box(y)).unwrap();
+                builder.output("Y", result).unwrap();
                 black_box(builder.build())
             });
         });
@@ -256,10 +265,10 @@ fn bench_softmax(c: &mut Criterion) {
             &(batch, seq_len, vocab_size),
             |b, &(batch, seq_len, vocab_size)| {
                 b.iter(|| {
-                    let mut builder = IRBuilder::new("bench");
-                    let x = builder.add_input("X", f32_tensor(&[batch, seq_len, vocab_size]));
-                    let result = builder.softmax(black_box(x), -1);
-                    builder.set_output(result);
+                    let mut builder = GraphBuilder::new();
+                    let x = builder.input("X", f32_shape(&[batch, seq_len, vocab_size]), DType::F32);
+                    let result = builder.softmax(black_box(x), -1).unwrap();
+                    builder.output("Y", result).unwrap();
                     black_box(builder.build())
                 });
             },
@@ -292,10 +301,10 @@ fn bench_transpose(c: &mut Criterion) {
             &(dims.clone(), perm.clone()),
             |b, (dims, perm)| {
                 b.iter(|| {
-                    let mut builder = IRBuilder::new("bench");
-                    let x = builder.add_input("X", f32_tensor(dims));
-                    let result = builder.transpose(black_box(x), Some(perm.clone()));
-                    builder.set_output(result);
+                    let mut builder = GraphBuilder::new();
+                    let x = builder.input("X", f32_shape(dims), DType::F32);
+                    let result = builder.transpose(black_box(x), perm.clone()).unwrap();
+                    builder.output("Y", result).unwrap();
                     black_box(builder.build())
                 });
             },

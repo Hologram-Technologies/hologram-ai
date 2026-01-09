@@ -3,7 +3,7 @@
 //! This module provides translators for padding operations including:
 //! - Pad: Pad tensor with various modes (constant, reflect, edge)
 
-use hologram_ir::{GraphBuilder, NodeIndex, PadMode};
+use hologram::ir::{GraphBuilder, NodeIndex, PadMode};
 use crate::core::{OnnxError, Result};
 use crate::proto::AttributeProto;
 use crate::ops::utils::{parse_attr_ints, parse_attr_string_or, parse_attr_float};
@@ -117,7 +117,7 @@ pub fn translate_pad(
 mod tests {
     use super::*;
     use crate::proto::attribute_proto::AttributeType;
-    use hologram_ir::{DType, Shape};
+    use hologram::ir::{DType, Shape};
 
     fn make_ints_attr(name: &str, values: Vec<i64>) -> AttributeProto {
         AttributeProto {

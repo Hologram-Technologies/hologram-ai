@@ -4,7 +4,7 @@
 //! - Conv: Standard 2D convolution with groups support
 //! - ConvTranspose: Transposed convolution (deconvolution)
 
-use hologram_ir::{GraphBuilder, NodeIndex, Padding};
+use hologram::ir::{GraphBuilder, NodeIndex, Padding};
 use crate::core::{OnnxError, Result};
 use crate::proto::AttributeProto;
 use crate::ops::utils::{parse_attr_int, parse_attr_ints};
@@ -182,7 +182,7 @@ pub fn translate_conv_transpose(
 
     // Create transposed convolution node
     // Note: GraphBuilder doesn't have conv_transpose2d helper, so we use manual construction
-    use hologram_ir::NodeOp;
+    use hologram::ir::NodeOp;
 
     // Get input shape and dtype for output inference (simplified - preserves spatial dims)
     let input_node = builder.graph().node(input)
@@ -261,7 +261,7 @@ fn parse_padding(pads: &[i64]) -> Result<Padding> {
 mod tests {
     use super::*;
     use crate::proto::attribute_proto::AttributeType;
-    use hologram_ir::{DType, Shape};
+    use hologram::ir::{DType, Shape};
 
     fn make_ints_attr(name: &str, values: Vec<i64>) -> AttributeProto {
         AttributeProto {

@@ -28,30 +28,30 @@ I don't actually think we need those wrappers in the `hologram-backend` crate in
 
 ---
 
-# Hologram-ONNX
-
-Convert ONNX models to Hologram IR format.
-
-## Implementation Requirements
-
-1. **ONNX Parsing**: Use `prost` or `onnx-rs` to parse ONNX protobuf
-2. **Operator Mapping**: Convert ONNX ops to `hologram_ir::NodeOp` variants:
-   - Conv → Conv2D
-   - Gemm/MatMul → MatMul
-   - Relu, Sigmoid, Tanh → corresponding activations
-   - BatchNormalization → fused ops
-3. **Graph Building**: Use `hologram_ir::GraphBuilder` to construct `OperationGraph`
-4. **Output Options**:
-   - `convert`: Save as `.ir` file (serialized OperationGraph)
-   - `compile`: Directly compile to `.holo` file using `hologram_compiler::compile_ir()`
-
-## CLI Commands
-
-```bash
-hologram-onnx convert model.onnx -o model.ir
-hologram-onnx compile model.onnx -o model.holo --backend cpu
-```
+Now models themselves have weights, which can be really large. We need to be able to take weights and serialize them using memory maps so we don't have to load all the weights into memory when running a model. For big models, like Stable Diffusion we have Gb of weight files. We need to make sure this works for large models.
 
 ---
 
-Now models themselves have weights, which can be really large. We need to be able to take weights and serialize them using memory maps so we don't have to load all the weights into memory when running a model. For big models, like Stable Diffusion we have Gb of weight files. We need to make sure this works for large models.
+We need organization in our `docs/` folder.
+
+---
+
+One thing that I want to include here is that the `.holo` format is an archive, so we can compile all of those required models and weights and tokenizer into a single `.holo` file. Can you help update the compilation and execution to be able to support this?
+
+---
+
+Shouldn't this run faster than it actually is? Everything in `hologram` is a O(1) lookup with zero-copy and has minimal runtime overhead, but yet this `cargo run --release -- run --config configs/t5-generate.toml` command takes a long time (I'm timing it with the `time` command)
+
+Shouldn't it execute a LOT faster than seconds/minutes?
+
+The purpose of this is to build compiled `.holo` files and have it run on `hologram` which obeys the O(1), constant-time lookup of data, and `hologram` benchmarks say these operations take much less time (so far my command is still running... and it's been 5 minutes and it's still running). It looks like it's never ending
+
+We also want to take advantage of the archive pipeline of `.holo` files so that when we compile with or without a config file, it builds 1 single `.holo` file which contains all of the onnx model and weights that are memory-mapped.
+
+---
+
+Can you continue debugging, compiling, and running the T5 model that gives us the response in english from T5 execution when I send in a prompt asking for it to generate a joke
+
+---
+
+If we need to set the `input-shapes`, that's okay... we need to get this working

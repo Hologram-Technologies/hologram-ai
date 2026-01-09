@@ -3,7 +3,7 @@
 //! These tests verify the complete ONNX compilation pipeline from parsing
 //! through weight extraction and validation.
 
-use hologram_onnx_core::{
+use hologram_onnx::{
     OnnxConfig, OnnxError, SymbolicShape, WeightData, extract_opset_version, parse_model,
     validate_model,
 };
@@ -697,6 +697,7 @@ fn test_config_structure() {
         decompose_pooling: true,
         pack_weights: true,
         memory_budget: Some(1024),
+        enable_resize_upscaling: true,
     };
 
     assert_eq!(config.weight_threshold, 8192);
