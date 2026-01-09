@@ -80,15 +80,26 @@ impl Tensor {
 
     /// Get tensor size in bytes (f32 representation).
     pub fn size_bytes(&self) -> usize {
-        self.data.len() * std::mem::size_of::<f32>()
+        match self.dtype {
+            DType::F32 => self.data.len() * std::mem::size_of::<f32>(),
+            DType::I64 => self.data.len() * std::mem::size_of::<i64>(),
+        }
     }
 
     /// Serialize tensor data to bytes.
     pub fn to_bytes(&self) -> Vec<u8> {
-        self.data
-            .iter()
-            .flat_map(|&f| f.to_le_bytes())
-            .collect()
+        match self.dtype {
+            DType::F32 => self
+                .data
+                .iter()
+                .flat_map(|&f| f.to_le_bytes())
+                .collect(),
+            DType::I64 => self
+                .data
+                .iter()
+                .flat_map(|&f| (f as i64).to_le_bytes())
+                .collect(),
+        }
     }
 
     /// Deserialize tensor data from bytes.
@@ -146,6 +157,17 @@ pub fn infer_tensor_shape(data: &[f32], input_name: &str) -> Result<Vec<usize>> 
         // Default: 2D tensor with batch=1
         Ok(vec![1, data.len()])
     }
+}
+
+/// Infer tensor dtype from input name conventions.
+///
+/// Returns F32 for all inputs because the hologram backend works with f32 internally.
+/// ONNX models may declare int64 for token IDs, but hologram processes them as f32
+/// (the values are still integer token IDs, just stored as f32).
+pub fn infer_tensor_dtype(_input_name: &str) -> DType {
+    // Always use F32 since hologram backend uses f32 internally.
+    // Token IDs like [817, 140, 3, ...] are stored as [817.0, 140.0, 3.0, ...].
+    DType::F32
 }
 
 #[cfg(test)]
@@ -214,5 +236,12 @@ mod tests {
         let shape = infer_tensor_shape(&data, "encoder_hidden_states").unwrap();
 
         assert_eq!(shape, vec![1, 10, 512]);
+    }
+
+    #[test]
+    fn test_infer_tensor_dtype() {
+        assert_eq!(infer_tensor_dtype("input_ids"), DType::I64);
+        assert_eq!(infer_tensor_dtype("attention_mask"), DType::I64);
+        assert_eq!(infer_tensor_dtype("encoder_hidden_states"), DType::F32);
     }
 }

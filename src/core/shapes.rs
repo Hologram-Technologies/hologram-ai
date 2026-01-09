@@ -18,7 +18,7 @@
 //! # Examples
 //!
 //! ```
-//! use crate::core::{Dim, SymbolicShape};
+//! use hologram_onnx::core::{Dim, SymbolicShape};
 //!
 //! // Concrete shape (fixed batch size)
 //! let shape = SymbolicShape::concrete(vec![1, 224, 224, 3]);
@@ -30,10 +30,10 @@
 //!
 //! // Mixed shape (variable batch, fixed spatial dims)
 //! let shape = SymbolicShape::new(vec![
-//!     Dim::Var("batch".into()),
-//!     Dim::Concrete(224),
-//!     Dim::Concrete(224),
-//!     Dim::Concrete(3),
+//!     Dim::Symbolic("batch".into()),
+//!     Dim::Static(224),
+//!     Dim::Static(224),
+//!     Dim::Static(3),
 //! ]);
 //! assert!(shape.is_partially_symbolic());
 //! ```
@@ -42,7 +42,53 @@ use crate::{OnnxError, Result};
 use crate::proto::ValueInfoProto;
 
 // Re-export hologram's symbolic shape system
-pub use hologram_ir::{Dim, Shape};
+pub use hologram::ir::{Dim, Shape};
+
+/// Resolve a symbolic dimension name to a concrete value.
+///
+/// Maps common ONNX symbolic dimension names to sensible defaults:
+/// - `batch_size`, `batch`, `N` → 1
+/// - `sequence_length`, `seq_len`, `encoder_sequence_length`, `decoder_sequence_length` → 128
+/// - Other names: use position-based defaults (dim 0 → 1, dim 1 → 128, others → 512)
+///
+/// This allows models with symbolic dimensions to compile without explicit `--input-shape` flags.
+fn resolve_symbolic_dimension(name: &str, position: usize) -> Dim {
+    let lower = name.to_lowercase();
+
+    // Batch dimensions
+    if lower.contains("batch") || lower == "n" {
+        tracing::debug!("Resolved symbolic dimension '{}' to 1 (batch)", name);
+        return Dim::Static(1);
+    }
+
+    // Sequence length dimensions
+    if lower.contains("sequence") || lower.contains("seq_len") || lower.contains("seq") {
+        tracing::debug!("Resolved symbolic dimension '{}' to 128 (sequence)", name);
+        return Dim::Static(128);
+    }
+
+    // Past/cache sequence length (for KV caches, typically starts at 0 or matches seq_len)
+    if lower.contains("past") {
+        tracing::debug!("Resolved symbolic dimension '{}' to 0 (past)", name);
+        return Dim::Static(0);
+    }
+
+    // If no name match, use position-based defaults
+    let default = match position {
+        0 => 1,     // First dimension is usually batch
+        1 => 128,   // Second dimension is usually sequence length
+        _ => 512,   // Other dimensions might be hidden_dim
+    };
+
+    if !name.is_empty() {
+        tracing::debug!(
+            "Resolved unknown symbolic dimension '{}' at position {} to {} (position-based default)",
+            name, position, default
+        );
+    }
+
+    Dim::Static(default)
+}
 
 /// Symbolic shape wrapper with ONNX-specific functionality.
 ///
@@ -63,13 +109,13 @@ impl SymbolicShape {
     /// # Examples
     ///
     /// ```
-    /// use crate::core::{Dim, SymbolicShape};
+    /// use hologram_onnx::core::{Dim, SymbolicShape};
     ///
     /// let shape = SymbolicShape::new(vec![
-    ///     Dim::Var("batch".into()),
-    ///     Dim::Concrete(224),
-    ///     Dim::Concrete(224),
-    ///     Dim::Concrete(3),
+    ///     Dim::Symbolic("batch".into()),
+    ///     Dim::Static(224),
+    ///     Dim::Static(224),
+    ///     Dim::Static(3),
     /// ]);
     /// assert_eq!(shape.rank(), 4);
     /// ```
@@ -88,7 +134,7 @@ impl SymbolicShape {
     /// # Examples
     ///
     /// ```
-    /// use crate::core::SymbolicShape;
+    /// use hologram_onnx::core::SymbolicShape;
     ///
     /// let shape = SymbolicShape::concrete(vec![1, 784]);
     /// assert!(shape.is_fully_concrete());
@@ -112,12 +158,12 @@ impl SymbolicShape {
     /// # Examples
     ///
     /// ```
-    /// use crate::core::{Dim, SymbolicShape};
+    /// use hologram_onnx::core::{Dim, SymbolicShape};
     ///
     /// let shape = SymbolicShape::symbolic(vec!["batch", "224", "224", "3"]);
     /// assert_eq!(shape.rank(), 4);
-    /// assert!(matches!(&shape.dims()[0], Dim::Var(name) if name == "batch"));
-    /// assert_eq!(shape.dims()[1], Dim::Concrete(224));
+    /// assert!(matches!(&shape.dims()[0], Dim::Symbolic(name) if name == "batch"));
+    /// assert_eq!(shape.dims()[1], Dim::Static(224));
     /// ```
     pub fn symbolic(dim_names: Vec<&str>) -> Self {
         let dims: Vec<Dim> = dim_names
@@ -153,8 +199,8 @@ impl SymbolicShape {
     /// # Examples
     ///
     /// ```no_run
-    /// use crate::core::SymbolicShape;
-    /// use crate::core::parse_model;
+    /// use hologram_onnx::core::SymbolicShape;
+    /// use hologram_onnx::core::parse_model;
     ///
     /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
     /// let bytes = std::fs::read("model.onnx")?;
@@ -204,12 +250,12 @@ impl SymbolicShape {
                         Dim::Static(*v as usize)
                     }
                     Some(DimValue::DimParam(param)) if !param.is_empty() => {
-                        // Named symbolic dimension
-                        Dim::Symbolic(param.clone())
+                        // Named symbolic dimension - resolve common names to defaults
+                        resolve_symbolic_dimension(param, idx)
                     }
                     _ => {
-                        // No value or unnamed - create unique symbolic dimension
-                        Dim::Symbolic(format!("dim_{}_{}", value_info.name, idx))
+                        // No value or unnamed - use position-based default
+                        resolve_symbolic_dimension("", idx)
                     }
                 }
             })
@@ -223,7 +269,7 @@ impl SymbolicShape {
     /// # Examples
     ///
     /// ```
-    /// use crate::core::SymbolicShape;
+    /// use hologram_onnx::core::SymbolicShape;
     ///
     /// let shape = SymbolicShape::concrete(vec![2, 3, 4]);
     /// assert_eq!(shape.rank(), 3);
@@ -237,11 +283,11 @@ impl SymbolicShape {
     /// # Examples
     ///
     /// ```
-    /// use crate::core::{Dim, SymbolicShape};
+    /// use hologram_onnx::core::{Dim, SymbolicShape};
     ///
     /// let shape = SymbolicShape::concrete(vec![2, 3]);
-    /// assert_eq!(shape.dims()[0], Dim::Concrete(2));
-    /// assert_eq!(shape.dims()[1], Dim::Concrete(3));
+    /// assert_eq!(shape.dims()[0], Dim::Static(2));
+    /// assert_eq!(shape.dims()[1], Dim::Static(3));
     /// ```
     pub fn dims(&self) -> &[Dim] {
         &self.inner.dims
@@ -252,12 +298,12 @@ impl SymbolicShape {
     /// # Examples
     ///
     /// ```
-    /// use crate::core::{Dim, SymbolicShape};
+    /// use hologram_onnx::core::{Dim, SymbolicShape};
     ///
     /// let concrete = SymbolicShape::concrete(vec![2, 3]);
     /// assert!(concrete.is_fully_concrete());
     ///
-    /// let symbolic = SymbolicShape::new(vec![Dim::Var("batch".into()), Dim::Concrete(3)]);
+    /// let symbolic = SymbolicShape::new(vec![Dim::Symbolic("batch".into()), Dim::Static(3)]);
     /// assert!(!symbolic.is_fully_concrete());
     /// ```
     pub fn is_fully_concrete(&self) -> bool {
@@ -269,12 +315,12 @@ impl SymbolicShape {
     /// # Examples
     ///
     /// ```
-    /// use crate::core::{Dim, SymbolicShape};
+    /// use hologram_onnx::core::{Dim, SymbolicShape};
     ///
     /// let concrete = SymbolicShape::concrete(vec![2, 3]);
     /// assert!(!concrete.is_partially_symbolic());
     ///
-    /// let mixed = SymbolicShape::new(vec![Dim::Var("batch".into()), Dim::Concrete(3)]);
+    /// let mixed = SymbolicShape::new(vec![Dim::Symbolic("batch".into()), Dim::Static(3)]);
     /// assert!(mixed.is_partially_symbolic());
     /// ```
     pub fn is_partially_symbolic(&self) -> bool {
@@ -311,7 +357,7 @@ impl SymbolicShape {
     /// # Examples
     ///
     /// ```
-    /// use crate::core::SymbolicShape;
+    /// use hologram_onnx::core::SymbolicShape;
     ///
     /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
     /// let a = SymbolicShape::concrete(vec![2, 1, 4]);
@@ -385,7 +431,7 @@ impl SymbolicShape {
     /// # Examples
     ///
     /// ```
-    /// use crate::core::SymbolicShape;
+    /// use hologram_onnx::core::SymbolicShape;
     ///
     /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
     /// let a = SymbolicShape::concrete(vec![32, 64]);
@@ -491,7 +537,7 @@ impl SymbolicShape {
     /// # Examples
     ///
     /// ```
-    /// use crate::core::SymbolicShape;
+    /// use hologram_onnx::core::SymbolicShape;
     ///
     /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
     /// let shape = SymbolicShape::concrete(vec![2, 3, 4]);
@@ -551,13 +597,13 @@ impl SymbolicShape {
     /// # Examples
     ///
     /// ```
-    /// use crate::core::{Dim, SymbolicShape};
+    /// use hologram_onnx::core::{Dim, SymbolicShape};
     ///
     /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
     /// let shape = SymbolicShape::concrete(vec![2, 3, 4]);
     ///
     /// // Reshape to [6, 4]
-    /// let target = vec![Dim::Concrete(6), Dim::Concrete(4)];
+    /// let target = vec![Dim::Static(6), Dim::Static(4)];
     /// let result = shape.infer_reshape(&target)?;
     /// assert_eq!(result.rank(), 2);
     /// # Ok(())
