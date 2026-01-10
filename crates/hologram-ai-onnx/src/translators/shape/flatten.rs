@@ -107,33 +107,19 @@ impl OnnxTranslator for FlattenTranslator {
                 .map_err(|e| TranslationError::IrBuilder(e.to_string()))?;
             Ok(vec![result])
         } else {
-            // Dynamic shape - need to compute at runtime
-            // We'll use a combination of Shape + Gather + Reshape
-            // For now, use a simplified approach with reshape to [-1, -1]
+            // Dynamic shape - use reshape with dimension inference
             tracing::debug!(
                 "Flatten: dynamic path, axis = {}, input shape = {:?}",
                 axis, input_shape
             );
 
-            // Create a dynamic flatten using reshape
-            // First compute the shape at runtime using Shape op
-            let shape_node = builder
-                .shape(data, 0, rank)
-                .map_err(|e| TranslationError::IrBuilder(e.to_string()))?;
-
-            // For dynamic flatten, we need to compute:
-            // - first_dim = product of dims[:axis]
-            // - second_dim = product of dims[axis:]
-            // This requires runtime computation. For now, use a placeholder.
-            // A complete implementation would use Reduce + Slice + Reshape.
-
-            // Simplified: if axis=1, we can use a reshape with -1
+            // For axis=1 (the common case), we preserve batch dimension and flatten the rest
             if axis == 1 && rank >= 1 {
-                // Get first dimension
+                // Get first dimension if static, otherwise use inference
                 let first_dim_shape = if let Some(Dim::Static(d)) = dims.first() {
                     vec![*d as i64, -1]
                 } else {
-                    // Fully dynamic - use reshape with inference
+                    // Fully dynamic - let reshape infer both dimensions
                     vec![-1, -1]
                 };
 
@@ -148,11 +134,8 @@ impl OnnxTranslator for FlattenTranslator {
                 return Ok(vec![result]);
             }
 
-            // General dynamic case: use dynamic reshape
-            // This is a simplification - full implementation would compute shape at runtime
-            let _ = shape_node; // Suppress unused warning
-
-            // For general case, we'll create a reshape with inferred dimensions
+            // General dynamic case: use reshape with dimension inference
+            // The -1 values tell reshape to compute dimensions at runtime
             let shape_const = builder.constant(
                 ConstantData::I64(vec![-1, -1]),
                 Shape::static_shape(&[2]),

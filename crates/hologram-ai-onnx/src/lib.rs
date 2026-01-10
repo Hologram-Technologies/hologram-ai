@@ -42,7 +42,7 @@ pub mod translators;
 // Re-export main types at crate root for convenience
 pub use core::{
     Dim, GraphPartition, GraphPartitioner, OnnxConfig, OnnxError, Result, Shape, SymbolicShape,
-    WeightData, apply_ir_decomposition, extract_opset_version, parse_model, translate_graph_to_ir,
+    WeightData, extract_opset_version, parse_model, translate_graph_to_ir,
     validate_model,
 };
 

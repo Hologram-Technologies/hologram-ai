@@ -189,30 +189,6 @@ impl GenericTransformerBuilder {
 
         Ok(logits)
     }
-
-    /// Build RoPE (Rotary Position Embedding) for a tensor.
-    ///
-    /// RoPE formula: q_rot = q * cos(θ) + rotate_half(q) * sin(θ)
-    /// where rotate_half swaps adjacent pairs and negates the second element.
-    ///
-    /// Note: This is a placeholder. Full RoPE implementation would require
-    /// precomputed sin/cos tables and reshape operations.
-    #[allow(dead_code)]
-    fn build_rope(
-        &self,
-        _builder: &mut GraphBuilder,
-        tensor: NodeIndex,
-        config: &TransformerConfig,
-    ) -> NodeIndex {
-        let _head_dim = config.head_dimension() as usize;
-        let _max_seq = config.max_position_embeddings as usize;
-        let _base = config.rope_theta.unwrap_or(10000.0);
-
-        // For now, return input unchanged
-        // RoPE is typically applied in the attention layer,
-        // which would be added when we implement attention with position encoding
-        tensor
-    }
 }
 
 impl Default for GenericTransformerBuilder {

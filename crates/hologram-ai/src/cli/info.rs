@@ -23,10 +23,18 @@ use tracing::{debug, info};
 /// Returns Ok(()) on success, or an error if the model cannot be read/parsed.
 pub fn info_command(model_path: &Path, detailed: bool) -> Result<()> {
     // Check file extension to determine format
+    #[cfg(feature = "onnx")]
     if let Some(ext) = model_path.extension()
         && ext == "holo"
     {
         return info_holo_command(model_path);
+    }
+
+    #[cfg(not(feature = "onnx"))]
+    if let Some(ext) = model_path.extension()
+        && ext == "holo"
+    {
+        anyhow::bail!("HOLO file introspection requires the 'onnx' feature to be enabled");
     }
 
     info!("Reading ONNX model: {}", model_path.display());
@@ -196,39 +204,101 @@ fn get_tensor_type_string(value_info: &hologram_ai_onnx::proto::ValueInfoProto) 
 }
 
 /// Display information about a compiled .holo model.
+#[cfg(feature = "onnx")]
 fn info_holo_command(model_path: &Path) -> Result<()> {
-    use hologram::ir::OperationGraph;
+    use hologram_ai_onnx::core::{HoloFormat, UnifiedBundleReader, PipelineBundleReader};
 
     info!("Reading HOLO model: {}", model_path.display());
 
-    // Read and parse the rkyv-serialized .holo file
+    // Read file bytes
     let holo_bytes = fs::read(model_path)
         .with_context(|| format!("Failed to read HOLO model from {}", model_path.display()))?;
 
-    let graph =
-        OperationGraph::from_bytes(&holo_bytes).with_context(|| "Failed to parse .holo file")?;
+    if holo_bytes.len() < 4 {
+        anyhow::bail!("File too small to be a valid .holo file");
+    }
+
+    // Detect format from magic bytes
+    let format = HoloFormat::detect(&holo_bytes[0..4]);
 
     println!("\n╔════════════════════════════════════════════════════════════╗");
     println!("║              HOLO Model Information                        ║");
     println!("╚════════════════════════════════════════════════════════════╝");
 
-    println!("\n📄 Model Metadata:");
-    println!("  File: {}", model_path.display());
-    println!("  Size: {} bytes", holo_bytes.len());
-    println!("  Format: OperationGraph (rkyv binary)");
+    println!("\n📄 File Information:");
+    println!("  Path: {}", model_path.display());
+    println!("  Size: {} bytes ({:.2} MB)", holo_bytes.len(), holo_bytes.len() as f64 / 1_048_576.0);
 
-    // Graph introspection requires accessing the deserialized structure
-    println!("\n📊 Graph:");
-    println!("  Nodes: (introspection requires implementation)");
-    println!("\n⚙️  Operations:");
-    println!("  (operation details require implementation)");
-    println!("\n📥 Inputs:");
-    println!("  (input introspection requires implementation)");
-    println!("\n📤 Outputs:");
-    println!("  (output introspection requires implementation)");
+    match format {
+        HoloFormat::Bundle => {
+            println!("  Format: HOLB (Unified Bundle with embedded weights)");
 
-    // Stub to avoid unused variable warning
-    let _ = graph;
+            // Parse unified bundle
+            let reader = UnifiedBundleReader::from_bytes(&holo_bytes)
+                .with_context(|| "Failed to parse HOLB bundle")?;
+
+            let header = reader.header();
+            let graph_size = header.graph_size;
+            let weights_size = header.weights_size;
+
+            println!("\n📊 Bundle Contents:");
+            println!("  Graph section: {} bytes ({:.2} KB)", graph_size, graph_size as f64 / 1024.0);
+            println!("  Weights section: {} bytes ({:.2} MB)", weights_size, weights_size as f64 / 1_048_576.0);
+
+            if reader.verify_checksums() {
+                println!("  Checksum: VALID");
+            } else {
+                println!("  Checksum: INVALID (data may be corrupted)");
+            }
+        }
+        HoloFormat::Pipeline => {
+            println!("  Format: HOLM (Pipeline Bundle with multiple models)");
+
+            // Parse pipeline bundle
+            let reader = PipelineBundleReader::from_bytes(&holo_bytes)
+                .with_context(|| "Failed to parse HOLM pipeline bundle")?;
+
+            println!("\n📊 Pipeline Contents:");
+            println!("  Model count: {}", reader.model_count());
+            println!("  Models:");
+            for name in reader.model_names() {
+                if let Some(entry) = reader.get_entry(name) {
+                    println!("    - {}: {} bytes ({:.2} MB)",
+                             name,
+                             entry.size,
+                             entry.size as f64 / 1_048_576.0);
+                }
+            }
+        }
+        HoloFormat::Plan => {
+            println!("  Format: HOLP (Legacy Plan format)");
+            println!("\n📊 Plan Contents:");
+            println!("  Data size: {} bytes", holo_bytes.len() - 4);
+
+            // Check for accompanying .weights file
+            let weights_path = model_path.with_extension("weights");
+            if weights_path.exists() {
+                if let Ok(metadata) = fs::metadata(&weights_path) {
+                    println!("  External weights: {} ({:.2} MB)",
+                             weights_path.display(),
+                             metadata.len() as f64 / 1_048_576.0);
+                }
+            } else {
+                println!("  External weights: None (embedded in plan)");
+            }
+        }
+        HoloFormat::Legacy => {
+            println!("  Format: HOLO (Legacy format)");
+            println!("\n📊 Contents:");
+            println!("  Data size: {} bytes", holo_bytes.len() - 4);
+        }
+        HoloFormat::Unknown => {
+            let magic = &holo_bytes[0..4];
+            println!("  Format: Unknown (magic: {:02x} {:02x} {:02x} {:02x})",
+                     magic[0], magic[1], magic[2], magic[3]);
+            println!("\n  Warning: This file may not be a valid .holo file.");
+        }
+    }
 
     println!("\n");
     Ok(())

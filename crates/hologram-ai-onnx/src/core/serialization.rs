@@ -657,41 +657,6 @@ pub struct PackedWeightEntry {
     pub external: bool,
 }
 
-// =============================================================================
-// Serializer
-// =============================================================================
-
-/// Serializer for .holo format.
-///
-/// Full serialization functionality requires implementation.
-#[allow(dead_code)]
-pub struct HoloSerializer {
-    _phantom: std::marker::PhantomData<()>,
-}
-
-#[allow(dead_code)]
-impl HoloSerializer {
-    /// Create a new serializer.
-    ///
-    /// # Arguments
-    /// * `_weight_threshold` - Threshold for externalizing weights
-    /// * `_pack_weights` - Whether to pack weights
-    pub fn new(_weight_threshold: usize, _pack_weights: bool) -> Self {
-        Self {
-            _phantom: std::marker::PhantomData,
-        }
-    }
-
-    /// Serialize an operation graph to .holo format.
-    ///
-    /// # Returns
-    /// An error indicating serialization is not implemented.
-    pub fn serialize(&mut self, _func: &hologram::ir::OperationGraph) -> Result<(Vec<u8>, Vec<u8>)> {
-        Err(OnnxError::SerializationError(
-            "Serialization requires implementation.".to_string()
-        ))
-    }
-}
 
 // =============================================================================
 // Tests

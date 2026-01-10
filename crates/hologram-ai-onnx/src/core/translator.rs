@@ -101,7 +101,6 @@ impl OperationGraph {
 /// use hologram_ai_onnx::core::lower_to_operation_graph;
 ///
 /// let ir_func = translate_graph_to_ir(&graph, opset)?;
-/// let ir_func = apply_ir_decomposition(ir_func, &config)?;
 /// let op_graph = lower_to_operation_graph(ir_func)?;
 /// let bytes = op_graph.to_bytes()?;
 /// ```
@@ -363,14 +362,6 @@ fn parse_raw_data_f16(raw: &[u8]) -> Result<Vec<half::f16>> {
     Ok(raw.chunks_exact(2)
         .map(|chunk| half::f16::from_le_bytes([chunk[0], chunk[1]]))
         .collect())
-}
-
-/// Apply IR-level decompositions (stub).
-///
-/// This is a compatibility stub - decompositions are now handled by hologram-ir.
-/// Returns the IR function unchanged.
-pub fn apply_ir_decomposition(ir_func: IRFunction, _config: &crate::OnnxConfig) -> Result<IRFunction> {
-    Ok(ir_func)
 }
 
 #[cfg(test)]

@@ -48,7 +48,7 @@ pub use serialization::{
     HOLM_MAGIC, PIPELINE_VERSION, PIPELINE_HEADER_SIZE,
 };
 pub use shapes::{Dim, Shape, SymbolicShape};
-pub use translator::{apply_ir_decomposition, translate_graph_to_ir, lower_to_operation_graph, OperationGraph as TranslatorOperationGraph};
+pub use translator::{translate_graph_to_ir, lower_to_operation_graph, OperationGraph as TranslatorOperationGraph};
 pub use weights::{WeightData, WeightRef, MmapWeightEntry};
 pub use weights_format::{
     WeightsFileReader, WeightsFileWriter, WeightsHeader, WeightIndexEntry, WeightDType,
