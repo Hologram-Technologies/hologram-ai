@@ -206,6 +206,38 @@ impl ModelExecutor {
                             tracing::debug!("    -> {} (max across all inputs at dim {})", max_value, dim_index);
                             max_value
                         }
+                        DimExpr::TotalElements { input_id } => {
+                            tracing::debug!("  Dim {}: TotalElements {{ input_id: {} }}", dim_idx, input_id);
+                            input_tensors
+                                .get(*input_id)
+                                .map(|t| t.shape.iter().product())
+                                .unwrap_or(1)
+                        }
+                        DimExpr::ProductOfDims { input_id_a, dim_a, input_id_b, dim_b } => {
+                            tracing::debug!("  Dim {}: ProductOfDims", dim_idx);
+                            let a = input_tensors.get(*input_id_a).and_then(|t| t.shape.get(*dim_a).copied()).unwrap_or(1);
+                            let b = input_tensors.get(*input_id_b).and_then(|t| t.shape.get(*dim_b).copied()).unwrap_or(1);
+                            a * b
+                        }
+                        DimExpr::TotalElementsDiv { input_id, divisor } => {
+                            tracing::debug!("  Dim {}: TotalElementsDiv {{ input_id: {}, divisor: {} }}", dim_idx, input_id, divisor);
+                            let total: usize = input_tensors
+                                .get(*input_id)
+                                .map(|t| t.shape.iter().product())
+                                .unwrap_or(1);
+                            total / (*divisor).max(1)
+                        }
+                        DimExpr::DimDiv { input_id, dim_index, divisor } => {
+                            tracing::debug!("  Dim {}: DimDiv", dim_idx);
+                            let dim = input_tensors.get(*input_id).and_then(|t| t.shape.get(*dim_index).copied()).unwrap_or(1);
+                            dim / (*divisor).max(1)
+                        }
+                        DimExpr::PredecessorElementsDiv { predecessor_slot, divisor } => {
+                            // For output shape resolution, we don't have predecessor info
+                            // Use a sensible default
+                            tracing::debug!("  Dim {}: PredecessorElementsDiv {{ slot: {}, divisor: {} }} (using default)", dim_idx, predecessor_slot, divisor);
+                            128 / (*divisor).max(1)
+                        }
                     })
                     .collect();
 
