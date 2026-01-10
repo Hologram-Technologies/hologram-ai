@@ -108,6 +108,42 @@ pub fn lower_to_operation_graph(ir_func: IRFunction) -> Result<OperationGraph> {
     Ok(OperationGraph::from_ir(ir_func))
 }
 
+/// Global translator registry (lazily initialized).
+static REGISTRY: std::sync::LazyLock<crate::translators::TranslatorRegistry> =
+    std::sync::LazyLock::new(crate::translators::TranslatorRegistry::new);
+
+/// Translate a single ONNX node using the trait-based registry.
+///
+/// This function resolves inputs from the value map and dispatches to the
+/// appropriate translator from the registry.
+fn translate_node_via_registry(
+    node: &crate::proto::NodeProto,
+    builder: &mut hologram::ir::GraphBuilder,
+    value_map: &std::collections::HashMap<String, hologram::NodeIndex>,
+) -> Result<Vec<hologram::NodeIndex>> {
+    // Resolve inputs from value map (filtering empty optional inputs)
+    let inputs: Result<Vec<hologram::NodeIndex>> = node
+        .input
+        .iter()
+        .filter(|input_name| !input_name.is_empty())
+        .map(|input_name| {
+            value_map.get(input_name).copied().ok_or_else(|| {
+                crate::OnnxError::MissingInput(format!(
+                    "Input '{}' not found for node '{}' ({})",
+                    input_name, node.name, node.op_type
+                ))
+            })
+        })
+        .collect();
+
+    let inputs = inputs?;
+
+    // Dispatch to registry
+    REGISTRY
+        .translate(node, &inputs, builder)
+        .map_err(crate::OnnxError::from)
+}
+
 /// Translate ONNX GraphProto to hologram IR.
 ///
 /// This is the main entry point for ONNX→IR translation. It:
@@ -132,7 +168,6 @@ pub fn lower_to_operation_graph(ir_func: IRFunction) -> Result<OperationGraph> {
 /// - Invalid ONNX graph structure
 pub fn translate_graph_to_ir(graph: &crate::proto::GraphProto) -> Result<IRFunction> {
     use hologram::ir::GraphBuilder;
-    use crate::ops::translator::translate_onnx_node;
     use std::collections::HashMap;
     use tracing::{debug, trace};
 
@@ -190,8 +225,8 @@ pub fn translate_graph_to_ir(graph: &crate::proto::GraphProto) -> Result<IRFunct
             }
         }
 
-        // Translate this ONNX node to IR operations
-        let output_indices = translate_onnx_node(node, &mut builder, &mut value_map)?;
+        // Translate this ONNX node to IR operations using the new registry
+        let output_indices = translate_node_via_registry(node, &mut builder, &value_map)?;
 
         // Map outputs to their node indices
         for (output_name, output_idx) in node.output.iter().zip(output_indices.iter()) {

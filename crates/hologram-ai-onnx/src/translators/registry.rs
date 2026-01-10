@@ -66,6 +66,14 @@ impl TranslatorRegistry {
             .insert(translator.onnx_op_type(), translator);
     }
 
+    /// Register a translator under a specific name (for aliases).
+    ///
+    /// This allows registering the same translator under multiple operation names.
+    /// Useful for operations that have common aliases (e.g., LayerNorm for LayerNormalization).
+    pub fn register_with_name(&mut self, name: &'static str, translator: Arc<dyn OnnxTranslator>) {
+        self.translators.insert(name, translator);
+    }
+
     /// Get a translator by operation type.
     pub fn get(&self, op_type: &str) -> Option<&Arc<dyn OnnxTranslator>> {
         self.translators.get(op_type)
@@ -214,7 +222,10 @@ impl TranslatorRegistry {
 
     fn register_norm(&mut self) {
         use super::norm::*;
-        self.register(Arc::new(LayerNormTranslator));
+        let layer_norm = Arc::new(LayerNormTranslator);
+        self.register(layer_norm.clone());
+        // Register LayerNorm as an alias for LayerNormalization (common shorthand)
+        self.register_with_name("LayerNorm", layer_norm);
         self.register(Arc::new(BatchNormTranslator));
         self.register(Arc::new(GroupNormTranslator));
         self.register(Arc::new(InstanceNormTranslator));
@@ -471,6 +482,24 @@ mod tests {
         let layer_norm = registry.get("LayerNormalization");
         assert!(layer_norm.is_some());
         assert_eq!(layer_norm.unwrap().onnx_op_type(), "LayerNormalization");
+    }
+
+    #[test]
+    fn test_layer_norm_alias() {
+        let registry = TranslatorRegistry::new();
+
+        // Both LayerNormalization and LayerNorm should be supported
+        assert!(registry.is_supported("LayerNormalization"));
+        assert!(registry.is_supported("LayerNorm"));
+
+        // Both should resolve to the same translator type
+        let layer_norm = registry.get("LayerNormalization");
+        let layer_norm_alias = registry.get("LayerNorm");
+        assert!(layer_norm.is_some());
+        assert!(layer_norm_alias.is_some());
+        // Both point to LayerNormTranslator
+        assert_eq!(layer_norm.unwrap().onnx_op_type(), "LayerNormalization");
+        assert_eq!(layer_norm_alias.unwrap().onnx_op_type(), "LayerNormalization");
     }
 
     #[test]

@@ -1055,7 +1055,6 @@ dependencies = [
  "half",
  "hologram",
  "hologram-ai-common",
- "ndarray",
  "petgraph 0.6.5",
  "prost",
  "prost-build",

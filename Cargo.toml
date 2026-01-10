@@ -44,10 +44,6 @@ rayon = "1.10"
 half = "2.3"
 rkyv = "0.8"
 
-# Runtime execution
-ndarray = "0.16"
-matrixmultiply = "0.3"
-
 # CLI dependencies
 clap = { version = "4.5", features = ["derive"] }
 reqwest = { version = "0.12", features = ["blocking", "json"] }

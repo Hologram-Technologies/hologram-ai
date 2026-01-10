@@ -1,5 +1,9 @@
 //! Main ONNX operation dispatcher.
 //!
+//! **DEPRECATED**: This module is deprecated in favor of the trait-based
+//! [`TranslatorRegistry`](crate::translators::TranslatorRegistry) system.
+//! The new system provides constant folding support and consistent error handling.
+//!
 //! This module provides the central translation function that dispatches
 //! ONNX operations to their specific translators based on the operation type.
 
@@ -31,6 +35,10 @@ use tracing::{trace, warn};
 /// - Required inputs are missing
 /// - Attribute parsing fails
 /// - Shape inference fails
+#[deprecated(
+    since = "0.2.0",
+    note = "Use `crate::translators::TranslatorRegistry` instead. The new system provides constant folding and consistent error handling."
+)]
 pub fn translate_onnx_node(
     node: &NodeProto,
     builder: &mut GraphBuilder,

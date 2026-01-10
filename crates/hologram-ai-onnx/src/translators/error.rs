@@ -143,6 +143,52 @@ impl TranslationError {
     }
 }
 
+impl From<TranslationError> for crate::core::OnnxError {
+    fn from(err: TranslationError) -> Self {
+        match err {
+            TranslationError::UnsupportedOp { op, opset } => {
+                crate::core::OnnxError::UnsupportedOp {
+                    op_type: op,
+                    opset_version: opset as i64,
+                }
+            }
+            TranslationError::WrongInputCount { op, expected, got } => {
+                crate::core::OnnxError::InvalidModel(format!(
+                    "Wrong input count for {}: expected {}, got {}",
+                    op, expected, got
+                ))
+            }
+            TranslationError::InputCountOutOfRange { op, min, max, got } => {
+                crate::core::OnnxError::InvalidModel(format!(
+                    "Input count out of range for {}: expected {}-{}, got {}",
+                    op, min, max, got
+                ))
+            }
+            TranslationError::NotEnoughInputs { op, min, got } => {
+                crate::core::OnnxError::InvalidModel(format!(
+                    "Not enough inputs for {}: expected at least {}, got {}",
+                    op, min, got
+                ))
+            }
+            TranslationError::MissingAttribute { op, name } => {
+                crate::core::OnnxError::InvalidAttribute {
+                    name,
+                    reason: format!("Missing required attribute for {}", op),
+                }
+            }
+            TranslationError::InvalidAttribute { name, reason } => {
+                crate::core::OnnxError::InvalidAttribute { name, reason }
+            }
+            TranslationError::ShapeInference(msg) => {
+                crate::core::OnnxError::ShapeInferenceError(msg)
+            }
+            TranslationError::IrBuilder(msg) => {
+                crate::core::OnnxError::IrTranslationError(msg)
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -191,5 +237,31 @@ mod tests {
         let err = TranslationError::invalid_attribute("axis", "must be non-negative");
         assert!(err.to_string().contains("axis"));
         assert!(err.to_string().contains("must be non-negative"));
+    }
+
+    #[test]
+    fn test_from_translation_error_to_onnx_error() {
+        use crate::core::OnnxError;
+
+        // Test UnsupportedOp conversion
+        let trans_err = TranslationError::unsupported_op("CustomOp", 13);
+        let onnx_err: OnnxError = trans_err.into();
+        assert!(matches!(onnx_err, OnnxError::UnsupportedOp { op_type, opset_version }
+            if op_type == "CustomOp" && opset_version == 13));
+
+        // Test WrongInputCount conversion
+        let trans_err = TranslationError::wrong_input_count("Add", 2, 1);
+        let onnx_err: OnnxError = trans_err.into();
+        assert!(matches!(onnx_err, OnnxError::InvalidModel(msg) if msg.contains("Add")));
+
+        // Test ShapeInference conversion
+        let trans_err = TranslationError::ShapeInference("shape failed".into());
+        let onnx_err: OnnxError = trans_err.into();
+        assert!(matches!(onnx_err, OnnxError::ShapeInferenceError(msg) if msg == "shape failed"));
+
+        // Test IrBuilder conversion
+        let trans_err = TranslationError::IrBuilder("builder failed".into());
+        let onnx_err: OnnxError = trans_err.into();
+        assert!(matches!(onnx_err, OnnxError::IrTranslationError(msg) if msg == "builder failed"));
     }
 }

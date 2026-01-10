@@ -29,9 +29,6 @@ rayon.workspace = true
 half.workspace = true
 rkyv.workspace = true
 
-# Runtime execution
-ndarray.workspace = true
-
 [build-dependencies]
 prost-build = "0.13"
 
