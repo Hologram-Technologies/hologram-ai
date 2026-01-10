@@ -36,7 +36,6 @@ pub mod proto {
 
 // Core modules
 pub mod core;
-pub mod ops;
 pub mod translators;
 
 // Re-export main types at crate root for convenience
