@@ -11,7 +11,7 @@ description = "End-to-end text generation with T5"
 # Input
 [inputs]
 # Prompt for text generation
-prompt = "tell me a joke"
+prompt = "Tell me a joke in English"
 
 # Tokenizer configuration
 [tokenizer]
@@ -23,11 +23,6 @@ eos_token_id = 1
 unk_token_id = 2
 
 # Models
-[models.tokenizer]
-# Tokenizer compiled to .holo format
-path = "../models/t5-small/tokenizer.json"  # Source tokenizer file
-precompiled = "../models/t5-small/compiled/tokenizer.holo"
-
 [models.encoder]
 path = "../models/t5-small/encoder_model.onnx"
 precompiled = "../models/t5-small/compiled/encoder.holo"

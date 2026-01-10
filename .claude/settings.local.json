@@ -119,7 +119,19 @@
       "Bash(RUST_LOG=hologram_compiler=debug,hologram_backend=debug cargo run:*)",
       "Bash(RUST_BACKTRACE=1 cargo run:*)",
       "Bash(file:*)",
-      "Bash(xargs ls:*)"
+      "Bash(xargs ls:*)",
+      "Bash(gdb:*)",
+      "Bash(RUST_BACKTRACE=full cargo run:*)",
+      "Bash(RUST_LOG=error target/release/hologram-ai run:*)",
+      "Bash(target/release/hologram-ai run:*)",
+      "Bash(RUST_LOG=error ./target/release/hologram-ai run:*)",
+      "Bash(./target/release/hologram-ai run:*)",
+      "Bash(RUST_LOG=hologram_compiler=warn cargo run:*)",
+      "Bash(RUST_LOG=hologram_compiler=warn,hologram_backend=info cargo run:*)",
+      "Bash(RUST_LOG=info,hologram_backend=warn,hologram_compiler=warn cargo run:*)",
+      "Bash(RUST_LOG=hologram_backend::executor=trace cargo run:*)",
+      "Bash(./target/release/hologram compile:*)",
+      "Bash(RUST_BACKTRACE=1 RUST_LOG=info ./target/release/hologram-ai:*)"
     ]
   }
 }

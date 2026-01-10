@@ -2020,54 +2020,72 @@ pub fn run_direct_command(
         batch_size, seq_len
     );
 
-    // Load the .holo model
+    // Load the .holo model using ModelExecutor
     info!("Loading model: {}", model_path.display());
-    let model_bytes = std::fs::read(model_path)
-        .with_context(|| format!("Failed to read model file: {}", model_path.display()))?;
+    let mut executor = crate::runtime::ModelExecutor::from_holo_file(model_path)
+        .with_context(|| format!("Failed to load model from {}", model_path.display()))?;
 
-    info!(
-        "Model size: {:.2} MB",
-        model_bytes.len() as f64 / 1_048_576.0
+    // Create attention mask (1 for real tokens, 0 for padding)
+    let attention_mask: Vec<f32> = padded_ids
+        .iter()
+        .map(|&id| if id == 0 { 0.0 } else { 1.0 })
+        .collect();
+
+    // Convert input_ids to f32 for the executor
+    let input_ids_f32: Vec<f32> = padded_ids.iter().map(|&id| id as f32).collect();
+
+    // Create input tensors
+    let mut inputs = std::collections::HashMap::new();
+    inputs.insert(
+        "input_ids".to_string(),
+        crate::runtime::Tensor::new(input_ids_f32, vec![batch_size, seq_len]),
+    );
+    inputs.insert(
+        "attention_mask".to_string(),
+        crate::runtime::Tensor::new(attention_mask, vec![batch_size, seq_len]),
     );
 
-    // NOTE: Actual execution requires hologram runtime integration
-    // For now, we demonstrate the tokenization and setup
     info!("");
-    info!("=== T5 Execution Flow ===");
-    info!("✓ Tokenization complete");
-    info!("✓ Input prepared: {} tokens", input_ids.len());
-    info!(
-        "✓ Model loaded: {:.2} MB",
-        model_bytes.len() as f64 / 1_048_576.0
-    );
-    info!("");
-    warn!("⚠  Model execution requires hologram runtime integration.");
-    warn!("   The .holo format is loaded and ready to execute.");
-    warn!("   Tokenization pipeline is working correctly.");
-    info!("");
-    info!("To execute:");
-    info!(
-        "  1. Encoder input_ids shape: [{}, {}]",
-        batch_size, seq_len
-    );
-    info!(
-        "  2. Encoder attention_mask shape: [{}, {}]",
-        batch_size, seq_len
-    );
-    info!(
-        "  3. Run encoder → get last_hidden_state [{}, {}, 512]",
-        batch_size, seq_len
-    );
-    info!("  4. Decoder generates output tokens autoregressively");
-    info!("  5. Detokenize output_ids → final text");
-    info!("");
+    info!("=== Executing Encoder ===");
+    info!("Running encoder with {} tokens...", seq_len);
 
-    // Demonstrate detokenization with a sample output
-    info!("Example detokenization:");
-    let sample_output_ids = vec![0, 259, 532, 312, 271, 1]; // Sample token IDs
-    if let Ok(decoded) = tokenizer.decode(&sample_output_ids, true) {
-        info!("  Sample output: \"{}\"", decoded);
+    let start = std::time::Instant::now();
+    let outputs = executor.execute(inputs)
+        .with_context(|| "Failed to execute encoder")?;
+    let elapsed = start.elapsed();
+
+    info!("Encoder execution completed in {:?}", elapsed);
+
+    // Display output information
+    info!("");
+    info!("=== Output ===");
+    for (name, tensor) in &outputs {
+        info!(
+            "Output '{}': shape {:?}, {} elements",
+            name,
+            tensor.shape,
+            tensor.numel()
+        );
+
+        // Check for NaN/Inf values
+        let nan_count = tensor.data.iter().filter(|x| x.is_nan()).count();
+        let inf_count = tensor.data.iter().filter(|x| x.is_infinite()).count();
+        if nan_count > 0 || inf_count > 0 {
+            warn!("  WARNING: {} NaN values, {} Inf values", nan_count, inf_count);
+        }
+
+        // Show some sample values
+        let sample_size = tensor.data.len().min(5);
+        info!(
+            "  First {} values: {:?}",
+            sample_size,
+            &tensor.data[..sample_size]
+        );
     }
+
+    info!("");
+    info!("=== Encoder Execution Complete ===");
+    info!("To generate text, use both encoder and decoder with a config file.");
 
     Ok(())
 }

@@ -1,0 +1,50 @@
+# T5 Encoder Test Configuration
+#
+# Simple test to run T5 encoder only
+#
+# Usage:
+#   cargo run --features text-output --release -p hologram-ai -- run --config configs/t5-encoder-test.toml
+
+name = "T5 Encoder Test"
+description = "Test T5 encoder with a simple prompt"
+
+# Input
+[inputs]
+prompt = "Tell me a joke in English"
+
+# Tokenizer configuration
+[tokenizer]
+type = "sentencepiece"
+vocab_path = "../models/t5-small/tokenizer.json"
+max_length = 512
+pad_token_id = 0
+eos_token_id = 1
+unk_token_id = 2
+
+# Models (using the compiled .holo files)
+[models.encoder]
+path = "../models/t5-small/encoder_model.onnx"
+precompiled = "../models/t5-small/encoder_model.holo"
+
+# Pipeline stages
+[[stages]]
+type = "builtin"
+builtin = "tokenize"
+outputs = ["input_ids", "attention_mask"]
+
+[stages.args]
+text = "prompt"
+max_length = 128
+tokenizer_path = "../models/t5-small/tokenizer.json"
+
+[[stages]]
+type = "model"
+model = "encoder"
+inputs = { input_ids = "input_ids", attention_mask = "attention_mask" }
+outputs = ["encoder_output"]
+
+# Output
+[outputs.result]
+tensor = "encoder_output"
+handler = "json"
+description = "Encoder hidden states"
