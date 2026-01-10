@@ -1,0 +1,22 @@
+[package]
+name = "hologram-ai-common"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Shared utilities and generic transformer builder for hologram-ai"
+
+[dependencies]
+hologram.workspace = true
+
+thiserror.workspace = true
+anyhow.workspace = true
+bytemuck.workspace = true
+half.workspace = true
+tracing.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+rkyv.workspace = true
+
+[dev-dependencies]
+criterion.workspace = true

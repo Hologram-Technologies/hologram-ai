@@ -1,27 +1,28 @@
-[package]
-name = "hologram-onnx"
+[workspace]
+resolver = "2"
+members = [
+    "crates/hologram-ai",
+    "crates/hologram-ai-onnx",
+    "crates/hologram-ai-gguf",
+    "crates/hologram-ai-safetensors",
+    "crates/hologram-ai-common",
+]
+
+[workspace.package]
 version = "0.1.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/uor-framework/hologram-onnx"
-description = "Production ONNX runtime for hologram with full ISA optimization support"
-readme = "README.md"
-keywords = [
-    "onnx",
-    "hologram",
-    "machine-learning",
-    "neural-network",
-    "compiler",
-]
-categories = ["science", "machine-learning"]
+repository = "https://github.com/uor-framework/hologram-ai"
 
-[[bin]]
-name = "hologram-onnx"
-path = "src/main.rs"
-
-[dependencies]
-# Hologram dependency (unified crate)
+[workspace.dependencies]
+# Hologram
 hologram = { path = "/hologram" }
+
+# Internal crates
+hologram-ai-common = { path = "crates/hologram-ai-common" }
+hologram-ai-onnx = { path = "crates/hologram-ai-onnx" }
+hologram-ai-gguf = { path = "crates/hologram-ai-gguf" }
+hologram-ai-safetensors = { path = "crates/hologram-ai-safetensors" }
 
 # Protobuf
 prost = "0.13"
@@ -40,7 +41,7 @@ serde_json = "1.0"
 toml = "0.8"
 petgraph = "0.6"
 rayon = "1.10"
-half = "2.3"  # f16 support
+half = "2.3"
 rkyv = "0.8"
 
 # Runtime execution
@@ -52,33 +53,15 @@ clap = { version = "4.5", features = ["derive"] }
 reqwest = { version = "0.12", features = ["blocking", "json"] }
 indicatif = "0.17"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-tempfile = "3.8"  # For compile-pipeline temp directory
+tempfile = "3.8"
 
 # Feature-gated output handlers
-image = { version = "0.25", optional = true }
-hound = { version = "3.5", optional = true }
-tokenizers = { version = "0.20", optional = true }
+image = "0.25"
+hound = "3.5"
+tokenizers = "0.20"
 
-[build-dependencies]
-prost-build = "0.13"
-
-[dev-dependencies]
+# Testing
 criterion = { version = "0.5", features = ["html_reports"] }
-
-[features]
-default = []
-image-output = ["dep:image"]
-audio-output = ["dep:hound"]
-text-output = ["dep:tokenizers"]
-all-outputs = ["image-output", "audio-output", "text-output"]
 
 [patch."https://github.com/UOR-Foundation/hologram-backend.git"]
 hologram-backend = { path = "/hologram/crates/backend" }
-
-[[bench]]
-name = "execution_bench"
-harness = false
-
-[[bench]]
-name = "compilation_benchmarks"
-harness = false

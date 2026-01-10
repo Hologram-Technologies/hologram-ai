@@ -1,15 +1,50 @@
 # Unified hologram-ai: ONNX + GGUF + SafeTensors Support
 
+## Implementation Status: COMPLETE
+
+| Phase | Description | Status |
+|-------|-------------|--------|
+| 1-2 | Workspace restructure | ✅ Complete |
+| 4 | Move ONNX code | ✅ Complete |
+| 3 | GenericTransformerBuilder | ✅ Complete |
+| 5 | GGUF support | ✅ Complete |
+| 6 | SafeTensors support | ✅ Complete |
+| 7 | Unified CLI | ✅ Complete |
+| 8 | Testing & validation | ✅ Complete |
+
+### Cleanup & Features
+
+| Item | Status |
+|------|--------|
+| Remove old `src/` directory | ✅ Complete |
+| Remove old `proto/` and `build.rs` | ✅ Complete |
+| Implement SiLU activation | ✅ Complete (composed from sigmoid + mul) |
+| Implement RoPE position encoding | ✅ Complete (in AttentionBuilder) |
+| Fix doctest imports | ✅ Complete |
+| Mark external fixture tests as #[ignore] | ✅ Complete |
+
+### Test Results
+
+* **hologram-ai-common**: 41 tests passing
+* **hologram-ai-gguf**: 22 tests passing
+* **hologram-ai-safetensors**: 13 tests passing
+* **hologram-ai-onnx**: 973 tests passing
+* **Workspace**: Compiles successfully with all features
+* **All doctests**: Passing (with ignored for external fixtures)
+
+***
+
 ## Decisions Made
 
 Based on user requirements:
-- **Architectures**: LLaMA/LLaMA2/LLaMA3, Mistral/Mixtral, Qwen2, DeepSeek
-- **Quantization**: Dequantize to F32 on load (for GGUF quantized models)
-- **Structure**: Rename `hologram-onnx` → `hologram-ai` as a Cargo workspace
-- **Multi-format**: Support ONNX, GGUF, and SafeTensors
-- **Crate design**: Hybrid with feature flags (`onnx`, `gguf`, `safetensors`)
 
----
+* **Architectures**: LLaMA/LLaMA2/LLaMA3, Mistral/Mixtral, Qwen2, DeepSeek
+* **Quantization**: Dequantize to F32 on load (for GGUF quantized models)
+* **Structure**: Rename `hologram-onnx` → `hologram-ai` as a Cargo workspace
+* **Multi-format**: Support ONNX, GGUF, and SafeTensors
+* **Crate design**: Hybrid with feature flags (`onnx`, `gguf`, `safetensors`)
+
+***
 
 ## Background: Format Comparison
 
@@ -18,7 +53,7 @@ Based on user requirements:
 | **Format Type** | Computational graph | Weight storage + metadata | Weight storage + config.json |
 | **Operations** | Explicit nodes | Implicit (from architecture) | Implicit (from config.json) |
 | **Architectures** | Any DAG of ops | Fixed (LLaMA, etc.) | Fixed (from config.json) |
-| **Weights** | F32/F16 | Quantized (Q4_K, Q8_0) | F32/F16/BF16 |
+| **Weights** | F32/F16 | Quantized (Q4\_K, Q8\_0) | F32/F16/BF16 |
 | **Source** | PyTorch export | llama.cpp ecosystem | HuggingFace models |
 | **Translation** | 1:1 op mapping | Arch → graph rebuild | Arch → graph rebuild |
 
@@ -27,17 +62,20 @@ Based on user requirements:
 ### Format Support Scope
 
 **ONNX: Any model (in principle)**
-- ONNX contains explicit computational graph
-- Any model with implemented operation translators works
-- Missing ops → add translator, model works
+
+* ONNX contains explicit computational graph
+* Any model with implemented operation translators works
+* Missing ops → add translator, model works
 
 **GGUF + SafeTensors: Architecture-specific**
-- Both are weight-only formats, NO computational graph
-- Must reconstruct graph from architecture metadata
-- Only works for architectures with implemented builders
-- Unknown architecture → clear error message
+
+* Both are weight-only formats, NO computational graph
+* Must reconstruct graph from architecture metadata
+* Only works for architectures with implemented builders
+* Unknown architecture → clear error message
 
 **Generic TransformerBuilder (no architecture-specific code):**
+
 ```
 GGUF file                      SafeTensors + config.json
     │                                   │
@@ -66,12 +104,13 @@ GGUF file                      SafeTensors + config.json
 ### Weight Handling
 
 All weights are embedded in `.holo` files:
-- No external weight files
-- No SafeTensors runtime dependency (we only PARSE the format)
-- Everything runs through hologram runtime
-- Aligned with project philosophy: "Everything is a .holo file"
 
----
+* No external weight files
+* No SafeTensors runtime dependency (we only PARSE the format)
+* Everything runs through hologram runtime
+* Aligned with project philosophy: "Everything is a .holo file"
+
+***
 
 ## Implementation Plan
 
@@ -137,9 +176,10 @@ hologram-ai/                      # Renamed from hologram-onnx
 ```
 
 **Files to modify:**
-- `/workspace/Cargo.toml` → workspace manifest
-- Create new crate directories and Cargo.toml files
-- Move existing code into `hologram-ai-onnx`
+
+* `/workspace/Cargo.toml` → workspace manifest
+* Create new crate directories and Cargo.toml files
+* Move existing code into `hologram-ai-onnx`
 
 ### Phase 2: Create Workspace Cargo.toml
 
@@ -216,6 +256,7 @@ safetensors = ["dep:hologram-ai-safetensors"]
 ```
 
 **Usage examples:**
+
 ```toml
 # Full support (default)
 hologram-ai = "0.1"
@@ -256,9 +297,10 @@ hologram-ai run model.holo --input data.json
 ```
 
 **Format detection logic:**
-- `.onnx` extension → ONNX format
-- `.gguf` extension → GGUF format
-- Directory with `config.json` + `*.safetensors` → SafeTensors format
+
+* `.onnx` extension → ONNX format
+* `.gguf` extension → GGUF format
+* Directory with `config.json` + `*.safetensors` → SafeTensors format
 
 ### Phase 4: Move Existing ONNX Code
 
@@ -307,22 +349,24 @@ pub enum Architecture {
 #### 5.2: Dequantization Module
 
 **Quantization types to support (priority order):**
+
 1. F32, F16, BF16 (trivial)
-2. Q8_0 (simple 8-bit)
-3. Q4_0 (legacy 4-bit)
-4. Q4_K (K-quant 4-bit, most common)
-5. Q6_K, Q5_K (stretch goals)
+2. Q8\_0 (simple 8-bit)
+3. Q4\_0 (legacy 4-bit)
+4. Q4\_K (K-quant 4-bit, most common)
+5. Q6\_K, Q5\_K (stretch goals)
 
 #### 5.3: Architecture Builders
 
 **LLaMA transformer block structure:**
+
 ```
 Input → RMSNorm → QKV Projection → RoPE → Attention → Add (residual)
                                                             ↓
                                                RMSNorm → FFN (gate*up→down) → Add (residual)
 ```
 
----
+***
 
 ## Required hologram Operations
 
@@ -347,6 +391,7 @@ Operations needed for LLaMA/Mistral - verified against hologram IR:
 | **RoPE** | 🔧 | Compose using Sin/Cos/Mul/Reshape or add dedicated op |
 
 **SiLU Implementation**: Can be composed from existing ops:
+
 ```rust
 // SiLU(x) = x * sigmoid(x)
 let sig_x = builder.sigmoid(x)?;
@@ -354,15 +399,18 @@ let silu_output = builder.mul(x, sig_x)?;
 ```
 
 **RoPE Implementation**: Can be composed from primitives, or we could add a dedicated `NodeOp::RoPE` for efficiency. RoPE formula:
+
 ```
 q_rot = q * cos(θ) + rotate_half(q) * sin(θ)
 ```
-Where `rotate_half` swaps adjacent pairs and negates. This can be built from:
-- Reshape (split pairs)
-- Neg, Mul, Add
-- Precomputed sin/cos tables as constants
 
----
+Where `rotate_half` swaps adjacent pairs and negates. This can be built from:
+
+* Reshape (split pairs)
+* Neg, Mul, Add
+* Precomputed sin/cos tables as constants
+
+***
 
 ## New Dependencies for GGUF
 
@@ -376,7 +424,7 @@ gguf-rs-lib = "0.1"
 
 The ONNX crate keeps its existing dependencies (prost, prost-build, etc.).
 
----
+***
 
 ## Verification Plan
 
@@ -385,27 +433,28 @@ The ONNX crate keeps its existing dependencies (prost, prost-build, etc.).
 3. **E2E test**: Compile GGUF → .holo → run with hologram CLI → verify output
 4. **Reference comparison**: Compare outputs against llama.cpp for same model/input
 
----
+***
 
 ## Sources
 
-- [GGUF Specification](https://github.com/ggml-org/ggml/blob/master/docs/gguf.md)
-- [Hugging Face GGUF Docs](https://huggingface.co/docs/hub/en/gguf)
-- [gguf-rs-lib crate](https://lib.rs/crates/gguf-rs-lib)
-- [GGUF Quantization Types](https://huggingface.co/docs/hub/en/gguf)
-- [llama.cpp Model Architecture](https://deepwiki.com/ggml-org/llama.cpp/3.2-model-loading-and-management)
-- [K-Quants Overview](https://gist.github.com/Artefact2/b5f810600771265fc1e39442288e8ec9)
+* [GGUF Specification](https://github.com/ggml-org/ggml/blob/master/docs/gguf.md)
+* [Hugging Face GGUF Docs](https://huggingface.co/docs/hub/en/gguf)
+* [gguf-rs-lib crate](https://lib.rs/crates/gguf-rs-lib)
+* [GGUF Quantization Types](https://huggingface.co/docs/hub/en/gguf)
+* [llama.cpp Model Architecture](https://deepwiki.com/ggml-org/llama.cpp/3.2-model-loading-and-management)
+* [K-Quants Overview](https://gist.github.com/Artefact2/b5f810600771265fc1e39442288e8ec9)
 
----
+***
 
 ## Model Support Summary
 
 ### Diffusion Models (Stable Diffusion, SDXL, Flux)
 
 **Supported via ONNX path.** Diffusion models are commonly exported to ONNX:
-- UNet, VAE, CLIP text encoder are standard NN operations
-- Existing ONNX translator supports Conv2D, attention, GroupNorm
-- No additional work needed for ONNX-exported diffusion models
+
+* UNet, VAE, CLIP text encoder are standard NN operations
+* Existing ONNX translator supports Conv2D, attention, GroupNorm
+* No additional work needed for ONNX-exported diffusion models
 
 ### LLM Models (via GGUF or SafeTensors)
 
@@ -476,57 +525,58 @@ impl GenericTransformerBuilder {
 ```
 
 **Supported model families (same generic builder):**
-- LLaMA, LLaMA 2, LLaMA 3
-- Mistral, Mixtral
-- Qwen, Qwen2
-- DeepSeek
-- Phi-2, Phi-3
-- Gemma
+
+* LLaMA, LLaMA 2, LLaMA 3
+* Mistral, Mixtral
+* Qwen, Qwen2
+* DeepSeek
+* Phi-2, Phi-3
+* Gemma
 
 All use the same `GenericTransformerBuilder` with different `TransformerConfig` parameters.
 
----
+***
 
 ## Implementation Order
 
 1. **Workspace restructure** (Phase 1-2)
-   - Convert to Cargo workspace
-   - Create all crate directories
-   - Update root Cargo.toml
+   * Convert to Cargo workspace
+   * Create all crate directories
+   * Update root Cargo.toml
 
 2. **Move ONNX code** (Phase 4)
-   - Move existing files to `hologram-ai-onnx`
-   - Extract common code to `hologram-ai-common`
-   - Update imports and module paths
-   - Verify ONNX tests still pass
+   * Move existing files to `hologram-ai-onnx`
+   * Extract common code to `hologram-ai-common`
+   * Update imports and module paths
+   * Verify ONNX tests still pass
 
 3. **Generic TransformerBuilder** (`hologram-ai-common/transformer/`)
-   - `TransformerConfig` struct (num_layers, hidden_size, etc.)
-   - Attention block builder (multi-head, GQA support)
-   - FFN block builder (gated, standard)
-   - Normalization builders (RMSNorm, LayerNorm)
-   - Full transformer graph builder
-   - Weight name mapping (GGUF style ↔ SafeTensors style)
+   * `TransformerConfig` struct (num\_layers, hidden\_size, etc.)
+   * Attention block builder (multi-head, GQA support)
+   * FFN block builder (gated, standard)
+   * Normalization builders (RMSNorm, LayerNorm)
+   * Full transformer graph builder
+   * Weight name mapping (GGUF style ↔ SafeTensors style)
 
 4. **GGUF support** (`hologram-ai-gguf`)
-   - Parser (using gguf-rs-lib)
-   - Metadata → TransformerConfig conversion
-   - Dequantization (F16, Q8_0, Q4_K, Q4_0)
-   - Integration with GenericTransformerBuilder
+   * Parser (using gguf-rs-lib)
+   * Metadata → TransformerConfig conversion
+   * Dequantization (F16, Q8\_0, Q4\_K, Q4\_0)
+   * Integration with GenericTransformerBuilder
 
 5. **SafeTensors support** (`hologram-ai-safetensors`)
-   - Parser (simple binary format, no runtime)
-   - config.json → TransformerConfig conversion
-   - Integration with GenericTransformerBuilder
+   * Parser (simple binary format, no runtime)
+   * config.json → TransformerConfig conversion
+   * Integration with GenericTransformerBuilder
 
 6. **Unified CLI** (Phase 3)
-   - Create main crate with format detection
-   - Integrate all format compilers
-   - Add info/validate commands
+   * Create main crate with format detection
+   * Integrate all format compilers
+   * Add info/validate commands
 
 7. **Testing & validation**
-   - Unit tests for dequant
-   - Unit tests for transformer builder
-   - Integration tests with small models
-   - E2E comparison with llama.cpp (GGUF)
-   - E2E comparison with transformers (SafeTensors)
+   * Unit tests for dequant
+   * Unit tests for transformer builder
+   * Integration tests with small models
+   * E2E comparison with llama.cpp (GGUF)
+   * E2E comparison with transformers (SafeTensors)

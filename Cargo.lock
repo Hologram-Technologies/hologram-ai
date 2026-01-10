@@ -981,6 +981,113 @@ dependencies = [
 ]
 
 [[package]]
+name = "hologram-ai"
+version = "0.1.0"
+dependencies = [
+ "ahash",
+ "anyhow",
+ "clap",
+ "criterion",
+ "half",
+ "hologram",
+ "hologram-ai-common",
+ "hologram-ai-gguf",
+ "hologram-ai-onnx",
+ "hologram-ai-safetensors",
+ "hound",
+ "image",
+ "indicatif",
+ "prost",
+ "reqwest",
+ "rkyv",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.17",
+ "tokenizers",
+ "toml",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "hologram-ai-common"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "bytemuck",
+ "criterion",
+ "half",
+ "hologram",
+ "rkyv",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.17",
+ "tracing",
+]
+
+[[package]]
+name = "hologram-ai-gguf"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "bytemuck",
+ "criterion",
+ "half",
+ "hologram",
+ "hologram-ai-common",
+ "rkyv",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.17",
+ "tracing",
+]
+
+[[package]]
+name = "hologram-ai-onnx"
+version = "0.1.0"
+dependencies = [
+ "ahash",
+ "anyhow",
+ "bytemuck",
+ "bytes",
+ "criterion",
+ "half",
+ "hologram",
+ "hologram-ai-common",
+ "ndarray",
+ "petgraph 0.6.5",
+ "prost",
+ "prost-build",
+ "prost-types",
+ "rayon",
+ "rkyv",
+ "rustc-hash",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.17",
+ "tracing",
+]
+
+[[package]]
+name = "hologram-ai-safetensors"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "bytemuck",
+ "criterion",
+ "half",
+ "hologram",
+ "hologram-ai-common",
+ "rkyv",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.17",
+ "tracing",
+]
+
+[[package]]
 name = "hologram-backend"
 version = "0.1.0"
 dependencies = [
@@ -1074,41 +1181,6 @@ dependencies = [
  "libc",
  "rayon",
  "tracing",
-]
-
-[[package]]
-name = "hologram-onnx"
-version = "0.1.0"
-dependencies = [
- "ahash",
- "anyhow",
- "bytemuck",
- "bytes",
- "clap",
- "criterion",
- "half",
- "hologram",
- "hound",
- "image",
- "indicatif",
- "matrixmultiply",
- "ndarray",
- "petgraph 0.6.5",
- "prost",
- "prost-build",
- "prost-types",
- "rayon",
- "reqwest",
- "rkyv",
- "rustc-hash",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror 2.0.17",
- "tokenizers",
- "toml",
- "tracing",
- "tracing-subscriber",
 ]
 
 [[package]]

@@ -117,7 +117,9 @@
       "Bash(printf:*)",
       "Bash(git stash:*)",
       "Bash(RUST_LOG=hologram_compiler=debug,hologram_backend=debug cargo run:*)",
-      "Bash(RUST_BACKTRACE=1 cargo run:*)"
+      "Bash(RUST_BACKTRACE=1 cargo run:*)",
+      "Bash(file:*)",
+      "Bash(xargs ls:*)"
     ]
   }
 }

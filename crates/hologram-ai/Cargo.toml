@@ -1,0 +1,66 @@
+[package]
+name = "hologram-ai"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Unified AI model compiler for ONNX, GGUF, and SafeTensors formats"
+readme = "../../README.md"
+keywords = [
+    "onnx",
+    "gguf",
+    "safetensors",
+    "machine-learning",
+    "compiler",
+]
+categories = ["science", "machine-learning"]
+
+[[bin]]
+name = "hologram-ai"
+path = "src/main.rs"
+
+[dependencies]
+hologram.workspace = true
+hologram-ai-common.workspace = true
+hologram-ai-onnx = { workspace = true, optional = true }
+hologram-ai-gguf = { workspace = true, optional = true }
+hologram-ai-safetensors = { workspace = true, optional = true }
+
+# Core
+thiserror.workspace = true
+anyhow.workspace = true
+ahash.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+toml.workspace = true
+rkyv.workspace = true
+half.workspace = true
+
+# CLI
+clap.workspace = true
+reqwest.workspace = true
+indicatif.workspace = true
+tempfile.workspace = true
+
+# Feature-gated output handlers
+image = { workspace = true, optional = true }
+hound = { workspace = true, optional = true }
+tokenizers = { workspace = true, optional = true }
+
+# Protobuf (for ONNX feature)
+prost = { workspace = true, optional = true }
+
+[features]
+default = ["onnx", "gguf", "safetensors"]
+onnx = ["dep:hologram-ai-onnx", "dep:prost"]
+gguf = ["dep:hologram-ai-gguf"]
+safetensors = ["dep:hologram-ai-safetensors"]
+image-output = ["dep:image"]
+audio-output = ["dep:hound"]
+text-output = ["dep:tokenizers"]
+all-outputs = ["image-output", "audio-output", "text-output"]
+
+[dev-dependencies]
+criterion.workspace = true
