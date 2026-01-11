@@ -1,7 +1,244 @@
 //! Compilation configuration for ONNX models.
 //!
 //! This module defines configuration options that control the ONNX compilation
-//! pipeline, including memory management, graph partitioning, and ISA optimizations.
+//! pipeline, including memory management, graph partitioning, ISA optimizations,
+//! and embedded sections for single-file model distribution.
+
+use std::path::PathBuf;
+
+/// Type of section to embed in the bundle.
+///
+/// This enum specifies how a file should be interpreted when embedding
+/// it as a section in a `.holo` bundle. Each type corresponds to a
+/// specific section implementation with appropriate parsing and validation.
+///
+/// # Examples
+///
+/// ```
+/// use hologram_ai_onnx::core::SectionType;
+///
+/// // WordPiece vocabulary (vocab.txt)
+/// let vocab_type = SectionType::Vocabulary;
+///
+/// // JSON vocabulary (vocab.json)
+/// let vocab_json = SectionType::VocabularyJson;
+///
+/// // Arbitrary file with custom content type
+/// let raw = SectionType::Raw {
+///     content_type: "application/x-custom".to_string(),
+/// };
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SectionType {
+    /// WordPiece/BPE line-based vocabulary (vocab.txt format).
+    /// Each line is a token, line number is the token ID.
+    Vocabulary,
+
+    /// JSON vocabulary (vocab.json format).
+    /// Maps token strings to integer IDs.
+    VocabularyJson,
+
+    /// Tokenizer configuration (tokenizer_config.json).
+    TokenizerConfig,
+
+    /// Model configuration (config.json).
+    ModelConfig,
+
+    /// Special tokens map (special_tokens_map.json).
+    SpecialTokensMap,
+
+    /// Preprocessor configuration (preprocessor_config.json).
+    PreprocessorConfig,
+
+    /// SentencePiece model (*.model binary format).
+    SentencePiece,
+
+    /// Generation configuration (generation_config.json).
+    GenerationConfig,
+
+    /// Arbitrary file with custom content type.
+    Raw {
+        /// MIME content type for the file (e.g., "text/plain", "application/octet-stream").
+        content_type: String,
+    },
+}
+
+impl SectionType {
+    /// Get the default section ID for this type.
+    ///
+    /// Returns the standard section ID used for each type. For `Raw` types,
+    /// a custom ID should typically be provided in `EmbeddedFileConfig`.
+    pub fn default_section_id(&self) -> &'static str {
+        match self {
+            Self::Vocabulary | Self::VocabularyJson => "vocabulary",
+            Self::TokenizerConfig => "tokenizer_config",
+            Self::ModelConfig => "model_config",
+            Self::SpecialTokensMap => "special_tokens",
+            Self::PreprocessorConfig => "preprocessor_config",
+            Self::SentencePiece => "sentencepiece",
+            Self::GenerationConfig => "generation_config",
+            Self::Raw { .. } => "raw",
+        }
+    }
+}
+
+/// Configuration for embedding a file in the bundle.
+///
+/// This structure specifies a file to be embedded as a section in the
+/// compiled `.holo` bundle. The file will be loaded, validated, and
+/// stored with the appropriate section type and ID.
+///
+/// # Examples
+///
+/// ```
+/// use hologram_ai_onnx::core::{EmbeddedFileConfig, SectionType};
+/// use std::path::PathBuf;
+///
+/// // Embed a vocabulary file
+/// let vocab_config = EmbeddedFileConfig {
+///     path: PathBuf::from("models/bert/vocab.txt"),
+///     section_type: SectionType::Vocabulary,
+///     custom_id: None, // Use default ID "vocabulary"
+/// };
+///
+/// // Embed a custom file with custom ID
+/// let custom_config = EmbeddedFileConfig {
+///     path: PathBuf::from("models/bert/custom_data.bin"),
+///     section_type: SectionType::Raw {
+///         content_type: "application/octet-stream".to_string(),
+///     },
+///     custom_id: Some("custom_data".to_string()),
+/// };
+/// ```
+#[derive(Debug, Clone)]
+pub struct EmbeddedFileConfig {
+    /// Path to the file to embed.
+    ///
+    /// Can be relative (resolved from the ONNX model directory) or absolute.
+    pub path: PathBuf,
+
+    /// Type of section to create from this file.
+    pub section_type: SectionType,
+
+    /// Optional custom section ID.
+    ///
+    /// If `None`, the default ID for the section type is used.
+    /// If `Some`, this ID overrides the default.
+    pub custom_id: Option<String>,
+}
+
+impl EmbeddedFileConfig {
+    /// Create a new embedded file configuration.
+    ///
+    /// # Arguments
+    ///
+    /// * `path` - Path to the file to embed
+    /// * `section_type` - Type of section to create
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use hologram_ai_onnx::core::{EmbeddedFileConfig, SectionType};
+    /// use std::path::PathBuf;
+    ///
+    /// let config = EmbeddedFileConfig::new(
+    ///     PathBuf::from("vocab.txt"),
+    ///     SectionType::Vocabulary,
+    /// );
+    /// ```
+    pub fn new(path: PathBuf, section_type: SectionType) -> Self {
+        Self {
+            path,
+            section_type,
+            custom_id: None,
+        }
+    }
+
+    /// Create an embedded file config with a custom section ID.
+    ///
+    /// # Arguments
+    ///
+    /// * `path` - Path to the file to embed
+    /// * `section_type` - Type of section to create
+    /// * `custom_id` - Custom section ID to use
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use hologram_ai_onnx::core::{EmbeddedFileConfig, SectionType};
+    /// use std::path::PathBuf;
+    ///
+    /// let config = EmbeddedFileConfig::with_id(
+    ///     PathBuf::from("custom.bin"),
+    ///     SectionType::Raw { content_type: "application/octet-stream".to_string() },
+    ///     "my_custom_section",
+    /// );
+    /// assert_eq!(config.section_id(), "my_custom_section");
+    /// ```
+    pub fn with_id(path: PathBuf, section_type: SectionType, custom_id: &str) -> Self {
+        Self {
+            path,
+            section_type,
+            custom_id: Some(custom_id.to_string()),
+        }
+    }
+
+    /// Get the section ID to use for this embedded file.
+    ///
+    /// Returns the custom ID if set, otherwise the default ID for the section type.
+    pub fn section_id(&self) -> &str {
+        self.custom_id
+            .as_deref()
+            .unwrap_or_else(|| self.section_type.default_section_id())
+    }
+
+    /// Create a vocabulary file configuration.
+    ///
+    /// Convenience method for creating a line-based vocabulary section.
+    pub fn vocabulary(path: impl Into<PathBuf>) -> Self {
+        Self::new(path.into(), SectionType::Vocabulary)
+    }
+
+    /// Create a JSON vocabulary file configuration.
+    ///
+    /// Convenience method for creating a JSON vocabulary section.
+    pub fn vocabulary_json(path: impl Into<PathBuf>) -> Self {
+        Self::new(path.into(), SectionType::VocabularyJson)
+    }
+
+    /// Create a tokenizer config file configuration.
+    ///
+    /// Convenience method for creating a tokenizer config section.
+    pub fn tokenizer_config(path: impl Into<PathBuf>) -> Self {
+        Self::new(path.into(), SectionType::TokenizerConfig)
+    }
+
+    /// Create a model config file configuration.
+    ///
+    /// Convenience method for creating a model config section.
+    pub fn model_config(path: impl Into<PathBuf>) -> Self {
+        Self::new(path.into(), SectionType::ModelConfig)
+    }
+
+    /// Create a SentencePiece model file configuration.
+    ///
+    /// Convenience method for creating a SentencePiece section.
+    pub fn sentencepiece(path: impl Into<PathBuf>) -> Self {
+        Self::new(path.into(), SectionType::SentencePiece)
+    }
+
+    /// Create a raw file configuration with custom content type.
+    ///
+    /// Convenience method for creating a raw section.
+    pub fn raw(path: impl Into<PathBuf>, content_type: &str) -> Self {
+        Self::new(
+            path.into(),
+            SectionType::Raw {
+                content_type: content_type.to_string(),
+            },
+        )
+    }
+}
 
 /// Configuration for ONNX compilation.
 ///
@@ -10,6 +247,7 @@
 /// - Graph partitioning for large models
 /// - ISA optimization passes (decomposition)
 /// - Memory budget constraints
+/// - Embedded sections for single-file distribution
 ///
 /// # Examples
 ///
@@ -31,6 +269,7 @@
 ///     pack_weights: true,
 ///     memory_budget: Some(16 * 1024), // 16 GB
 ///     enable_resize_upscaling: true,
+///     ..Default::default()
 /// };
 /// ```
 #[derive(Debug, Clone)]
@@ -155,6 +394,30 @@ pub struct OnnxConfig {
     /// Full upscaling (512x512) requires ~8GB RAM for VAE decoders.
     /// Disable this option for systems with limited memory (<8GB).
     pub enable_resize_upscaling: bool,
+
+    /// Files to embed as sections in the bundle.
+    ///
+    /// When this vector is non-empty, the compiler produces a V2 bundle
+    /// with the specified files embedded as sections. This enables
+    /// single-file model distribution including vocabulary, tokenizer
+    /// config, and other auxiliary data.
+    ///
+    /// Default: empty (no embedded files, produces V1 bundle)
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use hologram_ai_onnx::core::{OnnxConfig, EmbeddedFileConfig};
+    ///
+    /// let config = OnnxConfig {
+    ///     embedded_files: vec![
+    ///         EmbeddedFileConfig::vocabulary("vocab.txt"),
+    ///         EmbeddedFileConfig::tokenizer_config("tokenizer_config.json"),
+    ///     ],
+    ///     ..Default::default()
+    /// };
+    /// ```
+    pub embedded_files: Vec<EmbeddedFileConfig>,
 }
 
 impl Default for OnnxConfig {
@@ -168,6 +431,7 @@ impl Default for OnnxConfig {
             pack_weights: true,
             memory_budget: None,
             enable_resize_upscaling: true,
+            embedded_files: Vec::new(),
         }
     }
 }
@@ -215,6 +479,7 @@ impl OnnxConfig {
             pack_weights: true,
             memory_budget: Some(8 * 1024), // 8 GB
             enable_resize_upscaling: true,
+            embedded_files: Vec::new(),
         }
     }
 
@@ -247,6 +512,7 @@ impl OnnxConfig {
             pack_weights: true,
             memory_budget: None,
             enable_resize_upscaling: true,
+            embedded_files: Vec::new(),
         }
     }
 
@@ -300,6 +566,34 @@ impl OnnxConfig {
 
         Ok(())
     }
+
+    /// Add an embedded file to the configuration.
+    ///
+    /// This is a builder method that returns `self` for chaining.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use hologram_ai_onnx::core::{OnnxConfig, EmbeddedFileConfig};
+    ///
+    /// let config = OnnxConfig::new()
+    ///     .with_embedded_file(EmbeddedFileConfig::vocabulary("vocab.txt"))
+    ///     .with_embedded_file(EmbeddedFileConfig::tokenizer_config("tokenizer_config.json"));
+    ///
+    /// assert_eq!(config.embedded_files.len(), 2);
+    /// ```
+    pub fn with_embedded_file(mut self, file: EmbeddedFileConfig) -> Self {
+        self.embedded_files.push(file);
+        self
+    }
+
+    /// Check if the configuration will produce a V2 bundle.
+    ///
+    /// Returns `true` if there are any embedded files, which triggers
+    /// V2 bundle format output.
+    pub fn produces_v2_bundle(&self) -> bool {
+        !self.embedded_files.is_empty()
+    }
 }
 
 #[cfg(test)]
@@ -316,6 +610,7 @@ mod tests {
         assert!(config.decompose_pooling);
         assert!(config.pack_weights);
         assert_eq!(config.memory_budget, None);
+        assert!(config.embedded_files.is_empty());
         assert!(config.validate().is_ok());
     }
 
@@ -331,6 +626,7 @@ mod tests {
         assert!(config.enable_partitioning);
         assert_eq!(config.partition_size, 500);
         assert_eq!(config.memory_budget, Some(8 * 1024));
+        assert!(config.embedded_files.is_empty());
         assert!(config.validate().is_ok());
     }
 
@@ -340,6 +636,7 @@ mod tests {
         assert!(!config.enable_partitioning);
         assert_eq!(config.weight_threshold, 16384);
         assert_eq!(config.memory_budget, None);
+        assert!(config.embedded_files.is_empty());
         assert!(config.validate().is_ok());
     }
 
@@ -394,6 +691,7 @@ mod tests {
             pack_weights: true,
             memory_budget: Some(16 * 1024),
             enable_resize_upscaling: false,
+            embedded_files: Vec::new(),
         };
         assert!(config.validate().is_ok());
     }
@@ -404,5 +702,104 @@ mod tests {
         let config2 = config1.clone();
         assert_eq!(config1.weight_threshold, config2.weight_threshold);
         assert_eq!(config1.enable_partitioning, config2.enable_partitioning);
+    }
+
+    #[test]
+    fn test_section_type_default_ids() {
+        assert_eq!(SectionType::Vocabulary.default_section_id(), "vocabulary");
+        assert_eq!(
+            SectionType::VocabularyJson.default_section_id(),
+            "vocabulary"
+        );
+        assert_eq!(
+            SectionType::TokenizerConfig.default_section_id(),
+            "tokenizer_config"
+        );
+        assert_eq!(
+            SectionType::ModelConfig.default_section_id(),
+            "model_config"
+        );
+        assert_eq!(
+            SectionType::SpecialTokensMap.default_section_id(),
+            "special_tokens"
+        );
+        assert_eq!(
+            SectionType::PreprocessorConfig.default_section_id(),
+            "preprocessor_config"
+        );
+        assert_eq!(
+            SectionType::SentencePiece.default_section_id(),
+            "sentencepiece"
+        );
+        assert_eq!(
+            SectionType::GenerationConfig.default_section_id(),
+            "generation_config"
+        );
+        assert_eq!(
+            SectionType::Raw {
+                content_type: "text/plain".to_string()
+            }
+            .default_section_id(),
+            "raw"
+        );
+    }
+
+    #[test]
+    fn test_embedded_file_config() {
+        let config = EmbeddedFileConfig::new(PathBuf::from("vocab.txt"), SectionType::Vocabulary);
+        assert_eq!(config.section_id(), "vocabulary");
+        assert!(config.custom_id.is_none());
+
+        let config = EmbeddedFileConfig::with_id(
+            PathBuf::from("custom.bin"),
+            SectionType::Raw {
+                content_type: "application/octet-stream".to_string(),
+            },
+            "my_section",
+        );
+        assert_eq!(config.section_id(), "my_section");
+    }
+
+    #[test]
+    fn test_embedded_file_convenience_methods() {
+        let vocab = EmbeddedFileConfig::vocabulary("vocab.txt");
+        assert_eq!(vocab.section_type, SectionType::Vocabulary);
+
+        let vocab_json = EmbeddedFileConfig::vocabulary_json("vocab.json");
+        assert_eq!(vocab_json.section_type, SectionType::VocabularyJson);
+
+        let tok_config = EmbeddedFileConfig::tokenizer_config("tokenizer_config.json");
+        assert_eq!(tok_config.section_type, SectionType::TokenizerConfig);
+
+        let model_config = EmbeddedFileConfig::model_config("config.json");
+        assert_eq!(model_config.section_type, SectionType::ModelConfig);
+
+        let sp = EmbeddedFileConfig::sentencepiece("model.model");
+        assert_eq!(sp.section_type, SectionType::SentencePiece);
+
+        let raw = EmbeddedFileConfig::raw("data.bin", "application/octet-stream");
+        assert!(matches!(raw.section_type, SectionType::Raw { .. }));
+    }
+
+    #[test]
+    fn test_with_embedded_file() {
+        let config = OnnxConfig::new()
+            .with_embedded_file(EmbeddedFileConfig::vocabulary("vocab.txt"))
+            .with_embedded_file(EmbeddedFileConfig::tokenizer_config(
+                "tokenizer_config.json",
+            ));
+
+        assert_eq!(config.embedded_files.len(), 2);
+        assert!(config.produces_v2_bundle());
+    }
+
+    #[test]
+    fn test_produces_v2_bundle() {
+        let config = OnnxConfig::default();
+        assert!(!config.produces_v2_bundle());
+
+        let config =
+            OnnxConfig::new().with_embedded_file(EmbeddedFileConfig::vocabulary("vocab.txt"));
+        assert!(config.produces_v2_bundle());
     }
 }

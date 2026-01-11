@@ -784,16 +784,34 @@ mod tests {
 // |  Weights Section               |  Page-aligned for mmap
 // +================================+
 
-use crate::core::serialization::{BUNDLE_HEADER_SIZE, HoloBundleHeader, HoloFormat};
+use crate::core::serialization::{
+    BUNDLE_HEADER_SIZE, HoloBundleHeader, HoloBundleHeaderV2, HoloFormat, SectionTableEntry,
+    serialize_sections_table,
+};
+
+/// Internal section data container.
+#[derive(Debug)]
+struct SectionData {
+    /// Section ID (e.g., "vocabulary", "tokenizer_config")
+    id: String,
+    /// Content type (e.g., "text/plain", "application/json")
+    content_type: String,
+    /// Section data bytes
+    data: Vec<u8>,
+}
 
 /// Writer for creating unified bundle files (HOLB format).
 ///
-/// The writer accumulates graph and weight bytes, then produces a properly
-/// formatted bundle with page-aligned weights section.
+/// The writer accumulates graph, weight bytes, and optional sections,
+/// then produces a properly formatted bundle with page-aligned sections.
+///
+/// If sections are added, produces a V2 bundle with embedded sections.
+/// Otherwise, produces a V1 bundle for backward compatibility.
 #[derive(Debug, Default)]
 pub struct UnifiedBundleWriter {
     graph_bytes: Vec<u8>,
     weights_bytes: Vec<u8>,
+    sections: Vec<SectionData>,
 }
 
 impl UnifiedBundleWriter {
@@ -822,6 +840,39 @@ impl UnifiedBundleWriter {
         &self.weights_bytes
     }
 
+    /// Add a raw section with explicit ID and content type.
+    ///
+    /// This is the low-level method for adding sections. For typed sections,
+    /// use `add_section` instead.
+    ///
+    /// # Arguments
+    ///
+    /// * `id` - Section identifier (e.g., "vocabulary")
+    /// * `content_type` - MIME content type (e.g., "text/plain")
+    /// * `data` - Section data bytes
+    pub fn add_raw_section(&mut self, id: &str, content_type: &str, data: Vec<u8>) {
+        self.sections.push(SectionData {
+            id: id.to_string(),
+            content_type: content_type.to_string(),
+            data,
+        });
+    }
+
+    /// Check if a section with the given ID exists.
+    pub fn has_section(&self, id: &str) -> bool {
+        self.sections.iter().any(|s| s.id == id)
+    }
+
+    /// Get the number of sections.
+    pub fn section_count(&self) -> usize {
+        self.sections.len()
+    }
+
+    /// Check if this will produce a V2 bundle (has sections).
+    pub fn is_v2(&self) -> bool {
+        !self.sections.is_empty()
+    }
+
     /// Calculate the total bundle size including padding.
     pub fn total_size(&self) -> usize {
         let header_size = BUNDLE_HEADER_SIZE;
@@ -839,11 +890,21 @@ impl UnifiedBundleWriter {
     /// Finish writing and produce the bundle bytes.
     ///
     /// This creates the final bundle with:
-    /// - Header with checksums
+    /// - Header with checksums (V1 or V2 depending on sections)
     /// - Graph section
+    /// - Sections table and data (V2 only)
     /// - Padding to page boundary
     /// - Weights section (if present)
     pub fn finish(self) -> Vec<u8> {
+        if self.sections.is_empty() {
+            self.finish_v1()
+        } else {
+            self.finish_v2()
+        }
+    }
+
+    /// Produce a V1 bundle (no sections).
+    fn finish_v1(self) -> Vec<u8> {
         let graph_size = self.graph_bytes.len() as u64;
         let weights_size = self.weights_bytes.len() as u64;
 
@@ -875,6 +936,87 @@ impl UnifiedBundleWriter {
             output.resize(weights_offset, 0);
 
             // Write weights
+            output.extend_from_slice(&self.weights_bytes);
+        }
+
+        output
+    }
+
+    /// Produce a V2 bundle with sections.
+    fn finish_v2(self) -> Vec<u8> {
+        let graph_size = self.graph_bytes.len() as u64;
+        let weights_size = self.weights_bytes.len() as u64;
+        let sections_count = self.sections.len() as u32;
+
+        // Build section table entries and concatenate section data
+        let mut section_entries = Vec::with_capacity(self.sections.len());
+        let mut sections_data = Vec::new();
+        let mut section_offset = 0u64;
+
+        for section in &self.sections {
+            let checksum = crc32_checksum(&section.data);
+            section_entries.push(SectionTableEntry::new(
+                section.id.clone(),
+                section.content_type.clone(),
+                1, // version
+                section_offset,
+                section.data.len() as u64,
+                checksum,
+            ));
+            sections_data.extend_from_slice(&section.data);
+            section_offset += section.data.len() as u64;
+        }
+
+        // Serialize sections table
+        let sections_table = serialize_sections_table(&section_entries);
+        let sections_table_size = sections_table.len() as u64;
+        let sections_data_size = sections_data.len() as u64;
+
+        // Create V2 header
+        let mut header = HoloBundleHeaderV2::new(
+            graph_size,
+            sections_table_size,
+            sections_data_size,
+            weights_size,
+            sections_count,
+        );
+
+        // Calculate checksums
+        let graph_checksum = crc32_checksum(&self.graph_bytes);
+        let weights_checksum = if weights_size > 0 {
+            crc32_checksum(&self.weights_bytes)
+        } else {
+            0
+        };
+        header.set_checksums(graph_checksum, weights_checksum);
+
+        // Allocate output buffer
+        let mut output = Vec::new();
+
+        // Write V2 header (80 bytes)
+        output.extend_from_slice(&header.to_bytes());
+
+        // Write graph
+        output.extend_from_slice(&self.graph_bytes);
+
+        // Pad to page boundary for sections table
+        let sections_table_offset = header.sections_table_offset as usize;
+        if sections_table_offset > output.len() {
+            output.resize(sections_table_offset, 0);
+        }
+
+        // Write sections table
+        output.extend_from_slice(&sections_table);
+
+        // Write sections data
+        output.extend_from_slice(&sections_data);
+
+        // Pad to page boundary for weights
+        if weights_size > 0 {
+            let weights_offset = header.weights_offset as usize;
+            if weights_offset > output.len() {
+                output.resize(weights_offset, 0);
+            }
             output.extend_from_slice(&self.weights_bytes);
         }
 
@@ -1205,6 +1347,101 @@ mod unified_bundle_tests {
 
         let bundle = writer.finish();
         assert_eq!(bundle.len(), expected_total);
+    }
+
+    // =========================================================================
+    // V2 Bundle with Sections Tests
+    // =========================================================================
+
+    #[test]
+    fn test_unified_writer_with_sections() {
+        let mut writer = UnifiedBundleWriter::new();
+        let graph = b"test graph data";
+        let weights = b"weight data here";
+
+        writer.set_graph_bytes(graph.to_vec());
+        writer.set_weights_bytes(weights.to_vec());
+        writer.add_raw_section("vocabulary", "text/plain", b"hello\nworld\ntest".to_vec());
+        writer.add_raw_section(
+            "tokenizer_config",
+            "application/json",
+            b"{\"do_lower_case\": true}".to_vec(),
+        );
+
+        assert!(writer.is_v2());
+        assert_eq!(writer.section_count(), 2);
+        assert!(writer.has_section("vocabulary"));
+        assert!(writer.has_section("tokenizer_config"));
+        assert!(!writer.has_section("nonexistent"));
+
+        let bundle = writer.finish();
+
+        // Verify bundle is valid V2
+        use crate::core::serialization::{BUNDLE_HEADER_SIZE_V2, detect_bundle_version};
+        let version = detect_bundle_version(&bundle).unwrap();
+        assert_eq!(version, 2);
+
+        // Bundle should be larger than V2 header
+        assert!(bundle.len() > BUNDLE_HEADER_SIZE_V2);
+    }
+
+    #[test]
+    fn test_unified_writer_v1_when_no_sections() {
+        let mut writer = UnifiedBundleWriter::new();
+        writer.set_graph_bytes(b"test graph".to_vec());
+        writer.set_weights_bytes(b"test weights".to_vec());
+
+        // No sections added
+        assert!(!writer.is_v2());
+        assert_eq!(writer.section_count(), 0);
+
+        let bundle = writer.finish();
+
+        // Verify bundle is V1
+        use crate::core::serialization::detect_bundle_version;
+        let version = detect_bundle_version(&bundle).unwrap();
+        assert_eq!(version, 1);
+    }
+
+    #[test]
+    fn test_unified_writer_section_count() {
+        let mut writer = UnifiedBundleWriter::new();
+        assert_eq!(writer.section_count(), 0);
+        assert!(!writer.is_v2());
+
+        writer.add_raw_section("sec1", "text/plain", vec![1, 2, 3]);
+        assert_eq!(writer.section_count(), 1);
+        assert!(writer.is_v2());
+
+        writer.add_raw_section("sec2", "text/plain", vec![4, 5, 6]);
+        assert_eq!(writer.section_count(), 2);
+
+        writer.add_raw_section("sec3", "application/json", vec![7, 8, 9]);
+        assert_eq!(writer.section_count(), 3);
+    }
+
+    #[test]
+    fn test_v2_bundle_sections_data_integrity() {
+        let mut writer = UnifiedBundleWriter::new();
+        writer.set_graph_bytes(b"graph data".to_vec());
+        writer.set_weights_bytes(b"weights data".to_vec());
+
+        let vocab_data = b"line1\nline2\nline3";
+        let config_data = b"{\"key\": \"value\"}";
+
+        writer.add_raw_section("vocabulary", "text/plain", vocab_data.to_vec());
+        writer.add_raw_section("tokenizer_config", "application/json", config_data.to_vec());
+
+        let bundle = writer.finish();
+
+        // Verify the V2 header
+        use crate::core::serialization::HoloBundleHeaderV2;
+        let header = HoloBundleHeaderV2::from_bytes(&bundle).unwrap();
+
+        assert_eq!(header.version, 2);
+        assert_eq!(header.sections_count, 2);
+        assert!(header.sections_table_offset > 0);
+        assert_eq!(header.sections_table_offset % PAGE_SIZE as u64, 0);
     }
 }
 

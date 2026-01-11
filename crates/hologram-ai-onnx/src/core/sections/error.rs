@@ -29,7 +29,9 @@ pub enum EmbedError {
     SectionNotFound(String),
 
     /// Section checksum verification failed.
-    #[error("Checksum mismatch for section '{section_id}': expected {expected:08x}, got {actual:08x}")]
+    #[error(
+        "Checksum mismatch for section '{section_id}': expected {expected:08x}, got {actual:08x}"
+    )]
     ChecksumMismatch {
         /// The section identifier.
         section_id: String,

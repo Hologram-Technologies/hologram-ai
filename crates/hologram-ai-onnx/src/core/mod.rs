@@ -14,13 +14,14 @@ mod error;
 mod ir_to_graph;
 mod parser;
 mod partitioning;
+pub mod sections;
 mod serialization;
 mod shapes;
 mod translator;
 mod weights;
 mod weights_format;
 
-// ONNX configuration (being replaced by config module, but keep for now)
+// ONNX configuration
 mod config;
 
 // Re-export public API
@@ -48,6 +49,11 @@ pub use serialization::{
 pub use serialization::{
     HOLM_MAGIC, HoloPipelineHeader, PIPELINE_HEADER_SIZE, PIPELINE_VERSION, PipelineModelEntry,
 };
+// V2 bundle format with sections support
+pub use serialization::{
+    BUNDLE_HEADER_SIZE_V2, BUNDLE_VERSION_V2, HoloBundleHeaderV2, SectionTableEntry,
+    deserialize_sections_table, detect_bundle_version, serialize_sections_table,
+};
 pub use shapes::{Dim, Shape, SymbolicShape};
 pub use translator::{
     OperationGraph as TranslatorOperationGraph, lower_to_operation_graph, translate_graph_to_ir,
@@ -58,8 +64,15 @@ pub use weights_format::{
     WeightsFileWriter, WeightsHeader,
 };
 
-// Re-export config for backward compatibility
-pub use config::OnnxConfig;
+// Re-export config types
+pub use config::{EmbeddedFileConfig, OnnxConfig, SectionType};
+
+// Re-export section traits and types
+pub use sections::{
+    EmbedError, EmbedResult, EmbeddableSection, FromEmbeddedSection, GenerationConfigSection,
+    ModelConfigSection, PreprocessorConfigSection, RawFileSection, SentencePieceSection,
+    SpecialTokensSection, TokenizerConfigSection, VocabularySection,
+};
 
 // Re-export hologram IR types for convenience
 pub use hologram::ir::{GraphBuilder, NodeIndex, OperationGraph};

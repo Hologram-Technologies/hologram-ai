@@ -3,7 +3,7 @@
 //! This module provides section types for embedding JSON configuration files
 //! commonly used with AI models (tokenizer config, model config, etc.).
 
-use super::error::{EmbedError, EmbedResult};
+use super::error::EmbedResult;
 use super::traits::{EmbeddableSection, FromEmbeddedSection};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;

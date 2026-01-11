@@ -44,6 +44,16 @@ pub use core::{
     WeightData, extract_opset_version, parse_model, translate_graph_to_ir, validate_model,
 };
 
+// Re-export embedded file configuration types
+pub use core::{EmbeddedFileConfig, SectionType};
+
+// Re-export section traits and types
+pub use core::sections::{
+    EmbedError, EmbedResult, EmbeddableSection, FromEmbeddedSection, GenerationConfigSection,
+    ModelConfigSection, PreprocessorConfigSection, RawFileSection, SentencePieceSection,
+    SpecialTokensSection, TokenizerConfigSection, VocabularySection,
+};
+
 // Re-export hologram-ir types for convenience
 pub use hologram::ir::{GraphBuilder, NodeIndex, OperationGraph};
 
@@ -233,6 +243,9 @@ impl OnnxCompiler {
     }
 
     /// Compile ONNX model to a unified bundle (HOLB format).
+    ///
+    /// If `embedded_files` are configured, this produces a V2 bundle with
+    /// embedded sections for vocabulary, tokenizer config, etc.
     pub fn compile_to_bundle(&self, onnx_bytes: &[u8]) -> Result<Vec<u8>> {
         use tracing::{debug, info};
 
@@ -278,14 +291,191 @@ impl OnnxCompiler {
         let mut writer = core::UnifiedBundleWriter::new();
         writer.set_graph_bytes(graph_bytes);
         writer.set_weights_bytes(weight_bytes);
+
+        // Step 6: Load and embed sections if configured
+        if !self.config.embedded_files.is_empty() {
+            info!(
+                "Embedding {} sections in bundle",
+                self.config.embedded_files.len()
+            );
+            for file_config in &self.config.embedded_files {
+                debug!("Loading section from {:?}", file_config.path);
+                let (section_id, content_type, data) = self.load_section_data(file_config)?;
+                writer.add_raw_section(&section_id, &content_type, data);
+                debug!("Added section '{}'", section_id);
+            }
+        }
+
         let bundle = writer.finish();
 
         info!(
-            "Compilation to bundle complete: {} bytes total",
-            bundle.len()
+            "Compilation to bundle complete: {} bytes total{}",
+            bundle.len(),
+            if self.config.produces_v2_bundle() {
+                " (V2 with sections)"
+            } else {
+                ""
+            }
         );
 
         Ok(bundle)
+    }
+
+    /// Compile ONNX model to a unified bundle with a base path for resolving relative paths.
+    ///
+    /// This variant allows specifying a base path for resolving relative paths
+    /// in `embedded_files` configuration.
+    ///
+    /// # Arguments
+    ///
+    /// * `onnx_bytes` - The ONNX model bytes
+    /// * `base_path` - Base path for resolving relative embedded file paths
+    ///
+    /// # Examples
+    ///
+    /// ```ignore
+    /// use hologram_ai_onnx::{OnnxCompiler, OnnxConfig, EmbeddedFileConfig};
+    ///
+    /// let config = OnnxConfig::new()
+    ///     .with_embedded_file(EmbeddedFileConfig::vocabulary("vocab.txt"));
+    ///
+    /// let compiler = OnnxCompiler::with_config(config);
+    /// let onnx_bytes = std::fs::read("models/bert/model.onnx")?;
+    /// let bundle = compiler.compile_to_bundle_with_base_path(&onnx_bytes, "models/bert/")?;
+    /// ```
+    pub fn compile_to_bundle_with_base_path(
+        &self,
+        onnx_bytes: &[u8],
+        base_path: impl AsRef<std::path::Path>,
+    ) -> Result<Vec<u8>> {
+        use tracing::{debug, info};
+
+        let base_path = base_path.as_ref();
+        info!("Starting ONNX compilation to unified bundle");
+
+        // Step 1: Parse and validate ONNX model
+        debug!("Parsing ONNX protobuf");
+        let model = parse_model(onnx_bytes)?;
+        validate_model(&model)?;
+        let opset_version = core::extract_opset_version(&model);
+        info!("ONNX opset version: {}", opset_version);
+
+        // Get the graph
+        let graph = model
+            .graph
+            .as_ref()
+            .ok_or_else(|| OnnxError::InvalidModel("Model has no graph".into()))?;
+
+        // Step 2: Translate ONNX → IR with symbolic shapes
+        debug!("Translating ONNX to IR");
+        let ir_func = translate_graph_to_ir(graph)?;
+        info!("IR translation complete");
+
+        // Step 3: Compile to BackendPlan using hologram-compiler
+        debug!("Compiling IR to BackendPlan");
+        let backend_type = hologram::BackendType::Cpu;
+        let mut plan = hologram::compiler::compile_ir(&ir_func, backend_type)
+            .map_err(|e| OnnxError::IrTranslationError(format!("Failed to compile IR: {:?}", e)))?;
+
+        // Extract weights from plan (they'll be embedded in the bundle)
+        let weight_bytes = std::mem::take(&mut plan.constant_data);
+        info!(
+            "Extracted {} bytes of weights for bundle",
+            weight_bytes.len()
+        );
+
+        // Step 4: Serialize plan to HOLP format (without weights)
+        debug!("Serializing BackendPlan");
+        let graph_bytes = serialize_backend_plan(&plan)?;
+
+        // Step 5: Create unified bundle
+        debug!("Creating unified bundle");
+        let mut writer = core::UnifiedBundleWriter::new();
+        writer.set_graph_bytes(graph_bytes);
+        writer.set_weights_bytes(weight_bytes);
+
+        // Step 6: Load and embed sections if configured
+        if !self.config.embedded_files.is_empty() {
+            info!(
+                "Embedding {} sections in bundle",
+                self.config.embedded_files.len()
+            );
+            for file_config in &self.config.embedded_files {
+                debug!("Loading section from {:?}", file_config.path);
+                let (section_id, content_type, data) =
+                    self.load_section_data_with_base_path(file_config, base_path)?;
+                writer.add_raw_section(&section_id, &content_type, data);
+                debug!("Added section '{}'", section_id);
+            }
+        }
+
+        let bundle = writer.finish();
+
+        info!(
+            "Compilation to bundle complete: {} bytes total{}",
+            bundle.len(),
+            if self.config.produces_v2_bundle() {
+                " (V2 with sections)"
+            } else {
+                ""
+            }
+        );
+
+        Ok(bundle)
+    }
+
+    /// Load section data from a file configuration.
+    ///
+    /// Returns (section_id, content_type, data) tuple.
+    fn load_section_data(&self, config: &EmbeddedFileConfig) -> Result<(String, String, Vec<u8>)> {
+        self.load_section_data_with_base_path(config, "")
+    }
+
+    /// Load section data from a file configuration with a base path.
+    ///
+    /// Returns (section_id, content_type, data) tuple.
+    fn load_section_data_with_base_path(
+        &self,
+        config: &EmbeddedFileConfig,
+        base_path: impl AsRef<std::path::Path>,
+    ) -> Result<(String, String, Vec<u8>)> {
+        use std::fs;
+
+        let base_path = base_path.as_ref();
+
+        // Resolve the file path
+        let file_path = if config.path.is_absolute() {
+            config.path.clone()
+        } else {
+            base_path.join(&config.path)
+        };
+
+        // Read the file
+        let data = fs::read(&file_path).map_err(|e| {
+            OnnxError::InternalError(format!(
+                "Failed to read embedded file '{}': {}",
+                file_path.display(),
+                e
+            ))
+        })?;
+
+        // Get section ID
+        let section_id = config.section_id().to_string();
+
+        // Get content type based on section type
+        let content_type = match &config.section_type {
+            SectionType::Vocabulary => "text/plain".to_string(),
+            SectionType::VocabularyJson => "application/json".to_string(),
+            SectionType::TokenizerConfig => "application/json".to_string(),
+            SectionType::ModelConfig => "application/json".to_string(),
+            SectionType::SpecialTokensMap => "application/json".to_string(),
+            SectionType::PreprocessorConfig => "application/json".to_string(),
+            SectionType::GenerationConfig => "application/json".to_string(),
+            SectionType::SentencePiece => "application/x-sentencepiece".to_string(),
+            SectionType::Raw { content_type } => content_type.clone(),
+        };
+
+        Ok((section_id, content_type, data))
     }
 }
 

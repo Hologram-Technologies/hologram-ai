@@ -52,6 +52,7 @@ impl From<&CompilerConfig> for OnnxConfig {
             pack_weights: config.pack_weights,
             memory_budget: config.memory_budget,
             enable_resize_upscaling: config.enable_resize_upscaling,
+            embedded_files: Vec::new(),
         }
     }
 }
@@ -368,6 +369,7 @@ mod tests {
             pack_weights: false,
             memory_budget: None,
             enable_resize_upscaling: true,
+            embedded_files: Vec::new(),
         };
 
         let compiler_config: CompilerConfig = onnx_config.into();

@@ -97,6 +97,7 @@ pub fn compile_command(
         pack_weights: true,
         memory_budget,
         enable_resize_upscaling,
+        embedded_files: Vec::new(),
     };
 
     config

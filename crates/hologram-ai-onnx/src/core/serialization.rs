@@ -658,6 +658,431 @@ pub struct PackedWeightEntry {
 }
 
 // =============================================================================
+// V2 Bundle Format (HOLB with sections support)
+// =============================================================================
+
+/// V2 Bundle format version
+pub const BUNDLE_VERSION_V2: u32 = 2;
+
+/// V2 Bundle header size in bytes (80 bytes)
+pub const BUNDLE_HEADER_SIZE_V2: usize = 80;
+
+/// Header for the V2 unified bundle format (HOLB with sections).
+///
+/// This format extends V1 by adding a sections table for embedding
+/// auxiliary data like vocabulary, tokenizer configs, etc.
+///
+/// # Layout
+/// ```text
+/// +================================+
+/// | Magic: "HOLB" (4 bytes)        |  bytes 0-3
+/// | Version: u32 (4 bytes)         |  bytes 4-7 (value: 2)
+/// | Flags: u32 (4 bytes)           |  bytes 8-11
+/// +================================+
+/// | Graph offset: u64              |  bytes 12-19 (always 80)
+/// | Graph size: u64                |  bytes 20-27
+/// | Weights offset: u64            |  bytes 28-35 (page-aligned)
+/// | Weights size: u64              |  bytes 36-43
+/// +================================+
+/// | Graph checksum: u32            |  bytes 44-47
+/// | Weights checksum: u32          |  bytes 48-51
+/// +================================+
+/// | Sections table offset: u64     |  bytes 52-59
+/// | Sections count: u32            |  bytes 60-63
+/// | Reserved: [u8; 16]             |  bytes 64-79
+/// +================================+  Total: 80 bytes
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HoloBundleHeaderV2 {
+    /// Magic bytes: "HOLB"
+    pub magic: [u8; 4],
+    /// Format version (2 for V2)
+    pub version: u32,
+    /// Flags (reserved for future use)
+    pub flags: u32,
+    /// Offset to graph section (always 80, after header)
+    pub graph_offset: u64,
+    /// Size of graph section in bytes
+    pub graph_size: u64,
+    /// Offset to weights section (page-aligned, after sections)
+    pub weights_offset: u64,
+    /// Size of weights section in bytes
+    pub weights_size: u64,
+    /// CRC32 checksum of graph section
+    pub graph_checksum: u32,
+    /// CRC32 checksum of weights section
+    pub weights_checksum: u32,
+    /// Offset to sections table (page-aligned, after graph)
+    pub sections_table_offset: u64,
+    /// Number of sections in the table
+    pub sections_count: u32,
+    // Reserved bytes: 16 bytes (bytes 64-79)
+}
+
+impl HoloBundleHeaderV2 {
+    /// Create a new V2 bundle header with the given section sizes.
+    ///
+    /// Automatically calculates page-aligned offsets.
+    pub fn new(
+        graph_size: u64,
+        sections_table_size: u64,
+        sections_data_size: u64,
+        weights_size: u64,
+        sections_count: u32,
+    ) -> Self {
+        // Graph starts immediately after header
+        let graph_offset = BUNDLE_HEADER_SIZE_V2 as u64;
+
+        // Sections table is page-aligned after graph
+        let graph_end = graph_offset + graph_size;
+        let sections_table_offset = if sections_count > 0 {
+            graph_end.div_ceil(PAGE_SIZE as u64) * PAGE_SIZE as u64
+        } else {
+            0
+        };
+
+        // Weights are page-aligned after sections data
+        let weights_offset = if sections_count > 0 {
+            let sections_end = sections_table_offset + sections_table_size + sections_data_size;
+            sections_end.div_ceil(PAGE_SIZE as u64) * PAGE_SIZE as u64
+        } else {
+            graph_end.div_ceil(PAGE_SIZE as u64) * PAGE_SIZE as u64
+        };
+
+        Self {
+            magic: HOLB_MAGIC,
+            version: BUNDLE_VERSION_V2,
+            flags: 0,
+            graph_offset,
+            graph_size,
+            weights_offset,
+            weights_size,
+            graph_checksum: 0,
+            weights_checksum: 0,
+            sections_table_offset,
+            sections_count,
+        }
+    }
+
+    /// Set checksums for graph and weights sections.
+    pub fn set_checksums(&mut self, graph_checksum: u32, weights_checksum: u32) {
+        self.graph_checksum = graph_checksum;
+        self.weights_checksum = weights_checksum;
+    }
+
+    /// Convert header to raw bytes for writing.
+    pub fn to_bytes(&self) -> [u8; BUNDLE_HEADER_SIZE_V2] {
+        let mut buf = [0u8; BUNDLE_HEADER_SIZE_V2];
+        buf[0..4].copy_from_slice(&self.magic);
+        buf[4..8].copy_from_slice(&self.version.to_le_bytes());
+        buf[8..12].copy_from_slice(&self.flags.to_le_bytes());
+        buf[12..20].copy_from_slice(&self.graph_offset.to_le_bytes());
+        buf[20..28].copy_from_slice(&self.graph_size.to_le_bytes());
+        buf[28..36].copy_from_slice(&self.weights_offset.to_le_bytes());
+        buf[36..44].copy_from_slice(&self.weights_size.to_le_bytes());
+        buf[44..48].copy_from_slice(&self.graph_checksum.to_le_bytes());
+        buf[48..52].copy_from_slice(&self.weights_checksum.to_le_bytes());
+        buf[52..60].copy_from_slice(&self.sections_table_offset.to_le_bytes());
+        buf[60..64].copy_from_slice(&self.sections_count.to_le_bytes());
+        // bytes 64-79 are reserved (zero-initialized)
+        buf
+    }
+
+    /// Parse header from raw bytes.
+    pub fn from_bytes(buf: &[u8]) -> Result<Self> {
+        if buf.len() < BUNDLE_HEADER_SIZE_V2 {
+            return Err(OnnxError::InvalidModel("V2 bundle header too small".into()));
+        }
+
+        let magic: [u8; 4] = buf[0..4].try_into().unwrap();
+        if magic != HOLB_MAGIC {
+            return Err(OnnxError::InvalidModel(format!(
+                "Invalid bundle magic: expected {:?}, got {:?}",
+                HOLB_MAGIC, magic
+            )));
+        }
+
+        Ok(Self {
+            magic,
+            version: u32::from_le_bytes([buf[4], buf[5], buf[6], buf[7]]),
+            flags: u32::from_le_bytes([buf[8], buf[9], buf[10], buf[11]]),
+            graph_offset: u64::from_le_bytes([
+                buf[12], buf[13], buf[14], buf[15], buf[16], buf[17], buf[18], buf[19],
+            ]),
+            graph_size: u64::from_le_bytes([
+                buf[20], buf[21], buf[22], buf[23], buf[24], buf[25], buf[26], buf[27],
+            ]),
+            weights_offset: u64::from_le_bytes([
+                buf[28], buf[29], buf[30], buf[31], buf[32], buf[33], buf[34], buf[35],
+            ]),
+            weights_size: u64::from_le_bytes([
+                buf[36], buf[37], buf[38], buf[39], buf[40], buf[41], buf[42], buf[43],
+            ]),
+            graph_checksum: u32::from_le_bytes([buf[44], buf[45], buf[46], buf[47]]),
+            weights_checksum: u32::from_le_bytes([buf[48], buf[49], buf[50], buf[51]]),
+            sections_table_offset: u64::from_le_bytes([
+                buf[52], buf[53], buf[54], buf[55], buf[56], buf[57], buf[58], buf[59],
+            ]),
+            sections_count: u32::from_le_bytes([buf[60], buf[61], buf[62], buf[63]]),
+        })
+    }
+
+    /// Check if weights section is present and non-empty.
+    pub fn has_weights(&self) -> bool {
+        self.weights_size > 0
+    }
+
+    /// Check if sections are present.
+    pub fn has_sections(&self) -> bool {
+        self.sections_count > 0
+    }
+
+    /// Validate the header fields for consistency.
+    pub fn validate(&self) -> Result<()> {
+        if self.magic != HOLB_MAGIC {
+            return Err(OnnxError::InvalidModel("Invalid bundle magic".into()));
+        }
+        if self.version != BUNDLE_VERSION_V2 {
+            return Err(OnnxError::InvalidModel(format!(
+                "Unsupported bundle version: {} (expected {})",
+                self.version, BUNDLE_VERSION_V2
+            )));
+        }
+        if self.graph_offset != BUNDLE_HEADER_SIZE_V2 as u64 {
+            return Err(OnnxError::InvalidModel(
+                "Graph offset must be 80 (after V2 header)".into(),
+            ));
+        }
+        if self.weights_size > 0 && !self.weights_offset.is_multiple_of(PAGE_SIZE as u64) {
+            return Err(OnnxError::InvalidModel(
+                "Weights offset must be page-aligned".into(),
+            ));
+        }
+        if self.sections_count > 0 && !self.sections_table_offset.is_multiple_of(PAGE_SIZE as u64) {
+            return Err(OnnxError::InvalidModel(
+                "Sections table offset must be page-aligned".into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// Entry in the sections table.
+///
+/// Describes a single embedded section in a V2 bundle.
+///
+/// # Wire Format
+/// - ID length: u16
+/// - ID: [u8; id_len]
+/// - Content-Type length: u16
+/// - Content-Type: [u8; ct_len]
+/// - Version: u32
+/// - Offset: u64 (from sections data start)
+/// - Size: u64
+/// - Checksum: u32 (CRC32)
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SectionTableEntry {
+    /// Section identifier (e.g., "vocabulary", "tokenizer_config")
+    pub id: String,
+    /// MIME content type (e.g., "text/plain", "application/json")
+    pub content_type: String,
+    /// Section format version
+    pub version: u32,
+    /// Offset from sections data start
+    pub offset: u64,
+    /// Size in bytes
+    pub size: u64,
+    /// CRC32 checksum
+    pub checksum: u32,
+}
+
+impl SectionTableEntry {
+    /// Create a new section table entry.
+    pub fn new(
+        id: String,
+        content_type: String,
+        version: u32,
+        offset: u64,
+        size: u64,
+        checksum: u32,
+    ) -> Self {
+        Self {
+            id,
+            content_type,
+            version,
+            offset,
+            size,
+            checksum,
+        }
+    }
+
+    /// Serialize entry to bytes.
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let id_bytes = self.id.as_bytes();
+        let ct_bytes = self.content_type.as_bytes();
+        let mut buf = Vec::with_capacity(2 + id_bytes.len() + 2 + ct_bytes.len() + 4 + 8 + 8 + 4);
+
+        buf.extend_from_slice(&(id_bytes.len() as u16).to_le_bytes());
+        buf.extend_from_slice(id_bytes);
+        buf.extend_from_slice(&(ct_bytes.len() as u16).to_le_bytes());
+        buf.extend_from_slice(ct_bytes);
+        buf.extend_from_slice(&self.version.to_le_bytes());
+        buf.extend_from_slice(&self.offset.to_le_bytes());
+        buf.extend_from_slice(&self.size.to_le_bytes());
+        buf.extend_from_slice(&self.checksum.to_le_bytes());
+
+        buf
+    }
+
+    /// Parse entry from bytes, returning entry and bytes consumed.
+    pub fn from_bytes(buf: &[u8]) -> Result<(Self, usize)> {
+        if buf.len() < 2 {
+            return Err(OnnxError::InvalidModel("Section entry too small".into()));
+        }
+
+        let mut pos = 0;
+
+        // Read ID
+        let id_len = u16::from_le_bytes([buf[pos], buf[pos + 1]]) as usize;
+        pos += 2;
+        if buf.len() < pos + id_len {
+            return Err(OnnxError::InvalidModel(
+                "Section entry truncated (id)".into(),
+            ));
+        }
+        let id = String::from_utf8(buf[pos..pos + id_len].to_vec())
+            .map_err(|e| OnnxError::InvalidModel(format!("Invalid section ID: {}", e)))?;
+        pos += id_len;
+
+        // Read content type
+        if buf.len() < pos + 2 {
+            return Err(OnnxError::InvalidModel(
+                "Section entry truncated (content_type len)".into(),
+            ));
+        }
+        let ct_len = u16::from_le_bytes([buf[pos], buf[pos + 1]]) as usize;
+        pos += 2;
+        if buf.len() < pos + ct_len {
+            return Err(OnnxError::InvalidModel(
+                "Section entry truncated (content_type)".into(),
+            ));
+        }
+        let content_type = String::from_utf8(buf[pos..pos + ct_len].to_vec())
+            .map_err(|e| OnnxError::InvalidModel(format!("Invalid content type: {}", e)))?;
+        pos += ct_len;
+
+        // Read fixed fields
+        if buf.len() < pos + 24 {
+            return Err(OnnxError::InvalidModel(
+                "Section entry truncated (fields)".into(),
+            ));
+        }
+
+        let version = u32::from_le_bytes([buf[pos], buf[pos + 1], buf[pos + 2], buf[pos + 3]]);
+        pos += 4;
+
+        let offset = u64::from_le_bytes([
+            buf[pos],
+            buf[pos + 1],
+            buf[pos + 2],
+            buf[pos + 3],
+            buf[pos + 4],
+            buf[pos + 5],
+            buf[pos + 6],
+            buf[pos + 7],
+        ]);
+        pos += 8;
+
+        let size = u64::from_le_bytes([
+            buf[pos],
+            buf[pos + 1],
+            buf[pos + 2],
+            buf[pos + 3],
+            buf[pos + 4],
+            buf[pos + 5],
+            buf[pos + 6],
+            buf[pos + 7],
+        ]);
+        pos += 8;
+
+        let checksum = u32::from_le_bytes([buf[pos], buf[pos + 1], buf[pos + 2], buf[pos + 3]]);
+        pos += 4;
+
+        Ok((
+            Self {
+                id,
+                content_type,
+                version,
+                offset,
+                size,
+                checksum,
+            },
+            pos,
+        ))
+    }
+
+    /// Calculate serialized size.
+    pub fn serialized_size(&self) -> usize {
+        2 + self.id.len() + 2 + self.content_type.len() + 4 + 8 + 8 + 4
+    }
+}
+
+/// Serialize a list of section table entries to bytes.
+pub fn serialize_sections_table(entries: &[SectionTableEntry]) -> Vec<u8> {
+    let mut buf = Vec::new();
+    for entry in entries {
+        buf.extend_from_slice(&entry.to_bytes());
+    }
+    buf
+}
+
+/// Deserialize section table entries from bytes.
+pub fn deserialize_sections_table(bytes: &[u8], count: usize) -> Result<Vec<SectionTableEntry>> {
+    let mut entries = Vec::with_capacity(count);
+    let mut pos = 0;
+
+    for _ in 0..count {
+        if pos >= bytes.len() {
+            return Err(OnnxError::InvalidModel("Sections table truncated".into()));
+        }
+        let (entry, consumed) = SectionTableEntry::from_bytes(&bytes[pos..])?;
+        entries.push(entry);
+        pos += consumed;
+    }
+
+    Ok(entries)
+}
+
+/// Detect bundle version from header bytes.
+///
+/// Returns 1 for V1 bundles (64-byte header), 2 for V2 bundles (80-byte header).
+pub fn detect_bundle_version(buf: &[u8]) -> Result<u32> {
+    if buf.len() < 8 {
+        return Err(OnnxError::InvalidModel(
+            "Buffer too small to detect version".into(),
+        ));
+    }
+
+    let magic: [u8; 4] = buf[0..4].try_into().unwrap();
+    if magic != HOLB_MAGIC {
+        return Err(OnnxError::InvalidModel(format!(
+            "Invalid bundle magic: expected {:?}, got {:?}",
+            HOLB_MAGIC, magic
+        )));
+    }
+
+    let version = u32::from_le_bytes([buf[4], buf[5], buf[6], buf[7]]);
+    if version != BUNDLE_VERSION && version != BUNDLE_VERSION_V2 {
+        return Err(OnnxError::InvalidModel(format!(
+            "Unsupported bundle version: {}",
+            version
+        )));
+    }
+
+    Ok(version)
+}
+
+// =============================================================================
 // Tests
 // =============================================================================
 
@@ -973,5 +1398,207 @@ mod tests {
             weights_offset: 0,
         };
         assert!(!without_external.has_external_weights());
+    }
+
+    // =========================================================================
+    // V2 Bundle Header Tests
+    // =========================================================================
+
+    #[test]
+    fn test_v2_header_new() {
+        let header = HoloBundleHeaderV2::new(
+            1000, // graph_size
+            100,  // sections_table_size
+            500,  // sections_data_size
+            5000, // weights_size
+            2,    // sections_count
+        );
+
+        assert_eq!(header.magic, HOLB_MAGIC);
+        assert_eq!(header.version, BUNDLE_VERSION_V2);
+        assert_eq!(header.graph_offset, BUNDLE_HEADER_SIZE_V2 as u64);
+        assert_eq!(header.graph_size, 1000);
+        assert_eq!(header.weights_size, 5000);
+        assert_eq!(header.sections_count, 2);
+        // Sections table offset should be page-aligned
+        assert_eq!(header.sections_table_offset % PAGE_SIZE as u64, 0);
+        // Weights offset should be page-aligned
+        assert_eq!(header.weights_offset % PAGE_SIZE as u64, 0);
+    }
+
+    #[test]
+    fn test_v2_header_roundtrip() {
+        let mut header = HoloBundleHeaderV2::new(12345, 100, 500, 67890, 3);
+        header.set_checksums(0xDEADBEEF, 0xCAFEBABE);
+
+        let bytes = header.to_bytes();
+        assert_eq!(bytes.len(), BUNDLE_HEADER_SIZE_V2);
+
+        let parsed = HoloBundleHeaderV2::from_bytes(&bytes).unwrap();
+        assert_eq!(parsed, header);
+    }
+
+    #[test]
+    fn test_v2_header_validation() {
+        let header = HoloBundleHeaderV2::new(1000, 100, 500, 5000, 2);
+        assert!(header.validate().is_ok());
+
+        // Invalid magic
+        let mut bad_header = header.clone();
+        bad_header.magic = *b"BAAD";
+        assert!(bad_header.validate().is_err());
+
+        // Invalid version
+        let mut bad_header = header.clone();
+        bad_header.version = 99;
+        assert!(bad_header.validate().is_err());
+
+        // Invalid graph offset
+        let mut bad_header = header.clone();
+        bad_header.graph_offset = 128;
+        assert!(bad_header.validate().is_err());
+    }
+
+    #[test]
+    fn test_v2_header_has_sections() {
+        let header_with = HoloBundleHeaderV2::new(1000, 100, 500, 5000, 2);
+        assert!(header_with.has_sections());
+
+        let header_without = HoloBundleHeaderV2::new(1000, 0, 0, 5000, 0);
+        assert!(!header_without.has_sections());
+    }
+
+    #[test]
+    fn test_v2_header_no_sections() {
+        let header = HoloBundleHeaderV2::new(1000, 0, 0, 5000, 0);
+        assert_eq!(header.sections_count, 0);
+        assert_eq!(header.sections_table_offset, 0);
+    }
+
+    // =========================================================================
+    // Section Table Tests
+    // =========================================================================
+
+    #[test]
+    fn test_section_table_entry_roundtrip() {
+        let entry = SectionTableEntry::new(
+            "vocabulary".to_string(),
+            "text/plain".to_string(),
+            1,
+            0,
+            1024,
+            0xDEADBEEF,
+        );
+
+        let bytes = entry.to_bytes();
+        let (parsed, consumed) = SectionTableEntry::from_bytes(&bytes).unwrap();
+
+        assert_eq!(parsed, entry);
+        assert_eq!(consumed, bytes.len());
+    }
+
+    #[test]
+    fn test_section_table_entry_serialized_size() {
+        let entry = SectionTableEntry::new(
+            "vocab".to_string(),            // 5 bytes + 2 = 7
+            "application/json".to_string(), // 16 bytes + 2 = 18
+            1,                              // 4 bytes
+            100,                            // 8 bytes
+            500,                            // 8 bytes
+            0xABCD,                         // 4 bytes
+        );
+
+        let expected_size = 2 + 5 + 2 + 16 + 4 + 8 + 8 + 4; // 49
+        assert_eq!(entry.serialized_size(), expected_size);
+        assert_eq!(entry.to_bytes().len(), expected_size);
+    }
+
+    #[test]
+    fn test_sections_table_serialize_deserialize() {
+        let entries = vec![
+            SectionTableEntry::new(
+                "vocabulary".to_string(),
+                "text/plain".to_string(),
+                1,
+                0,
+                100,
+                0x111,
+            ),
+            SectionTableEntry::new(
+                "tokenizer_config".to_string(),
+                "application/json".to_string(),
+                1,
+                100,
+                200,
+                0x222,
+            ),
+            SectionTableEntry::new(
+                "model_config".to_string(),
+                "application/json".to_string(),
+                1,
+                300,
+                150,
+                0x333,
+            ),
+        ];
+
+        let bytes = serialize_sections_table(&entries);
+        let parsed = deserialize_sections_table(&bytes, 3).unwrap();
+
+        assert_eq!(parsed.len(), 3);
+        assert_eq!(parsed[0], entries[0]);
+        assert_eq!(parsed[1], entries[1]);
+        assert_eq!(parsed[2], entries[2]);
+    }
+
+    #[test]
+    fn test_sections_table_empty() {
+        let entries: Vec<SectionTableEntry> = vec![];
+        let bytes = serialize_sections_table(&entries);
+        assert!(bytes.is_empty());
+
+        let parsed = deserialize_sections_table(&bytes, 0).unwrap();
+        assert!(parsed.is_empty());
+    }
+
+    // =========================================================================
+    // Version Detection Tests
+    // =========================================================================
+
+    #[test]
+    fn test_detect_bundle_version_v1() {
+        let header = HoloBundleHeader::new(1000, 5000);
+        let bytes = header.to_bytes();
+        let version = detect_bundle_version(&bytes).unwrap();
+        assert_eq!(version, 1);
+    }
+
+    #[test]
+    fn test_detect_bundle_version_v2() {
+        let header = HoloBundleHeaderV2::new(1000, 100, 500, 5000, 2);
+        let bytes = header.to_bytes();
+        let version = detect_bundle_version(&bytes).unwrap();
+        assert_eq!(version, 2);
+    }
+
+    #[test]
+    fn test_detect_bundle_version_invalid_magic() {
+        let mut bytes = [0u8; 64];
+        bytes[0..4].copy_from_slice(b"XXXX");
+        assert!(detect_bundle_version(&bytes).is_err());
+    }
+
+    #[test]
+    fn test_detect_bundle_version_too_small() {
+        let bytes = [0u8; 4];
+        assert!(detect_bundle_version(&bytes).is_err());
+    }
+
+    #[test]
+    fn test_detect_bundle_version_unsupported() {
+        let mut bytes = [0u8; 64];
+        bytes[0..4].copy_from_slice(&HOLB_MAGIC);
+        bytes[4..8].copy_from_slice(&99u32.to_le_bytes());
+        assert!(detect_bundle_version(&bytes).is_err());
     }
 }

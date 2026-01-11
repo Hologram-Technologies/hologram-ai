@@ -161,11 +161,7 @@ mod tests {
 
         let mut unique_ids = std::collections::HashSet::new();
         for id in &ids {
-            assert!(
-                unique_ids.insert(*id),
-                "Duplicate section ID: {}",
-                id
-            );
+            assert!(unique_ids.insert(*id), "Duplicate section ID: {}", id);
         }
     }
 

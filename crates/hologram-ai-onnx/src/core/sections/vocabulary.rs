@@ -3,7 +3,7 @@
 //! This module provides the [`VocabularySection`] type for embedding
 //! token vocabularies in .holo bundles.
 
-use super::error::{EmbedError, EmbedResult};
+use super::error::EmbedResult;
 use super::traits::{EmbeddableSection, FromEmbeddedSection};
 use std::collections::HashMap;
 
@@ -440,10 +440,7 @@ mod tests {
 
     #[test]
     fn test_contains() {
-        let vocab = VocabularySection::from_lines(vec![
-            "hello".to_string(),
-            "world".to_string(),
-        ]);
+        let vocab = VocabularySection::from_lines(vec!["hello".to_string(), "world".to_string()]);
 
         assert!(vocab.contains("hello"));
         assert!(vocab.contains("world"));
