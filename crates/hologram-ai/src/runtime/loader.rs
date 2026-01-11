@@ -675,7 +675,6 @@ pub fn is_pipeline_bundle(path: &Path) -> Result<bool> {
 /// };
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-#[allow(dead_code)]
 pub enum ExecutionMode {
     /// Load entire model at once (fast, high memory).
     ///
@@ -721,7 +720,6 @@ pub enum ExecutionMode {
 /// };
 /// ```
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct LoadOptions {
     /// Execution mode (default: Auto).
     pub mode: ExecutionMode,
@@ -745,7 +743,6 @@ impl Default for LoadOptions {
     }
 }
 
-#[allow(dead_code)]
 impl LoadOptions {
     /// Create options for full loading (optimal for small models).
     pub fn full_loading() -> Self {
@@ -804,7 +801,6 @@ impl LoadOptions {
 ///     // Execute with your inputs/outputs using plan_executor
 /// }
 /// ```
-#[allow(dead_code)]
 pub struct LayerStreamingExecutor {
     /// The underlying pipeline bundle
     pipeline: PipelineBundle,
@@ -812,7 +808,6 @@ pub struct LayerStreamingExecutor {
     layer_names: Vec<String>,
 }
 
-#[allow(dead_code)]
 impl LayerStreamingExecutor {
     /// Create a new streaming executor from a pipeline bundle.
     pub fn new(pipeline: PipelineBundle) -> Self {
@@ -900,7 +895,6 @@ impl LayerStreamingExecutor {
 }
 
 /// Iterator over layers with automatic prefetching.
-#[allow(dead_code)]
 pub struct LayerIterator<'a> {
     executor: &'a LayerStreamingExecutor,
     current_index: usize,
@@ -941,13 +935,11 @@ impl ExactSizeIterator for LayerIterator<'_> {}
 /// Context for a single layer during iteration.
 ///
 /// Provides methods to load and execute the layer.
-#[allow(dead_code)]
 pub struct LayerContext<'a> {
     executor: &'a LayerStreamingExecutor,
     index: usize,
 }
 
-#[allow(dead_code)]
 impl<'a> LayerContext<'a> {
     /// Get the layer index.
     pub fn index(&self) -> usize {

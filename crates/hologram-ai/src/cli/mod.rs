@@ -3,8 +3,24 @@
 //! Command-line interface for compiling ONNX models to hologram's .holo format,
 //! downloading models from Hugging Face, and running pipelines with unified configs.
 
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use std::path::PathBuf;
+
+/// Execution mode for model inference.
+#[derive(Debug, Clone, Copy, Default, ValueEnum)]
+pub enum CliExecutionMode {
+    /// Load entire model at once (fast, high memory).
+    /// Best for interactive use and small/medium models.
+    Full,
+
+    /// Load and execute one layer at a time (slow, low memory).
+    /// Best for large models (70B+) on memory-constrained systems.
+    LayerByLayer,
+
+    /// Automatically select mode based on model size and available memory.
+    #[default]
+    Auto,
+}
 
 mod bundle;
 mod compile;
@@ -205,6 +221,10 @@ enum Commands {
         /// Output directory for generated files
         #[arg(short, long)]
         output: Option<PathBuf>,
+
+        /// Execution mode for model loading
+        #[arg(long, value_enum, default_value = "auto")]
+        execution_mode: CliExecutionMode,
     },
 
     /// Download ONNX model from Hugging Face
@@ -547,6 +567,7 @@ pub fn run() -> anyhow::Result<()> {
             max_length,
             inputs,
             output,
+            execution_mode,
         } => {
             if let Some(config_path) = config {
                 // Config-based pipeline execution (existing mode)
@@ -559,6 +580,7 @@ pub fn run() -> anyhow::Result<()> {
                     &tokenizer,
                     max_length,
                     output.as_deref(),
+                    execution_mode,
                 )
             } else {
                 anyhow::bail!("Either --config or model path must be specified")

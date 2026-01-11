@@ -1954,7 +1954,10 @@ pub fn run_direct_command(
     tokenizer_path: &Path,
     max_length: usize,
     _output_dir: Option<&Path>,
+    execution_mode: super::CliExecutionMode,
 ) -> Result<()> {
+    // Log execution mode
+    info!("Execution mode: {:?}", execution_mode);
     use tokenizers::Tokenizer;
 
     info!("Direct model execution mode");
@@ -2102,6 +2105,7 @@ pub fn run_direct_command(
     _tokenizer_path: &Path,
     _max_length: usize,
     _output_dir: Option<&Path>,
+    _execution_mode: super::CliExecutionMode,
 ) -> Result<()> {
     anyhow::bail!(
         "Direct .holo execution with --prompt requires the 'text-output' feature.\n\
