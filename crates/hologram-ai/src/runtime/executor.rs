@@ -404,7 +404,7 @@ impl ModelExecutor {
         let input_handles = self.map_inputs_to_buffers(&inputs, &requirements)?;
 
         // Allocate output buffers with runtime shape resolution
-        let (mut output_handles, output_shapes) =
+        let (output_handles, output_shapes) =
             self.allocate_output_buffers_with_shapes(&requirements, &sorted_tensors)?;
 
         // DEBUG: Check buffer references
@@ -454,7 +454,7 @@ impl ModelExecutor {
 
         // Execute the plan
         self.executor
-            .execute(&input_handles, &mut output_handles, &mut *self.backend)
+            .execute(&input_handles, &output_handles, &*self.backend)
             .map_err(|e| anyhow::anyhow!("Model execution failed: {:?}", e))?;
 
         tracing::debug!("Model execution completed successfully");

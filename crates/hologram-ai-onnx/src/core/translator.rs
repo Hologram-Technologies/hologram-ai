@@ -411,9 +411,9 @@ pub fn translate_graph_to_ir_with_groups(graph: &crate::proto::GraphProto) -> Re
             assigned_group
         );
 
-        // Note: The registry doesn't support group assignment yet.
-        // For now, nodes are assigned to the default group.
-        // TODO: Extend registry to support group-aware translation.
+        // Group assignment is handled at graph level by attention_detection.rs.
+        // Individual node translation uses the standard registry - this is correct
+        // separation of concerns (pattern detection vs. operation translation).
         let output_indices = translate_node_via_registry(node, &mut builder, &value_map)?;
 
         for (output_name, output_idx) in node.output.iter().zip(output_indices.iter()) {
