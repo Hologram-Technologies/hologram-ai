@@ -23,7 +23,7 @@ build-cli:
 
 # Run all tests
 test:
-    cargo test
+    cargo test --workspace
 
 # Run tests with all features
 test-all:

@@ -9,6 +9,7 @@
 //! - Graph partitioning for large models
 
 // Core modules
+pub mod attention_detection;
 mod bundle;
 mod error;
 mod ir_to_graph;
@@ -59,6 +60,7 @@ pub use serialization::{
 pub use shapes::{Dim, Shape, SymbolicShape};
 pub use translator::{
     OperationGraph as TranslatorOperationGraph, lower_to_operation_graph, translate_graph_to_ir,
+    translate_graph_to_ir_with_groups,
 };
 pub use weights::{MmapWeightEntry, WeightData, WeightRef};
 pub use weights_format::{

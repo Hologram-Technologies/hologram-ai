@@ -216,7 +216,7 @@ jobs:
           CARGO_NET_GIT_FETCH_WITH_CLI: true
           RUSTDOCFLAGS: "-D warnings"
 
-  # Integration tests with MNIST model
+  # Lightweight integration tests using mock models (no downloads required)
   integration:
     name: Integration Tests
     runs-on: ubuntu-latest
@@ -250,17 +250,11 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-integration-
 
-      - name: Download MNIST model
-        run: |
-          mkdir -p crates/hologram-ai-onnx/tests/fixtures
-          curl -L https://github.com/onnx/models/raw/main/validated/vision/classification/mnist/model/mnist-12.onnx \
-            -o crates/hologram-ai-onnx/tests/fixtures/mnist-12.onnx
-
       - name: Install cargo-nextest
         uses: taiki-e/install-action@nextest
 
-      - name: Run integration tests
-        run: cargo nextest run -p hologram-ai-onnx --test '*' --no-fail-fast
+      - name: Run lightweight integration tests
+        run: cargo nextest run -p hologram-ai-onnx --test lightweight_tests --no-fail-fast
         env:
           CARGO_NET_GIT_FETCH_WITH_CLI: true
 
