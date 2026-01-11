@@ -1,8 +1,8 @@
 //! Resize operation translator.
 
-use hologram::ir::{GraphBuilder, NodeIndex, ResizeMode, CoordinateTransform};
 use crate::proto::NodeProto;
-use crate::translators::{OnnxTranslator, OnnxAttributes, InputRequirement, TranslationError};
+use crate::translators::{InputRequirement, OnnxAttributes, OnnxTranslator, TranslationError};
+use hologram::ir::{CoordinateTransform, GraphBuilder, NodeIndex, ResizeMode};
 
 /// Translator for ONNX Resize operation.
 ///
@@ -54,7 +54,7 @@ impl OnnxTranslator for ResizeTranslator {
             _ => {
                 return Err(TranslationError::invalid_attribute(
                     "mode",
-                    format!("unknown resize mode: {}", mode_str)
+                    format!("unknown resize mode: {}", mode_str),
                 ));
             }
         };
@@ -73,7 +73,7 @@ impl OnnxTranslator for ResizeTranslator {
             _ => {
                 return Err(TranslationError::invalid_attribute(
                     "coordinate_transformation_mode",
-                    format!("unknown mode: {}", coord_mode_str)
+                    format!("unknown mode: {}", coord_mode_str),
                 ));
             }
         };
@@ -99,13 +99,13 @@ impl OnnxTranslator for ResizeTranslator {
         // Validate
         if scales.is_some() && sizes.is_some() {
             return Err(TranslationError::IrBuilder(
-                "Resize cannot have both scales and sizes specified".to_string()
+                "Resize cannot have both scales and sizes specified".to_string(),
             ));
         }
 
         if scales.is_none() && sizes.is_none() {
             return Err(TranslationError::IrBuilder(
-                "Resize requires either scales or sizes to be specified".to_string()
+                "Resize requires either scales or sizes to be specified".to_string(),
             ));
         }
 
@@ -120,10 +120,14 @@ impl OnnxTranslator for ResizeTranslator {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use hologram::ir::{DType, Shape};
     use crate::proto::AttributeProto;
+    use hologram::ir::{DType, Shape};
 
-    fn make_node_with_attrs(mode: &str, scales: Option<Vec<f32>>, sizes: Option<Vec<i64>>) -> NodeProto {
+    fn make_node_with_attrs(
+        mode: &str,
+        scales: Option<Vec<f32>>,
+        sizes: Option<Vec<i64>>,
+    ) -> NodeProto {
         let mut attrs = vec![AttributeProto {
             name: "mode".to_string(),
             s: mode.as_bytes().to_vec(),
@@ -211,7 +215,11 @@ mod tests {
         let mut builder = GraphBuilder::new();
         let data = builder.input("data", Shape::static_shape(&[1, 3, 32, 32]), DType::F32);
 
-        let node = make_node_with_attrs("nearest", Some(vec![1.0, 1.0, 2.0, 2.0]), Some(vec![1, 3, 64, 64]));
+        let node = make_node_with_attrs(
+            "nearest",
+            Some(vec![1.0, 1.0, 2.0, 2.0]),
+            Some(vec![1, 3, 64, 64]),
+        );
         let result = translator.translate(&node, &[data], &mut builder);
         assert!(result.is_err());
     }

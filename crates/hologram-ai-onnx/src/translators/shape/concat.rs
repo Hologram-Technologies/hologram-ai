@@ -1,8 +1,8 @@
 //! Concat operation translator.
 
-use hologram::ir::{GraphBuilder, NodeIndex, NodeOp, ConstantData, Shape};
 use crate::proto::NodeProto;
-use crate::translators::{OnnxTranslator, OnnxAttributes, InputRequirement, TranslationError};
+use crate::translators::{InputRequirement, OnnxAttributes, OnnxTranslator, TranslationError};
+use hologram::ir::{ConstantData, GraphBuilder, NodeIndex, NodeOp, Shape};
 
 /// Translator for ONNX Concat operation.
 ///
@@ -35,9 +35,10 @@ impl OnnxTranslator for ConcatTranslator {
         builder: &mut GraphBuilder,
     ) -> Result<Vec<NodeIndex>, TranslationError> {
         // Get axis attribute (required)
-        let axis_raw = node.get_int("axis").ok_or_else(|| {
-            TranslationError::missing_attribute("Concat", "axis")
-        })? as i32;
+        let axis_raw = node
+            .get_int("axis")
+            .ok_or_else(|| TranslationError::missing_attribute("Concat", "axis"))?
+            as i32;
 
         // Get first input to determine rank
         let first_node = builder.graph().node(inputs[0]).ok_or_else(|| {
@@ -78,7 +79,10 @@ impl OnnxTranslator for ConcatTranslator {
 
         tracing::debug!(
             "Concat: {} inputs, axis_raw = {}, normalized axis = {}, rank = {}",
-            inputs.len(), axis_raw, axis, rank
+            inputs.len(),
+            axis_raw,
+            axis,
+            rank
         );
 
         // Try constant folding for 1D integer tensors concatenated along axis 0
@@ -108,7 +112,9 @@ impl OnnxTranslator for ConcatTranslator {
 fn try_constant_fold_concat(inputs: &[NodeIndex], builder: &mut GraphBuilder) -> Option<NodeIndex> {
     // Check if all inputs are constants
     let all_constants = inputs.iter().all(|&idx| {
-        builder.graph().node(idx)
+        builder
+            .graph()
+            .node(idx)
             .is_some_and(|node| matches!(node.op, NodeOp::Constant { .. }))
     });
 
@@ -124,7 +130,10 @@ fn try_constant_fold_concat(inputs: &[NodeIndex], builder: &mut GraphBuilder) ->
                 let mut result_values = Vec::new();
                 for &idx in inputs {
                     let node = builder.graph().node(idx)?;
-                    if let NodeOp::Constant { data: ConstantData::I64(values) } = &node.op {
+                    if let NodeOp::Constant {
+                        data: ConstantData::I64(values),
+                    } = &node.op
+                    {
                         result_values.extend_from_slice(values);
                     } else {
                         return None;
@@ -137,7 +146,10 @@ fn try_constant_fold_concat(inputs: &[NodeIndex], builder: &mut GraphBuilder) ->
                 let mut result_values = Vec::new();
                 for &idx in inputs {
                     let node = builder.graph().node(idx)?;
-                    if let NodeOp::Constant { data: ConstantData::I32(values) } = &node.op {
+                    if let NodeOp::Constant {
+                        data: ConstantData::I32(values),
+                    } = &node.op
+                    {
                         result_values.extend_from_slice(values);
                     } else {
                         return None;
@@ -150,7 +162,10 @@ fn try_constant_fold_concat(inputs: &[NodeIndex], builder: &mut GraphBuilder) ->
                 let mut result_values = Vec::new();
                 for &idx in inputs {
                     let node = builder.graph().node(idx)?;
-                    if let NodeOp::Constant { data: ConstantData::F32(values) } = &node.op {
+                    if let NodeOp::Constant {
+                        data: ConstantData::F32(values),
+                    } = &node.op
+                    {
                         result_values.extend_from_slice(values);
                     } else {
                         return None;
@@ -169,8 +184,8 @@ fn try_constant_fold_concat(inputs: &[NodeIndex], builder: &mut GraphBuilder) ->
 #[cfg(test)]
 mod tests {
     use super::*;
-    use hologram::ir::DType;
     use crate::proto::AttributeProto;
+    use hologram::ir::DType;
 
     fn make_node(axis: i64) -> NodeProto {
         NodeProto {
@@ -276,14 +291,8 @@ mod tests {
         let translator = ConcatTranslator;
         let mut builder = GraphBuilder::new();
 
-        let a = builder.constant(
-            ConstantData::I64(vec![1, 2, 3]),
-            Shape::static_shape(&[3]),
-        );
-        let b = builder.constant(
-            ConstantData::I64(vec![4, 5]),
-            Shape::static_shape(&[2]),
-        );
+        let a = builder.constant(ConstantData::I64(vec![1, 2, 3]), Shape::static_shape(&[3]));
+        let b = builder.constant(ConstantData::I64(vec![4, 5]), Shape::static_shape(&[2]));
 
         let result = translator.translate(&make_node(0), &[a, b], &mut builder);
         assert!(result.is_ok());
@@ -306,14 +315,8 @@ mod tests {
         let translator = ConcatTranslator;
         let mut builder = GraphBuilder::new();
 
-        let a = builder.constant(
-            ConstantData::I32(vec![10, 20]),
-            Shape::static_shape(&[2]),
-        );
-        let b = builder.constant(
-            ConstantData::I32(vec![30]),
-            Shape::static_shape(&[1]),
-        );
+        let a = builder.constant(ConstantData::I32(vec![10, 20]), Shape::static_shape(&[2]));
+        let b = builder.constant(ConstantData::I32(vec![30]), Shape::static_shape(&[1]));
 
         let result = translator.translate(&make_node(0), &[a, b], &mut builder);
         assert!(result.is_ok());

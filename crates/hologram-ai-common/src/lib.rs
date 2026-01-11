@@ -39,4 +39,4 @@ pub use transformer::{
     Activation, AttentionType, FFNType, GenericTransformerBuilder, NormType, RoPEScaling,
     TransformerConfig,
 };
-pub use weights::{WeightMap, WeightTensor, WeightDtype};
+pub use weights::{WeightDtype, WeightMap, WeightTensor};

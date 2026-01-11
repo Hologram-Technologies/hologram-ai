@@ -1,8 +1,8 @@
 //! Sub operation translator.
 
-use hologram::ir::{GraphBuilder, NodeIndex};
 use crate::proto::NodeProto;
-use crate::translators::{OnnxTranslator, InputRequirement, TranslationError};
+use crate::translators::{InputRequirement, OnnxTranslator, TranslationError};
+use hologram::ir::{GraphBuilder, NodeIndex};
 
 /// Translator for ONNX Sub operation.
 ///
@@ -35,11 +35,7 @@ impl OnnxTranslator for SubTranslator {
         true
     }
 
-    fn constant_fold(
-        &self,
-        _node: &NodeProto,
-        constant_inputs: &[&[u8]],
-    ) -> Option<Vec<u8>> {
+    fn constant_fold(&self, _node: &NodeProto, constant_inputs: &[&[u8]]) -> Option<Vec<u8>> {
         if constant_inputs.len() != 2 {
             return None;
         }

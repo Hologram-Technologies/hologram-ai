@@ -1,8 +1,8 @@
 //! Reshape operation translator.
 
-use hologram::ir::{GraphBuilder, NodeIndex, NodeOp, ConstantData};
 use crate::proto::NodeProto;
-use crate::translators::{OnnxTranslator, OnnxAttributes, InputRequirement, TranslationError};
+use crate::translators::{InputRequirement, OnnxAttributes, OnnxTranslator, TranslationError};
+use hologram::ir::{ConstantData, GraphBuilder, NodeIndex, NodeOp};
 
 /// Translator for ONNX Reshape operation.
 ///
@@ -86,8 +86,8 @@ impl OnnxTranslator for ReshapeTranslator {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use hologram::ir::{DType, Shape};
     use crate::proto::AttributeProto;
+    use hologram::ir::{DType, Shape};
 
     fn make_node() -> NodeProto {
         NodeProto {
@@ -118,10 +118,7 @@ mod tests {
         let mut builder = GraphBuilder::new();
 
         let data = builder.input("data", Shape::static_shape(&[2, 3, 4]), DType::F32);
-        let shape = builder.constant(
-            ConstantData::I64(vec![6, 4]),
-            Shape::static_shape(&[2]),
-        );
+        let shape = builder.constant(ConstantData::I64(vec![6, 4]), Shape::static_shape(&[2]));
 
         let result = translator.translate(&make_node(), &[data, shape], &mut builder);
         assert!(result.is_ok());
@@ -135,10 +132,7 @@ mod tests {
         let mut builder = GraphBuilder::new();
 
         let data = builder.input("data", Shape::static_shape(&[2, 3, 4, 5]), DType::F32);
-        let shape = builder.constant(
-            ConstantData::I64(vec![2, 60]),
-            Shape::static_shape(&[2]),
-        );
+        let shape = builder.constant(ConstantData::I64(vec![2, 60]), Shape::static_shape(&[2]));
 
         let result = translator.translate(&make_node(), &[data, shape], &mut builder);
         assert!(result.is_ok());
@@ -151,10 +145,7 @@ mod tests {
 
         let data = builder.input("data", Shape::static_shape(&[2, 3, 4]), DType::F32);
         // Shape with -1 to infer dimension
-        let shape = builder.constant(
-            ConstantData::I64(vec![-1, 4]),
-            Shape::static_shape(&[2]),
-        );
+        let shape = builder.constant(ConstantData::I64(vec![-1, 4]), Shape::static_shape(&[2]));
 
         let result = translator.translate(&make_node(), &[data, shape], &mut builder);
         assert!(result.is_ok());
@@ -167,11 +158,12 @@ mod tests {
 
         let data = builder.input("data", Shape::static_shape(&[2, 3, 4]), DType::F32);
         let shape = builder.constant(
-            ConstantData::I64(vec![0, 3, 4]),  // 0 should copy from input
+            ConstantData::I64(vec![0, 3, 4]), // 0 should copy from input
             Shape::static_shape(&[3]),
         );
 
-        let result = translator.translate(&make_node_with_allowzero(1), &[data, shape], &mut builder);
+        let result =
+            translator.translate(&make_node_with_allowzero(1), &[data, shape], &mut builder);
         assert!(result.is_ok());
     }
 
@@ -181,10 +173,7 @@ mod tests {
         let mut builder = GraphBuilder::new();
 
         let data = builder.input("data", Shape::static_shape(&[1]), DType::F32);
-        let shape = builder.constant(
-            ConstantData::I64(vec![]),
-            Shape::static_shape(&[0]),
-        );
+        let shape = builder.constant(ConstantData::I64(vec![]), Shape::static_shape(&[0]));
 
         let result = translator.translate(&make_node(), &[data, shape], &mut builder);
         assert!(result.is_ok());
@@ -196,10 +185,7 @@ mod tests {
         let mut builder = GraphBuilder::new();
 
         let data = builder.input("data", Shape::static_shape(&[]), DType::F32);
-        let shape = builder.constant(
-            ConstantData::I64(vec![1, 1]),
-            Shape::static_shape(&[2]),
-        );
+        let shape = builder.constant(ConstantData::I64(vec![1, 1]), Shape::static_shape(&[2]));
 
         let result = translator.translate(&make_node(), &[data, shape], &mut builder);
         assert!(result.is_ok());
@@ -227,7 +213,11 @@ mod tests {
         assert!(err.is_err());
         assert!(matches!(
             err.unwrap_err(),
-            TranslationError::WrongInputCount { expected: 2, got: 0, .. }
+            TranslationError::WrongInputCount {
+                expected: 2,
+                got: 0,
+                ..
+            }
         ));
     }
 

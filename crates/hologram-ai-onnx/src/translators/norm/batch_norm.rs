@@ -1,8 +1,8 @@
 //! BatchNormalization operation translator.
 
-use hologram::ir::{GraphBuilder, NodeIndex, NodeOp};
 use crate::proto::NodeProto;
-use crate::translators::{OnnxTranslator, OnnxAttributes, InputRequirement, TranslationError};
+use crate::translators::{InputRequirement, OnnxAttributes, OnnxTranslator, TranslationError};
+use hologram::ir::{GraphBuilder, NodeIndex, NodeOp};
 
 /// Translator for ONNX BatchNormalization operation.
 ///
@@ -51,8 +51,8 @@ impl OnnxTranslator for BatchNormTranslator {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use hologram::ir::{DType, Shape};
     use crate::proto::AttributeProto;
+    use hologram::ir::{DType, Shape};
 
     fn make_node() -> NodeProto {
         NodeProto {
@@ -83,7 +83,11 @@ mod tests {
     }
 
     fn create_batch_norm_inputs(builder: &mut GraphBuilder, channels: usize) -> Vec<NodeIndex> {
-        let input = builder.input("input", Shape::static_shape(&[1, channels, 32, 32]), DType::F32);
+        let input = builder.input(
+            "input",
+            Shape::static_shape(&[1, channels, 32, 32]),
+            DType::F32,
+        );
         let scale = builder.input("scale", Shape::static_shape(&[channels]), DType::F32);
         let bias = builder.input("bias", Shape::static_shape(&[channels]), DType::F32);
         let mean = builder.input("mean", Shape::static_shape(&[channels]), DType::F32);
@@ -129,23 +133,34 @@ mod tests {
         let translator = BatchNormTranslator;
 
         // Less than 5 inputs should fail
-        let err = translator.input_requirement().validate(4, "BatchNormalization");
+        let err = translator
+            .input_requirement()
+            .validate(4, "BatchNormalization");
         assert!(err.is_err());
 
-        let err = translator.input_requirement().validate(2, "BatchNormalization");
+        let err = translator
+            .input_requirement()
+            .validate(2, "BatchNormalization");
         assert!(err.is_err());
     }
 
     #[test]
     fn test_batch_norm_input_validation_correct() {
         let translator = BatchNormTranslator;
-        assert!(translator.input_requirement().validate(5, "BatchNormalization").is_ok());
+        assert!(
+            translator
+                .input_requirement()
+                .validate(5, "BatchNormalization")
+                .is_ok()
+        );
     }
 
     #[test]
     fn test_batch_norm_input_validation_too_many() {
         let translator = BatchNormTranslator;
-        let err = translator.input_requirement().validate(6, "BatchNormalization");
+        let err = translator
+            .input_requirement()
+            .validate(6, "BatchNormalization");
         assert!(err.is_err());
     }
 }

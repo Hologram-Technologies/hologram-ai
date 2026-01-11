@@ -1,8 +1,8 @@
 //! GELU activation translator.
 
-use hologram::ir::{GraphBuilder, NodeIndex};
 use crate::proto::NodeProto;
-use crate::translators::{OnnxTranslator, InputRequirement, TranslationError};
+use crate::translators::{InputRequirement, OnnxTranslator, TranslationError};
+use hologram::ir::{GraphBuilder, NodeIndex};
 
 /// Translator for ONNX Gelu operation.
 ///
@@ -35,11 +35,7 @@ impl OnnxTranslator for GeluTranslator {
         true
     }
 
-    fn constant_fold(
-        &self,
-        _node: &NodeProto,
-        constant_inputs: &[&[u8]],
-    ) -> Option<Vec<u8>> {
+    fn constant_fold(&self, _node: &NodeProto, constant_inputs: &[&[u8]]) -> Option<Vec<u8>> {
         let input = constant_inputs.first()?;
         let floats: &[f32] = bytemuck::cast_slice(input);
         // GELU approximation: 0.5 * x * (1 + tanh(sqrt(2/pi) * (x + 0.044715 * x^3)))

@@ -182,9 +182,7 @@ impl From<TranslationError> for crate::core::OnnxError {
             TranslationError::ShapeInference(msg) => {
                 crate::core::OnnxError::ShapeInferenceError(msg)
             }
-            TranslationError::IrBuilder(msg) => {
-                crate::core::OnnxError::IrTranslationError(msg)
-            }
+            TranslationError::IrBuilder(msg) => crate::core::OnnxError::IrTranslationError(msg),
         }
     }
 }
@@ -246,8 +244,10 @@ mod tests {
         // Test UnsupportedOp conversion
         let trans_err = TranslationError::unsupported_op("CustomOp", 13);
         let onnx_err: OnnxError = trans_err.into();
-        assert!(matches!(onnx_err, OnnxError::UnsupportedOp { op_type, opset_version }
-            if op_type == "CustomOp" && opset_version == 13));
+        assert!(
+            matches!(onnx_err, OnnxError::UnsupportedOp { op_type, opset_version }
+            if op_type == "CustomOp" && opset_version == 13)
+        );
 
         // Test WrongInputCount conversion
         let trans_err = TranslationError::wrong_input_count("Add", 2, 1);

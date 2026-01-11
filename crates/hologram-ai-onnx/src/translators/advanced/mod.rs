@@ -7,11 +7,11 @@
 //! - Dropout: Dropout (identity during inference)
 
 mod cast;
+mod dropout;
 mod range;
 mod trilu;
-mod dropout;
 
 pub use cast::CastTranslator;
+pub use dropout::DropoutTranslator;
 pub use range::RangeTranslator;
 pub use trilu::TriluTranslator;
-pub use dropout::DropoutTranslator;

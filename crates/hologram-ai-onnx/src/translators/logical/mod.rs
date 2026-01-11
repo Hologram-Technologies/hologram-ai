@@ -5,10 +5,13 @@
 //! - Boolean: And, Or, Not
 //! - Conditional: Where
 
-mod comparison;
 mod boolean;
+mod comparison;
 mod where_op;
 
-pub use comparison::{EqualTranslator, GreaterTranslator, LessTranslator, GreaterOrEqualTranslator, LessOrEqualTranslator};
-pub use boolean::{AndTranslator, OrTranslator, NotTranslator};
+pub use boolean::{AndTranslator, NotTranslator, OrTranslator};
+pub use comparison::{
+    EqualTranslator, GreaterOrEqualTranslator, GreaterTranslator, LessOrEqualTranslator,
+    LessTranslator,
+};
 pub use where_op::WhereTranslator;

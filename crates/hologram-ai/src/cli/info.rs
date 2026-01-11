@@ -3,9 +3,9 @@
 //! This module provides functionality to inspect ONNX and .holo models and display
 //! their structure, inputs, outputs, and operations.
 
+use anyhow::{Context, Result};
 #[cfg(feature = "onnx")]
 use hologram_ai_onnx::core::{extract_opset_version, parse_model};
-use anyhow::{Context, Result};
 use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
@@ -206,7 +206,7 @@ fn get_tensor_type_string(value_info: &hologram_ai_onnx::proto::ValueInfoProto) 
 /// Display information about a compiled .holo model.
 #[cfg(feature = "onnx")]
 fn info_holo_command(model_path: &Path) -> Result<()> {
-    use hologram_ai_onnx::core::{HoloFormat, UnifiedBundleReader, PipelineBundleReader};
+    use hologram_ai_onnx::core::{HoloFormat, PipelineBundleReader, UnifiedBundleReader};
 
     info!("Reading HOLO model: {}", model_path.display());
 
@@ -227,7 +227,11 @@ fn info_holo_command(model_path: &Path) -> Result<()> {
 
     println!("\n📄 File Information:");
     println!("  Path: {}", model_path.display());
-    println!("  Size: {} bytes ({:.2} MB)", holo_bytes.len(), holo_bytes.len() as f64 / 1_048_576.0);
+    println!(
+        "  Size: {} bytes ({:.2} MB)",
+        holo_bytes.len(),
+        holo_bytes.len() as f64 / 1_048_576.0
+    );
 
     match format {
         HoloFormat::Bundle => {
@@ -242,8 +246,16 @@ fn info_holo_command(model_path: &Path) -> Result<()> {
             let weights_size = header.weights_size;
 
             println!("\n📊 Bundle Contents:");
-            println!("  Graph section: {} bytes ({:.2} KB)", graph_size, graph_size as f64 / 1024.0);
-            println!("  Weights section: {} bytes ({:.2} MB)", weights_size, weights_size as f64 / 1_048_576.0);
+            println!(
+                "  Graph section: {} bytes ({:.2} KB)",
+                graph_size,
+                graph_size as f64 / 1024.0
+            );
+            println!(
+                "  Weights section: {} bytes ({:.2} MB)",
+                weights_size,
+                weights_size as f64 / 1_048_576.0
+            );
 
             if reader.verify_checksums() {
                 println!("  Checksum: VALID");
@@ -263,10 +275,12 @@ fn info_holo_command(model_path: &Path) -> Result<()> {
             println!("  Models:");
             for name in reader.model_names() {
                 if let Some(entry) = reader.get_entry(name) {
-                    println!("    - {}: {} bytes ({:.2} MB)",
-                             name,
-                             entry.size,
-                             entry.size as f64 / 1_048_576.0);
+                    println!(
+                        "    - {}: {} bytes ({:.2} MB)",
+                        name,
+                        entry.size,
+                        entry.size as f64 / 1_048_576.0
+                    );
                 }
             }
         }
@@ -279,9 +293,11 @@ fn info_holo_command(model_path: &Path) -> Result<()> {
             let weights_path = model_path.with_extension("weights");
             if weights_path.exists() {
                 if let Ok(metadata) = fs::metadata(&weights_path) {
-                    println!("  External weights: {} ({:.2} MB)",
-                             weights_path.display(),
-                             metadata.len() as f64 / 1_048_576.0);
+                    println!(
+                        "  External weights: {} ({:.2} MB)",
+                        weights_path.display(),
+                        metadata.len() as f64 / 1_048_576.0
+                    );
                 }
             } else {
                 println!("  External weights: None (embedded in plan)");
@@ -294,8 +310,10 @@ fn info_holo_command(model_path: &Path) -> Result<()> {
         }
         HoloFormat::Unknown => {
             let magic = &holo_bytes[0..4];
-            println!("  Format: Unknown (magic: {:02x} {:02x} {:02x} {:02x})",
-                     magic[0], magic[1], magic[2], magic[3]);
+            println!(
+                "  Format: Unknown (magic: {:02x} {:02x} {:02x} {:02x})",
+                magic[0], magic[1], magic[2], magic[3]
+            );
             println!("\n  Warning: This file may not be a valid .holo file.");
         }
     }

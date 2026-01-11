@@ -1,8 +1,8 @@
 //! MatMul operation translator.
 
-use hologram::ir::{GraphBuilder, NodeIndex};
 use crate::proto::NodeProto;
-use crate::translators::{OnnxTranslator, InputRequirement, TranslationError};
+use crate::translators::{InputRequirement, OnnxTranslator, TranslationError};
+use hologram::ir::{GraphBuilder, NodeIndex};
 
 /// Translator for ONNX MatMul operation.
 ///
@@ -40,7 +40,7 @@ impl OnnxTranslator for MatMulTranslator {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use hologram::ir::{Dim, DType, Shape};
+    use hologram::ir::{DType, Dim, Shape};
 
     fn make_node() -> NodeProto {
         NodeProto {
@@ -168,7 +168,11 @@ mod tests {
         assert!(err.is_err());
         assert!(matches!(
             err.unwrap_err(),
-            TranslationError::WrongInputCount { expected: 2, got: 0, .. }
+            TranslationError::WrongInputCount {
+                expected: 2,
+                got: 0,
+                ..
+            }
         ));
     }
 
@@ -179,7 +183,11 @@ mod tests {
         assert!(err.is_err());
         assert!(matches!(
             err.unwrap_err(),
-            TranslationError::WrongInputCount { expected: 2, got: 1, .. }
+            TranslationError::WrongInputCount {
+                expected: 2,
+                got: 1,
+                ..
+            }
         ));
     }
 
@@ -190,7 +198,11 @@ mod tests {
         assert!(err.is_err());
         assert!(matches!(
             err.unwrap_err(),
-            TranslationError::WrongInputCount { expected: 2, got: 3, .. }
+            TranslationError::WrongInputCount {
+                expected: 2,
+                got: 3,
+                ..
+            }
         ));
     }
 

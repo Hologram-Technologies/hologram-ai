@@ -3,8 +3,8 @@
 //! This module provides functionality for parsing ONNX protobuf files and
 //! validating model structure before translation to hologram IR.
 
-use crate::{OnnxError, Result};
 use crate::proto::{GraphProto, ModelProto, NodeProto, ValueInfoProto};
+use crate::{OnnxError, Result};
 use prost::Message;
 use tracing::{debug, trace, warn};
 

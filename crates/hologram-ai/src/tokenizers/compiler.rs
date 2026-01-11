@@ -9,7 +9,7 @@
 
 use super::TokenizerConfig;
 use anyhow::{Context, Result};
-use hologram::ir::{GraphBuilder, Shape, Dim, DType, ConstantData};
+use hologram::ir::{ConstantData, DType, Dim, GraphBuilder, Shape};
 use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
@@ -32,14 +32,15 @@ pub fn parse_tokenizer_vocab(vocab_path: &Path) -> Result<TokenizerVocab> {
     let content = fs::read_to_string(vocab_path)
         .with_context(|| format!("Failed to read tokenizer file: {}", vocab_path.display()))?;
 
-    let json: serde_json::Value = serde_json::from_str(&content)
-        .with_context(|| "Failed to parse tokenizer.json")?;
+    let json: serde_json::Value =
+        serde_json::from_str(&content).with_context(|| "Failed to parse tokenizer.json")?;
 
     // Extract vocab from model.vocab
     // Handle both formats:
     // 1. Object format: {"token": id, ...}
     // 2. Array format: [[token, score], ...] where index is ID
-    let vocab = json.get("model")
+    let vocab = json
+        .get("model")
         .and_then(|m| m.get("vocab"))
         .ok_or_else(|| anyhow::anyhow!("No model.vocab found in tokenizer.json"))?;
 
@@ -59,11 +60,12 @@ pub fn parse_tokenizer_vocab(vocab_path: &Path) -> Result<TokenizerVocab> {
         // Array format: [[token, score], ...] where index is ID
         for (id, entry) in vocab_arr.iter().enumerate() {
             if let Some(pair) = entry.as_array()
-                && let Some(token) = pair.first().and_then(|t| t.as_str()) {
-                    let id = id as u32;
-                    token_to_id.insert(token.to_string(), id);
-                    id_to_token.insert(id, token.to_string());
-                }
+                && let Some(token) = pair.first().and_then(|t| t.as_str())
+            {
+                let id = id as u32;
+                token_to_id.insert(token.to_string(), id);
+                id_to_token.insert(id, token.to_string());
+            }
         }
     } else {
         anyhow::bail!("model.vocab must be an object or array");
@@ -74,7 +76,7 @@ pub fn parse_tokenizer_vocab(vocab_path: &Path) -> Result<TokenizerVocab> {
         for token_obj in added_tokens {
             if let (Some(id), Some(content)) = (
                 token_obj.get("id").and_then(|v| v.as_u64()),
-                token_obj.get("content").and_then(|v| v.as_str())
+                token_obj.get("content").and_then(|v| v.as_str()),
             ) {
                 let id = id as u32;
                 token_to_id.insert(content.to_string(), id);
@@ -140,7 +142,7 @@ pub fn compile_tokenizer_to_ir(
     let input_indices = builder.input(
         "token_indices",
         Shape::new(vec![
-            Dim::Static(1),      // batch
+            Dim::Static(1),       // batch
             Dim::Static(max_len), // seq_len (padded)
         ]),
         DType::I64,
@@ -196,11 +198,11 @@ pub fn compile_tokenizer_to_ir(
 ///
 /// compile_tokenizer_to_holo(&config, Path::new("tokenizer.holo")).unwrap();
 /// ```
-pub fn compile_tokenizer_to_holo(
-    config: &TokenizerConfig,
-    output_path: &Path,
-) -> Result<()> {
-    tracing::info!("Compiling {} tokenizer to .holo format", config.tokenizer_type);
+pub fn compile_tokenizer_to_holo(config: &TokenizerConfig, output_path: &Path) -> Result<()> {
+    tracing::info!(
+        "Compiling {} tokenizer to .holo format",
+        config.tokenizer_type
+    );
 
     // Step 1: Parse vocabulary
     let vocab = parse_tokenizer_vocab(Path::new(&config.vocab_path))?;
@@ -261,14 +263,14 @@ pub fn compile_tokenizer_to_holo(
 ///
 /// compile_tokenizer_to_bundle(&config, Path::new("tokenizer.holo")).unwrap();
 /// ```
-pub fn compile_tokenizer_to_bundle(
-    config: &TokenizerConfig,
-    output_path: &Path,
-) -> Result<()> {
+pub fn compile_tokenizer_to_bundle(config: &TokenizerConfig, output_path: &Path) -> Result<()> {
     #[cfg(feature = "onnx")]
     use hologram_ai_onnx::core::UnifiedBundleWriter;
 
-    tracing::info!("Compiling {} tokenizer to HOLB bundle format", config.tokenizer_type);
+    tracing::info!(
+        "Compiling {} tokenizer to HOLB bundle format",
+        config.tokenizer_type
+    );
 
     // Step 1: Parse vocabulary
     let vocab = parse_tokenizer_vocab(Path::new(&config.vocab_path))?;
@@ -304,7 +306,10 @@ pub fn compile_tokenizer_to_bundle(
     fs::write(output_path, bundle_bytes)
         .with_context(|| format!("Failed to write HOLB bundle: {}", output_path.display()))?;
 
-    tracing::info!("Compiled tokenizer bundle saved to: {}", output_path.display());
+    tracing::info!(
+        "Compiled tokenizer bundle saved to: {}",
+        output_path.display()
+    );
     Ok(())
 }
 
@@ -329,7 +334,8 @@ mod tests {
                 ]
             }
         }"#;
-        file.write_all(tokenizer_json.as_bytes()).expect("write tokenizer");
+        file.write_all(tokenizer_json.as_bytes())
+            .expect("write tokenizer");
 
         let config = TokenizerConfig {
             tokenizer_type: "sentencepiece".to_string(),

@@ -1,0 +1,42 @@
+#!/bin/bash
+#
+# Pre-commit hook for hologram-ai
+# - Formats code with cargo fmt
+# - Runs clippy
+# - Runs tests
+#
+# To install this hook, run:
+#   git config core.hooksPath .githooks
+# Or copy this file to .git/hooks/pre-commit
+#
+
+set -e
+
+echo "🔧 Running pre-commit checks..."
+
+# Format code
+echo "📝 Formatting code with cargo fmt..."
+cargo fmt --all
+
+# Check if formatting changed any files
+if ! git diff --quiet; then
+    echo "⚠️  Code was reformatted. The changes have been applied."
+    echo "   Please review and stage the formatted files before committing."
+    echo ""
+    echo "   Files changed:"
+    git diff --name-only
+    echo ""
+    echo "   You can stage all changes with: git add -u"
+    echo "   Then retry your commit."
+    exit 1
+fi
+
+# Run clippy
+echo "🔍 Running clippy..."
+cargo clippy --all-targets -- -D warnings
+
+# Run tests
+echo "🧪 Running tests..."
+cargo test --all --lib
+
+echo "✅ All pre-commit checks passed!"

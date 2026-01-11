@@ -1,8 +1,8 @@
 //! Global pooling operation translators.
 
-use hologram::ir::{GraphBuilder, NodeIndex, NodeOp};
 use crate::proto::NodeProto;
-use crate::translators::{OnnxTranslator, InputRequirement, TranslationError};
+use crate::translators::{InputRequirement, OnnxTranslator, TranslationError};
+use hologram::ir::{GraphBuilder, NodeIndex, NodeOp};
 
 /// Translator for ONNX GlobalAveragePool operation.
 ///
@@ -128,14 +128,23 @@ mod tests {
         let translator = GlobalAveragePoolTranslator;
 
         // 0 inputs should fail
-        let err = translator.input_requirement().validate(0, "GlobalAveragePool");
+        let err = translator
+            .input_requirement()
+            .validate(0, "GlobalAveragePool");
         assert!(err.is_err());
 
         // 1 input should pass
-        assert!(translator.input_requirement().validate(1, "GlobalAveragePool").is_ok());
+        assert!(
+            translator
+                .input_requirement()
+                .validate(1, "GlobalAveragePool")
+                .is_ok()
+        );
 
         // 2 inputs should fail
-        let err = translator.input_requirement().validate(2, "GlobalAveragePool");
+        let err = translator
+            .input_requirement()
+            .validate(2, "GlobalAveragePool");
         assert!(err.is_err());
     }
 
@@ -161,7 +170,12 @@ mod tests {
         assert!(err.is_err());
 
         // 1 input should pass
-        assert!(translator.input_requirement().validate(1, "GlobalMaxPool").is_ok());
+        assert!(
+            translator
+                .input_requirement()
+                .validate(1, "GlobalMaxPool")
+                .is_ok()
+        );
 
         // 2 inputs should fail
         let err = translator.input_requirement().validate(2, "GlobalMaxPool");

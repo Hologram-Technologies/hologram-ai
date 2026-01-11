@@ -1,8 +1,8 @@
 //! Pad operation translator.
 
-use hologram::ir::{GraphBuilder, NodeIndex, PadMode};
 use crate::proto::NodeProto;
-use crate::translators::{OnnxTranslator, OnnxAttributes, InputRequirement, TranslationError};
+use crate::translators::{InputRequirement, OnnxAttributes, OnnxTranslator, TranslationError};
+use hologram::ir::{GraphBuilder, NodeIndex, PadMode};
 
 /// Translator for ONNX Pad operation.
 ///
@@ -60,7 +60,7 @@ impl OnnxTranslator for PadTranslator {
             _ => {
                 return Err(TranslationError::invalid_attribute(
                     "mode",
-                    format!("unknown padding mode: {}", mode_str)
+                    format!("unknown padding mode: {}", mode_str),
                 ));
             }
         };
@@ -89,7 +89,7 @@ impl OnnxTranslator for PadTranslator {
         if pads.len() != num_dims * 2 {
             return Err(TranslationError::invalid_attribute(
                 "pads",
-                format!("length must be even, got {}", pads.len())
+                format!("length must be even, got {}", pads.len()),
             ));
         }
 
@@ -111,8 +111,8 @@ impl OnnxTranslator for PadTranslator {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use hologram::ir::{DType, Shape};
     use crate::proto::AttributeProto;
+    use hologram::ir::{DType, Shape};
 
     fn make_node_with_attrs(mode: &str, pads: Vec<i64>, value: Option<f32>) -> NodeProto {
         let mut attrs = vec![

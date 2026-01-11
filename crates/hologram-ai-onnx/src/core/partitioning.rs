@@ -36,9 +36,9 @@
 //! }
 //! ```
 
+use crate::proto::{GraphProto, NodeProto};
 use crate::{OnnxError, Result};
 use ahash::{AHashMap, AHashSet};
-use crate::proto::{GraphProto, NodeProto};
 use petgraph::algo::toposort;
 use petgraph::graph::{DiGraph, NodeIndex};
 use tracing::{debug, trace};

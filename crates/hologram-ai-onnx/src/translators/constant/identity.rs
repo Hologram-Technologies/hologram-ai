@@ -1,8 +1,8 @@
 //! Identity operation translator.
 
-use hologram::ir::{GraphBuilder, NodeIndex};
 use crate::proto::NodeProto;
-use crate::translators::{OnnxTranslator, InputRequirement, TranslationError};
+use crate::translators::{InputRequirement, OnnxTranslator, TranslationError};
+use hologram::ir::{GraphBuilder, NodeIndex};
 
 /// Translator for ONNX Identity operation.
 ///
@@ -43,11 +43,7 @@ impl OnnxTranslator for IdentityTranslator {
         true
     }
 
-    fn constant_fold(
-        &self,
-        _node: &NodeProto,
-        constant_inputs: &[&[u8]],
-    ) -> Option<Vec<u8>> {
+    fn constant_fold(&self, _node: &NodeProto, constant_inputs: &[&[u8]]) -> Option<Vec<u8>> {
         // Identity just returns the input as-is
         constant_inputs.first().map(|data| data.to_vec())
     }
@@ -190,7 +186,11 @@ mod tests {
         assert!(err.is_err());
         assert!(matches!(
             err.unwrap_err(),
-            TranslationError::WrongInputCount { expected: 1, got: 0, .. }
+            TranslationError::WrongInputCount {
+                expected: 1,
+                got: 0,
+                ..
+            }
         ));
     }
 
@@ -201,7 +201,11 @@ mod tests {
         assert!(err.is_err());
         assert!(matches!(
             err.unwrap_err(),
-            TranslationError::WrongInputCount { expected: 1, got: 2, .. }
+            TranslationError::WrongInputCount {
+                expected: 1,
+                got: 2,
+                ..
+            }
         ));
     }
 

@@ -573,7 +573,10 @@ impl WeightData {
 
             // Seek to offset
             file.seek(SeekFrom::Start(offset)).map_err(|e| {
-                OnnxError::IoError(io::Error::other(format!("Failed to seek in external data: {}", e)))
+                OnnxError::IoError(io::Error::other(format!(
+                    "Failed to seek in external data: {}",
+                    e
+                )))
             })?;
 
             // Determine how many bytes to read
@@ -596,7 +599,10 @@ impl WeightData {
             // Read raw bytes
             let mut raw_data = vec![0u8; bytes_to_read];
             file.read_exact(&mut raw_data).map_err(|e| {
-                OnnxError::IoError(io::Error::other(format!("Failed to read external data: {}", e)))
+                OnnxError::IoError(io::Error::other(format!(
+                    "Failed to read external data: {}",
+                    e
+                )))
             })?;
 
             // Convert based on data type

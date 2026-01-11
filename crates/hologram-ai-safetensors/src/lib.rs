@@ -27,7 +27,7 @@ pub mod error;
 pub mod parser;
 
 pub use config::HfConfig;
-pub use error::{SafeTensorsError, Result};
+pub use error::{Result, SafeTensorsError};
 pub use parser::SafeTensorsParser;
 
 use hologram_ai_common::{TransformerConfig, WeightMap};
@@ -43,7 +43,9 @@ pub struct SafeTensorsCompiler {
 impl SafeTensorsCompiler {
     /// Create a new SafeTensors compiler with default settings.
     pub fn new() -> Self {
-        Self { convert_to_f32: true }
+        Self {
+            convert_to_f32: true,
+        }
     }
 
     /// Compile a SafeTensors model directory to hologram format.

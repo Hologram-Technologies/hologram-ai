@@ -257,7 +257,10 @@ impl DimExpr {
                 // Try to parse simple expressions like "height/8" or "batch*2"
                 if let Some((lhs, op, rhs)) = Self::parse_binary_expr(expr) {
                     let lhs_val = bindings.get(&lhs).ok_or_else(|| {
-                        ConfigError::invalid_value("dimension", format!("unknown variable: {}", lhs))
+                        ConfigError::invalid_value(
+                            "dimension",
+                            format!("unknown variable: {}", lhs),
+                        )
                     })?;
                     let rhs_val: i64 = rhs.parse().map_err(|_| {
                         ConfigError::invalid_value(

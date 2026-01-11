@@ -1,8 +1,8 @@
 //! Shape operation translator.
 
-use hologram::ir::{GraphBuilder, NodeIndex, ConstantData, Shape, Dim};
 use crate::proto::NodeProto;
-use crate::translators::{OnnxTranslator, OnnxAttributes, InputRequirement, TranslationError};
+use crate::translators::{InputRequirement, OnnxAttributes, OnnxTranslator, TranslationError};
+use hologram::ir::{ConstantData, Dim, GraphBuilder, NodeIndex, Shape};
 
 /// Translator for ONNX Shape operation.
 ///
@@ -100,8 +100,8 @@ impl OnnxTranslator for ShapeOpTranslator {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use hologram::ir::{DType, NodeOp};
     use crate::proto::AttributeProto;
+    use hologram::ir::{DType, NodeOp};
 
     fn make_node() -> NodeProto {
         NodeProto {
@@ -270,10 +270,7 @@ mod tests {
         let mut builder = GraphBuilder::new();
 
         // Create input with symbolic batch dimension
-        let shape = Shape::new(vec![
-            Dim::Symbolic("batch".to_string()),
-            Dim::Static(768),
-        ]);
+        let shape = Shape::new(vec![Dim::Symbolic("batch".to_string()), Dim::Static(768)]);
         let input = builder.input("input", shape, DType::F32);
 
         // Extract only the static part [1:2]
@@ -332,7 +329,11 @@ mod tests {
         assert!(err.is_err());
         assert!(matches!(
             err.unwrap_err(),
-            TranslationError::WrongInputCount { expected: 1, got: 0, .. }
+            TranslationError::WrongInputCount {
+                expected: 1,
+                got: 0,
+                ..
+            }
         ));
     }
 

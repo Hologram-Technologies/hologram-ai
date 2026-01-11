@@ -82,7 +82,8 @@ fn test_bert_parsing() {
         }
 
         // Count operation types
-        let mut op_counts: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+        let mut op_counts: std::collections::HashMap<&str, usize> =
+            std::collections::HashMap::new();
         for node in &graph.node {
             *op_counts.entry(&node.op_type).or_insert(0) += 1;
         }
@@ -117,14 +118,19 @@ fn test_bert_compile_to_bundle() {
     let compiler = OnnxCompiler::new();
 
     println!("Compiling BERT to unified bundle (weights embedded)...");
-    let bundle_bytes = compiler.compile_to_bundle(&onnx_bytes)
+    let bundle_bytes = compiler
+        .compile_to_bundle(&onnx_bytes)
         .expect("BERT compilation to bundle failed");
 
     // Save to file
     fs::write(&holo_path, &bundle_bytes).expect("Failed to write .holo bundle");
 
     println!("Saved compiled BERT model:");
-    println!("  .holo bundle: {} ({} MB)", holo_path.display(), bundle_bytes.len() / 1_000_000);
+    println!(
+        "  .holo bundle: {} ({} MB)",
+        holo_path.display(),
+        bundle_bytes.len() / 1_000_000
+    );
 }
 
 /// Test runtime execution of compiled BERT model.
@@ -136,7 +142,10 @@ fn test_bert_runtime_execution() {
 
     // Skip if compiled file doesn't exist (run test_bert_compile_to_bundle first)
     if !holo_path.exists() {
-        eprintln!("Skipping test: Compiled BERT bundle not found at {:?}", holo_path);
+        eprintln!(
+            "Skipping test: Compiled BERT bundle not found at {:?}",
+            holo_path
+        );
         eprintln!("  Run test_bert_compile_to_bundle first to create it.");
         return;
     }
@@ -147,8 +156,8 @@ fn test_bert_runtime_execution() {
         .try_init();
 
     println!("Loading compiled BERT bundle...");
-    let mut executor = ModelExecutor::from_holo_file(&holo_path)
-        .expect("Failed to load BERT model");
+    let mut executor =
+        ModelExecutor::from_holo_file(&holo_path).expect("Failed to load BERT model");
 
     // BERT inputs: input_ids, attention_mask, token_type_ids
     // Model was compiled with batch_size=1, sequence_length=512 (default symbolic resolution)
@@ -191,7 +200,8 @@ fn test_bert_runtime_execution() {
     println!("Number of outputs: {}", outputs.len());
 
     for (name, tensor) in &outputs {
-        println!("  {}: shape={:?}, first 5 values={:?}",
+        println!(
+            "  {}: shape={:?}, first 5 values={:?}",
             name,
             tensor.shape,
             &tensor.data[..tensor.data.len().min(5)]
@@ -208,7 +218,8 @@ fn test_bert_runtime_execution() {
 
         // Check output is not all zeros (sanity check)
         let non_zero_count = output.data.iter().filter(|&&x| x != 0.0).count();
-        println!("Non-zero elements: {} ({:.1}%)",
+        println!(
+            "Non-zero elements: {} ({:.1}%)",
             non_zero_count,
             100.0 * non_zero_count as f64 / output.data.len() as f64
         );

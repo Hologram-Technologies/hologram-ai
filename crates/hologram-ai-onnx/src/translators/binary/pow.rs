@@ -1,8 +1,8 @@
 //! Pow operation translator.
 
-use hologram::ir::{GraphBuilder, NodeIndex, NodeOp};
 use crate::proto::NodeProto;
-use crate::translators::{OnnxTranslator, InputRequirement, TranslationError};
+use crate::translators::{InputRequirement, OnnxTranslator, TranslationError};
+use hologram::ir::{GraphBuilder, NodeIndex, NodeOp};
 
 /// Translator for ONNX Pow operation.
 ///
@@ -35,11 +35,7 @@ impl OnnxTranslator for PowTranslator {
         true
     }
 
-    fn constant_fold(
-        &self,
-        _node: &NodeProto,
-        constant_inputs: &[&[u8]],
-    ) -> Option<Vec<u8>> {
+    fn constant_fold(&self, _node: &NodeProto, constant_inputs: &[&[u8]]) -> Option<Vec<u8>> {
         if constant_inputs.len() != 2 {
             return None;
         }
@@ -91,9 +87,9 @@ mod tests {
 
         let output_bytes = result.unwrap();
         let output: &[f32] = bytemuck::cast_slice(&output_bytes);
-        assert!((output[0] - 4.0).abs() < 1e-6);  // 2^2 = 4
-        assert!((output[1] - 9.0).abs() < 1e-6);  // 3^2 = 9
-        assert!((output[2] - 2.0).abs() < 1e-6);  // 4^0.5 = 2
+        assert!((output[0] - 4.0).abs() < 1e-6); // 2^2 = 4
+        assert!((output[1] - 9.0).abs() < 1e-6); // 3^2 = 9
+        assert!((output[2] - 2.0).abs() < 1e-6); // 4^0.5 = 2
     }
 
     #[test]

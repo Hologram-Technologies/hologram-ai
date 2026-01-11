@@ -33,28 +33,28 @@
 //! 3. Register the translator in `registry.rs`
 //! 4. Add tests for valid/invalid inputs and constant folding
 
-mod traits;
 mod error;
 mod registry;
+mod traits;
 
 // Translator modules by category
 pub mod activation;
-pub mod binary;
-pub mod unary;
-pub mod matmul;
-pub mod constant;
-pub mod reduce;
-pub mod shape;
-pub mod indexing;
-pub mod norm;
-pub mod conv;
-pub mod pool;
-pub mod logical;
 pub mod advanced;
-pub mod resize;
+pub mod binary;
+pub mod constant;
+pub mod conv;
+pub mod indexing;
+pub mod logical;
+pub mod matmul;
+pub mod norm;
 pub mod pad;
+pub mod pool;
+pub mod reduce;
+pub mod resize;
+pub mod shape;
+pub mod unary;
 
 // Re-export core types
-pub use traits::{OnnxTranslator, OnnxAttributes, InputRequirement};
 pub use error::TranslationError;
 pub use registry::TranslatorRegistry;
+pub use traits::{InputRequirement, OnnxAttributes, OnnxTranslator};

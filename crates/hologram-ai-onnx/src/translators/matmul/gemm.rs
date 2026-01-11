@@ -1,8 +1,8 @@
 //! Gemm operation translator.
 
-use hologram::ir::{GraphBuilder, NodeIndex};
 use crate::proto::NodeProto;
-use crate::translators::{OnnxTranslator, OnnxAttributes, InputRequirement, TranslationError};
+use crate::translators::{InputRequirement, OnnxAttributes, OnnxTranslator, TranslationError};
+use hologram::ir::{GraphBuilder, NodeIndex};
 
 /// Translator for ONNX Gemm operation.
 ///
@@ -69,7 +69,7 @@ mod tests {
     use super::*;
     use crate::proto::AttributeProto;
     use crate::proto::attribute_proto::AttributeType;
-    use hologram::ir::{Dim, DType, Shape};
+    use hologram::ir::{DType, Dim, Shape};
 
     fn make_node() -> NodeProto {
         NodeProto {
@@ -188,10 +188,8 @@ mod tests {
         let a = builder.input("a", Shape::static_shape(&[3, 2]), DType::F32);
         let b = builder.input("b", Shape::static_shape(&[4, 3]), DType::F32);
 
-        let node = make_node_with_attrs(vec![
-            make_int_attr("transA", 1),
-            make_int_attr("transB", 1),
-        ]);
+        let node =
+            make_node_with_attrs(vec![make_int_attr("transA", 1), make_int_attr("transB", 1)]);
         let result = translator.translate(&node, &[a, b], &mut builder);
         assert!(result.is_ok());
         let outputs = result.unwrap();
@@ -328,7 +326,12 @@ mod tests {
         assert!(err.is_err());
         assert!(matches!(
             err.unwrap_err(),
-            TranslationError::InputCountOutOfRange { min: 2, max: 3, got: 0, .. }
+            TranslationError::InputCountOutOfRange {
+                min: 2,
+                max: 3,
+                got: 0,
+                ..
+            }
         ));
     }
 
@@ -339,7 +342,12 @@ mod tests {
         assert!(err.is_err());
         assert!(matches!(
             err.unwrap_err(),
-            TranslationError::InputCountOutOfRange { min: 2, max: 3, got: 1, .. }
+            TranslationError::InputCountOutOfRange {
+                min: 2,
+                max: 3,
+                got: 1,
+                ..
+            }
         ));
     }
 
@@ -350,7 +358,12 @@ mod tests {
         assert!(err.is_err());
         assert!(matches!(
             err.unwrap_err(),
-            TranslationError::InputCountOutOfRange { min: 2, max: 3, got: 4, .. }
+            TranslationError::InputCountOutOfRange {
+                min: 2,
+                max: 3,
+                got: 4,
+                ..
+            }
         ));
     }
 

@@ -3,11 +3,11 @@
 //! The registry manages all registered translators and provides
 //! the central dispatch mechanism for translating ONNX nodes.
 
+use super::{OnnxTranslator, TranslationError};
+use crate::proto::NodeProto;
+use hologram::ir::{GraphBuilder, NodeIndex};
 use std::collections::HashMap;
 use std::sync::Arc;
-use hologram::ir::{GraphBuilder, NodeIndex};
-use crate::proto::NodeProto;
-use super::{OnnxTranslator, TranslationError};
 
 /// Registry of ONNX translators.
 ///
@@ -121,9 +121,10 @@ impl TranslatorRegistry {
         inputs: &[NodeIndex],
         builder: &mut GraphBuilder,
     ) -> Result<Vec<NodeIndex>, TranslationError> {
-        let translator = self.translators.get(node.op_type.as_str()).ok_or_else(|| {
-            TranslationError::unsupported_op(&node.op_type, 13)
-        })?;
+        let translator = self
+            .translators
+            .get(node.op_type.as_str())
+            .ok_or_else(|| TranslationError::unsupported_op(&node.op_type, 13))?;
 
         // Validate input count
         translator
@@ -499,7 +500,10 @@ mod tests {
         assert!(layer_norm_alias.is_some());
         // Both point to LayerNormTranslator
         assert_eq!(layer_norm.unwrap().onnx_op_type(), "LayerNormalization");
-        assert_eq!(layer_norm_alias.unwrap().onnx_op_type(), "LayerNormalization");
+        assert_eq!(
+            layer_norm_alias.unwrap().onnx_op_type(),
+            "LayerNormalization"
+        );
     }
 
     #[test]

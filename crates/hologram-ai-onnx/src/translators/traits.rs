@@ -3,9 +3,9 @@
 //! This module defines the traits that all ONNX operation translators must implement.
 //! Each translator is responsible for converting an ONNX node to hologram IR.
 
-use hologram::ir::{GraphBuilder, NodeIndex};
-use crate::proto::{NodeProto, TensorProto};
 use super::error::TranslationError;
+use crate::proto::{NodeProto, TensorProto};
+use hologram::ir::{GraphBuilder, NodeIndex};
 
 /// Trait for translating an ONNX operation to hologram IR.
 ///
@@ -90,11 +90,7 @@ pub trait OnnxTranslator: std::fmt::Debug + Send + Sync {
     /// # Returns
     ///
     /// `Some(bytes)` with the folded constant data, or `None` if folding failed.
-    fn constant_fold(
-        &self,
-        _node: &NodeProto,
-        _constant_inputs: &[&[u8]],
-    ) -> Option<Vec<u8>> {
+    fn constant_fold(&self, _node: &NodeProto, _constant_inputs: &[&[u8]]) -> Option<Vec<u8>> {
         None
     }
 }
@@ -130,11 +126,9 @@ impl InputRequirement {
             InputRequirement::Exact(n) if count != *n => {
                 Err(TranslationError::wrong_input_count(op_type, *n, count))
             }
-            InputRequirement::Range(min, max) if count < *min || count > *max => {
-                Err(TranslationError::input_count_out_of_range(
-                    op_type, *min, *max, count,
-                ))
-            }
+            InputRequirement::Range(min, max) if count < *min || count > *max => Err(
+                TranslationError::input_count_out_of_range(op_type, *min, *max, count),
+            ),
             InputRequirement::AtLeast(min) if count < *min => {
                 Err(TranslationError::not_enough_inputs(op_type, *min, count))
             }
@@ -200,17 +194,11 @@ pub trait OnnxAttributes {
 
 impl OnnxAttributes for NodeProto {
     fn get_int(&self, name: &str) -> Option<i64> {
-        self.attribute
-            .iter()
-            .find(|a| a.name == name)
-            .map(|a| a.i)
+        self.attribute.iter().find(|a| a.name == name).map(|a| a.i)
     }
 
     fn get_float(&self, name: &str) -> Option<f32> {
-        self.attribute
-            .iter()
-            .find(|a| a.name == name)
-            .map(|a| a.f)
+        self.attribute.iter().find(|a| a.name == name).map(|a| a.f)
     }
 
     fn get_string(&self, name: &str) -> Option<&[u8]> {
@@ -302,7 +290,11 @@ mod tests {
         assert!(err.is_err());
         assert!(matches!(
             err.unwrap_err(),
-            TranslationError::WrongInputCount { expected: 2, got: 1, .. }
+            TranslationError::WrongInputCount {
+                expected: 2,
+                got: 1,
+                ..
+            }
         ));
     }
 

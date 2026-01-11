@@ -8,28 +8,28 @@
 //! - Swish (self-gated activation)
 //! - Erf (error function)
 
-mod relu;
-mod sigmoid;
-mod tanh;
-mod gelu;
-mod softmax;
 mod clip;
-mod leaky_relu;
 mod elu;
-mod selu;
-mod prelu;
-mod swish;
 mod erf;
+mod gelu;
+mod leaky_relu;
+mod prelu;
+mod relu;
+mod selu;
+mod sigmoid;
+mod softmax;
+mod swish;
+mod tanh;
 
-pub use relu::ReluTranslator;
-pub use sigmoid::SigmoidTranslator;
-pub use tanh::TanhTranslator;
-pub use gelu::GeluTranslator;
-pub use softmax::SoftmaxTranslator;
 pub use clip::ClipTranslator;
-pub use leaky_relu::LeakyReluTranslator;
 pub use elu::EluTranslator;
-pub use selu::SeluTranslator;
-pub use prelu::PReluTranslator;
-pub use swish::SwishTranslator;
 pub use erf::ErfTranslator;
+pub use gelu::GeluTranslator;
+pub use leaky_relu::LeakyReluTranslator;
+pub use prelu::PReluTranslator;
+pub use relu::ReluTranslator;
+pub use selu::SeluTranslator;
+pub use sigmoid::SigmoidTranslator;
+pub use softmax::SoftmaxTranslator;
+pub use swish::SwishTranslator;
+pub use tanh::TanhTranslator;

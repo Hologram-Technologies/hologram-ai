@@ -259,13 +259,11 @@ pub fn load_holo_auto(
                 load_holo_file(path, None)
             }
         }
-        HoloFormat::Unknown => {
-            Err(anyhow::anyhow!(
-                "Unknown file format: {:?} (magic: {:?})",
-                path.display(),
-                magic
-            ))
-        }
+        HoloFormat::Unknown => Err(anyhow::anyhow!(
+            "Unknown file format: {:?} (magic: {:?})",
+            path.display(),
+            magic
+        )),
     }
 }
 
@@ -322,8 +320,9 @@ fn load_unified_bundle(
     // Create executor with mmap'd weights at the bundle offset
     let mmap_arc = Arc::new(mmap);
     let executor = if let Some(offset) = weights_offset {
-        PlanExecutor::with_mmap_constants_at_offset(plan, &*backend, mmap_arc, offset)
-            .map_err(|e| anyhow::anyhow!("Failed to create executor with bundle weights: {:?}", e))?
+        PlanExecutor::with_mmap_constants_at_offset(plan, &*backend, mmap_arc, offset).map_err(
+            |e| anyhow::anyhow!("Failed to create executor with bundle weights: {:?}", e),
+        )?
     } else {
         // No weights in bundle - just create normal executor
         PlanExecutor::new(plan, &*backend)
@@ -413,8 +412,10 @@ impl PipelineBundle {
         }
 
         // Deserialize the graph
-        let plan = hologram::compiler::read_holo_from_bytes(model_reader.graph_bytes())
-            .map_err(|e| anyhow::anyhow!("Failed to deserialize model '{}' graph: {:?}", name, e))?;
+        let plan =
+            hologram::compiler::read_holo_from_bytes(model_reader.graph_bytes()).map_err(|e| {
+                anyhow::anyhow!("Failed to deserialize model '{}' graph: {:?}", name, e)
+            })?;
 
         // Create backend
         let backend = match hologram::backend::create_backend(plan.backend_type.clone()) {
@@ -480,8 +481,9 @@ impl PipelineBundle {
 /// ```
 pub fn load_pipeline_bundle(path: &Path) -> Result<PipelineBundle> {
     // Memory-map the pipeline file
-    let mmap = MappedInput::open(path)
-        .map_err(|e| anyhow::anyhow!("Failed to mmap pipeline bundle '{}': {}", path.display(), e))?;
+    let mmap = MappedInput::open(path).map_err(|e| {
+        anyhow::anyhow!("Failed to mmap pipeline bundle '{}': {}", path.display(), e)
+    })?;
 
     // Parse the pipeline header and index
     let reader = PipelineBundleReader::from_bytes(mmap.as_slice())
@@ -489,7 +491,9 @@ pub fn load_pipeline_bundle(path: &Path) -> Result<PipelineBundle> {
 
     // Verify checksums
     if !reader.verify_index_checksum() {
-        return Err(anyhow::anyhow!("Pipeline index checksum verification failed"));
+        return Err(anyhow::anyhow!(
+            "Pipeline index checksum verification failed"
+        ));
     }
 
     tracing::info!(
@@ -503,9 +507,9 @@ pub fn load_pipeline_bundle(path: &Path) -> Result<PipelineBundle> {
         .model_names()
         .iter()
         .filter_map(|name| {
-            reader.get_entry(name).map(|entry| {
-                (name.to_string(), entry.offset as usize, entry.size as usize)
-            })
+            reader
+                .get_entry(name)
+                .map(|entry| (name.to_string(), entry.offset as usize, entry.size as usize))
         })
         .collect();
 
@@ -544,6 +548,10 @@ mod tests {
         );
 
         let result = load_and_compile_holo(&encoder_path);
-        assert!(result.is_ok(), "Failed to load T5 encoder: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "Failed to load T5 encoder: {:?}",
+            result.err()
+        );
     }
 }

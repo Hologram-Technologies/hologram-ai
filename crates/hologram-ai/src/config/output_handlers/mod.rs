@@ -6,8 +6,8 @@
 //! - **Lazy loading**: Handlers only created when features enabled
 //! - **O(1) dispatch**: Handler registry uses HashMap lookup
 
-use crate::config::OutputHandlerConfig;
 use super::error::ConfigError;
+use crate::config::OutputHandlerConfig;
 use ahash::AHashMap;
 use std::collections::HashMap;
 use std::path::Path;

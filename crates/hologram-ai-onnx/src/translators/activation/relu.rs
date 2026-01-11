@@ -1,8 +1,8 @@
 //! ReLU activation translator.
 
-use hologram::ir::{GraphBuilder, NodeIndex};
 use crate::proto::NodeProto;
-use crate::translators::{OnnxTranslator, InputRequirement, TranslationError};
+use crate::translators::{InputRequirement, OnnxTranslator, TranslationError};
+use hologram::ir::{GraphBuilder, NodeIndex};
 
 /// Translator for ONNX Relu operation.
 ///
@@ -35,11 +35,7 @@ impl OnnxTranslator for ReluTranslator {
         true
     }
 
-    fn constant_fold(
-        &self,
-        _node: &NodeProto,
-        constant_inputs: &[&[u8]],
-    ) -> Option<Vec<u8>> {
+    fn constant_fold(&self, _node: &NodeProto, constant_inputs: &[&[u8]]) -> Option<Vec<u8>> {
         let input = constant_inputs.first()?;
         let floats: &[f32] = bytemuck::cast_slice(input);
         let result: Vec<f32> = floats.iter().map(|x| x.max(0.0)).collect();
@@ -153,7 +149,11 @@ mod tests {
         assert!(err.is_err());
         assert!(matches!(
             err.unwrap_err(),
-            TranslationError::WrongInputCount { expected: 1, got: 0, .. }
+            TranslationError::WrongInputCount {
+                expected: 1,
+                got: 0,
+                ..
+            }
         ));
     }
 

@@ -68,7 +68,10 @@ pub fn compile_tokenizer_command(
     crate::tokenizers::compile_tokenizer(&config, output_path)
         .with_context(|| format!("Failed to compile tokenizer from {}", vocab_path.display()))?;
 
-    info!("✅ Successfully compiled tokenizer to: {}", output_path.display());
+    info!(
+        "✅ Successfully compiled tokenizer to: {}",
+        output_path.display()
+    );
     info!("   You can now use this .holo file in your pipeline configs");
 
     Ok(())
@@ -93,10 +96,7 @@ pub fn compile_tokenizer_command(
 /// eos_token_id = 1
 /// unk_token_id = 2
 /// ```
-pub fn compile_tokenizer_from_config(
-    config_path: &Path,
-    output_path: Option<&Path>,
-) -> Result<()> {
+pub fn compile_tokenizer_from_config(config_path: &Path, output_path: Option<&Path>) -> Result<()> {
     use crate::config::UnifiedConfig;
 
     info!("Loading tokenizer config from: {}", config_path.display());
@@ -135,7 +135,10 @@ pub fn compile_tokenizer_from_config(
     crate::tokenizers::compile_tokenizer(&abs_config, &output)
         .with_context(|| "Failed to compile tokenizer")?;
 
-    info!("✅ Successfully compiled tokenizer to: {}", output.display());
+    info!(
+        "✅ Successfully compiled tokenizer to: {}",
+        output.display()
+    );
 
     Ok(())
 }

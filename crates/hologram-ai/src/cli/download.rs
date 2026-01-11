@@ -15,7 +15,7 @@
 use anyhow::{Context, Result};
 use indicatif::{ProgressBar, ProgressStyle};
 use reqwest::blocking::Client;
-use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION};
+use reqwest::header::{AUTHORIZATION, HeaderMap, HeaderValue};
 use serde::Deserialize;
 use std::fs::{self, File};
 use std::io::Write;
@@ -120,10 +120,10 @@ pub fn download_command(model_id: &str, output_dir: &Path, revision: Option<&str
     let onnx_files: Vec<&FileInfo> = all_files
         .iter()
         .filter(|f| {
-            f.path.ends_with(".onnx") ||
-            f.path.ends_with(".onnx_data") ||
-            f.path.ends_with(".pb") ||
-            f.path.ends_with(".bin") && f.path.contains("model")
+            f.path.ends_with(".onnx")
+                || f.path.ends_with(".onnx_data")
+                || f.path.ends_with(".pb")
+                || f.path.ends_with(".bin") && f.path.contains("model")
         })
         .collect();
 
@@ -168,7 +168,9 @@ pub fn download_command(model_id: &str, output_dir: &Path, revision: Option<&str
             onnx_files.len(),
             file.path
         );
-        download_file(&client, model_id, revision, &file.path, output_dir, file.size)?;
+        download_file(
+            &client, model_id, revision, &file.path, output_dir, file.size,
+        )?;
     }
 
     info!("✓ Download complete!");
@@ -241,11 +243,7 @@ fn fetch_files_recursive(
             );
         }
 
-        anyhow::bail!(
-            "Failed to fetch model info: HTTP {} - {}",
-            status,
-            body
-        );
+        anyhow::bail!("Failed to fetch model info: HTTP {} - {}", status, body);
     }
 
     let entries: Vec<FileInfo> = response

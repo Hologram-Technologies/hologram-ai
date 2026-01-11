@@ -1,8 +1,8 @@
 //! Cast operation translator.
 
-use hologram::ir::{GraphBuilder, NodeIndex, NodeOp, DType, ConstantData};
 use crate::proto::NodeProto;
-use crate::translators::{OnnxTranslator, OnnxAttributes, InputRequirement, TranslationError};
+use crate::translators::{InputRequirement, OnnxAttributes, OnnxTranslator, TranslationError};
+use hologram::ir::{ConstantData, DType, GraphBuilder, NodeIndex, NodeOp};
 
 /// Translator for ONNX Cast operation.
 ///
@@ -48,7 +48,9 @@ impl OnnxTranslator for CastTranslator {
         let dtype = Self::onnx_type_to_dtype(to_type);
 
         // Check for constant folding opportunity
-        let input_node = builder.graph().node(inputs[0])
+        let input_node = builder
+            .graph()
+            .node(inputs[0])
             .ok_or_else(|| TranslationError::IrBuilder("Cast: input not found".to_string()))?;
 
         if let NodeOp::Constant { data } = &input_node.op {
@@ -95,37 +97,37 @@ impl CastTranslator {
             (ConstantData::I64(values), DType::I64) => Some(ConstantData::I64(values.clone())),
 
             // I32 -> I64
-            (ConstantData::I32(values), DType::I64) => {
-                Some(ConstantData::I64(values.iter().map(|&v| v as i64).collect()))
-            }
+            (ConstantData::I32(values), DType::I64) => Some(ConstantData::I64(
+                values.iter().map(|&v| v as i64).collect(),
+            )),
 
             // I64 -> I32
-            (ConstantData::I64(values), DType::I32) => {
-                Some(ConstantData::I32(values.iter().map(|&v| v as i32).collect()))
-            }
+            (ConstantData::I64(values), DType::I32) => Some(ConstantData::I32(
+                values.iter().map(|&v| v as i32).collect(),
+            )),
 
             // F32 -> F32 (no-op)
             (ConstantData::F32(values), DType::F32) => Some(ConstantData::F32(values.clone())),
 
             // I64 -> F32
-            (ConstantData::I64(values), DType::F32) => {
-                Some(ConstantData::F32(values.iter().map(|&v| v as f32).collect()))
-            }
+            (ConstantData::I64(values), DType::F32) => Some(ConstantData::F32(
+                values.iter().map(|&v| v as f32).collect(),
+            )),
 
             // I32 -> F32
-            (ConstantData::I32(values), DType::F32) => {
-                Some(ConstantData::F32(values.iter().map(|&v| v as f32).collect()))
-            }
+            (ConstantData::I32(values), DType::F32) => Some(ConstantData::F32(
+                values.iter().map(|&v| v as f32).collect(),
+            )),
 
             // F32 -> I64
-            (ConstantData::F32(values), DType::I64) => {
-                Some(ConstantData::I64(values.iter().map(|&v| v as i64).collect()))
-            }
+            (ConstantData::F32(values), DType::I64) => Some(ConstantData::I64(
+                values.iter().map(|&v| v as i64).collect(),
+            )),
 
             // F32 -> I32
-            (ConstantData::F32(values), DType::I32) => {
-                Some(ConstantData::I32(values.iter().map(|&v| v as i32).collect()))
-            }
+            (ConstantData::F32(values), DType::I32) => Some(ConstantData::I32(
+                values.iter().map(|&v| v as i32).collect(),
+            )),
 
             // Unsupported conversions fall through
             _ => None,
@@ -136,8 +138,8 @@ impl CastTranslator {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use hologram::ir::Shape;
     use crate::proto::AttributeProto;
+    use hologram::ir::Shape;
 
     fn make_node_with_to(to_type: i64) -> NodeProto {
         NodeProto {
@@ -190,7 +192,10 @@ mod tests {
     fn test_cast_constant_folding_i64_to_f32() {
         let translator = CastTranslator;
         let mut builder = GraphBuilder::new();
-        let constant = builder.constant(ConstantData::I64(vec![1, 2, 3, 4]), Shape::static_shape(&[4]));
+        let constant = builder.constant(
+            ConstantData::I64(vec![1, 2, 3, 4]),
+            Shape::static_shape(&[4]),
+        );
 
         let node = make_node_with_to(1); // FLOAT
         let result = translator.translate(&node, &[constant], &mut builder);
@@ -214,7 +219,10 @@ mod tests {
     fn test_cast_constant_folding_i32_to_i64() {
         let translator = CastTranslator;
         let mut builder = GraphBuilder::new();
-        let constant = builder.constant(ConstantData::I32(vec![10, 20, 30]), Shape::static_shape(&[3]));
+        let constant = builder.constant(
+            ConstantData::I32(vec![10, 20, 30]),
+            Shape::static_shape(&[3]),
+        );
 
         let node = make_node_with_to(7); // INT64
         let result = translator.translate(&node, &[constant], &mut builder);

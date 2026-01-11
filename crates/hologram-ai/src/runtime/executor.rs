@@ -162,7 +162,6 @@ impl ModelExecutor {
         Ok(handles)
     }
 
-
     /// Allocate output buffers and return both handles and computed shapes.
     ///
     /// This is a convenience wrapper that returns the shapes for use in buffers_to_outputs.
@@ -176,10 +175,16 @@ impl ModelExecutor {
 
         for (idx, &metadata_size_bytes) in requirements.output_sizes.iter().enumerate() {
             // Compute actual output shape and size if shape_expr exists
-            let (actual_size, actual_shape) = if let Some(ref shape_expr) = requirements.output_shape_exprs[idx] {
+            let (actual_size, actual_shape) = if let Some(ref shape_expr) =
+                requirements.output_shape_exprs[idx]
+            {
                 use hologram::DimExpr;
 
-                tracing::debug!("Output {} shape_expr has {} dimensions", idx, shape_expr.len());
+                tracing::debug!(
+                    "Output {} shape_expr has {} dimensions",
+                    idx,
+                    shape_expr.len()
+                );
 
                 // Resolve each dimension expression to a concrete value
                 let resolved_dims: Vec<usize> = shape_expr
@@ -249,7 +254,10 @@ impl ModelExecutor {
 
                 tracing::debug!(
                     "Output {} has dynamic shape: resolved {:?} from shape_expr -> {} bytes (metadata was {} bytes)",
-                    idx, resolved_dims, size_bytes, metadata_size_bytes
+                    idx,
+                    resolved_dims,
+                    size_bytes,
+                    metadata_size_bytes
                 );
 
                 (size_bytes, shape_4d)
@@ -265,10 +273,9 @@ impl ModelExecutor {
                 actual_shape
             );
 
-            let handle = self
-                .backend
-                .allocate_buffer(actual_size)
-                .map_err(|e| anyhow::anyhow!("Failed to allocate output buffer {}: {:?}", idx, e))?;
+            let handle = self.backend.allocate_buffer(actual_size).map_err(|e| {
+                anyhow::anyhow!("Failed to allocate output buffer {}: {:?}", idx, e)
+            })?;
 
             handles.push(handle);
             shapes.push(actual_shape);
@@ -314,12 +321,7 @@ impl ModelExecutor {
                 .rev()
                 .collect();
 
-            tracing::trace!(
-                "Output {}: shape {:?} (from {:?})",
-                idx,
-                shape_vec,
-                shape
-            );
+            tracing::trace!("Output {}: shape {:?} (from {:?})", idx, shape_vec, shape);
 
             let tensor = self.buffer_handle_to_tensor(*handle, shape_vec)?;
 
@@ -379,13 +381,17 @@ impl ModelExecutor {
         // (Must sort alphabetically to match buffer index ordering)
         let mut input_names: Vec<_> = inputs.keys().cloned().collect();
         input_names.sort();
-        let sorted_tensors: Vec<&Tensor> = input_names.iter().map(|name| inputs.get(name).unwrap()).collect();
+        let sorted_tensors: Vec<&Tensor> = input_names
+            .iter()
+            .map(|name| inputs.get(name).unwrap())
+            .collect();
 
         // Map named inputs to positional buffers (alphabetically sorted)
         let input_handles = self.map_inputs_to_buffers(&inputs, &requirements)?;
 
         // Allocate output buffers with runtime shape resolution
-        let (mut output_handles, output_shapes) = self.allocate_output_buffers_with_shapes(&requirements, &sorted_tensors)?;
+        let (mut output_handles, output_shapes) =
+            self.allocate_output_buffers_with_shapes(&requirements, &sorted_tensors)?;
 
         // DEBUG: Check buffer references
         let plan = self.executor.plan();
@@ -408,7 +414,10 @@ impl ModelExecutor {
 
         tracing::info!(
             "Operation breakdown: {} no-input (constants), {} single-input, {} dual-input, {} multi-input",
-            no_input, single_input, dual_input, multi_input
+            no_input,
+            single_input,
+            dual_input,
+            multi_input
         );
         tracing::info!(
             "We're passing {} input buffers, {} output buffers",
@@ -420,8 +429,13 @@ impl ModelExecutor {
         for (name, tensor) in &inputs {
             let data = tensor.to_f32();
             let non_zero = data.iter().filter(|&&x| x != 0.0).count();
-            tracing::info!("Input '{}': {} values, {} non-zero, first 10: {:?}",
-                name, data.len(), non_zero, &data.iter().take(10).copied().collect::<Vec<f32>>());
+            tracing::info!(
+                "Input '{}': {} values, {} non-zero, first 10: {:?}",
+                name,
+                data.len(),
+                non_zero,
+                &data.iter().take(10).copied().collect::<Vec<f32>>()
+            );
         }
 
         // Execute the plan
@@ -432,7 +446,8 @@ impl ModelExecutor {
         tracing::debug!("Model execution completed successfully");
 
         // Convert output buffers to named tensors (using computed shapes)
-        let outputs = self.buffers_to_outputs(output_handles.clone(), output_shapes, &requirements)?;
+        let outputs =
+            self.buffers_to_outputs(output_handles.clone(), output_shapes, &requirements)?;
 
         // Free all buffers
         for handle in input_handles {

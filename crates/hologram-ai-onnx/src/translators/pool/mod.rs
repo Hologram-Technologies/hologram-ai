@@ -6,10 +6,10 @@
 //! - GlobalAveragePool: Global average pooling
 //! - GlobalMaxPool: Global max pooling
 
-mod max_pool;
 mod avg_pool;
 mod global_pool;
+mod max_pool;
 
-pub use max_pool::MaxPoolTranslator;
 pub use avg_pool::AveragePoolTranslator;
 pub use global_pool::{GlobalAveragePoolTranslator, GlobalMaxPoolTranslator};
+pub use max_pool::MaxPoolTranslator;

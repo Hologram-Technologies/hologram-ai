@@ -13,8 +13,8 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use tracing::info;
 
-use super::compile::compile_command;
 use super::bundle::bundle_pipeline_command;
+use super::compile::compile_command;
 
 /// Source type for a model in the pipeline.
 #[derive(Debug, Clone)]
@@ -92,7 +92,10 @@ pub fn compile_pipeline_command(
 
     // Add tokenizer if specified
     if let Some(path) = tokenizer {
-        sources.push(("tokenizer".to_string(), ModelSource::Tokenizer(path.to_path_buf())));
+        sources.push((
+            "tokenizer".to_string(),
+            ModelSource::Tokenizer(path.to_path_buf()),
+        ));
     }
 
     // Parse additional models from --model args
@@ -162,7 +165,13 @@ fn compile_pipeline_from_sources(
 
     // Create temp directory for intermediate files
     let (temp_dir, _temp_guard) = if keep_intermediates {
-        (output.parent().unwrap_or_else(|| Path::new(".")).to_path_buf(), None)
+        (
+            output
+                .parent()
+                .unwrap_or_else(|| Path::new("."))
+                .to_path_buf(),
+            None,
+        )
     } else {
         let dir = tempfile::tempdir().context("Failed to create temp directory")?;
         let path = dir.path().to_path_buf();
@@ -191,11 +200,11 @@ fn compile_pipeline_from_sources(
                     partition_size,
                     memory_budget,
                     weight_threshold,
-                    true,  // decompose_conv2d
-                    true,  // decompose_pooling
-                    true,  // enable_resize_upscaling
+                    true, // decompose_conv2d
+                    true, // decompose_pooling
+                    true, // enable_resize_upscaling
                     &HashMap::new(),
-                    true,  // bundle = true (create HOLB)
+                    true, // bundle = true (create HOLB)
                 )
                 .with_context(|| format!("Failed to compile ONNX model '{}'", name))?;
             }
@@ -348,7 +357,9 @@ mod tests {
         let (name, source) = parse_model_spec("tokenizer=tokenizer:models/tokenizer.json").unwrap();
         assert_eq!(name, "tokenizer");
         match source {
-            ModelSource::Tokenizer(path) => assert_eq!(path, PathBuf::from("models/tokenizer.json")),
+            ModelSource::Tokenizer(path) => {
+                assert_eq!(path, PathBuf::from("models/tokenizer.json"))
+            }
             _ => panic!("Expected Tokenizer source"),
         }
     }
@@ -379,6 +390,11 @@ mod tests {
         );
 
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("No models specified"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("No models specified")
+        );
     }
 }

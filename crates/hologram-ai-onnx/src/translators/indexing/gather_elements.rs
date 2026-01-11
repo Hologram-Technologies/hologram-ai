@@ -1,8 +1,8 @@
 //! GatherElements operation translator.
 
-use hologram::ir::{GraphBuilder, NodeIndex};
 use crate::proto::NodeProto;
-use crate::translators::{OnnxTranslator, InputRequirement, TranslationError};
+use crate::translators::{InputRequirement, OnnxTranslator, TranslationError};
+use hologram::ir::{GraphBuilder, NodeIndex};
 
 /// Translator for ONNX GatherElements operation.
 ///
@@ -79,7 +79,12 @@ mod tests {
         assert!(err.is_err());
 
         // 2 inputs should pass
-        assert!(translator.input_requirement().validate(2, "GatherElements").is_ok());
+        assert!(
+            translator
+                .input_requirement()
+                .validate(2, "GatherElements")
+                .is_ok()
+        );
 
         // 3 inputs should fail
         let err = translator.input_requirement().validate(3, "GatherElements");

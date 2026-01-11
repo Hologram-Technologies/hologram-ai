@@ -1,8 +1,8 @@
 //! ReduceSum operation translator.
 
-use hologram::ir::{GraphBuilder, NodeIndex, NodeOp};
 use crate::proto::NodeProto;
-use crate::translators::{OnnxTranslator, OnnxAttributes, InputRequirement, TranslationError};
+use crate::translators::{InputRequirement, OnnxAttributes, OnnxTranslator, TranslationError};
+use hologram::ir::{GraphBuilder, NodeIndex, NodeOp};
 
 /// Translator for ONNX ReduceSum operation.
 ///
@@ -73,8 +73,8 @@ impl OnnxTranslator for ReduceSumTranslator {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use hologram::ir::{DType, Shape};
     use crate::proto::AttributeProto;
+    use hologram::ir::{DType, Shape};
 
     fn make_node() -> NodeProto {
         NodeProto {
@@ -199,8 +199,7 @@ mod tests {
         let mut builder = GraphBuilder::new();
         let x = builder.input("x", Shape::static_shape(&[2, 3, 4]), DType::F32);
 
-        let result =
-            translator.translate(&make_node_with_axes(vec![0, 1, 2]), &[x], &mut builder);
+        let result = translator.translate(&make_node_with_axes(vec![0, 1, 2]), &[x], &mut builder);
         assert!(result.is_ok());
     }
 

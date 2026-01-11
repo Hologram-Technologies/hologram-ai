@@ -1,8 +1,8 @@
 //! LayerNormalization operation translator.
 
-use hologram::ir::{GraphBuilder, NodeIndex, NodeOp};
 use crate::proto::NodeProto;
-use crate::translators::{OnnxTranslator, OnnxAttributes, InputRequirement, TranslationError};
+use crate::translators::{InputRequirement, OnnxAttributes, OnnxTranslator, TranslationError};
+use hologram::ir::{GraphBuilder, NodeIndex, NodeOp};
 
 /// Translator for ONNX LayerNormalization operation.
 ///
@@ -38,7 +38,9 @@ impl OnnxTranslator for LayerNormTranslator {
         let axis = node.get_int_or("axis", -1) as i32;
 
         // Get input node to determine rank
-        let input_node = builder.graph().node(inputs[0])
+        let input_node = builder
+            .graph()
+            .node(inputs[0])
             .ok_or_else(|| TranslationError::IrBuilder("Invalid input node".to_string()))?;
         let rank = input_node.shape.rank() as i32;
 
@@ -79,8 +81,8 @@ impl OnnxTranslator for LayerNormTranslator {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use hologram::ir::{DType, Shape};
     use crate::proto::AttributeProto;
+    use hologram::ir::{DType, Shape};
 
     fn make_node() -> NodeProto {
         NodeProto {
@@ -172,16 +174,35 @@ mod tests {
         let translator = LayerNormTranslator;
 
         // 0 inputs should fail
-        let err = translator.input_requirement().validate(0, "LayerNormalization");
+        let err = translator
+            .input_requirement()
+            .validate(0, "LayerNormalization");
         assert!(err.is_err());
 
         // 1-3 inputs should pass
-        assert!(translator.input_requirement().validate(1, "LayerNormalization").is_ok());
-        assert!(translator.input_requirement().validate(2, "LayerNormalization").is_ok());
-        assert!(translator.input_requirement().validate(3, "LayerNormalization").is_ok());
+        assert!(
+            translator
+                .input_requirement()
+                .validate(1, "LayerNormalization")
+                .is_ok()
+        );
+        assert!(
+            translator
+                .input_requirement()
+                .validate(2, "LayerNormalization")
+                .is_ok()
+        );
+        assert!(
+            translator
+                .input_requirement()
+                .validate(3, "LayerNormalization")
+                .is_ok()
+        );
 
         // 4 inputs should fail
-        let err = translator.input_requirement().validate(4, "LayerNormalization");
+        let err = translator
+            .input_requirement()
+            .validate(4, "LayerNormalization");
         assert!(err.is_err());
     }
 }

@@ -3,9 +3,9 @@
 //! This module provides compatibility shims for the old IR conversion API.
 //! The actual translation is now handled directly by hologram-ir.
 
-use std::path::Path;
-use hologram::ir::OperationGraph;
 use crate::Result;
+use hologram::ir::OperationGraph;
+use std::path::Path;
 
 /// Default threshold for streaming weights to external file (256KB in elements).
 pub const DEFAULT_WEIGHT_THRESHOLD_ELEMENTS: usize = 64 * 1024;

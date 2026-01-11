@@ -4,8 +4,8 @@
 //! - MatMul: Standard matrix multiplication
 //! - Gemm: General Matrix Multiplication with optional bias
 
-mod matmul_op;
 mod gemm;
+mod matmul_op;
 
-pub use matmul_op::MatMulTranslator;
 pub use gemm::GemmTranslator;
+pub use matmul_op::MatMulTranslator;

@@ -77,9 +77,7 @@ impl OperationGraph {
     ///
     /// Uses hologram-ir's rkyv-based serialization.
     pub fn to_bytes(&self) -> Result<Vec<u8>> {
-        self.ir_func
-            .to_bytes()
-            .map_err(crate::OnnxError::IrError)
+        self.ir_func.to_bytes().map_err(crate::OnnxError::IrError)
     }
 }
 
@@ -182,14 +180,19 @@ pub fn translate_graph_to_ir(graph: &crate::proto::GraphProto) -> Result<IRFunct
         // Determine dtype from ONNX type
         let dtype = extract_dtype_from_value_info(input)?;
 
-        trace!("Adding input '{}': shape={:?}, dtype={:?}", input.name, shape, dtype);
+        trace!(
+            "Adding input '{}': shape={:?}, dtype={:?}",
+            input.name, shape, dtype
+        );
         let node_idx = builder.input(&input.name, shape.into_inner(), dtype);
         value_map.insert(input.name.clone(), node_idx);
 
         // Debug: Log input_ids mapping specifically
         if input.name == "input_ids" {
-            debug!("INPUT_IDS MAPPING: '{}' (ONNX input {}) -> NodeIndex({:?})",
-                input.name, i, node_idx);
+            debug!(
+                "INPUT_IDS MAPPING: '{}' (ONNX input {}) -> NodeIndex({:?})",
+                input.name, i, node_idx
+            );
         }
     }
 
@@ -198,7 +201,10 @@ pub fn translate_graph_to_ir(graph: &crate::proto::GraphProto) -> Result<IRFunct
     for initializer in &graph.initializer {
         if value_map.contains_key(&initializer.name) {
             // Already added as input, skip
-            trace!("Skipping initializer '{}' (already in inputs)", initializer.name);
+            trace!(
+                "Skipping initializer '{}' (already in inputs)",
+                initializer.name
+            );
             continue;
         }
 
@@ -212,7 +218,13 @@ pub fn translate_graph_to_ir(graph: &crate::proto::GraphProto) -> Result<IRFunct
     // Step 3: Translate all nodes in topological order
     debug!("Processing {} graph nodes", graph.node.len());
     for (idx, node) in graph.node.iter().enumerate() {
-        trace!("Translating node {}/{}: {} ({})", idx + 1, graph.node.len(), node.name, node.op_type);
+        trace!(
+            "Translating node {}/{}: {} ({})",
+            idx + 1,
+            graph.node.len(),
+            node.name,
+            node.op_type
+        );
 
         // Debug: Log when input_ids is used
         for input_name in &node.input {
@@ -240,7 +252,10 @@ pub fn translate_graph_to_ir(graph: &crate::proto::GraphProto) -> Result<IRFunct
     debug!("Processing {} graph outputs", graph.output.len());
     for output in &graph.output {
         let output_node = value_map.get(&output.name).ok_or_else(|| {
-            crate::OnnxError::InvalidModel(format!("Graph output '{}' not found in value map", output.name))
+            crate::OnnxError::InvalidModel(format!(
+                "Graph output '{}' not found in value map",
+                output.name
+            ))
         })?;
 
         // Extract declared shape from ONNX ValueInfoProto to preserve symbolic dimensions
@@ -248,16 +263,21 @@ pub fn translate_graph_to_ir(graph: &crate::proto::GraphProto) -> Result<IRFunct
             .ok()
             .map(|s| s.into_inner());
 
-        trace!("Adding output '{}' with declared shape {:?}", output.name, declared_shape);
+        trace!(
+            "Adding output '{}' with declared shape {:?}",
+            output.name, declared_shape
+        );
         builder.output_with_shape(&output.name, *output_node, declared_shape)?;
     }
 
     let ir_func = builder.build();
 
     // Debug: Check if edges were created
-    debug!("Graph translation complete: {} nodes, {} edges",
+    debug!(
+        "Graph translation complete: {} nodes, {} edges",
         ir_func.inner().node_count(),
-        ir_func.inner().edge_count());
+        ir_func.inner().edge_count()
+    );
 
     Ok(ir_func)
 }
@@ -267,7 +287,10 @@ fn extract_dtype_from_value_info(value_info: &crate::proto::ValueInfoProto) -> R
     use crate::proto::type_proto::Value;
 
     let type_proto = value_info.r#type.as_ref().ok_or_else(|| {
-        crate::OnnxError::InvalidModel(format!("Value '{}' has no type information", value_info.name))
+        crate::OnnxError::InvalidModel(format!(
+            "Value '{}' has no type information",
+            value_info.name
+        ))
     })?;
 
     let tensor_type = match &type_proto.value {
@@ -298,22 +321,32 @@ fn onnx_dtype_to_hologram(onnx_type: i32) -> Result<DType> {
         11 => Ok(DType::F64), // DOUBLE
         12 => Ok(DType::U32), // UINT32
         13 => Ok(DType::U64), // UINT64
-        _ => Err(crate::OnnxError::UnsupportedDataType(format!("ONNX type code {}", onnx_type))),
+        _ => Err(crate::OnnxError::UnsupportedDataType(format!(
+            "ONNX type code {}",
+            onnx_type
+        ))),
     }
 }
 
 /// Convert ONNX TensorProto to hologram ConstantData and Shape.
-fn tensor_proto_to_constant(tensor: &crate::proto::TensorProto) -> Result<(hologram::ConstantData, hologram::Shape)> {
+fn tensor_proto_to_constant(
+    tensor: &crate::proto::TensorProto,
+) -> Result<(hologram::ConstantData, hologram::Shape)> {
     use hologram::ir::{ConstantData, Dim, Shape};
 
     // Extract shape
     let shape = Shape::new(
-        tensor.dims.iter().map(|&d| Dim::Static(d as usize)).collect()
+        tensor
+            .dims
+            .iter()
+            .map(|&d| Dim::Static(d as usize))
+            .collect(),
     );
 
     // Extract data based on type
     let data = match tensor.data_type {
-        1 => {  // FLOAT
+        1 => {
+            // FLOAT
             let values = if !tensor.float_data.is_empty() {
                 tensor.float_data.clone()
             } else {
@@ -322,7 +355,8 @@ fn tensor_proto_to_constant(tensor: &crate::proto::TensorProto) -> Result<(holog
             };
             ConstantData::F32(values)
         }
-        6 => {  // INT32
+        6 => {
+            // INT32
             let values = if !tensor.int32_data.is_empty() {
                 tensor.int32_data.clone()
             } else {
@@ -330,7 +364,8 @@ fn tensor_proto_to_constant(tensor: &crate::proto::TensorProto) -> Result<(holog
             };
             ConstantData::I32(values)
         }
-        7 => {  // INT64
+        7 => {
+            // INT64
             let values = if !tensor.int64_data.is_empty() {
                 tensor.int64_data.clone()
             } else {
@@ -338,14 +373,18 @@ fn tensor_proto_to_constant(tensor: &crate::proto::TensorProto) -> Result<(holog
             };
             ConstantData::I64(values)
         }
-        10 => { // FLOAT16
+        10 => {
+            // FLOAT16
             // Parse f16 from raw data and convert to f32
             let f16_values = parse_raw_data_f16(&tensor.raw_data)?;
             let f32_values: Vec<f32> = f16_values.iter().map(|&x| x.to_f32()).collect();
             ConstantData::F32(f32_values)
         }
         _ => {
-            return Err(crate::OnnxError::UnsupportedDataType(format!("ONNX type code {}", tensor.data_type)));
+            return Err(crate::OnnxError::UnsupportedDataType(format!(
+                "ONNX type code {}",
+                tensor.data_type
+            )));
         }
     };
 
@@ -355,10 +394,13 @@ fn tensor_proto_to_constant(tensor: &crate::proto::TensorProto) -> Result<(holog
 /// Parse f32 values from raw bytes.
 fn parse_raw_data_f32(raw: &[u8]) -> Result<Vec<f32>> {
     if !raw.len().is_multiple_of(4) {
-        return Err(crate::OnnxError::InvalidModel("Invalid raw_data length for f32".into()));
+        return Err(crate::OnnxError::InvalidModel(
+            "Invalid raw_data length for f32".into(),
+        ));
     }
 
-    Ok(raw.chunks_exact(4)
+    Ok(raw
+        .chunks_exact(4)
         .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
         .collect())
 }
@@ -366,10 +408,13 @@ fn parse_raw_data_f32(raw: &[u8]) -> Result<Vec<f32>> {
 /// Parse i32 values from raw bytes.
 fn parse_raw_data_i32(raw: &[u8]) -> Result<Vec<i32>> {
     if !raw.len().is_multiple_of(4) {
-        return Err(crate::OnnxError::InvalidModel("Invalid raw_data length for i32".into()));
+        return Err(crate::OnnxError::InvalidModel(
+            "Invalid raw_data length for i32".into(),
+        ));
     }
 
-    Ok(raw.chunks_exact(4)
+    Ok(raw
+        .chunks_exact(4)
         .map(|chunk| i32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
         .collect())
 }
@@ -377,24 +422,31 @@ fn parse_raw_data_i32(raw: &[u8]) -> Result<Vec<i32>> {
 /// Parse i64 values from raw bytes.
 fn parse_raw_data_i64(raw: &[u8]) -> Result<Vec<i64>> {
     if !raw.len().is_multiple_of(8) {
-        return Err(crate::OnnxError::InvalidModel("Invalid raw_data length for i64".into()));
+        return Err(crate::OnnxError::InvalidModel(
+            "Invalid raw_data length for i64".into(),
+        ));
     }
 
-    Ok(raw.chunks_exact(8)
-        .map(|chunk| i64::from_le_bytes([
-            chunk[0], chunk[1], chunk[2], chunk[3],
-            chunk[4], chunk[5], chunk[6], chunk[7],
-        ]))
+    Ok(raw
+        .chunks_exact(8)
+        .map(|chunk| {
+            i64::from_le_bytes([
+                chunk[0], chunk[1], chunk[2], chunk[3], chunk[4], chunk[5], chunk[6], chunk[7],
+            ])
+        })
         .collect())
 }
 
 /// Parse f16 values from raw bytes.
 fn parse_raw_data_f16(raw: &[u8]) -> Result<Vec<half::f16>> {
     if !raw.len().is_multiple_of(2) {
-        return Err(crate::OnnxError::InvalidModel("Invalid raw_data length for f16".into()));
+        return Err(crate::OnnxError::InvalidModel(
+            "Invalid raw_data length for f16".into(),
+        ));
     }
 
-    Ok(raw.chunks_exact(2)
+    Ok(raw
+        .chunks_exact(2)
         .map(|chunk| half::f16::from_le_bytes([chunk[0], chunk[1]]))
         .collect())
 }

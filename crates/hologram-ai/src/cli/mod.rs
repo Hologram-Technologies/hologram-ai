@@ -16,7 +16,10 @@ mod run;
 mod translator;
 mod validate;
 
-use bundle::{bundle_command, bundle_from_config, bundle_pipeline_command, bundle_pipeline_from_config, extract_command, list_pipeline_command};
+use bundle::{
+    bundle_command, bundle_from_config, bundle_pipeline_command, bundle_pipeline_from_config,
+    extract_command, list_pipeline_command,
+};
 use compile::compile_command;
 use compile_pipeline::compile_pipeline_command;
 pub use compile_tokenizer::{compile_tokenizer_command, compile_tokenizer_from_config};
@@ -514,7 +517,11 @@ pub fn run() -> anyhow::Result<()> {
             if let Some(config_path) = config {
                 bundle_from_config(&config_path, &output)
             } else {
-                let names_opt = if names.is_empty() { None } else { Some(names.as_slice()) };
+                let names_opt = if names.is_empty() {
+                    None
+                } else {
+                    Some(names.as_slice())
+                };
                 bundle_command(&inputs, &output, names_opt)
             }
         }
@@ -587,21 +594,19 @@ pub fn run() -> anyhow::Result<()> {
             partition_size,
             memory_budget,
             keep_intermediates,
-        } => {
-            compile_pipeline_command(
-                encoder.as_deref(),
-                decoder.as_deref(),
-                tokenizer.as_deref(),
-                &models,
-                config.as_deref(),
-                &output,
-                weight_threshold,
-                partition,
-                partition_size,
-                memory_budget,
-                keep_intermediates,
-            )
-        }
+        } => compile_pipeline_command(
+            encoder.as_deref(),
+            decoder.as_deref(),
+            tokenizer.as_deref(),
+            &models,
+            config.as_deref(),
+            &output,
+            weight_threshold,
+            partition,
+            partition_size,
+            memory_budget,
+            keep_intermediates,
+        ),
     }
 }
 
@@ -725,13 +730,7 @@ mod tests {
 
     #[test]
     fn test_cli_parse_compile() {
-        let args = vec![
-            "hologram-onnx",
-            "compile",
-            "input.onnx",
-            "-o",
-            "output",
-        ];
+        let args = vec!["hologram-onnx", "compile", "input.onnx", "-o", "output"];
         let cli = Cli::try_parse_from(args).unwrap();
         match cli.command {
             Commands::Compile { input, output, .. } => {
@@ -744,12 +743,7 @@ mod tests {
 
     #[test]
     fn test_cli_parse_compile_with_config() {
-        let args = vec![
-            "hologram-onnx",
-            "compile",
-            "--config",
-            "pipeline.toml",
-        ];
+        let args = vec!["hologram-onnx", "compile", "--config", "pipeline.toml"];
         let cli = Cli::try_parse_from(args).unwrap();
         match cli.command {
             Commands::Compile { config, input, .. } => {
@@ -796,11 +790,7 @@ mod tests {
         ];
         let cli = Cli::try_parse_from(args).unwrap();
         match cli.command {
-            Commands::Run {
-                config,
-                output,
-                ..
-            } => {
+            Commands::Run { config, output, .. } => {
                 assert_eq!(config, Some(PathBuf::from("pipeline.toml")));
                 assert_eq!(output, Some(PathBuf::from("output_dir")));
             }

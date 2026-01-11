@@ -6,17 +6,17 @@
 //! - Min, Max (element-wise comparison)
 
 mod add;
-mod sub;
-mod mul;
 mod div;
-mod pow;
-mod min;
 mod max;
+mod min;
+mod mul;
+mod pow;
+mod sub;
 
 pub use add::AddTranslator;
-pub use sub::SubTranslator;
-pub use mul::MulTranslator;
 pub use div::DivTranslator;
-pub use pow::PowTranslator;
-pub use min::MinTranslator;
 pub use max::MaxTranslator;
+pub use min::MinTranslator;
+pub use mul::MulTranslator;
+pub use pow::PowTranslator;
+pub use sub::SubTranslator;

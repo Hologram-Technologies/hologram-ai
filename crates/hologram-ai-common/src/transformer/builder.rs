@@ -1,12 +1,12 @@
 //! Generic transformer builder.
 
 use crate::error::{CommonError, Result};
-use crate::weights::WeightMap;
 use crate::transformer::attention::AttentionBuilder;
 use crate::transformer::config::TransformerConfig;
 use crate::transformer::ffn::FFNBuilder;
 use crate::transformer::norm::NormBuilder;
-use hologram::ir::{GraphBuilder, NodeIndex, OperationGraph, Shape, Dim, DType, ConstantData};
+use crate::weights::WeightMap;
+use hologram::ir::{ConstantData, DType, Dim, GraphBuilder, NodeIndex, OperationGraph, Shape};
 
 /// Generic transformer builder that constructs IR graphs from configuration.
 ///
@@ -50,11 +50,7 @@ impl GenericTransformerBuilder {
     ///
     /// # Returns
     /// The complete operation graph ready for compilation.
-    pub fn build(
-        &self,
-        config: &TransformerConfig,
-        weights: &WeightMap,
-    ) -> Result<OperationGraph> {
+    pub fn build(&self, config: &TransformerConfig, weights: &WeightMap) -> Result<OperationGraph> {
         // Validate configuration
         config.validate().map_err(CommonError::InvalidConfig)?;
 
@@ -84,8 +80,9 @@ impl GenericTransformerBuilder {
         let logits = self.build_lm_head(&mut builder, normalized, config, weights)?;
 
         // 6. Register output
-        builder.output("logits", logits)
-            .map_err(|e| CommonError::GraphBuildError(format!("Output registration failed: {:?}", e)))?;
+        builder.output("logits", logits).map_err(|e| {
+            CommonError::GraphBuildError(format!("Output registration failed: {:?}", e))
+        })?;
 
         Ok(builder.build())
     }
@@ -112,8 +109,9 @@ impl GenericTransformerBuilder {
 
         // Gather embeddings: [batch, seq] -> [batch, seq, hidden]
         // gather(data, indices, axis) - axis 0 means we're gathering rows from the embedding table
-        let embeddings = builder.gather(embed_const, input_ids, 0)
-            .map_err(|e| CommonError::GraphBuildError(format!("Embedding gather failed: {:?}", e)))?;
+        let embeddings = builder.gather(embed_const, input_ids, 0).map_err(|e| {
+            CommonError::GraphBuildError(format!("Embedding gather failed: {:?}", e))
+        })?;
 
         Ok(embeddings)
     }
@@ -137,20 +135,24 @@ impl GenericTransformerBuilder {
         let attn_output = attn_builder.build_attention(builder, normed, layer_idx, weights)?;
 
         // Residual connection
-        let hidden_after_attn = builder.add(hidden_states, attn_output)
-            .map_err(|e| CommonError::GraphBuildError(format!("Attention residual add failed: {:?}", e)))?;
+        let hidden_after_attn = builder.add(hidden_states, attn_output).map_err(|e| {
+            CommonError::GraphBuildError(format!("Attention residual add failed: {:?}", e))
+        })?;
 
         // Post-attention normalization
-        let post_attn_norm_name = format!("model.layers.{}.post_attention_layernorm.weight", layer_idx);
-        let normed_for_ffn = norm_builder.build_norm(builder, hidden_after_attn, &post_attn_norm_name, weights)?;
+        let post_attn_norm_name =
+            format!("model.layers.{}.post_attention_layernorm.weight", layer_idx);
+        let normed_for_ffn =
+            norm_builder.build_norm(builder, hidden_after_attn, &post_attn_norm_name, weights)?;
 
         // Feed-forward network
         let ffn_builder = FFNBuilder::new(config);
         let ffn_output = ffn_builder.build_ffn(builder, normed_for_ffn, layer_idx, weights)?;
 
         // Residual connection
-        let output = builder.add(hidden_after_attn, ffn_output)
-            .map_err(|e| CommonError::GraphBuildError(format!("FFN residual add failed: {:?}", e)))?;
+        let output = builder.add(hidden_after_attn, ffn_output).map_err(|e| {
+            CommonError::GraphBuildError(format!("FFN residual add failed: {:?}", e))
+        })?;
 
         Ok(output)
     }
@@ -180,11 +182,13 @@ impl GenericTransformerBuilder {
         );
 
         // Transpose for matmul: [vocab, hidden] -> [hidden, vocab]
-        let lm_head_t = builder.transpose(lm_head_const, vec![1, 0])
-            .map_err(|e| CommonError::GraphBuildError(format!("LM head transpose failed: {:?}", e)))?;
+        let lm_head_t = builder.transpose(lm_head_const, vec![1, 0]).map_err(|e| {
+            CommonError::GraphBuildError(format!("LM head transpose failed: {:?}", e))
+        })?;
 
         // Project to vocabulary: [batch, seq, hidden] @ [hidden, vocab] -> [batch, seq, vocab]
-        let logits = builder.matmul(hidden_states, lm_head_t)
+        let logits = builder
+            .matmul(hidden_states, lm_head_t)
             .map_err(|e| CommonError::GraphBuildError(format!("LM head matmul failed: {:?}", e)))?;
 
         Ok(logits)

@@ -114,8 +114,7 @@ mod tests {
         let mut builder = GraphBuilder::new();
         let x = builder.input("x", Shape::static_shape(&[2, 3, 4]), DType::F32);
 
-        let result =
-            translator.translate(&make_node_with_axes(vec![0, 2]), &[x], &mut builder);
+        let result = translator.translate(&make_node_with_axes(vec![0, 2]), &[x], &mut builder);
         assert!(result.is_err());
     }
 

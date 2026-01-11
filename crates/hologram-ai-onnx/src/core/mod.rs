@@ -28,31 +28,34 @@ pub use bundle::{BundleBuilder, BundleHeader, HoloBundle, ModelIndexEntry, is_bu
 // Unified bundle format (HOLB) - single model with embedded weights
 pub use bundle::{UnifiedBundleReader, UnifiedBundleWriter, read_unified_bundle_file};
 // Pipeline bundle format (HOLM) - multi-model with embedded weights
-pub use bundle::{PipelineBundleWriter, PipelineBundleReader};
+pub use bundle::{PipelineBundleReader, PipelineBundleWriter};
 pub use error::{OnnxError, Result};
-pub use ir_to_graph::{ConversionOptions, DEFAULT_WEIGHT_THRESHOLD_ELEMENTS, ir_to_operation_graph_streaming_with_options};
+pub use ir_to_graph::{
+    ConversionOptions, DEFAULT_WEIGHT_THRESHOLD_ELEMENTS,
+    ir_to_operation_graph_streaming_with_options,
+};
 pub use parser::{extract_opset_version, get_tensor_shape, parse_model, validate_model};
 pub use partitioning::{GraphPartition, GraphPartitioner};
 pub use serialization::{
-    HoloHeader, HoloMetadata, PackedWeightEntry, PackedWeightKind, WeightEntry,
-    HOLO_MAGIC, FORMAT_VERSION, HEADER_SIZE, FLAG_EXTERNAL_WEIGHTS,
+    FLAG_EXTERNAL_WEIGHTS, FORMAT_VERSION, HEADER_SIZE, HOLO_MAGIC, HoloHeader, HoloMetadata,
+    PackedWeightEntry, PackedWeightKind, WeightEntry,
 };
 // Unified bundle format header and detection
 pub use serialization::{
-    HoloBundleHeader, HoloFormat,
-    HOLB_MAGIC, HOLP_MAGIC, BUNDLE_VERSION, BUNDLE_HEADER_SIZE,
+    BUNDLE_HEADER_SIZE, BUNDLE_VERSION, HOLB_MAGIC, HOLP_MAGIC, HoloBundleHeader, HoloFormat,
 };
 // Pipeline bundle format (HOLM) - multi-model with embedded weights
 pub use serialization::{
-    HoloPipelineHeader, PipelineModelEntry,
-    HOLM_MAGIC, PIPELINE_VERSION, PIPELINE_HEADER_SIZE,
+    HOLM_MAGIC, HoloPipelineHeader, PIPELINE_HEADER_SIZE, PIPELINE_VERSION, PipelineModelEntry,
 };
 pub use shapes::{Dim, Shape, SymbolicShape};
-pub use translator::{translate_graph_to_ir, lower_to_operation_graph, OperationGraph as TranslatorOperationGraph};
-pub use weights::{WeightData, WeightRef, MmapWeightEntry};
+pub use translator::{
+    OperationGraph as TranslatorOperationGraph, lower_to_operation_graph, translate_graph_to_ir,
+};
+pub use weights::{MmapWeightEntry, WeightData, WeightRef};
 pub use weights_format::{
-    WeightsFileReader, WeightsFileWriter, WeightsHeader, WeightIndexEntry, WeightDType,
-    WEIGHTS_MAGIC, WEIGHTS_VERSION, PAGE_SIZE,
+    PAGE_SIZE, WEIGHTS_MAGIC, WEIGHTS_VERSION, WeightDType, WeightIndexEntry, WeightsFileReader,
+    WeightsFileWriter, WeightsHeader,
 };
 
 // Re-export config for backward compatibility

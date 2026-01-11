@@ -1,9 +1,9 @@
 //! Normalization layer builders.
 
 use crate::error::{CommonError, Result};
-use crate::weights::WeightMap;
 use crate::transformer::config::{NormType, TransformerConfig};
-use hologram::ir::{GraphBuilder, NodeIndex, Shape, Dim, NodeOp, ConstantData};
+use crate::weights::WeightMap;
+use hologram::ir::{ConstantData, Dim, GraphBuilder, NodeIndex, NodeOp, Shape};
 
 /// Builder for normalization layers.
 pub struct NormBuilder<'a> {
@@ -62,7 +62,8 @@ impl<'a> NormBuilder<'a> {
         );
 
         // RMSNorm operation: takes input and scale, normalizes over last axis
-        builder.rms_norm(input, weight_const, eps, vec![-1])
+        builder
+            .rms_norm(input, weight_const, eps, vec![-1])
             .map_err(|e| CommonError::GraphBuildError(format!("RMSNorm failed: {:?}", e)))
     }
 
@@ -91,7 +92,9 @@ impl<'a> NormBuilder<'a> {
         );
 
         // Get input shape and dtype for LayerNorm operation
-        let input_node = builder.graph().node(input)
+        let input_node = builder
+            .graph()
+            .node(input)
             .ok_or_else(|| CommonError::GraphBuildError("Invalid input node".to_string()))?;
         let shape = input_node.shape.clone();
         let dtype = input_node.dtype;
@@ -99,7 +102,10 @@ impl<'a> NormBuilder<'a> {
         // Add LayerNorm operation using direct graph access
         let graph = builder.graph_mut();
         let norm_idx = graph.add_op(
-            NodeOp::LayerNorm { epsilon: eps, axes: vec![-1] },
+            NodeOp::LayerNorm {
+                epsilon: eps,
+                axes: vec![-1],
+            },
             shape,
             dtype,
         );
@@ -112,8 +118,9 @@ impl<'a> NormBuilder<'a> {
                 ConstantData::F32(bias_weight.to_f32_vec()),
                 Shape::new(vec![Dim::Static(hidden_size)]),
             );
-            builder.add(norm_idx, bias_const)
-                .map_err(|e| CommonError::GraphBuildError(format!("LayerNorm bias add failed: {:?}", e)))
+            builder.add(norm_idx, bias_const).map_err(|e| {
+                CommonError::GraphBuildError(format!("LayerNorm bias add failed: {:?}", e))
+            })
         } else {
             Ok(norm_idx)
         }

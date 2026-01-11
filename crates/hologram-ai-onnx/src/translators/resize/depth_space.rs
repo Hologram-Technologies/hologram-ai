@@ -1,8 +1,8 @@
 //! DepthToSpace and SpaceToDepth operation translators.
 
-use hologram::ir::{GraphBuilder, NodeIndex};
 use crate::proto::NodeProto;
-use crate::translators::{OnnxTranslator, InputRequirement, TranslationError};
+use crate::translators::{InputRequirement, OnnxTranslator, TranslationError};
+use hologram::ir::{GraphBuilder, NodeIndex};
 
 /// Translator for ONNX DepthToSpace operation.
 ///
@@ -82,8 +82,8 @@ impl OnnxTranslator for SpaceToDepthTranslator {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use hologram::ir::{DType, Shape};
     use crate::proto::AttributeProto;
+    use hologram::ir::{DType, Shape};
 
     fn make_node(op_type: &str, blocksize: i64) -> NodeProto {
         NodeProto {
@@ -121,7 +121,12 @@ mod tests {
         assert!(err.is_err());
 
         // 1 input should pass
-        assert!(translator.input_requirement().validate(1, "DepthToSpace").is_ok());
+        assert!(
+            translator
+                .input_requirement()
+                .validate(1, "DepthToSpace")
+                .is_ok()
+        );
 
         // 2 inputs should fail
         let err = translator.input_requirement().validate(2, "DepthToSpace");
@@ -151,7 +156,12 @@ mod tests {
         assert!(err.is_err());
 
         // 1 input should pass
-        assert!(translator.input_requirement().validate(1, "SpaceToDepth").is_ok());
+        assert!(
+            translator
+                .input_requirement()
+                .validate(1, "SpaceToDepth")
+                .is_ok()
+        );
 
         // 2 inputs should fail
         let err = translator.input_requirement().validate(2, "SpaceToDepth");

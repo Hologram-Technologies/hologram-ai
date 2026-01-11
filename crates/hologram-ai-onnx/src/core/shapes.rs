@@ -38,8 +38,8 @@
 //! assert!(shape.is_partially_symbolic());
 //! ```
 
-use crate::{OnnxError, Result};
 use crate::proto::ValueInfoProto;
+use crate::{OnnxError, Result};
 
 // Re-export hologram's symbolic shape system
 pub use hologram::ir::{Dim, Shape};
@@ -76,15 +76,17 @@ fn resolve_symbolic_dimension(name: &str, position: usize) -> Dim {
 
     // If no name match, use position-based defaults
     let default = match position {
-        0 => 1,     // First dimension is usually batch
-        1 => 512,   // Second dimension is usually sequence length
-        _ => 512,   // Other dimensions might be hidden_dim
+        0 => 1,   // First dimension is usually batch
+        1 => 512, // Second dimension is usually sequence length
+        _ => 512, // Other dimensions might be hidden_dim
     };
 
     if !name.is_empty() {
         tracing::debug!(
             "Resolved unknown symbolic dimension '{}' at position {} to {} (position-based default)",
-            name, position, default
+            name,
+            position,
+            default
         );
     }
 
@@ -507,9 +509,8 @@ impl SymbolicShape {
                     (Dim::Static(1), d) | (d, Dim::Static(1)) => d.clone(),
                     (Dim::Static(a), Dim::Static(b)) if a == b => Dim::Static(*a),
                     (Dim::Symbolic(v1), Dim::Symbolic(v2)) if v1 == v2 => Dim::Symbolic(v1.clone()),
-                    (d @ Dim::Symbolic(_), Dim::Static(_)) | (Dim::Static(_), d @ Dim::Symbolic(_)) => {
-                        d.clone()
-                    }
+                    (d @ Dim::Symbolic(_), Dim::Static(_))
+                    | (Dim::Static(_), d @ Dim::Symbolic(_)) => d.clone(),
                     _ => {
                         return Err(OnnxError::ShapeInferenceError(format!(
                             "Cannot broadcast batch dimensions: {:?} and {:?}",

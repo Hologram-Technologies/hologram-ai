@@ -1,8 +1,8 @@
 //! ConstantOfShape operation translator.
 
-use hologram::ir::{GraphBuilder, NodeIndex, ConstantData, Shape, DType, NodeOp};
 use crate::proto::NodeProto;
-use crate::translators::{OnnxTranslator, OnnxAttributes, InputRequirement, TranslationError};
+use crate::translators::{InputRequirement, OnnxAttributes, OnnxTranslator, TranslationError};
+use hologram::ir::{ConstantData, DType, GraphBuilder, NodeIndex, NodeOp, Shape};
 
 /// Translator for ONNX ConstantOfShape operation.
 ///
@@ -48,12 +48,8 @@ impl OnnxTranslator for ConstantOfShapeTranslator {
         // Check if shape input is constant - if so, use constant folding (optimization)
         if let NodeOp::Constant { data } = &shape_node.op {
             let shape_dims = match data {
-                ConstantData::I64(values) => {
-                    values.iter().map(|&v| v as usize).collect::<Vec<_>>()
-                }
-                ConstantData::I32(values) => {
-                    values.iter().map(|&v| v as usize).collect::<Vec<_>>()
-                }
+                ConstantData::I64(values) => values.iter().map(|&v| v as usize).collect::<Vec<_>>(),
+                ConstantData::I32(values) => values.iter().map(|&v| v as usize).collect::<Vec<_>>(),
                 _ => {
                     return Err(TranslationError::invalid_attribute(
                         "shape",
@@ -374,18 +370,26 @@ mod tests {
     #[test]
     fn test_constant_of_shape_no_inputs() {
         let translator = ConstantOfShapeTranslator;
-        let err = translator.input_requirement().validate(0, "ConstantOfShape");
+        let err = translator
+            .input_requirement()
+            .validate(0, "ConstantOfShape");
         assert!(err.is_err());
         assert!(matches!(
             err.unwrap_err(),
-            TranslationError::WrongInputCount { expected: 1, got: 0, .. }
+            TranslationError::WrongInputCount {
+                expected: 1,
+                got: 0,
+                ..
+            }
         ));
     }
 
     #[test]
     fn test_constant_of_shape_too_many_inputs() {
         let translator = ConstantOfShapeTranslator;
-        let err = translator.input_requirement().validate(2, "ConstantOfShape");
+        let err = translator
+            .input_requirement()
+            .validate(2, "ConstantOfShape");
         assert!(err.is_err());
     }
 

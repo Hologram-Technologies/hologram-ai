@@ -1,8 +1,8 @@
 //! Flatten operation translator.
 
-use hologram::ir::{GraphBuilder, NodeIndex, NodeOp, ConstantData, Shape, Dim};
 use crate::proto::NodeProto;
-use crate::translators::{OnnxTranslator, OnnxAttributes, InputRequirement, TranslationError};
+use crate::translators::{InputRequirement, OnnxAttributes, OnnxTranslator, TranslationError};
+use hologram::ir::{ConstantData, Dim, GraphBuilder, NodeIndex, NodeOp, Shape};
 
 /// Translator for ONNX Flatten operation.
 ///
@@ -62,7 +62,10 @@ impl OnnxTranslator for FlattenTranslator {
         if axis < 0 || axis > rank {
             return Err(TranslationError::invalid_attribute(
                 "axis",
-                format!("axis {} is out of bounds for rank {} tensor", axis_raw, rank),
+                format!(
+                    "axis {} is out of bounds for rank {} tensor",
+                    axis_raw, rank
+                ),
             ));
         }
 
@@ -91,13 +94,16 @@ impl OnnxTranslator for FlattenTranslator {
             let output_shape = vec![first_dim as i64, second_dim as i64];
             tracing::debug!(
                 "Flatten: axis = {}, input shape = {:?}, output shape = {:?}",
-                axis, input_shape, output_shape
+                axis,
+                input_shape,
+                output_shape
             );
 
             // Handle constant folding
             if let NodeOp::Constant { data: const_data } = &input_node.op {
                 let folded_data = const_data.clone();
-                let result = builder.constant(folded_data, Shape::static_shape(&[first_dim, second_dim]));
+                let result =
+                    builder.constant(folded_data, Shape::static_shape(&[first_dim, second_dim]));
                 return Ok(vec![result]);
             }
 
@@ -110,7 +116,8 @@ impl OnnxTranslator for FlattenTranslator {
             // Dynamic shape - use reshape with dimension inference
             tracing::debug!(
                 "Flatten: dynamic path, axis = {}, input shape = {:?}",
-                axis, input_shape
+                axis,
+                input_shape
             );
 
             // For axis=1 (the common case), we preserve batch dimension and flatten the rest
@@ -136,10 +143,8 @@ impl OnnxTranslator for FlattenTranslator {
 
             // General dynamic case: use reshape with dimension inference
             // The -1 values tell reshape to compute dimensions at runtime
-            let shape_const = builder.constant(
-                ConstantData::I64(vec![-1, -1]),
-                Shape::static_shape(&[2]),
-            );
+            let shape_const =
+                builder.constant(ConstantData::I64(vec![-1, -1]), Shape::static_shape(&[2]));
 
             let result = builder
                 .reshape_dynamic(data, shape_const, false)
@@ -156,8 +161,8 @@ impl OnnxTranslator for FlattenTranslator {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use hologram::ir::DType;
     use crate::proto::AttributeProto;
+    use hologram::ir::DType;
 
     fn make_node() -> NodeProto {
         NodeProto {
@@ -328,7 +333,11 @@ mod tests {
         assert!(err.is_err());
         assert!(matches!(
             err.unwrap_err(),
-            TranslationError::WrongInputCount { expected: 1, got: 0, .. }
+            TranslationError::WrongInputCount {
+                expected: 1,
+                got: 0,
+                ..
+            }
         ));
     }
 

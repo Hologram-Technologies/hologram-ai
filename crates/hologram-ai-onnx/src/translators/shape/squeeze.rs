@@ -1,8 +1,8 @@
 //! Squeeze operation translator.
 
-use hologram::ir::{GraphBuilder, NodeIndex, NodeOp, ConstantData, Shape, Dim};
 use crate::proto::NodeProto;
-use crate::translators::{OnnxTranslator, OnnxAttributes, InputRequirement, TranslationError};
+use crate::translators::{InputRequirement, OnnxAttributes, OnnxTranslator, TranslationError};
+use hologram::ir::{ConstantData, Dim, GraphBuilder, NodeIndex, NodeOp, Shape};
 
 /// Translator for ONNX Squeeze operation.
 ///
@@ -53,14 +53,17 @@ impl OnnxTranslator for SqueezeTranslator {
                 TranslationError::IrBuilder("Squeeze: axes input not found".to_string())
             })?;
 
-            if let NodeOp::Constant { data: constant_data } = &axes_node.op {
+            if let NodeOp::Constant {
+                data: constant_data,
+            } = &axes_node.op
+            {
                 match constant_data {
                     ConstantData::I64(values) => values.iter().map(|&v| v as i32).collect(),
                     ConstantData::I32(values) => values.clone(),
                     _ => {
                         return Err(TranslationError::ShapeInference(
                             "Squeeze: axes must be int32 or int64".to_string(),
-                        ))
+                        ));
                     }
                 }
             } else {
@@ -73,7 +76,9 @@ impl OnnxTranslator for SqueezeTranslator {
             axes_attr.iter().map(|&v| v as i32).collect()
         } else {
             // No axes specified: squeeze all dimensions of size 1
-            input_shape.dims.iter()
+            input_shape
+                .dims
+                .iter()
                 .enumerate()
                 .filter_map(|(i, d)| {
                     if d.static_value() == Some(1) {
@@ -86,7 +91,8 @@ impl OnnxTranslator for SqueezeTranslator {
         };
 
         // Normalize negative axes
-        let normalized_axes: Vec<i32> = axes.iter()
+        let normalized_axes: Vec<i32> = axes
+            .iter()
             .map(|&a| if a < 0 { rank as i32 + a } else { a })
             .collect();
 
@@ -105,13 +111,18 @@ impl OnnxTranslator for SqueezeTranslator {
             {
                 return Err(TranslationError::invalid_attribute(
                     "axes",
-                    format!("cannot squeeze axis {} with size {} (must be 1)", axis, size),
+                    format!(
+                        "cannot squeeze axis {} with size {} (must be 1)",
+                        axis, size
+                    ),
                 ));
             }
         }
 
         // Build output shape by removing squeezed dimensions
-        let output_dims: Vec<Dim> = input_shape.dims.iter()
+        let output_dims: Vec<Dim> = input_shape
+            .dims
+            .iter()
             .enumerate()
             .filter_map(|(i, d)| {
                 if normalized_axes.contains(&(i as i32)) {
@@ -125,7 +136,9 @@ impl OnnxTranslator for SqueezeTranslator {
 
         tracing::debug!(
             "Squeeze: axes = {:?}, input shape = {:?}, output shape = {:?}",
-            normalized_axes, input_shape, output_shape
+            normalized_axes,
+            input_shape,
+            output_shape
         );
 
         // Constant folding: if input is a constant, create squeezed constant
@@ -156,8 +169,8 @@ impl OnnxTranslator for SqueezeTranslator {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use hologram::ir::DType;
     use crate::proto::AttributeProto;
+    use hologram::ir::DType;
 
     fn make_node() -> NodeProto {
         NodeProto {
@@ -258,10 +271,7 @@ mod tests {
         let mut builder = GraphBuilder::new();
 
         let x = builder.input("x", Shape::static_shape(&[1, 3, 1, 4]), DType::F32);
-        let axes = builder.constant(
-            ConstantData::I64(vec![0, 2]),
-            Shape::static_shape(&[2]),
-        );
+        let axes = builder.constant(ConstantData::I64(vec![0, 2]), Shape::static_shape(&[2]));
 
         let result = translator.translate(&make_node(), &[x, axes], &mut builder);
         assert!(result.is_ok());

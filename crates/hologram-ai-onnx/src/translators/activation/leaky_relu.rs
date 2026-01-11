@@ -1,8 +1,8 @@
 //! LeakyReLU activation translator.
 
-use hologram::ir::{GraphBuilder, NodeIndex, NodeOp, ConstantData, Shape};
 use crate::proto::NodeProto;
-use crate::translators::{OnnxTranslator, OnnxAttributes, InputRequirement, TranslationError};
+use crate::translators::{InputRequirement, OnnxAttributes, OnnxTranslator, TranslationError};
+use hologram::ir::{ConstantData, GraphBuilder, NodeIndex, NodeOp, Shape};
 
 /// Translator for ONNX LeakyRelu operation.
 ///
@@ -28,10 +28,8 @@ impl OnnxTranslator for LeakyReluTranslator {
         let alpha = node.get_float_or("alpha", 0.01);
 
         // LeakyReLU(x) = max(x, alpha * x)
-        let alpha_const = builder.constant(
-            ConstantData::F32(vec![alpha]),
-            Shape::static_shape(&[1]),
-        );
+        let alpha_const =
+            builder.constant(ConstantData::F32(vec![alpha]), Shape::static_shape(&[1]));
 
         let scaled = builder
             .mul(inputs[0], alpha_const)
@@ -47,11 +45,7 @@ impl OnnxTranslator for LeakyReluTranslator {
         true
     }
 
-    fn constant_fold(
-        &self,
-        node: &NodeProto,
-        constant_inputs: &[&[u8]],
-    ) -> Option<Vec<u8>> {
+    fn constant_fold(&self, node: &NodeProto, constant_inputs: &[&[u8]]) -> Option<Vec<u8>> {
         let input = constant_inputs.first()?;
         let floats: &[f32] = bytemuck::cast_slice(input);
         let alpha = node.get_float_or("alpha", 0.01);
@@ -66,8 +60,8 @@ impl OnnxTranslator for LeakyReluTranslator {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use hologram::ir::DType;
     use crate::proto::AttributeProto;
+    use hologram::ir::DType;
 
     fn make_node() -> NodeProto {
         NodeProto {
@@ -142,7 +136,7 @@ mod tests {
         let output_bytes = result.unwrap();
         let output: &[f32] = bytemuck::cast_slice(&output_bytes);
         assert!((output[0] - (-1.0)).abs() < 1e-6); // -10 * 0.1 = -1
-        assert!((output[1] - 10.0).abs() < 1e-6);  // positive unchanged
+        assert!((output[1] - 10.0).abs() < 1e-6); // positive unchanged
     }
 
     #[test]

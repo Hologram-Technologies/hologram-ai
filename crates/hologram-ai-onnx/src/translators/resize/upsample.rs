@@ -1,8 +1,8 @@
 //! Upsample operation translator.
 
-use hologram::ir::{GraphBuilder, NodeIndex, ResizeMode, CoordinateTransform};
 use crate::proto::NodeProto;
-use crate::translators::{OnnxTranslator, OnnxAttributes, InputRequirement, TranslationError};
+use crate::translators::{InputRequirement, OnnxAttributes, OnnxTranslator, TranslationError};
+use hologram::ir::{CoordinateTransform, GraphBuilder, NodeIndex, ResizeMode};
 
 /// Translator for ONNX Upsample operation.
 ///
@@ -48,7 +48,7 @@ impl OnnxTranslator for UpsampleTranslator {
             _ => {
                 return Err(TranslationError::invalid_attribute(
                     "mode",
-                    format!("unknown upsample mode: {}", mode_str)
+                    format!("unknown upsample mode: {}", mode_str),
                 ));
             }
         };
@@ -83,8 +83,8 @@ impl OnnxTranslator for UpsampleTranslator {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use hologram::ir::{DType, Shape};
     use crate::proto::AttributeProto;
+    use hologram::ir::{DType, Shape};
 
     fn make_node_with_attrs(mode: &str, scales: Option<Vec<f32>>) -> NodeProto {
         let mut attrs = vec![AttributeProto {
@@ -174,8 +174,18 @@ mod tests {
         assert!(err.is_err());
 
         // 1-2 inputs should pass
-        assert!(translator.input_requirement().validate(1, "Upsample").is_ok());
-        assert!(translator.input_requirement().validate(2, "Upsample").is_ok());
+        assert!(
+            translator
+                .input_requirement()
+                .validate(1, "Upsample")
+                .is_ok()
+        );
+        assert!(
+            translator
+                .input_requirement()
+                .validate(2, "Upsample")
+                .is_ok()
+        );
 
         // 3 inputs should fail
         let err = translator.input_requirement().validate(3, "Upsample");

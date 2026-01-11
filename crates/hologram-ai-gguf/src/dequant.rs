@@ -37,7 +37,11 @@ fn dequant_f32(data: &[u8], n_elements: usize) -> Result<Vec<f32>> {
     if data.len() < n_elements * 4 {
         return Err(GgufError::InvalidMetadata {
             key: "tensor_data".to_string(),
-            message: format!("Expected {} bytes for F32, got {}", n_elements * 4, data.len()),
+            message: format!(
+                "Expected {} bytes for F32, got {}",
+                n_elements * 4,
+                data.len()
+            ),
         });
     }
 
@@ -54,7 +58,11 @@ fn dequant_f16(data: &[u8], n_elements: usize) -> Result<Vec<f32>> {
     if data.len() < n_elements * 2 {
         return Err(GgufError::InvalidMetadata {
             key: "tensor_data".to_string(),
-            message: format!("Expected {} bytes for F16, got {}", n_elements * 2, data.len()),
+            message: format!(
+                "Expected {} bytes for F16, got {}",
+                n_elements * 2,
+                data.len()
+            ),
         });
     }
 
@@ -72,7 +80,11 @@ fn dequant_bf16(data: &[u8], n_elements: usize) -> Result<Vec<f32>> {
     if data.len() < n_elements * 2 {
         return Err(GgufError::InvalidMetadata {
             key: "tensor_data".to_string(),
-            message: format!("Expected {} bytes for BF16, got {}", n_elements * 2, data.len()),
+            message: format!(
+                "Expected {} bytes for BF16, got {}",
+                n_elements * 2,
+                data.len()
+            ),
         });
     }
 
@@ -100,8 +112,11 @@ fn dequant_q8_0(data: &[u8], n_elements: usize) -> Result<Vec<f32>> {
     if data.len() < n_blocks * BYTES_PER_BLOCK {
         return Err(GgufError::InvalidMetadata {
             key: "tensor_data".to_string(),
-            message: format!("Insufficient data for Q8_0: expected {} bytes, got {}",
-                           n_blocks * BYTES_PER_BLOCK, data.len()),
+            message: format!(
+                "Insufficient data for Q8_0: expected {} bytes, got {}",
+                n_blocks * BYTES_PER_BLOCK,
+                data.len()
+            ),
         });
     }
 
@@ -144,8 +159,11 @@ fn dequant_q4_0(data: &[u8], n_elements: usize) -> Result<Vec<f32>> {
     if data.len() < n_blocks * BYTES_PER_BLOCK {
         return Err(GgufError::InvalidMetadata {
             key: "tensor_data".to_string(),
-            message: format!("Insufficient data for Q4_0: expected {} bytes, got {}",
-                           n_blocks * BYTES_PER_BLOCK, data.len()),
+            message: format!(
+                "Insufficient data for Q4_0: expected {} bytes, got {}",
+                n_blocks * BYTES_PER_BLOCK,
+                data.len()
+            ),
         });
     }
 
@@ -162,7 +180,6 @@ fn dequant_q4_0(data: &[u8], n_elements: usize) -> Result<Vec<f32>> {
         // Dequantize values (2 values per byte)
         let quants = &block[2..18];
         for &byte in quants.iter().take(16) {
-
             // Low nibble
             if result.len() < n_elements {
                 let q_low = (byte & 0x0F) as i32 - 8;
@@ -199,8 +216,11 @@ fn dequant_q4_k(data: &[u8], n_elements: usize) -> Result<Vec<f32>> {
     if data.len() < n_blocks * BYTES_PER_BLOCK {
         return Err(GgufError::InvalidMetadata {
             key: "tensor_data".to_string(),
-            message: format!("Insufficient data for Q4_K: expected {} bytes, got {}",
-                           n_blocks * BYTES_PER_BLOCK, data.len()),
+            message: format!(
+                "Insufficient data for Q4_K: expected {} bytes, got {}",
+                n_blocks * BYTES_PER_BLOCK,
+                data.len()
+            ),
         });
     }
 
@@ -279,9 +299,7 @@ mod tests {
     #[test]
     fn test_dequant_f32() {
         let values = vec![1.0f32, 2.0, 3.0, 4.0];
-        let bytes: Vec<u8> = values.iter()
-            .flat_map(|v| v.to_le_bytes())
-            .collect();
+        let bytes: Vec<u8> = values.iter().flat_map(|v| v.to_le_bytes()).collect();
 
         let result = dequant_f32(&bytes, 4).unwrap();
         assert_eq!(result, values);
@@ -293,9 +311,7 @@ mod tests {
             .into_iter()
             .map(half::f16::from_f32)
             .collect();
-        let bytes: Vec<u8> = values.iter()
-            .flat_map(|v| v.to_le_bytes())
-            .collect();
+        let bytes: Vec<u8> = values.iter().flat_map(|v| v.to_le_bytes()).collect();
 
         let result = dequant_f16(&bytes, 3).unwrap();
         assert!((result[0] - 1.0).abs() < 0.01);
@@ -309,9 +325,7 @@ mod tests {
             .into_iter()
             .map(half::bf16::from_f32)
             .collect();
-        let bytes: Vec<u8> = values.iter()
-            .flat_map(|v| v.to_le_bytes())
-            .collect();
+        let bytes: Vec<u8> = values.iter().flat_map(|v| v.to_le_bytes()).collect();
 
         let result = dequant_bf16(&bytes, 3).unwrap();
         assert!((result[0] - 1.0).abs() < 0.01);

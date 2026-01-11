@@ -5,8 +5,8 @@
 //! Full serialization functionality requires implementation when compilation support
 //! is added.
 
-use serde::{Deserialize, Serialize};
 use crate::{OnnxError, Result};
+use serde::{Deserialize, Serialize};
 
 // =============================================================================
 // Constants
@@ -657,7 +657,6 @@ pub struct PackedWeightEntry {
     pub external: bool,
 }
 
-
 // =============================================================================
 // Tests
 // =============================================================================
@@ -875,12 +874,7 @@ mod tests {
     // Pipeline model entry tests
     #[test]
     fn test_pipeline_model_entry_roundtrip() {
-        let entry = PipelineModelEntry::new(
-            "encoder".to_string(),
-            4096,
-            141_000_000,
-            0xCAFEBABE,
-        );
+        let entry = PipelineModelEntry::new("encoder".to_string(), 4096, 141_000_000, 0xCAFEBABE);
 
         let bytes = entry.to_bytes();
         let (parsed, consumed) = PipelineModelEntry::from_bytes(&bytes).unwrap();

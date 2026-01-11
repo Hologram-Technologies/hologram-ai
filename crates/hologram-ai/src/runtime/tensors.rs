@@ -89,11 +89,7 @@ impl Tensor {
     /// Serialize tensor data to bytes.
     pub fn to_bytes(&self) -> Vec<u8> {
         match self.dtype {
-            DType::F32 => self
-                .data
-                .iter()
-                .flat_map(|&f| f.to_le_bytes())
-                .collect(),
+            DType::F32 => self.data.iter().flat_map(|&f| f.to_le_bytes()).collect(),
             DType::I64 => self
                 .data
                 .iter()

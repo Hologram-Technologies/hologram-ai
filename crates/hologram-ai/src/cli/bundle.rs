@@ -8,7 +8,10 @@
 
 use anyhow::{Context, Result};
 #[cfg(feature = "onnx")]
-use hologram_ai_onnx::core::{BundleBuilder, HoloBundle, HoloFormat, PipelineBundleReader, PipelineBundleWriter, UnifiedBundleReader};
+use hologram_ai_onnx::core::{
+    BundleBuilder, HoloBundle, HoloFormat, PipelineBundleReader, PipelineBundleWriter,
+    UnifiedBundleReader,
+};
 use std::fs::File;
 use std::io::Read;
 use std::path::Path;
@@ -154,7 +157,13 @@ pub fn bundle_from_config(config_path: &Path, output: &Path) -> Result<()> {
         info!("  Adding model '{}': {}", name, holo_path.display());
         builder
             .add_model_from_file(name, &holo_path)
-            .with_context(|| format!("Failed to add model '{}' from {}", name, holo_path.display()))?;
+            .with_context(|| {
+                format!(
+                    "Failed to add model '{}' from {}",
+                    name,
+                    holo_path.display()
+                )
+            })?;
     }
 
     let bundle = builder.build().context("Failed to build bundle")?;
@@ -246,10 +255,7 @@ pub fn bundle_pipeline_command(
     inputs: &[(&str, &Path)], // (name, path) pairs
     output: &Path,
 ) -> Result<()> {
-    info!(
-        "Creating pipeline bundle with {} models",
-        inputs.len()
-    );
+    info!("Creating pipeline bundle with {} models", inputs.len());
 
     if inputs.is_empty() {
         anyhow::bail!("No input files specified");
@@ -290,10 +296,7 @@ pub fn bundle_pipeline_command(
             .with_context(|| format!("Invalid HOLB bundle: {}", path.display()))?;
 
         if !reader.verify_checksums() {
-            anyhow::bail!(
-                "Checksum verification failed for: {}",
-                path.display()
-            );
+            anyhow::bail!("Checksum verification failed for: {}", path.display());
         }
 
         info!(
@@ -366,7 +369,10 @@ pub fn bundle_pipeline_from_config(config_path: &Path, output: &Path) -> Result<
                     .map(|s| format!("{}_bundle.holo", s))
                     .unwrap_or_else(|| format!("{}_bundle.holo", precompiled));
 
-                let bundle_path = precompiled_path.parent().unwrap_or(Path::new(".")).join(&bundle_name);
+                let bundle_path = precompiled_path
+                    .parent()
+                    .unwrap_or(Path::new("."))
+                    .join(&bundle_name);
                 if precompiled_path.is_absolute() {
                     bundle_path
                 } else {
@@ -512,8 +518,14 @@ pub fn list_pipeline_command(bundle_path: &Path) -> Result<()> {
             let reader = UnifiedBundleReader::from_bytes(&bytes)
                 .with_context(|| "Failed to parse HOLB bundle")?;
 
-            println!("Graph size: {}", format_size(reader.graph_bytes().len() as u64));
-            println!("Weights size: {}", format_size(reader.weights_bytes().len() as u64));
+            println!(
+                "Graph size: {}",
+                format_size(reader.graph_bytes().len() as u64)
+            );
+            println!(
+                "Weights size: {}",
+                format_size(reader.weights_bytes().len() as u64)
+            );
             let total_size = std::fs::metadata(bundle_path)?.len();
             println!("Total size: {}", format_size(total_size));
         }

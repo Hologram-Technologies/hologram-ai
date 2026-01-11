@@ -1,8 +1,8 @@
 //! PReLU activation translator.
 
-use hologram::ir::{GraphBuilder, NodeIndex, NodeOp, ConstantData, Shape};
 use crate::proto::NodeProto;
-use crate::translators::{OnnxTranslator, InputRequirement, TranslationError};
+use crate::translators::{InputRequirement, OnnxTranslator, TranslationError};
+use hologram::ir::{ConstantData, GraphBuilder, NodeIndex, NodeOp, Shape};
 
 /// Translator for ONNX PRelu operation.
 ///
@@ -29,10 +29,7 @@ impl OnnxTranslator for PReluTranslator {
         builder: &mut GraphBuilder,
     ) -> Result<Vec<NodeIndex>, TranslationError> {
         // PReLU(x, slope) = max(0, x) + slope * min(0, x)
-        let zero = builder.constant(
-            ConstantData::F32(vec![0.0]),
-            Shape::static_shape(&[1]),
-        );
+        let zero = builder.constant(ConstantData::F32(vec![0.0]), Shape::static_shape(&[1]));
 
         let pos_part = builder
             .binary(NodeOp::Max, inputs[0], zero)

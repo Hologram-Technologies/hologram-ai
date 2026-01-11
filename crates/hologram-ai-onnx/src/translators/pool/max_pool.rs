@@ -1,8 +1,8 @@
 //! MaxPool operation translator.
 
-use hologram::ir::{GraphBuilder, NodeIndex, NodeOp, Padding};
 use crate::proto::NodeProto;
-use crate::translators::{OnnxTranslator, OnnxAttributes, InputRequirement, TranslationError};
+use crate::translators::{InputRequirement, OnnxAttributes, OnnxTranslator, TranslationError};
+use hologram::ir::{GraphBuilder, NodeIndex, NodeOp, Padding};
 
 /// Translator for ONNX MaxPool operation.
 ///
@@ -38,12 +38,13 @@ impl OnnxTranslator for MaxPoolTranslator {
         let input = inputs[0];
 
         // Parse kernel_shape
-        let kernel_shape = node.get_ints("kernel_shape")
+        let kernel_shape = node
+            .get_ints("kernel_shape")
             .ok_or_else(|| TranslationError::missing_attribute("MaxPool", "kernel_shape"))?;
         if kernel_shape.len() != 2 {
             return Err(TranslationError::invalid_attribute(
                 "kernel_shape",
-                format!("must be 2D, got {:?}", kernel_shape)
+                format!("must be 2D, got {:?}", kernel_shape),
             ));
         }
         let kernel = (kernel_shape[0] as usize, kernel_shape[1] as usize);
@@ -53,7 +54,7 @@ impl OnnxTranslator for MaxPoolTranslator {
         if strides.len() != 2 {
             return Err(TranslationError::invalid_attribute(
                 "strides",
-                format!("must be 2D, got {:?}", strides)
+                format!("must be 2D, got {:?}", strides),
             ));
         }
         let stride = (strides[0] as usize, strides[1] as usize);
@@ -70,7 +71,14 @@ impl OnnxTranslator for MaxPoolTranslator {
 
         // Create max pool node
         let result = builder
-            .unary(NodeOp::MaxPool2d { kernel, stride, padding }, input)
+            .unary(
+                NodeOp::MaxPool2d {
+                    kernel,
+                    stride,
+                    padding,
+                },
+                input,
+            )
             .map_err(|e| TranslationError::IrBuilder(e.to_string()))?;
 
         Ok(vec![result])
@@ -92,12 +100,17 @@ impl MaxPoolTranslator {
             if top == 0 && left == 0 && bottom == 0 && right == 0 {
                 Ok(Padding::Valid)
             } else {
-                Ok(Padding::Explicit { top, bottom, left, right })
+                Ok(Padding::Explicit {
+                    top,
+                    bottom,
+                    left,
+                    right,
+                })
             }
         } else {
             Err(TranslationError::invalid_attribute(
                 "pads",
-                format!("expected 4 elements, got {}", pads.len())
+                format!("expected 4 elements, got {}", pads.len()),
             ))
         }
     }
@@ -106,10 +119,14 @@ impl MaxPoolTranslator {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use hologram::ir::{DType, Shape};
     use crate::proto::AttributeProto;
+    use hologram::ir::{DType, Shape};
 
-    fn make_node_with_attrs(kernel: Vec<i64>, strides: Option<Vec<i64>>, pads: Option<Vec<i64>>) -> NodeProto {
+    fn make_node_with_attrs(
+        kernel: Vec<i64>,
+        strides: Option<Vec<i64>>,
+        pads: Option<Vec<i64>>,
+    ) -> NodeProto {
         let mut attrs = vec![AttributeProto {
             name: "kernel_shape".to_string(),
             ints: kernel,
@@ -217,7 +234,12 @@ mod tests {
         assert!(err.is_err());
 
         // 1 input should pass
-        assert!(translator.input_requirement().validate(1, "MaxPool").is_ok());
+        assert!(
+            translator
+                .input_requirement()
+                .validate(1, "MaxPool")
+                .is_ok()
+        );
 
         // 2 inputs should fail
         let err = translator.input_requirement().validate(2, "MaxPool");

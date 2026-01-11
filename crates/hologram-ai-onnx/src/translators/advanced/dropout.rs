@@ -1,8 +1,8 @@
 //! Dropout operation translator.
 
-use hologram::ir::{GraphBuilder, NodeIndex};
 use crate::proto::NodeProto;
-use crate::translators::{OnnxTranslator, InputRequirement, TranslationError};
+use crate::translators::{InputRequirement, OnnxTranslator, TranslationError};
+use hologram::ir::{GraphBuilder, NodeIndex};
 
 /// Translator for ONNX Dropout operation.
 ///
@@ -45,8 +45,8 @@ impl OnnxTranslator for DropoutTranslator {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use hologram::ir::{DType, Shape};
     use crate::proto::AttributeProto;
+    use hologram::ir::{DType, Shape};
 
     fn make_node() -> NodeProto {
         NodeProto {
@@ -141,9 +141,24 @@ mod tests {
         assert!(err.is_err());
 
         // 1-3 inputs should pass
-        assert!(translator.input_requirement().validate(1, "Dropout").is_ok());
-        assert!(translator.input_requirement().validate(2, "Dropout").is_ok());
-        assert!(translator.input_requirement().validate(3, "Dropout").is_ok());
+        assert!(
+            translator
+                .input_requirement()
+                .validate(1, "Dropout")
+                .is_ok()
+        );
+        assert!(
+            translator
+                .input_requirement()
+                .validate(2, "Dropout")
+                .is_ok()
+        );
+        assert!(
+            translator
+                .input_requirement()
+                .validate(3, "Dropout")
+                .is_ok()
+        );
 
         // 4 inputs should fail
         let err = translator.input_requirement().validate(4, "Dropout");

@@ -1,8 +1,8 @@
 //! ScatterND operation translator.
 
-use hologram::ir::{GraphBuilder, NodeIndex};
 use crate::proto::NodeProto;
-use crate::translators::{OnnxTranslator, InputRequirement, TranslationError};
+use crate::translators::{InputRequirement, OnnxTranslator, TranslationError};
+use hologram::ir::{GraphBuilder, NodeIndex};
 
 /// Translator for ONNX ScatterND operation.
 ///
@@ -125,6 +125,11 @@ mod tests {
     #[test]
     fn test_scatter_nd_input_validation_correct() {
         let translator = ScatterNDTranslator;
-        assert!(translator.input_requirement().validate(3, "ScatterND").is_ok());
+        assert!(
+            translator
+                .input_requirement()
+                .validate(3, "ScatterND")
+                .is_ok()
+        );
     }
 }

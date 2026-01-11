@@ -7,9 +7,9 @@
 //! - Converts IR to OperationGraph and compiles to parallel schedule
 //! - Serializes to .holo format compatible with hologram runtime
 
+use anyhow::{Context, Result};
 #[cfg(feature = "onnx")]
 use hologram_ai_onnx::core::{OnnxConfig, parse_model};
-use anyhow::{Context, Result};
 use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
@@ -48,7 +48,14 @@ pub fn compile_command(
 ) -> Result<()> {
     info!("Compiling ONNX model: {}", input.display());
     debug!("Output path: {}", output.display());
-    debug!("Output format: {}", if bundle { "unified bundle (HOLB)" } else { "separate files (HOLP + weights)" });
+    debug!(
+        "Output format: {}",
+        if bundle {
+            "unified bundle (HOLB)"
+        } else {
+            "separate files (HOLP + weights)"
+        }
+    );
     debug!("Partitioning: {}", partition);
     debug!("Partition size: {}", partition_size);
     debug!("Weight threshold: {} bytes", weight_threshold);
@@ -73,7 +80,8 @@ pub fn compile_command(
         // Re-serialize the modified model
         use prost::Message;
         onnx_bytes.clear();
-        model.encode(&mut onnx_bytes)
+        model
+            .encode(&mut onnx_bytes)
             .context("Failed to re-encode ONNX model with concrete shapes")?;
 
         info!("Model updated with concrete input shapes");
@@ -105,7 +113,10 @@ pub fn compile_command(
             .compile_to_bundle(&onnx_bytes)
             .context("ONNX compilation to bundle failed")?;
 
-        info!("Compilation successful: {} bytes unified bundle", bundle_bytes.len());
+        info!(
+            "Compilation successful: {} bytes unified bundle",
+            bundle_bytes.len()
+        );
 
         // Write .holo bundle file
         let holo_path = output.with_extension("holo");
@@ -133,8 +144,12 @@ pub fn compile_command(
         // Write .weights file if not empty
         if !weight_bytes.is_empty() {
             let weights_path = output.with_extension("weights");
-            fs::write(&weights_path, &weight_bytes)
-                .with_context(|| format!("Failed to write .weights file to {}", weights_path.display()))?;
+            fs::write(&weights_path, &weight_bytes).with_context(|| {
+                format!(
+                    "Failed to write .weights file to {}",
+                    weights_path.display()
+                )
+            })?;
             info!("Written: {}", weights_path.display());
         } else {
             debug!("No external weights to write");
@@ -171,7 +186,8 @@ fn apply_input_shapes(
                 // Get the tensor type
                 if let Some(ref mut type_proto) = input.r#type
                     && let Some(ref mut value) = type_proto.value
-                    && let hologram_ai_onnx::proto::type_proto::Value::TensorType(tensor_type) = value
+                    && let hologram_ai_onnx::proto::type_proto::Value::TensorType(tensor_type) =
+                        value
                 {
                     // Create or modify the shape
                     let shape = tensor_type.shape.get_or_insert_with(Default::default);

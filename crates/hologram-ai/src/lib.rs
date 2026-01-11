@@ -38,8 +38,8 @@ pub mod tokenizers;
 
 // Re-export common types
 pub use hologram_ai_common::{
-    CommonError, TransformerConfig, WeightMap, WeightTensor, WeightDtype,
-    GenericTransformerBuilder, NormType, Activation, FFNType, RoPEScaling,
+    Activation, CommonError, FFNType, GenericTransformerBuilder, NormType, RoPEScaling,
+    TransformerConfig, WeightDtype, WeightMap, WeightTensor,
 };
 
 // Conditionally re-export format-specific crates
@@ -78,14 +78,16 @@ impl ModelFormat {
             {
                 // Check for config.json and .safetensors files
                 let config_exists = path.join("config.json").exists();
-                let has_safetensors = std::fs::read_dir(path)
-                    .ok()?
-                    .filter_map(|e| e.ok())
-                    .any(|e| {
-                        e.path().extension()
-                            .map(|ext| ext == "safetensors")
-                            .unwrap_or(false)
-                    });
+                let has_safetensors =
+                    std::fs::read_dir(path)
+                        .ok()?
+                        .filter_map(|e| e.ok())
+                        .any(|e| {
+                            e.path()
+                                .extension()
+                                .map(|ext| ext == "safetensors")
+                                .unwrap_or(false)
+                        });
                 if config_exists && has_safetensors {
                     return Some(Self::SafeTensors);
                 }

@@ -7,8 +7,8 @@
 //!
 //! The JSON header maps tensor names to their dtype, shape, and byte offsets.
 
-use crate::error::{SafeTensorsError, Result};
-use hologram_ai_common::{WeightMap, WeightTensor, WeightDtype};
+use crate::error::{Result, SafeTensorsError};
+use hologram_ai_common::{WeightDtype, WeightMap, WeightTensor};
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::fs::{self, File};
@@ -130,17 +130,21 @@ impl SafeTensorsFile {
 
     /// Load a tensor by name.
     pub fn load_tensor(&mut self, name: &str, convert_to_f32: bool) -> Result<WeightTensor> {
-        let metadata = self.header.tensors.get(name)
-            .ok_or_else(|| SafeTensorsError::InvalidTensorData(
-                format!("Tensor not found: {}", name)
-            ))?
+        let metadata = self
+            .header
+            .tensors
+            .get(name)
+            .ok_or_else(|| {
+                SafeTensorsError::InvalidTensorData(format!("Tensor not found: {}", name))
+            })?
             .clone();
 
         let [start, end] = metadata.data_offsets;
         let byte_len = end - start;
 
         // Seek and read
-        self.file.seek(SeekFrom::Start(self.data_offset + start as u64))?;
+        self.file
+            .seek(SeekFrom::Start(self.data_offset + start as u64))?;
         let mut data = vec![0u8; byte_len];
         self.file.read_exact(&mut data)?;
 
@@ -160,11 +164,7 @@ impl SafeTensorsFile {
                     return Ok(WeightTensor::from_f32(f32_data, shape));
                 }
             };
-            Ok(WeightTensor {
-                data,
-                shape,
-                dtype,
-            })
+            Ok(WeightTensor { data, shape, dtype })
         }
     }
 
@@ -213,9 +213,10 @@ impl SafeTensorsFile {
                 }
                 Ok(result)
             }
-            SafeTensorsDtype::Bool => {
-                Ok(data.iter().map(|&b| if b != 0 { 1.0 } else { 0.0 }).collect())
-            }
+            SafeTensorsDtype::Bool => Ok(data
+                .iter()
+                .map(|&b| if b != 0 { 1.0 } else { 0.0 })
+                .collect()),
         }
     }
 }
@@ -290,10 +291,9 @@ impl SafeTensorsParser {
 
     /// Load a specific tensor.
     pub fn load_tensor(&mut self, name: &str, convert_to_f32: bool) -> Result<WeightTensor> {
-        let file_idx = *self.tensor_to_file.get(name)
-            .ok_or_else(|| SafeTensorsError::InvalidTensorData(
-                format!("Tensor not found: {}", name)
-            ))?;
+        let file_idx = *self.tensor_to_file.get(name).ok_or_else(|| {
+            SafeTensorsError::InvalidTensorData(format!("Tensor not found: {}", name))
+        })?;
         self.files[file_idx].load_tensor(name, convert_to_f32)
     }
 

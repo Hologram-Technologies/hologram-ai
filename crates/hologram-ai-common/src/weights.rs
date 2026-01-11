@@ -28,10 +28,7 @@ pub struct WeightTensor {
 impl WeightTensor {
     /// Create a new weight tensor from F32 data.
     pub fn from_f32(data: Vec<f32>, shape: Vec<usize>) -> Self {
-        let bytes: Vec<u8> = data
-            .iter()
-            .flat_map(|f| f.to_le_bytes())
-            .collect();
+        let bytes: Vec<u8> = data.iter().flat_map(|f| f.to_le_bytes()).collect();
         Self {
             data: bytes,
             shape,
@@ -41,10 +38,7 @@ impl WeightTensor {
 
     /// Create a new weight tensor from F16 data.
     pub fn from_f16(data: Vec<half::f16>, shape: Vec<usize>) -> Self {
-        let bytes: Vec<u8> = data
-            .iter()
-            .flat_map(|f| f.to_le_bytes())
-            .collect();
+        let bytes: Vec<u8> = data.iter().flat_map(|f| f.to_le_bytes()).collect();
         Self {
             data: bytes,
             shape,
@@ -74,9 +68,7 @@ impl WeightTensor {
     /// Convert weight to F32 Vec, dequantizing if necessary.
     pub fn to_f32_vec(&self) -> Vec<f32> {
         match self.dtype {
-            WeightDtype::F32 => {
-                self.as_f32_slice().unwrap().to_vec()
-            }
+            WeightDtype::F32 => self.as_f32_slice().unwrap().to_vec(),
             WeightDtype::F16 => {
                 let ptr = self.data.as_ptr() as *const half::f16;
                 let len = self.data.len() / 2;
@@ -232,7 +224,10 @@ mod tests {
     fn test_weight_map_iteration() {
         let mut map = WeightMap::new();
         map.insert("a".to_string(), WeightTensor::from_f32(vec![1.0], vec![1]));
-        map.insert("b".to_string(), WeightTensor::from_f32(vec![2.0, 3.0], vec![2]));
+        map.insert(
+            "b".to_string(),
+            WeightTensor::from_f32(vec![2.0, 3.0], vec![2]),
+        );
 
         let names: Vec<_> = map.names().collect();
         assert_eq!(names.len(), 2);

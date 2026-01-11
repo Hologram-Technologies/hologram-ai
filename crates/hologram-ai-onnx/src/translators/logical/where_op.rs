@@ -1,8 +1,8 @@
 //! Where operation translator.
 
-use hologram::ir::{GraphBuilder, NodeIndex};
 use crate::proto::NodeProto;
-use crate::translators::{OnnxTranslator, InputRequirement, TranslationError};
+use crate::translators::{InputRequirement, OnnxTranslator, TranslationError};
+use hologram::ir::{GraphBuilder, NodeIndex};
 
 /// Translator for ONNX Where operation.
 ///
@@ -75,7 +75,11 @@ mod tests {
     fn test_where_large_shape() {
         let translator = WhereTranslator;
         let mut builder = GraphBuilder::new();
-        let condition = builder.input("condition", Shape::static_shape(&[1, 128, 64, 64]), DType::Bool);
+        let condition = builder.input(
+            "condition",
+            Shape::static_shape(&[1, 128, 64, 64]),
+            DType::Bool,
+        );
         let x = builder.input("x", Shape::static_shape(&[1, 128, 64, 64]), DType::F32);
         let y = builder.input("y", Shape::static_shape(&[1, 128, 64, 64]), DType::F32);
 

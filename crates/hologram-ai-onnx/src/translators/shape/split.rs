@@ -1,8 +1,8 @@
 //! Split operation translator.
 
-use hologram::ir::{GraphBuilder, NodeIndex, NodeOp, ConstantData, Dim};
 use crate::proto::NodeProto;
-use crate::translators::{OnnxTranslator, OnnxAttributes, InputRequirement, TranslationError};
+use crate::translators::{InputRequirement, OnnxAttributes, OnnxTranslator, TranslationError};
+use hologram::ir::{ConstantData, Dim, GraphBuilder, NodeIndex, NodeOp};
 
 /// Translator for ONNX Split operation.
 ///
@@ -89,7 +89,7 @@ impl OnnxTranslator for SplitTranslator {
                     _ => {
                         return Err(TranslationError::ShapeInference(
                             "Split: split sizes must be int32 or int64".to_string(),
-                        ))
+                        ));
                     }
                 }
             } else {
@@ -130,7 +130,9 @@ impl OnnxTranslator for SplitTranslator {
 
         tracing::debug!(
             "Split: axis = {}, axis_size = {}, split_sizes = {:?}",
-            axis, axis_size, split_sizes
+            axis,
+            axis_size,
+            split_sizes
         );
 
         // Create output shapes
@@ -141,12 +143,16 @@ impl OnnxTranslator for SplitTranslator {
             // Use Slice to extract this portion
             // starts: [0, ..., start, ..., 0]
             // ends: [dim0, ..., start+size, ..., dimN]
-            let starts: Vec<i64> = input_shape.dims.iter()
+            let starts: Vec<i64> = input_shape
+                .dims
+                .iter()
                 .enumerate()
                 .map(|(i, _)| if i == axis_usize { start as i64 } else { 0 })
                 .collect();
 
-            let ends: Vec<i64> = input_shape.dims.iter()
+            let ends: Vec<i64> = input_shape
+                .dims
+                .iter()
                 .enumerate()
                 .map(|(i, d)| {
                     if i == axis_usize {
@@ -179,8 +185,8 @@ impl OnnxTranslator for SplitTranslator {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use hologram::ir::{DType, Shape};
     use crate::proto::AttributeProto;
+    use hologram::ir::{DType, Shape};
 
     fn make_node() -> NodeProto {
         NodeProto {
@@ -252,7 +258,8 @@ mod tests {
 
         let x = builder.input("x", Shape::static_shape(&[6, 4]), DType::F32);
 
-        let result = translator.translate(&make_node_with_split(0, vec![2, 2, 2]), &[x], &mut builder);
+        let result =
+            translator.translate(&make_node_with_split(0, vec![2, 2, 2]), &[x], &mut builder);
         assert!(result.is_ok());
         let outputs = result.unwrap();
         assert_eq!(outputs.len(), 3);
@@ -265,7 +272,8 @@ mod tests {
 
         let x = builder.input("x", Shape::static_shape(&[6, 4]), DType::F32);
 
-        let result = translator.translate(&make_node_with_split(0, vec![1, 2, 3]), &[x], &mut builder);
+        let result =
+            translator.translate(&make_node_with_split(0, vec![1, 2, 3]), &[x], &mut builder);
         assert!(result.is_ok());
         let outputs = result.unwrap();
         assert_eq!(outputs.len(), 3);
@@ -292,7 +300,8 @@ mod tests {
         let x = builder.input("x", Shape::static_shape(&[2, 4]), DType::F32);
 
         // axis=-1 is equivalent to axis=1
-        let result = translator.translate(&make_node_with_split(-1, vec![2, 2]), &[x], &mut builder);
+        let result =
+            translator.translate(&make_node_with_split(-1, vec![2, 2]), &[x], &mut builder);
         assert!(result.is_ok());
         let outputs = result.unwrap();
         assert_eq!(outputs.len(), 2);
@@ -317,10 +326,7 @@ mod tests {
         let mut builder = GraphBuilder::new();
 
         let x = builder.input("x", Shape::static_shape(&[6, 4]), DType::F32);
-        let split = builder.constant(
-            ConstantData::I64(vec![2, 4]),
-            Shape::static_shape(&[2]),
-        );
+        let split = builder.constant(ConstantData::I64(vec![2, 4]), Shape::static_shape(&[2]));
 
         let result = translator.translate(&make_node_with_axis(0), &[x, split], &mut builder);
         assert!(result.is_ok());
@@ -349,7 +355,8 @@ mod tests {
 
         let x = builder.input("x", Shape::static_shape(&[2, 6, 4]), DType::F32);
 
-        let result = translator.translate(&make_node_with_split(1, vec![2, 2, 2]), &[x], &mut builder);
+        let result =
+            translator.translate(&make_node_with_split(1, vec![2, 2, 2]), &[x], &mut builder);
         assert!(result.is_ok());
         let outputs = result.unwrap();
         assert_eq!(outputs.len(), 3);

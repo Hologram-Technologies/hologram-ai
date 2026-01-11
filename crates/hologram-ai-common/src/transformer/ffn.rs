@@ -1,9 +1,9 @@
 //! Feed-forward network (FFN) block builder.
 
 use crate::error::{CommonError, Result};
-use crate::weights::WeightMap;
 use crate::transformer::config::{Activation, FFNType, TransformerConfig};
-use hologram::ir::{GraphBuilder, NodeIndex, ConstantData};
+use crate::weights::WeightMap;
+use hologram::ir::{ConstantData, GraphBuilder, NodeIndex};
 
 /// Builder for FFN blocks.
 pub struct FFNBuilder<'a> {
@@ -35,7 +35,9 @@ impl<'a> FFNBuilder<'a> {
     ) -> Result<NodeIndex> {
         match self.config.ffn_type {
             FFNType::Gated => self.build_gated_ffn(builder, hidden_states, layer_idx, weights),
-            FFNType::Standard => self.build_standard_ffn(builder, hidden_states, layer_idx, weights),
+            FFNType::Standard => {
+                self.build_standard_ffn(builder, hidden_states, layer_idx, weights)
+            }
         }
     }
 
@@ -84,23 +86,27 @@ impl<'a> FFNBuilder<'a> {
         );
 
         // gate = hidden @ gate_proj.T
-        let gate = builder.matmul(hidden_states, gate_proj)
-            .map_err(|e| CommonError::GraphBuildError(format!("Gate projection failed: {:?}", e)))?;
+        let gate = builder.matmul(hidden_states, gate_proj).map_err(|e| {
+            CommonError::GraphBuildError(format!("Gate projection failed: {:?}", e))
+        })?;
 
         // Apply activation to gate
         let gate_activated = self.apply_activation(builder, gate)?;
 
         // up = hidden @ up_proj.T
-        let up = builder.matmul(hidden_states, up_proj)
+        let up = builder
+            .matmul(hidden_states, up_proj)
             .map_err(|e| CommonError::GraphBuildError(format!("Up projection failed: {:?}", e)))?;
 
         // gate_activated * up
-        let gated = builder.mul(gate_activated, up)
+        let gated = builder
+            .mul(gate_activated, up)
             .map_err(|e| CommonError::GraphBuildError(format!("Gated multiply failed: {:?}", e)))?;
 
         // output = gated @ down_proj.T
-        let output = builder.matmul(gated, down_proj)
-            .map_err(|e| CommonError::GraphBuildError(format!("Down projection failed: {:?}", e)))?;
+        let output = builder.matmul(gated, down_proj).map_err(|e| {
+            CommonError::GraphBuildError(format!("Down projection failed: {:?}", e))
+        })?;
 
         Ok(output)
     }
@@ -141,15 +147,17 @@ impl<'a> FFNBuilder<'a> {
         );
 
         // up = hidden @ up_proj.T
-        let up = builder.matmul(hidden_states, up_proj)
+        let up = builder
+            .matmul(hidden_states, up_proj)
             .map_err(|e| CommonError::GraphBuildError(format!("Up projection failed: {:?}", e)))?;
 
         // Apply activation
         let up_activated = self.apply_activation(builder, up)?;
 
         // output = up_activated @ down_proj.T
-        let output = builder.matmul(up_activated, down_proj)
-            .map_err(|e| CommonError::GraphBuildError(format!("Down projection failed: {:?}", e)))?;
+        let output = builder.matmul(up_activated, down_proj).map_err(|e| {
+            CommonError::GraphBuildError(format!("Down projection failed: {:?}", e))
+        })?;
 
         Ok(output)
     }
@@ -159,19 +167,19 @@ impl<'a> FFNBuilder<'a> {
         match self.config.hidden_act {
             Activation::SiLU => {
                 // SiLU(x) = x * sigmoid(x)
-                let sigmoid = builder.sigmoid(input)
-                    .map_err(|e| CommonError::GraphBuildError(format!("Sigmoid failed: {:?}", e)))?;
-                builder.mul(input, sigmoid)
-                    .map_err(|e| CommonError::GraphBuildError(format!("SiLU multiply failed: {:?}", e)))
+                let sigmoid = builder.sigmoid(input).map_err(|e| {
+                    CommonError::GraphBuildError(format!("Sigmoid failed: {:?}", e))
+                })?;
+                builder.mul(input, sigmoid).map_err(|e| {
+                    CommonError::GraphBuildError(format!("SiLU multiply failed: {:?}", e))
+                })
             }
-            Activation::GELU | Activation::GELUTanh => {
-                builder.gelu(input)
-                    .map_err(|e| CommonError::GraphBuildError(format!("GELU failed: {:?}", e)))
-            }
-            Activation::ReLU => {
-                builder.relu(input)
-                    .map_err(|e| CommonError::GraphBuildError(format!("ReLU failed: {:?}", e)))
-            }
+            Activation::GELU | Activation::GELUTanh => builder
+                .gelu(input)
+                .map_err(|e| CommonError::GraphBuildError(format!("GELU failed: {:?}", e))),
+            Activation::ReLU => builder
+                .relu(input)
+                .map_err(|e| CommonError::GraphBuildError(format!("ReLU failed: {:?}", e))),
         }
     }
 }

@@ -129,8 +129,8 @@ impl SentencePieceTokenizer {
         let content = std::fs::read_to_string(path)
             .with_context(|| format!("Failed to read tokenizer file: {}", path.display()))?;
 
-        let json: serde_json::Value = serde_json::from_str(&content)
-            .with_context(|| "Failed to parse tokenizer.json")?;
+        let json: serde_json::Value =
+            serde_json::from_str(&content).with_context(|| "Failed to parse tokenizer.json")?;
 
         // Extract scores from model.vocab array
         let mut token_scores = HashMap::new();
@@ -142,8 +142,7 @@ impl SentencePieceTokenizer {
             for entry in vocab_array {
                 if let Some(pair) = entry.as_array()
                     && pair.len() >= 2
-                    && let (Some(token), Some(score)) =
-                        (pair[0].as_str(), pair[1].as_f64())
+                    && let (Some(token), Some(score)) = (pair[0].as_str(), pair[1].as_f64())
                 {
                     token_scores.insert(token.to_string(), score as f32);
                 }
@@ -237,7 +236,8 @@ impl SentencePieceTokenizer {
                 // Try each matching token
                 for (_token_len, token_id) in matches {
                     if let Some(token_str) = self.id_to_token.get(&token_id) {
-                        let token_score = self.token_scores.get(token_str).copied().unwrap_or(-10.0);
+                        let token_score =
+                            self.token_scores.get(token_str).copied().unwrap_or(-10.0);
                         let token_char_len = token_str.chars().count();
                         let next_pos = i + token_char_len;
 
@@ -374,8 +374,7 @@ mod tests {
     #[ignore = "Requires external tokenizer.json fixture"]
     fn test_sentencepiece_encode_decode() {
         let tokenizer =
-            SentencePieceTokenizer::from_file(Path::new("models/t5-small/tokenizer.json"))
-                .unwrap();
+            SentencePieceTokenizer::from_file(Path::new("models/t5-small/tokenizer.json")).unwrap();
 
         let text = "Hello world";
         let tokens = tokenizer.encode(text, 20).unwrap();
@@ -393,8 +392,7 @@ mod tests {
     #[ignore = "Requires external tokenizer.json fixture"]
     fn test_sentencepiece_unigram() {
         let tokenizer =
-            SentencePieceTokenizer::from_file(Path::new("models/t5-small/tokenizer.json"))
-                .unwrap();
+            SentencePieceTokenizer::from_file(Path::new("models/t5-small/tokenizer.json")).unwrap();
 
         let text = "Tell me a joke about programming";
         let tokens = tokenizer.tokenize_unigram(text);
@@ -405,7 +403,10 @@ mod tests {
 
         // Should produce reasonable number of tokens (not all unknown)
         assert!(!tokens.is_empty());
-        let unk_count = tokens.iter().filter(|&&t| t == tokenizer.unk_token_id).count();
+        let unk_count = tokens
+            .iter()
+            .filter(|&&t| t == tokenizer.unk_token_id)
+            .count();
         let unk_ratio = unk_count as f32 / tokens.len() as f32;
 
         // Less than 50% unknown tokens indicates working tokenization
@@ -421,8 +422,7 @@ mod tests {
     #[ignore = "Requires external tokenizer.json fixture"]
     fn test_vocab_loading() {
         let tokenizer =
-            SentencePieceTokenizer::from_file(Path::new("models/t5-small/tokenizer.json"))
-                .unwrap();
+            SentencePieceTokenizer::from_file(Path::new("models/t5-small/tokenizer.json")).unwrap();
 
         // Check special tokens
         assert_eq!(tokenizer.pad_token_id, 0);

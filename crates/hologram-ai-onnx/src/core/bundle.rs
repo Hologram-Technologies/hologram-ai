@@ -107,9 +107,7 @@ impl BundleHeader {
     /// Read header from bytes.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
         if bytes.len() < HEADER_SIZE {
-            return Err(OnnxError::InvalidModel(
-                "Header too small".to_string(),
-            ));
+            return Err(OnnxError::InvalidModel("Header too small".to_string()));
         }
 
         // Check magic
@@ -123,8 +121,7 @@ impl BundleHeader {
         let flags = u32::from_le_bytes([bytes[8], bytes[9], bytes[10], bytes[11]]);
         let model_count = u32::from_le_bytes([bytes[12], bytes[13], bytes[14], bytes[15]]);
         let index_offset = u64::from_le_bytes([
-            bytes[16], bytes[17], bytes[18], bytes[19],
-            bytes[20], bytes[21], bytes[22], bytes[23],
+            bytes[16], bytes[17], bytes[18], bytes[19], bytes[20], bytes[21], bytes[22], bytes[23],
         ]);
 
         Ok(Self {
@@ -250,10 +247,13 @@ impl BundleBuilder {
     }
 
     /// Add a model from a file.
-    pub fn add_model_from_file(&mut self, name: impl Into<String>, path: impl AsRef<Path>) -> Result<&mut Self> {
-        let data = fs::read(path.as_ref()).map_err(|e| {
-            io_error(format!("Failed to read model file: {}", e))
-        })?;
+    pub fn add_model_from_file(
+        &mut self,
+        name: impl Into<String>,
+        path: impl AsRef<Path>,
+    ) -> Result<&mut Self> {
+        let data = fs::read(path.as_ref())
+            .map_err(|e| io_error(format!("Failed to read model file: {}", e)))?;
         self.models.push((name.into(), data));
         Ok(self)
     }
@@ -322,9 +322,8 @@ impl HoloBundle {
     /// Read a bundle from a file.
     pub fn from_file(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref();
-        let file = File::open(path).map_err(|e| {
-            io_error(format!("Failed to open bundle file: {}", e))
-        })?;
+        let file =
+            File::open(path).map_err(|e| io_error(format!("Failed to open bundle file: {}", e)))?;
         let mut reader = BufReader::new(file);
         Self::from_reader(&mut reader)
     }
@@ -339,9 +338,9 @@ impl HoloBundle {
     pub fn from_reader<R: Read + Seek>(reader: &mut R) -> Result<Self> {
         // Read header
         let mut header_bytes = [0u8; HEADER_SIZE];
-        reader.read_exact(&mut header_bytes).map_err(|e| {
-            io_error(format!("Failed to read header: {}", e))
-        })?;
+        reader
+            .read_exact(&mut header_bytes)
+            .map_err(|e| io_error(format!("Failed to read header: {}", e)))?;
         let header = BundleHeader::from_bytes(&header_bytes)?;
 
         // Check if this is a v1 single model file
@@ -357,30 +356,29 @@ impl HoloBundle {
         }
 
         // Seek to index
-        reader.seek(SeekFrom::Start(header.index_offset)).map_err(|e| {
-            io_error(format!("Failed to seek to index: {}", e))
-        })?;
+        reader
+            .seek(SeekFrom::Start(header.index_offset))
+            .map_err(|e| io_error(format!("Failed to seek to index: {}", e)))?;
 
         // Read index entries
         let mut entries = Vec::with_capacity(header.model_count as usize);
         for _ in 0..header.model_count {
-            let entry = ModelIndexEntry::read_from(reader).map_err(|e| {
-                io_error(format!("Failed to read index entry: {}", e))
-            })?;
+            let entry = ModelIndexEntry::read_from(reader)
+                .map_err(|e| io_error(format!("Failed to read index entry: {}", e)))?;
             entries.push(entry);
         }
 
         // Read model data
         let mut model_data = Vec::with_capacity(entries.len());
         for entry in &entries {
-            reader.seek(SeekFrom::Start(entry.data_offset)).map_err(|e| {
-                io_error(format!("Failed to seek to model data: {}", e))
-            })?;
+            reader
+                .seek(SeekFrom::Start(entry.data_offset))
+                .map_err(|e| io_error(format!("Failed to seek to model data: {}", e)))?;
 
             let mut data = vec![0u8; entry.data_size as usize];
-            reader.read_exact(&mut data).map_err(|e| {
-                io_error(format!("Failed to read model data: {}", e))
-            })?;
+            reader
+                .read_exact(&mut data)
+                .map_err(|e| io_error(format!("Failed to read model data: {}", e)))?;
 
             // Verify checksum
             let actual_checksum = crc32_checksum(&data);
@@ -404,20 +402,23 @@ impl HoloBundle {
     /// Read a v1 single-model file as a bundle with one model.
     fn read_v1_as_bundle<R: Read + Seek>(reader: &mut R, header_bytes: &[u8]) -> Result<Self> {
         // Seek back to start
-        reader.seek(SeekFrom::Start(0)).map_err(|e| {
-            io_error(format!("Failed to seek: {}", e))
-        })?;
+        reader
+            .seek(SeekFrom::Start(0))
+            .map_err(|e| io_error(format!("Failed to seek: {}", e)))?;
 
         // Read entire file
         let mut data = Vec::new();
-        reader.read_to_end(&mut data).map_err(|e| {
-            io_error(format!("Failed to read v1 model: {}", e))
-        })?;
+        reader
+            .read_to_end(&mut data)
+            .map_err(|e| io_error(format!("Failed to read v1 model: {}", e)))?;
 
         // Extract model name from v1 format
         // v1 format: HOLO (4) | version (4) | name_len (4) | name | ...
         let name_len = u32::from_le_bytes([
-            header_bytes[8], header_bytes[9], header_bytes[10], header_bytes[11]
+            header_bytes[8],
+            header_bytes[9],
+            header_bytes[10],
+            header_bytes[11],
         ]) as usize;
 
         let name = if name_len > 0 && name_len < 256 {
@@ -447,9 +448,8 @@ impl HoloBundle {
     /// Write bundle to a file.
     pub fn write_to_file(&self, path: impl AsRef<Path>) -> Result<()> {
         let path = path.as_ref();
-        let file = File::create(path).map_err(|e| {
-            io_error(format!("Failed to create bundle file: {}", e))
-        })?;
+        let file = File::create(path)
+            .map_err(|e| io_error(format!("Failed to create bundle file: {}", e)))?;
         let mut writer = BufWriter::new(file);
         self.write_to(&mut writer)
     }
@@ -457,27 +457,27 @@ impl HoloBundle {
     /// Write bundle to a writer.
     pub fn write_to<W: Write>(&self, writer: &mut W) -> Result<()> {
         // Write header
-        writer.write_all(&self.header.to_bytes()).map_err(|e| {
-            io_error(format!("Failed to write header: {}", e))
-        })?;
+        writer
+            .write_all(&self.header.to_bytes())
+            .map_err(|e| io_error(format!("Failed to write header: {}", e)))?;
 
         // Write model data
         for data in &self.model_data {
-            writer.write_all(data).map_err(|e| {
-                io_error(format!("Failed to write model data: {}", e))
-            })?;
+            writer
+                .write_all(data)
+                .map_err(|e| io_error(format!("Failed to write model data: {}", e)))?;
         }
 
         // Write index
         for entry in &self.entries {
-            entry.write_to(writer).map_err(|e| {
-                io_error(format!("Failed to write index entry: {}", e))
-            })?;
+            entry
+                .write_to(writer)
+                .map_err(|e| io_error(format!("Failed to write index entry: {}", e)))?;
         }
 
-        writer.flush().map_err(|e| {
-            io_error(format!("Failed to flush writer: {}", e))
-        })?;
+        writer
+            .flush()
+            .map_err(|e| io_error(format!("Failed to flush writer: {}", e)))?;
 
         Ok(())
     }
@@ -523,15 +523,13 @@ impl HoloBundle {
     /// Extract all models to a directory.
     pub fn extract_to_dir(&self, dir: impl AsRef<Path>) -> Result<()> {
         let dir = dir.as_ref();
-        fs::create_dir_all(dir).map_err(|e| {
-            io_error(format!("Failed to create directory: {}", e))
-        })?;
+        fs::create_dir_all(dir)
+            .map_err(|e| io_error(format!("Failed to create directory: {}", e)))?;
 
         for (entry, data) in self.entries.iter().zip(self.model_data.iter()) {
             let path = dir.join(format!("{}.holo", entry.name));
-            fs::write(&path, data).map_err(|e| {
-                io_error(format!("Failed to write {}: {}", path.display(), e))
-            })?;
+            fs::write(&path, data)
+                .map_err(|e| io_error(format!("Failed to write {}: {}", path.display(), e)))?;
         }
 
         Ok(())
@@ -542,12 +540,11 @@ impl HoloBundle {
         let dir = dir.as_ref();
         let mut builder = BundleBuilder::new();
 
-        for entry in fs::read_dir(dir).map_err(|e| {
-            io_error(format!("Failed to read directory: {}", e))
-        })? {
-            let entry = entry.map_err(|e| {
-                io_error(format!("Failed to read directory entry: {}", e))
-            })?;
+        for entry in
+            fs::read_dir(dir).map_err(|e| io_error(format!("Failed to read directory: {}", e)))?
+        {
+            let entry =
+                entry.map_err(|e| io_error(format!("Failed to read directory entry: {}", e)))?;
             let path = entry.path();
 
             if path.extension().is_some_and(|ext| ext == "holo") {
@@ -606,14 +603,11 @@ const fn generate_crc32_table() -> [u32; 256] {
 /// Check if a file is a .holo bundle (v2) or single model (v1).
 pub fn is_bundle(path: impl AsRef<Path>) -> Result<bool> {
     let path = path.as_ref();
-    let mut file = File::open(path).map_err(|e| {
-        io_error(format!("Failed to open file: {}", e))
-    })?;
+    let mut file = File::open(path).map_err(|e| io_error(format!("Failed to open file: {}", e)))?;
 
     let mut header_bytes = [0u8; HEADER_SIZE];
-    file.read_exact(&mut header_bytes).map_err(|e| {
-        io_error(format!("Failed to read header: {}", e))
-    })?;
+    file.read_exact(&mut header_bytes)
+        .map_err(|e| io_error(format!("Failed to read header: {}", e)))?;
 
     let header = BundleHeader::from_bytes(&header_bytes)?;
     Ok(header.is_bundle())
@@ -649,12 +643,7 @@ mod tests {
 
     #[test]
     fn test_index_entry_roundtrip() {
-        let entry = ModelIndexEntry::new(
-            "text_encoder".to_string(),
-            1000,
-            5000,
-            0x12345678,
-        );
+        let entry = ModelIndexEntry::new("text_encoder".to_string(), 1000, 5000, 0x12345678);
 
         let mut buf = Vec::new();
         entry.write_to(&mut buf).unwrap();
@@ -795,7 +784,7 @@ mod tests {
 // |  Weights Section               |  Page-aligned for mmap
 // +================================+
 
-use crate::core::serialization::{HoloBundleHeader, HoloFormat, BUNDLE_HEADER_SIZE};
+use crate::core::serialization::{BUNDLE_HEADER_SIZE, HoloBundleHeader, HoloFormat};
 
 /// Writer for creating unified bundle files (HOLB format).
 ///
@@ -897,13 +886,11 @@ impl UnifiedBundleWriter {
         let bundle = self.finish();
         let size = bundle.len();
 
-        let mut file = File::create(path).map_err(|e| {
-            io_error(format!("Failed to create unified bundle file: {}", e))
-        })?;
+        let mut file = File::create(path)
+            .map_err(|e| io_error(format!("Failed to create unified bundle file: {}", e)))?;
 
-        file.write_all(&bundle).map_err(|e| {
-            io_error(format!("Failed to write unified bundle: {}", e))
-        })?;
+        file.write_all(&bundle)
+            .map_err(|e| io_error(format!("Failed to write unified bundle: {}", e)))?;
 
         Ok(size)
     }
@@ -926,7 +913,9 @@ impl<'a> UnifiedBundleReader<'a> {
     /// for the lifetime of the reader.
     pub fn from_bytes(data: &'a [u8]) -> Result<Self> {
         if data.len() < BUNDLE_HEADER_SIZE {
-            return Err(OnnxError::InvalidModel("Unified bundle too small for header".into()));
+            return Err(OnnxError::InvalidModel(
+                "Unified bundle too small for header".into(),
+            ));
         }
 
         // Check format
@@ -1042,7 +1031,11 @@ impl<'a> UnifiedBundleReader<'a> {
 /// memory-mapping instead.
 pub fn read_unified_bundle_file(path: &Path) -> Result<Vec<u8>> {
     fs::read(path).map_err(|e| {
-        io_error(format!("Failed to read unified bundle file '{}': {}", path.display(), e))
+        io_error(format!(
+            "Failed to read unified bundle file '{}': {}",
+            path.display(),
+            e
+        ))
     })
 }
 
@@ -1239,8 +1232,7 @@ mod unified_bundle_tests {
 // +================================+
 
 use crate::core::serialization::{
-    HoloPipelineHeader, PipelineModelEntry,
-    PIPELINE_HEADER_SIZE, PAGE_SIZE,
+    HoloPipelineHeader, PAGE_SIZE, PIPELINE_HEADER_SIZE, PipelineModelEntry,
 };
 
 /// Writer for creating pipeline bundle files (HOLM format).
@@ -1409,13 +1401,11 @@ impl PipelineBundleWriter {
         let bundle = self.finish();
         let size = bundle.len();
 
-        let mut file = File::create(path).map_err(|e| {
-            io_error(format!("Failed to create pipeline bundle file: {}", e))
-        })?;
+        let mut file = File::create(path)
+            .map_err(|e| io_error(format!("Failed to create pipeline bundle file: {}", e)))?;
 
-        file.write_all(&bundle).map_err(|e| {
-            io_error(format!("Failed to write pipeline bundle: {}", e))
-        })?;
+        file.write_all(&bundle)
+            .map_err(|e| io_error(format!("Failed to write pipeline bundle: {}", e)))?;
 
         Ok(size)
     }
@@ -1451,7 +1441,9 @@ impl<'a> PipelineBundleReader<'a> {
     /// remain valid for the lifetime of the reader.
     pub fn from_bytes(data: &'a [u8]) -> Result<Self> {
         if data.len() < PIPELINE_HEADER_SIZE {
-            return Err(OnnxError::InvalidModel("Pipeline bundle too small for header".into()));
+            return Err(OnnxError::InvalidModel(
+                "Pipeline bundle too small for header".into(),
+            ));
         }
 
         // Parse header
@@ -1643,7 +1635,10 @@ mod pipeline_bundle_tests {
         let reader = PipelineBundleReader::from_bytes(&bundle).unwrap();
 
         assert_eq!(reader.model_count(), 3);
-        assert_eq!(reader.model_names(), vec!["encoder", "decoder", "tokenizer"]);
+        assert_eq!(
+            reader.model_names(),
+            vec!["encoder", "decoder", "tokenizer"]
+        );
 
         // Verify each model
         assert_eq!(reader.get_model_bytes("encoder").unwrap(), &encoder[..]);

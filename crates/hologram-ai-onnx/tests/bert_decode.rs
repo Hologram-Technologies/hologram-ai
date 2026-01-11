@@ -29,7 +29,7 @@ fn decode_tokens(token_ids: &[usize], vocab: &[String]) -> String {
         })
         .collect::<Vec<_>>()
         .join(" ")
-        .replace(" ##", "")  // Handle wordpiece
+        .replace(" ##", "") // Handle wordpiece
 }
 
 /// Get top-k predictions with scores.
@@ -56,29 +56,28 @@ fn test_bert_mask_prediction() {
     println!("Loaded vocabulary: {} tokens", vocab.len());
 
     // Special tokens
-    let cls_id = 101;   // [CLS]
-    let sep_id = 102;   // [SEP]
-    let mask_id = 103;  // [MASK]
-    let pad_id = 0;     // [PAD]
+    let cls_id = 101; // [CLS]
+    let sep_id = 102; // [SEP]
+    let mask_id = 103; // [MASK]
+    let pad_id = 0; // [PAD]
 
     // Load model
     println!("Loading BERT model...");
-    let mut executor = ModelExecutor::from_holo_file(&holo_path)
-        .expect("Failed to load BERT");
+    let mut executor = ModelExecutor::from_holo_file(&holo_path).expect("Failed to load BERT");
 
     // Create input: "The [MASK] is very funny."
     // Token IDs for bert-base-uncased:
     // the=1996, is=2003, very=2200, funny=6057, .=1012
     let seq_len = 512;
     let mut input_ids: Vec<f32> = vec![
-        cls_id as f32,   // [CLS]
-        1996.0,          // the
-        mask_id as f32,  // [MASK] - position 2, this is what we want to predict
-        2003.0,          // is
-        2200.0,          // very
-        6057.0,          // funny
-        1012.0,          // .
-        sep_id as f32,   // [SEP]
+        cls_id as f32,  // [CLS]
+        1996.0,         // the
+        mask_id as f32, // [MASK] - position 2, this is what we want to predict
+        2003.0,         // is
+        2200.0,         // very
+        6057.0,         // funny
+        1012.0,         // .
+        sep_id as f32,  // [SEP]
     ];
     let actual_len = input_ids.len();
     input_ids.extend(vec![pad_id as f32; seq_len - actual_len]);
@@ -89,22 +88,36 @@ fn test_bert_mask_prediction() {
     let token_type_ids: Vec<f32> = vec![0.0; seq_len];
 
     // Show input
-    let input_tokens: Vec<usize> = input_ids[..actual_len].iter().map(|&x| x as usize).collect();
+    let input_tokens: Vec<usize> = input_ids[..actual_len]
+        .iter()
+        .map(|&x| x as usize)
+        .collect();
     println!("\nInput: {}", decode_tokens(&input_tokens, &vocab));
     println!("Input IDs: {:?}", &input_ids[..actual_len]);
 
     // Prepare inputs
     let mut inputs = HashMap::new();
-    inputs.insert("input_ids".to_string(), Tensor::new(input_ids, vec![1, seq_len]));
-    inputs.insert("attention_mask".to_string(), Tensor::new(attention_mask, vec![1, seq_len]));
-    inputs.insert("token_type_ids".to_string(), Tensor::new(token_type_ids, vec![1, seq_len]));
+    inputs.insert(
+        "input_ids".to_string(),
+        Tensor::new(input_ids, vec![1, seq_len]),
+    );
+    inputs.insert(
+        "attention_mask".to_string(),
+        Tensor::new(attention_mask, vec![1, seq_len]),
+    );
+    inputs.insert(
+        "token_type_ids".to_string(),
+        Tensor::new(token_type_ids, vec![1, seq_len]),
+    );
 
     // Execute
     println!("\nRunning BERT inference...");
     let outputs = executor.execute(inputs).expect("Execution failed");
 
     // Get output
-    let output = outputs.get("output").or_else(|| outputs.get("output_0"))
+    let output = outputs
+        .get("output")
+        .or_else(|| outputs.get("output_0"))
         .expect("No output found");
 
     println!("Output shape: {:?}", output.shape);
@@ -122,7 +135,10 @@ fn test_bert_mask_prediction() {
     let start = mask_position * vocab_size;
     let end = start + vocab_size;
 
-    println!("Extracting logits for position {} (indices {}..{})", mask_position, start, end);
+    println!(
+        "Extracting logits for position {} (indices {}..{})",
+        mask_position, start, end
+    );
 
     // Try both layouts to see which makes sense
     // Layout A: [batch, seq, vocab] - logits for pos 2 at indices 2*vocab_size .. 3*vocab_size
@@ -143,12 +159,21 @@ fn test_bert_mask_prediction() {
 
     // Debug: check logit statistics
     let min_logit = mask_logits.iter().cloned().fold(f32::INFINITY, f32::min);
-    let max_logit = mask_logits.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+    let max_logit = mask_logits
+        .iter()
+        .cloned()
+        .fold(f32::NEG_INFINITY, f32::max);
     println!("Logit range: [{:.4}, {:.4}]", min_logit, max_logit);
 
     // Check what the logit is for expected tokens like "joke" (8257), "man" (2158), "movie" (3185)
     println!("\nLogits for expected tokens:");
-    for (name, idx) in [("joke", 8257), ("man", 2158), ("movie", 3185), ("guy", 3124), ("story", 2466)] {
+    for (name, idx) in [
+        ("joke", 8257),
+        ("man", 2158),
+        ("movie", 3185),
+        ("guy", 3124),
+        ("story", 2466),
+    ] {
         if idx < mask_logits.len() {
             println!("  {}: {:.4}", name, mask_logits[idx]);
         }
@@ -163,7 +188,13 @@ fn test_bert_mask_prediction() {
         } else {
             "[UNK]"
         };
-        println!("  {}. {:15} (id={:5}) (score: {:.4})", rank + 1, token, token_id, score);
+        println!(
+            "  {}. {:15} (id={:5}) (score: {:.4})",
+            rank + 1,
+            token,
+            token_id,
+            score
+        );
     }
 
     // Show the full decoded sentence with top prediction

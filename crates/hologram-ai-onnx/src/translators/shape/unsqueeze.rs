@@ -1,8 +1,8 @@
 //! Unsqueeze operation translator.
 
-use hologram::ir::{GraphBuilder, NodeIndex, NodeOp, ConstantData, Shape, Dim};
 use crate::proto::NodeProto;
-use crate::translators::{OnnxTranslator, OnnxAttributes, InputRequirement, TranslationError};
+use crate::translators::{InputRequirement, OnnxAttributes, OnnxTranslator, TranslationError};
+use hologram::ir::{ConstantData, Dim, GraphBuilder, NodeIndex, NodeOp, Shape};
 
 /// Translator for ONNX Unsqueeze operation.
 ///
@@ -52,14 +52,17 @@ impl OnnxTranslator for UnsqueezeTranslator {
                 TranslationError::IrBuilder("Unsqueeze: axes input not found".to_string())
             })?;
 
-            if let NodeOp::Constant { data: constant_data } = &axes_node.op {
+            if let NodeOp::Constant {
+                data: constant_data,
+            } = &axes_node.op
+            {
                 match constant_data {
                     ConstantData::I64(values) => values.iter().map(|&v| v as i32).collect(),
                     ConstantData::I32(values) => values.clone(),
                     _ => {
                         return Err(TranslationError::ShapeInference(
                             "Unsqueeze: axes must be int32 or int64".to_string(),
-                        ))
+                        ));
                     }
                 }
             } else {
@@ -79,7 +82,8 @@ impl OnnxTranslator for UnsqueezeTranslator {
         let output_rank = input_rank + axes.len();
 
         // Normalize negative axes to positive
-        let mut normalized_axes: Vec<i32> = axes.iter()
+        let mut normalized_axes: Vec<i32> = axes
+            .iter()
             .map(|&axis| {
                 if axis < 0 {
                     output_rank as i32 + axis
@@ -95,7 +99,10 @@ impl OnnxTranslator for UnsqueezeTranslator {
             if axis < 0 || axis >= output_rank as i32 {
                 return Err(TranslationError::invalid_attribute(
                     "axes",
-                    format!("axis {} is out of bounds for output rank {}", axis, output_rank),
+                    format!(
+                        "axis {} is out of bounds for output rank {}",
+                        axis, output_rank
+                    ),
                 ));
             }
         }
@@ -132,7 +139,10 @@ impl OnnxTranslator for UnsqueezeTranslator {
 
         tracing::debug!(
             "Unsqueeze: axes = {:?}, normalized_axes = {:?}, input shape = {:?}, output shape = {:?}",
-            axes, normalized_axes, input_shape, output_shape
+            axes,
+            normalized_axes,
+            input_shape,
+            output_shape
         );
 
         // Constant folding: if input is a constant, create unsqueezed constant
@@ -163,8 +173,8 @@ impl OnnxTranslator for UnsqueezeTranslator {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use hologram::ir::DType;
     use crate::proto::AttributeProto;
+    use hologram::ir::DType;
 
     fn make_node() -> NodeProto {
         NodeProto {
@@ -254,10 +264,7 @@ mod tests {
         let mut builder = GraphBuilder::new();
 
         let x = builder.input("x", Shape::static_shape(&[2, 3]), DType::F32);
-        let axes = builder.constant(
-            ConstantData::I64(vec![1]),
-            Shape::static_shape(&[1]),
-        );
+        let axes = builder.constant(ConstantData::I64(vec![1]), Shape::static_shape(&[1]));
 
         let result = translator.translate(&make_node(), &[x, axes], &mut builder);
         assert!(result.is_ok());
@@ -305,10 +312,7 @@ mod tests {
         let translator = UnsqueezeTranslator;
         let mut builder = GraphBuilder::new();
 
-        let x = builder.constant(
-            ConstantData::F32(vec![42.0]),
-            Shape::static_shape(&[]),
-        );
+        let x = builder.constant(ConstantData::F32(vec![42.0]), Shape::static_shape(&[]));
 
         let result = translator.translate(&make_node_with_axes(vec![0]), &[x], &mut builder);
         assert!(result.is_ok());

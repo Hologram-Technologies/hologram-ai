@@ -611,7 +611,10 @@ mod tests {
         assert_eq!(original.decompose_pooling, back.decompose_pooling);
         assert_eq!(original.pack_weights, back.pack_weights);
         assert_eq!(original.memory_budget, back.memory_budget);
-        assert_eq!(original.enable_resize_upscaling, back.enable_resize_upscaling);
+        assert_eq!(
+            original.enable_resize_upscaling,
+            back.enable_resize_upscaling
+        );
 
         // Note: Fields like backend, aggressive_fusion, opt_level, auto_fuse, use_fp16,
         // use_int8, and quantization_mode have default values in the conversion and

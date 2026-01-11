@@ -7,8 +7,8 @@
 //! Supported tokenizer types:
 //! - SentencePiece (Unigram) - used by T5, ALBERT, XLNet
 
-pub mod sentencepiece;
 pub mod compiler;
+pub mod sentencepiece;
 
 use anyhow::Result;
 use std::path::Path;
@@ -82,7 +82,8 @@ pub trait Tokenizer: Send + Sync {
 pub fn load_tokenizer(config: &TokenizerConfig) -> Result<Box<dyn Tokenizer>> {
     match config.tokenizer_type.as_str() {
         "sentencepiece" => {
-            let tokenizer = sentencepiece::SentencePieceTokenizer::from_file(Path::new(&config.vocab_path))?;
+            let tokenizer =
+                sentencepiece::SentencePieceTokenizer::from_file(Path::new(&config.vocab_path))?;
             Ok(Box::new(tokenizer))
         }
         _ => Err(anyhow::anyhow!(
@@ -96,10 +97,7 @@ pub fn load_tokenizer(config: &TokenizerConfig) -> Result<Box<dyn Tokenizer>> {
 ///
 /// This creates a hologram IR graph that performs tokenization using
 /// lookup tables and optimized operations, then compiles it to a .holo file.
-pub fn compile_tokenizer(
-    config: &TokenizerConfig,
-    output_path: &Path,
-) -> Result<()> {
+pub fn compile_tokenizer(config: &TokenizerConfig, output_path: &Path) -> Result<()> {
     compiler::compile_tokenizer_to_holo(config, output_path)
 }
 
@@ -107,9 +105,6 @@ pub fn compile_tokenizer(
 ///
 /// This creates a unified bundle (.holo file with HOLB format) that can be
 /// combined with other HOLB bundles into a HOLM pipeline bundle.
-pub fn compile_tokenizer_to_bundle(
-    config: &TokenizerConfig,
-    output_path: &Path,
-) -> Result<()> {
+pub fn compile_tokenizer_to_bundle(config: &TokenizerConfig, output_path: &Path) -> Result<()> {
     compiler::compile_tokenizer_to_bundle(config, output_path)
 }

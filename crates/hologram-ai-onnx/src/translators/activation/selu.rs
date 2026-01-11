@@ -1,8 +1,8 @@
 //! SELU activation translator.
 
-use hologram::ir::{GraphBuilder, NodeIndex, NodeOp, ConstantData, Shape};
 use crate::proto::NodeProto;
-use crate::translators::{OnnxTranslator, OnnxAttributes, InputRequirement, TranslationError};
+use crate::translators::{InputRequirement, OnnxAttributes, OnnxTranslator, TranslationError};
+use hologram::ir::{ConstantData, GraphBuilder, NodeIndex, NodeOp, Shape};
 
 /// Translator for ONNX Selu operation.
 ///
@@ -33,22 +33,12 @@ impl OnnxTranslator for SeluTranslator {
         let gamma = node.get_float_or("gamma", 1.0507);
 
         // Create constants
-        let zero = builder.constant(
-            ConstantData::F32(vec![0.0]),
-            Shape::static_shape(&[1]),
-        );
-        let alpha_const = builder.constant(
-            ConstantData::F32(vec![alpha]),
-            Shape::static_shape(&[1]),
-        );
-        let one = builder.constant(
-            ConstantData::F32(vec![1.0]),
-            Shape::static_shape(&[1]),
-        );
-        let gamma_const = builder.constant(
-            ConstantData::F32(vec![gamma]),
-            Shape::static_shape(&[1]),
-        );
+        let zero = builder.constant(ConstantData::F32(vec![0.0]), Shape::static_shape(&[1]));
+        let alpha_const =
+            builder.constant(ConstantData::F32(vec![alpha]), Shape::static_shape(&[1]));
+        let one = builder.constant(ConstantData::F32(vec![1.0]), Shape::static_shape(&[1]));
+        let gamma_const =
+            builder.constant(ConstantData::F32(vec![gamma]), Shape::static_shape(&[1]));
 
         // SELU = gamma * ELU(x, alpha)
         // ELU(x, alpha) = max(0, x) + alpha * (exp(min(0, x)) - 1)
@@ -84,11 +74,7 @@ impl OnnxTranslator for SeluTranslator {
         true
     }
 
-    fn constant_fold(
-        &self,
-        node: &NodeProto,
-        constant_inputs: &[&[u8]],
-    ) -> Option<Vec<u8>> {
+    fn constant_fold(&self, node: &NodeProto, constant_inputs: &[&[u8]]) -> Option<Vec<u8>> {
         let input = constant_inputs.first()?;
         let floats: &[f32] = bytemuck::cast_slice(input);
         let alpha = node.get_float_or("alpha", 1.67326);
@@ -97,11 +83,7 @@ impl OnnxTranslator for SeluTranslator {
         let result: Vec<f32> = floats
             .iter()
             .map(|&x| {
-                let elu = if x >= 0.0 {
-                    x
-                } else {
-                    alpha * (x.exp() - 1.0)
-                };
+                let elu = if x >= 0.0 { x } else { alpha * (x.exp() - 1.0) };
                 gamma * elu
             })
             .collect();
@@ -112,8 +94,8 @@ impl OnnxTranslator for SeluTranslator {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use hologram::ir::DType;
     use crate::proto::AttributeProto;
+    use hologram::ir::DType;
 
     fn make_node() -> NodeProto {
         NodeProto {

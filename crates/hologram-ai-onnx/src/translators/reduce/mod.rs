@@ -7,14 +7,14 @@
 //! - ReduceMin: Minimum reduction along specified axes
 //! - ReduceProd: Product reduction along specified axes
 
-mod reduce_sum;
-mod reduce_mean;
 mod reduce_max;
+mod reduce_mean;
 mod reduce_min;
 mod reduce_prod;
+mod reduce_sum;
 
-pub use reduce_sum::ReduceSumTranslator;
-pub use reduce_mean::ReduceMeanTranslator;
 pub use reduce_max::ReduceMaxTranslator;
+pub use reduce_mean::ReduceMeanTranslator;
 pub use reduce_min::ReduceMinTranslator;
 pub use reduce_prod::ReduceProdTranslator;
+pub use reduce_sum::ReduceSumTranslator;

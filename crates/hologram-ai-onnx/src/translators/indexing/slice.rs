@@ -1,8 +1,8 @@
 //! Slice operation translator.
 
-use hologram::ir::{GraphBuilder, NodeIndex, NodeOp, ConstantData};
 use crate::proto::NodeProto;
-use crate::translators::{OnnxTranslator, OnnxAttributes, InputRequirement, TranslationError};
+use crate::translators::{InputRequirement, OnnxAttributes, OnnxTranslator, TranslationError};
+use hologram::ir::{ConstantData, GraphBuilder, NodeIndex, NodeOp};
 
 /// Translator for ONNX Slice operation.
 ///
@@ -39,7 +39,9 @@ impl OnnxTranslator for SliceTranslator {
         let ends_attr = node.get_ints("ends");
         let axes_attr = node.get_ints("axes");
 
-        let (starts, ends, axes) = if let (Some(starts_vals), Some(ends_vals)) = (starts_attr, ends_attr) {
+        let (starts, ends, axes) = if let (Some(starts_vals), Some(ends_vals)) =
+            (starts_attr, ends_attr)
+        {
             // Attribute-based (older opset < 10)
             if inputs.len() != 1 {
                 return Err(TranslationError::IrBuilder(format!(
@@ -63,18 +65,21 @@ impl OnnxTranslator for SliceTranslator {
             }
 
             // Check if all slice parameters are constants
-            let starts_node = builder.graph().node(inputs[1])
-                .ok_or_else(|| TranslationError::IrBuilder("Slice: starts node not found".to_string()))?;
-            let ends_node = builder.graph().node(inputs[2])
-                .ok_or_else(|| TranslationError::IrBuilder("Slice: ends node not found".to_string()))?;
+            let starts_node = builder.graph().node(inputs[1]).ok_or_else(|| {
+                TranslationError::IrBuilder("Slice: starts node not found".to_string())
+            })?;
+            let ends_node = builder.graph().node(inputs[2]).ok_or_else(|| {
+                TranslationError::IrBuilder("Slice: ends node not found".to_string())
+            })?;
 
             let starts_is_constant = matches!(starts_node.op, NodeOp::Constant { .. });
             let ends_is_constant = matches!(ends_node.op, NodeOp::Constant { .. });
 
             // Check axes if provided
             let axes_is_constant = if inputs.len() > 3 {
-                let axes_node = builder.graph().node(inputs[3])
-                    .ok_or_else(|| TranslationError::IrBuilder("Slice: axes node not found".to_string()))?;
+                let axes_node = builder.graph().node(inputs[3]).ok_or_else(|| {
+                    TranslationError::IrBuilder("Slice: axes node not found".to_string())
+                })?;
                 matches!(axes_node.op, NodeOp::Constant { .. })
             } else {
                 true
@@ -82,8 +87,9 @@ impl OnnxTranslator for SliceTranslator {
 
             // Check steps if provided
             let steps_is_constant = if inputs.len() > 4 {
-                let steps_node = builder.graph().node(inputs[4])
-                    .ok_or_else(|| TranslationError::IrBuilder("Slice: steps node not found".to_string()))?;
+                let steps_node = builder.graph().node(inputs[4]).ok_or_else(|| {
+                    TranslationError::IrBuilder("Slice: steps node not found".to_string())
+                })?;
                 matches!(steps_node.op, NodeOp::Constant { .. })
             } else {
                 true
@@ -91,8 +97,16 @@ impl OnnxTranslator for SliceTranslator {
 
             // If any input is non-constant, use dynamic slice
             if !starts_is_constant || !ends_is_constant || !axes_is_constant || !steps_is_constant {
-                let axes = if inputs.len() > 3 { Some(inputs[3]) } else { None };
-                let steps = if inputs.len() > 4 { Some(inputs[4]) } else { None };
+                let axes = if inputs.len() > 3 {
+                    Some(inputs[3])
+                } else {
+                    None
+                };
+                let steps = if inputs.len() > 4 {
+                    Some(inputs[4])
+                } else {
+                    None
+                };
 
                 let result = builder
                     .slice_dynamic(inputs[0], inputs[1], inputs[2], axes, steps)
@@ -105,8 +119,9 @@ impl OnnxTranslator for SliceTranslator {
             let ends_vals = Self::extract_i64_constant(ends_node)?;
 
             let axes_vals = if inputs.len() > 3 {
-                let axes_node = builder.graph().node(inputs[3])
-                    .ok_or_else(|| TranslationError::IrBuilder("Slice: axes node not found".to_string()))?;
+                let axes_node = builder.graph().node(inputs[3]).ok_or_else(|| {
+                    TranslationError::IrBuilder("Slice: axes node not found".to_string())
+                })?;
                 Self::extract_i64_constant(axes_node)?
             } else {
                 vec![]
@@ -142,7 +157,14 @@ impl OnnxTranslator for SliceTranslator {
 
         // Static slice path
         let result = builder
-            .unary(NodeOp::Slice { starts, ends, axes: axes_i32 }, data)
+            .unary(
+                NodeOp::Slice {
+                    starts,
+                    ends,
+                    axes: axes_i32,
+                },
+                data,
+            )
             .map_err(|e| TranslationError::IrBuilder(e.to_string()))?;
 
         Ok(vec![result])
@@ -157,12 +179,12 @@ impl SliceTranslator {
                 ConstantData::I64(values) => Ok(values.clone()),
                 ConstantData::I32(values) => Ok(values.iter().map(|&v| v as i64).collect()),
                 _ => Err(TranslationError::IrBuilder(
-                    "Slice: expected int32 or int64 tensor".to_string()
+                    "Slice: expected int32 or int64 tensor".to_string(),
                 )),
             }
         } else {
             Err(TranslationError::IrBuilder(
-                "Slice: expected constant input".to_string()
+                "Slice: expected constant input".to_string(),
             ))
         }
     }
@@ -171,8 +193,8 @@ impl SliceTranslator {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use hologram::ir::{DType, Shape};
     use crate::proto::AttributeProto;
+    use hologram::ir::{DType, Shape};
 
     fn make_node() -> NodeProto {
         NodeProto {

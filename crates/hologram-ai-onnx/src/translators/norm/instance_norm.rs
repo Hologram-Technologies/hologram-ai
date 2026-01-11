@@ -1,8 +1,8 @@
 //! InstanceNormalization operation translator.
 
-use hologram::ir::{GraphBuilder, NodeIndex, NodeOp};
 use crate::proto::NodeProto;
-use crate::translators::{OnnxTranslator, OnnxAttributes, InputRequirement, TranslationError};
+use crate::translators::{InputRequirement, OnnxAttributes, OnnxTranslator, TranslationError};
+use hologram::ir::{GraphBuilder, NodeIndex, NodeOp};
 
 /// Translator for ONNX InstanceNormalization operation.
 ///
@@ -52,8 +52,8 @@ impl OnnxTranslator for InstanceNormTranslator {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use hologram::ir::{DType, Shape};
     use crate::proto::AttributeProto;
+    use hologram::ir::{DType, Shape};
 
     fn make_node() -> NodeProto {
         NodeProto {
@@ -77,7 +77,11 @@ mod tests {
     }
 
     fn create_instance_norm_inputs(builder: &mut GraphBuilder, channels: usize) -> Vec<NodeIndex> {
-        let input = builder.input("input", Shape::static_shape(&[1, channels, 32, 32]), DType::F32);
+        let input = builder.input(
+            "input",
+            Shape::static_shape(&[1, channels, 32, 32]),
+            DType::F32,
+        );
         let scale = builder.input("scale", Shape::static_shape(&[channels]), DType::F32);
         let bias = builder.input("bias", Shape::static_shape(&[channels]), DType::F32);
         vec![input, scale, bias]
@@ -132,23 +136,34 @@ mod tests {
     fn test_instance_norm_input_validation_insufficient() {
         let translator = InstanceNormTranslator;
 
-        let err = translator.input_requirement().validate(2, "InstanceNormalization");
+        let err = translator
+            .input_requirement()
+            .validate(2, "InstanceNormalization");
         assert!(err.is_err());
 
-        let err = translator.input_requirement().validate(1, "InstanceNormalization");
+        let err = translator
+            .input_requirement()
+            .validate(1, "InstanceNormalization");
         assert!(err.is_err());
     }
 
     #[test]
     fn test_instance_norm_input_validation_correct() {
         let translator = InstanceNormTranslator;
-        assert!(translator.input_requirement().validate(3, "InstanceNormalization").is_ok());
+        assert!(
+            translator
+                .input_requirement()
+                .validate(3, "InstanceNormalization")
+                .is_ok()
+        );
     }
 
     #[test]
     fn test_instance_norm_input_validation_too_many() {
         let translator = InstanceNormTranslator;
-        let err = translator.input_requirement().validate(4, "InstanceNormalization");
+        let err = translator
+            .input_requirement()
+            .validate(4, "InstanceNormalization");
         assert!(err.is_err());
     }
 }

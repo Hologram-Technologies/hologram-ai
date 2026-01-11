@@ -1,8 +1,8 @@
 //! Tile operation translator.
 
-use hologram::ir::{GraphBuilder, NodeIndex, NodeOp, ConstantData, Shape, Dim};
 use crate::proto::NodeProto;
-use crate::translators::{OnnxTranslator, InputRequirement, TranslationError};
+use crate::translators::{InputRequirement, OnnxTranslator, TranslationError};
+use hologram::ir::{ConstantData, Dim, GraphBuilder, NodeIndex, NodeOp, Shape};
 
 /// Translator for ONNX Tile operation.
 ///
@@ -39,9 +39,10 @@ impl OnnxTranslator for TileTranslator {
         let repeats_input = inputs[1];
 
         // Get data node
-        let data_node = builder.graph().node(data).ok_or_else(|| {
-            TranslationError::IrBuilder("Tile: data input not found".to_string())
-        })?;
+        let data_node = builder
+            .graph()
+            .node(data)
+            .ok_or_else(|| TranslationError::IrBuilder("Tile: data input not found".to_string()))?;
         let data_shape = data_node.shape.clone();
 
         // Get repeats node
@@ -78,7 +79,8 @@ impl OnnxTranslator for TileTranslator {
         }
 
         // Compute output shape
-        let output_dims: Vec<Dim> = input_dims.iter()
+        let output_dims: Vec<Dim> = input_dims
+            .iter()
             .zip(repeats.iter())
             .map(|(dim, &rep)| match dim {
                 Dim::Static(n) => Dim::Static((*n as i64 * rep) as usize),
@@ -93,13 +95,16 @@ impl OnnxTranslator for TileTranslator {
 
         tracing::debug!(
             "Tile: repeats = {:?}, input shape = {:?}, output shape = {:?}",
-            repeats, data_shape, output_shape
+            repeats,
+            data_shape,
+            output_shape
         );
 
         // Try constant folding if data is also constant
         if let NodeOp::Constant { data: const_data } = &data_node.op {
             // Get concrete dimensions for constant folding
-            let input_dims_concrete: Vec<usize> = input_dims.iter()
+            let input_dims_concrete: Vec<usize> = input_dims
+                .iter()
                 .filter_map(|d| match d {
                     Dim::Static(n) => Some(*n),
                     _ => None,
@@ -108,7 +113,9 @@ impl OnnxTranslator for TileTranslator {
 
             if input_dims_concrete.len() == input_dims.len() {
                 // All dims are static, we can tile at compile time
-                let output_dims_concrete: Vec<usize> = output_shape.dims.iter()
+                let output_dims_concrete: Vec<usize> = output_shape
+                    .dims
+                    .iter()
                     .filter_map(|d| match d {
                         Dim::Static(n) => Some(*n),
                         _ => None,
@@ -116,11 +123,8 @@ impl OnnxTranslator for TileTranslator {
                     .collect();
 
                 if output_dims_concrete.len() == output_shape.dims.len()
-                    && let Some(tiled_data) = tile_constant_data(
-                        const_data,
-                        &input_dims_concrete,
-                        &output_dims_concrete,
-                    )
+                    && let Some(tiled_data) =
+                        tile_constant_data(const_data, &input_dims_concrete, &output_dims_concrete)
                 {
                     tracing::debug!("Tile: constant folding succeeded");
                     let result = builder.constant(tiled_data, output_shape);
@@ -170,11 +174,7 @@ fn tile_constant_data(
 }
 
 /// Generic N-dimensional tile operation.
-fn tile_nd<T: Clone>(
-    data: &[T],
-    input_dims: &[usize],
-    output_dims: &[usize],
-) -> Vec<T> {
+fn tile_nd<T: Clone>(data: &[T], input_dims: &[usize], output_dims: &[usize]) -> Vec<T> {
     let output_size: usize = output_dims.iter().product();
     if output_size == 0 {
         return Vec::new();
@@ -193,7 +193,8 @@ fn tile_nd<T: Clone>(
         }
 
         // Map to input coordinates using modulo
-        let in_coords: Vec<usize> = out_coords.iter()
+        let in_coords: Vec<usize> = out_coords
+            .iter()
             .zip(input_dims.iter())
             .map(|(&out_c, &in_dim)| out_c % in_dim)
             .collect();
@@ -233,10 +234,7 @@ mod tests {
         let mut builder = GraphBuilder::new();
 
         let data = builder.input("data", Shape::static_shape(&[2, 3]), DType::F32);
-        let repeats = builder.constant(
-            ConstantData::I64(vec![2, 3]),
-            Shape::static_shape(&[2]),
-        );
+        let repeats = builder.constant(ConstantData::I64(vec![2, 3]), Shape::static_shape(&[2]));
 
         let result = translator.translate(&make_node(), &[data, repeats], &mut builder);
         assert!(result.is_ok());
@@ -250,10 +248,7 @@ mod tests {
         let mut builder = GraphBuilder::new();
 
         let data = builder.input("data", Shape::static_shape(&[4]), DType::F32);
-        let repeats = builder.constant(
-            ConstantData::I64(vec![3]),
-            Shape::static_shape(&[1]),
-        );
+        let repeats = builder.constant(ConstantData::I64(vec![3]), Shape::static_shape(&[1]));
 
         let result = translator.translate(&make_node(), &[data, repeats], &mut builder);
         assert!(result.is_ok());
@@ -265,10 +260,7 @@ mod tests {
         let mut builder = GraphBuilder::new();
 
         let data = builder.input("data", Shape::static_shape(&[2, 3, 4]), DType::F32);
-        let repeats = builder.constant(
-            ConstantData::I64(vec![1, 2, 1]),
-            Shape::static_shape(&[3]),
-        );
+        let repeats = builder.constant(ConstantData::I64(vec![1, 2, 1]), Shape::static_shape(&[3]));
 
         let result = translator.translate(&make_node(), &[data, repeats], &mut builder);
         assert!(result.is_ok());
@@ -280,10 +272,7 @@ mod tests {
         let mut builder = GraphBuilder::new();
 
         let data = builder.input("data", Shape::static_shape(&[2, 3]), DType::F32);
-        let repeats = builder.constant(
-            ConstantData::I64(vec![1, 1]),
-            Shape::static_shape(&[2]),
-        );
+        let repeats = builder.constant(ConstantData::I64(vec![1, 1]), Shape::static_shape(&[2]));
 
         let result = translator.translate(&make_node(), &[data, repeats], &mut builder);
         assert!(result.is_ok());
@@ -299,10 +288,7 @@ mod tests {
             ConstantData::F32(vec![1.0, 2.0, 3.0, 4.0]),
             Shape::static_shape(&[2, 2]),
         );
-        let repeats = builder.constant(
-            ConstantData::I64(vec![2, 2]),
-            Shape::static_shape(&[2]),
-        );
+        let repeats = builder.constant(ConstantData::I64(vec![2, 2]), Shape::static_shape(&[2]));
 
         let result = translator.translate(&make_node(), &[data, repeats], &mut builder);
         assert!(result.is_ok());
@@ -346,10 +332,8 @@ mod tests {
         let mut builder = GraphBuilder::new();
 
         let data = builder.input("data", Shape::static_shape(&[1, 1]), DType::F32);
-        let repeats = builder.constant(
-            ConstantData::I64(vec![100, 100]),
-            Shape::static_shape(&[2]),
-        );
+        let repeats =
+            builder.constant(ConstantData::I64(vec![100, 100]), Shape::static_shape(&[2]));
 
         let result = translator.translate(&make_node(), &[data, repeats], &mut builder);
         assert!(result.is_ok());
@@ -361,10 +345,7 @@ mod tests {
         let mut builder = GraphBuilder::new();
 
         let data = builder.input("data", Shape::static_shape(&[]), DType::F32);
-        let repeats = builder.constant(
-            ConstantData::I64(vec![]),
-            Shape::static_shape(&[0]),
-        );
+        let repeats = builder.constant(ConstantData::I64(vec![]), Shape::static_shape(&[0]));
 
         let result = translator.translate(&make_node(), &[data, repeats], &mut builder);
         assert!(result.is_ok());
@@ -379,7 +360,11 @@ mod tests {
         assert!(err.is_err());
         assert!(matches!(
             err.unwrap_err(),
-            TranslationError::WrongInputCount { expected: 2, got: 0, .. }
+            TranslationError::WrongInputCount {
+                expected: 2,
+                got: 0,
+                ..
+            }
         ));
     }
 
@@ -404,10 +389,7 @@ mod tests {
 
         let data = builder.input("data", Shape::static_shape(&[2, 3]), DType::F32);
         // Wrong number of repeats
-        let repeats = builder.constant(
-            ConstantData::I64(vec![2, 3, 4]),
-            Shape::static_shape(&[3]),
-        );
+        let repeats = builder.constant(ConstantData::I64(vec![2, 3, 4]), Shape::static_shape(&[3]));
 
         let result = translator.translate(&make_node(), &[data, repeats], &mut builder);
         assert!(result.is_err());

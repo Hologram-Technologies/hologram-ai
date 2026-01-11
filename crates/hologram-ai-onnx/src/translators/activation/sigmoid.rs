@@ -1,8 +1,8 @@
 //! Sigmoid activation translator.
 
-use hologram::ir::{GraphBuilder, NodeIndex};
 use crate::proto::NodeProto;
-use crate::translators::{OnnxTranslator, InputRequirement, TranslationError};
+use crate::translators::{InputRequirement, OnnxTranslator, TranslationError};
+use hologram::ir::{GraphBuilder, NodeIndex};
 
 /// Translator for ONNX Sigmoid operation.
 ///
@@ -35,11 +35,7 @@ impl OnnxTranslator for SigmoidTranslator {
         true
     }
 
-    fn constant_fold(
-        &self,
-        _node: &NodeProto,
-        constant_inputs: &[&[u8]],
-    ) -> Option<Vec<u8>> {
+    fn constant_fold(&self, _node: &NodeProto, constant_inputs: &[&[u8]]) -> Option<Vec<u8>> {
         let input = constant_inputs.first()?;
         let floats: &[f32] = bytemuck::cast_slice(input);
         let result: Vec<f32> = floats.iter().map(|x| 1.0 / (1.0 + (-x).exp())).collect();

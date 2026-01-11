@@ -41,8 +41,7 @@ pub mod translators;
 // Re-export main types at crate root for convenience
 pub use core::{
     Dim, GraphPartition, GraphPartitioner, OnnxConfig, OnnxError, Result, Shape, SymbolicShape,
-    WeightData, extract_opset_version, parse_model, translate_graph_to_ir,
-    validate_model,
+    WeightData, extract_opset_version, parse_model, translate_graph_to_ir, validate_model,
 };
 
 // Re-export hologram-ir types for convenience
@@ -265,7 +264,10 @@ impl OnnxCompiler {
 
         // Extract weights from plan (they'll be embedded in the bundle)
         let weight_bytes = std::mem::take(&mut plan.constant_data);
-        info!("Extracted {} bytes of weights for bundle", weight_bytes.len());
+        info!(
+            "Extracted {} bytes of weights for bundle",
+            weight_bytes.len()
+        );
 
         // Step 4: Serialize plan to HOLP format (without weights)
         debug!("Serializing BackendPlan");
@@ -301,7 +303,9 @@ fn serialize_backend_plan(plan: &hologram::backend::BackendPlan) -> Result<Vec<u
     // Serialize using rkyv
     let plan_bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&serializable)
         .map(|bytes| bytes.to_vec())
-        .map_err(|e| OnnxError::IrTranslationError(format!("Failed to serialize BackendPlan: {}", e)))?;
+        .map_err(|e| {
+            OnnxError::IrTranslationError(format!("Failed to serialize BackendPlan: {}", e))
+        })?;
 
     // Prepend magic bytes
     let mut holo_bytes = Vec::with_capacity(4 + plan_bytes.len());

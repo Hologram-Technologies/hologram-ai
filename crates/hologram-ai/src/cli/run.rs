@@ -2050,7 +2050,8 @@ pub fn run_direct_command(
     info!("Running encoder with {} tokens...", seq_len);
 
     let start = std::time::Instant::now();
-    let outputs = executor.execute(inputs)
+    let outputs = executor
+        .execute(inputs)
         .with_context(|| "Failed to execute encoder")?;
     let elapsed = start.elapsed();
 
@@ -2071,7 +2072,10 @@ pub fn run_direct_command(
         let nan_count = tensor.data.iter().filter(|x| x.is_nan()).count();
         let inf_count = tensor.data.iter().filter(|x| x.is_infinite()).count();
         if nan_count > 0 || inf_count > 0 {
-            warn!("  WARNING: {} NaN values, {} Inf values", nan_count, inf_count);
+            warn!(
+                "  WARNING: {} NaN values, {} Inf values",
+                nan_count, inf_count
+            );
         }
 
         // Show some sample values

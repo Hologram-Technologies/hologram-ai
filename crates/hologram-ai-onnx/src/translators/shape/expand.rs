@@ -1,8 +1,8 @@
 //! Expand operation translator.
 
-use hologram::ir::{GraphBuilder, NodeIndex};
 use crate::proto::NodeProto;
-use crate::translators::{OnnxTranslator, InputRequirement, TranslationError};
+use crate::translators::{InputRequirement, OnnxTranslator, TranslationError};
+use hologram::ir::{GraphBuilder, NodeIndex};
 
 /// Translator for ONNX Expand operation.
 ///
@@ -56,7 +56,7 @@ impl OnnxTranslator for ExpandTranslator {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use hologram::ir::{DType, Shape, ConstantData};
+    use hologram::ir::{ConstantData, DType, Shape};
 
     fn make_node() -> NodeProto {
         NodeProto {
@@ -74,10 +74,7 @@ mod tests {
         let mut builder = GraphBuilder::new();
 
         let data = builder.input("data", Shape::static_shape(&[3, 1]), DType::F32);
-        let shape = builder.constant(
-            ConstantData::I64(vec![3, 4]),
-            Shape::static_shape(&[2]),
-        );
+        let shape = builder.constant(ConstantData::I64(vec![3, 4]), Shape::static_shape(&[2]));
 
         let result = translator.translate(&make_node(), &[data, shape], &mut builder);
         assert!(result.is_ok());
@@ -91,10 +88,7 @@ mod tests {
         let mut builder = GraphBuilder::new();
 
         let data = builder.input("data", Shape::static_shape(&[3, 4]), DType::F32);
-        let shape = builder.constant(
-            ConstantData::I64(vec![2, 3, 4]),
-            Shape::static_shape(&[3]),
-        );
+        let shape = builder.constant(ConstantData::I64(vec![2, 3, 4]), Shape::static_shape(&[3]));
 
         let result = translator.translate(&make_node(), &[data, shape], &mut builder);
         assert!(result.is_ok());
@@ -106,10 +100,7 @@ mod tests {
         let mut builder = GraphBuilder::new();
 
         let data = builder.input("data", Shape::static_shape(&[1, 1, 1]), DType::F32);
-        let shape = builder.constant(
-            ConstantData::I64(vec![2, 3, 4]),
-            Shape::static_shape(&[3]),
-        );
+        let shape = builder.constant(ConstantData::I64(vec![2, 3, 4]), Shape::static_shape(&[3]));
 
         let result = translator.translate(&make_node(), &[data, shape], &mut builder);
         assert!(result.is_ok());
@@ -121,10 +112,7 @@ mod tests {
         let mut builder = GraphBuilder::new();
 
         let data = builder.input("data", Shape::static_shape(&[2, 3]), DType::F32);
-        let shape = builder.constant(
-            ConstantData::I64(vec![2, 3]),
-            Shape::static_shape(&[2]),
-        );
+        let shape = builder.constant(ConstantData::I64(vec![2, 3]), Shape::static_shape(&[2]));
 
         let result = translator.translate(&make_node(), &[data, shape], &mut builder);
         assert!(result.is_ok());
@@ -136,10 +124,7 @@ mod tests {
         let mut builder = GraphBuilder::new();
 
         let data = builder.input("data", Shape::static_shape(&[]), DType::F32);
-        let shape = builder.constant(
-            ConstantData::I64(vec![2, 3, 4]),
-            Shape::static_shape(&[3]),
-        );
+        let shape = builder.constant(ConstantData::I64(vec![2, 3, 4]), Shape::static_shape(&[3]));
 
         let result = translator.translate(&make_node(), &[data, shape], &mut builder);
         assert!(result.is_ok());
@@ -151,10 +136,7 @@ mod tests {
         let mut builder = GraphBuilder::new();
 
         let data = builder.input("data", Shape::static_shape(&[4]), DType::F32);
-        let shape = builder.constant(
-            ConstantData::I64(vec![2, 3, 4]),
-            Shape::static_shape(&[3]),
-        );
+        let shape = builder.constant(ConstantData::I64(vec![2, 3, 4]), Shape::static_shape(&[3]));
 
         let result = translator.translate(&make_node(), &[data, shape], &mut builder);
         assert!(result.is_ok());
@@ -179,10 +161,7 @@ mod tests {
         let mut builder = GraphBuilder::new();
 
         let data = builder.input("data", Shape::static_shape(&[2, 1, 4]), DType::F32);
-        let shape = builder.constant(
-            ConstantData::I64(vec![2, 3, 4]),
-            Shape::static_shape(&[3]),
-        );
+        let shape = builder.constant(ConstantData::I64(vec![2, 3, 4]), Shape::static_shape(&[3]));
 
         let result = translator.translate(&make_node(), &[data, shape], &mut builder);
         assert!(result.is_ok());
@@ -212,7 +191,11 @@ mod tests {
         assert!(err.is_err());
         assert!(matches!(
             err.unwrap_err(),
-            TranslationError::WrongInputCount { expected: 2, got: 0, .. }
+            TranslationError::WrongInputCount {
+                expected: 2,
+                got: 0,
+                ..
+            }
         ));
     }
 

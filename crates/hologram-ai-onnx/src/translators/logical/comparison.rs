@@ -1,9 +1,9 @@
 //! Comparison operation translators.
 
-use hologram::ir::{GraphBuilder, NodeIndex, NodeOp, DType};
-use rustc_hash::FxHashMap;
 use crate::proto::NodeProto;
-use crate::translators::{OnnxTranslator, InputRequirement, TranslationError};
+use crate::translators::{InputRequirement, OnnxTranslator, TranslationError};
+use hologram::ir::{DType, GraphBuilder, NodeIndex, NodeOp};
+use rustc_hash::FxHashMap;
 
 /// Translator for ONNX Equal operation.
 ///
@@ -27,7 +27,9 @@ impl OnnxTranslator for EqualTranslator {
         builder: &mut GraphBuilder,
     ) -> Result<Vec<NodeIndex>, TranslationError> {
         let shape = {
-            let input_node = builder.graph().node(inputs[0])
+            let input_node = builder
+                .graph()
+                .node(inputs[0])
                 .ok_or_else(|| TranslationError::IrBuilder("Invalid input node".to_string()))?;
             input_node.shape.clone()
         };
@@ -69,7 +71,9 @@ impl OnnxTranslator for GreaterTranslator {
         builder: &mut GraphBuilder,
     ) -> Result<Vec<NodeIndex>, TranslationError> {
         let shape = {
-            let input_node = builder.graph().node(inputs[0])
+            let input_node = builder
+                .graph()
+                .node(inputs[0])
                 .ok_or_else(|| TranslationError::IrBuilder("Invalid input node".to_string()))?;
             input_node.shape.clone()
         };
@@ -111,7 +115,9 @@ impl OnnxTranslator for LessTranslator {
         builder: &mut GraphBuilder,
     ) -> Result<Vec<NodeIndex>, TranslationError> {
         let shape = {
-            let input_node = builder.graph().node(inputs[0])
+            let input_node = builder
+                .graph()
+                .node(inputs[0])
                 .ok_or_else(|| TranslationError::IrBuilder("Invalid input node".to_string()))?;
             input_node.shape.clone()
         };
@@ -153,7 +159,9 @@ impl OnnxTranslator for GreaterOrEqualTranslator {
         builder: &mut GraphBuilder,
     ) -> Result<Vec<NodeIndex>, TranslationError> {
         let shape = {
-            let input_node = builder.graph().node(inputs[0])
+            let input_node = builder
+                .graph()
+                .node(inputs[0])
                 .ok_or_else(|| TranslationError::IrBuilder("Invalid input node".to_string()))?;
             input_node.shape.clone()
         };
@@ -195,7 +203,9 @@ impl OnnxTranslator for LessOrEqualTranslator {
         builder: &mut GraphBuilder,
     ) -> Result<Vec<NodeIndex>, TranslationError> {
         let shape = {
-            let input_node = builder.graph().node(inputs[0])
+            let input_node = builder
+                .graph()
+                .node(inputs[0])
                 .ok_or_else(|| TranslationError::IrBuilder("Invalid input node".to_string()))?;
             input_node.shape.clone()
         };

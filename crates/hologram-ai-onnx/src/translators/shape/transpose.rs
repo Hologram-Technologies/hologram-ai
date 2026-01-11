@@ -1,8 +1,8 @@
 //! Transpose operation translator.
 
-use hologram::ir::{GraphBuilder, NodeIndex, NodeOp, ConstantData, Shape, Dim};
 use crate::proto::NodeProto;
-use crate::translators::{OnnxTranslator, OnnxAttributes, InputRequirement, TranslationError};
+use crate::translators::{InputRequirement, OnnxAttributes, OnnxTranslator, TranslationError};
+use hologram::ir::{ConstantData, Dim, GraphBuilder, NodeIndex, NodeOp, Shape};
 
 /// Translator for ONNX Transpose operation.
 ///
@@ -37,9 +37,10 @@ impl OnnxTranslator for TransposeTranslator {
         let data = inputs[0];
 
         // Get the input node
-        let input_node = builder.graph().node(data).ok_or_else(|| {
-            TranslationError::IrBuilder("Transpose: input not found".to_string())
-        })?;
+        let input_node = builder
+            .graph()
+            .node(data)
+            .ok_or_else(|| TranslationError::IrBuilder("Transpose: input not found".to_string()))?;
 
         // Determine permutation
         let perm: Vec<usize> = if let Some(perm_attr) = node.get_ints("perm") {
@@ -54,7 +55,11 @@ impl OnnxTranslator for TransposeTranslator {
         if perm.len() != rank {
             return Err(TranslationError::invalid_attribute(
                 "perm",
-                format!("perm length ({}) must match input rank ({})", perm.len(), rank),
+                format!(
+                    "perm length ({}) must match input rank ({})",
+                    perm.len(),
+                    rank
+                ),
             ));
         }
 
@@ -79,14 +84,15 @@ impl OnnxTranslator for TransposeTranslator {
         // Check if input is a Constant for constant folding
         if let NodeOp::Constant { data: const_data } = &input_node.op {
             // Get input shape dimensions as static values
-            let in_dims: Vec<usize> = input_node.shape.dims.iter()
+            let in_dims: Vec<usize> = input_node
+                .shape
+                .dims
+                .iter()
                 .map(|d| d.static_value().unwrap_or(1))
                 .collect();
 
             // Calculate output shape
-            let out_dims: Vec<Dim> = perm.iter()
-                .map(|&p| Dim::Static(in_dims[p]))
-                .collect();
+            let out_dims: Vec<Dim> = perm.iter().map(|&p| Dim::Static(in_dims[p])).collect();
             let out_shape = Shape::new(out_dims);
 
             // Perform the transpose
@@ -94,7 +100,9 @@ impl OnnxTranslator for TransposeTranslator {
 
             tracing::debug!(
                 "Transpose: constant folding {:?} with perm {:?} -> shape {:?}",
-                in_dims, perm, out_shape
+                in_dims,
+                perm,
+                out_shape
             );
 
             let result = builder.constant(transposed_data, out_shape);
@@ -116,11 +124,7 @@ impl OnnxTranslator for TransposeTranslator {
 }
 
 /// Transpose constant data according to permutation.
-fn transpose_constant_data(
-    data: &ConstantData,
-    in_dims: &[usize],
-    perm: &[usize],
-) -> ConstantData {
+fn transpose_constant_data(data: &ConstantData, in_dims: &[usize], perm: &[usize]) -> ConstantData {
     match data {
         ConstantData::F32(values) => ConstantData::F32(transpose_nd(values, in_dims, perm)),
         ConstantData::F64(values) => ConstantData::F64(transpose_nd(values, in_dims, perm)),
@@ -173,7 +177,8 @@ fn transpose_nd<T: Clone>(data: &[T], in_dims: &[usize], perm: &[usize]) -> Vec<
         }
 
         // Convert multi-dimensional index to flat index in input space
-        let in_idx: usize = in_coords.iter()
+        let in_idx: usize = in_coords
+            .iter()
             .zip(in_strides.iter())
             .map(|(&c, &s)| c * s)
             .sum();
@@ -187,8 +192,8 @@ fn transpose_nd<T: Clone>(data: &[T], in_dims: &[usize], perm: &[usize]) -> Vec<
 #[cfg(test)]
 mod tests {
     use super::*;
-    use hologram::ir::DType;
     use crate::proto::AttributeProto;
+    use hologram::ir::DType;
 
     fn make_node() -> NodeProto {
         NodeProto {
@@ -299,7 +304,8 @@ mod tests {
         // NCHW -> NHWC
         let x = builder.input("x", Shape::static_shape(&[1, 3, 224, 224]), DType::F32);
 
-        let result = translator.translate(&make_node_with_perm(vec![0, 2, 3, 1]), &[x], &mut builder);
+        let result =
+            translator.translate(&make_node_with_perm(vec![0, 2, 3, 1]), &[x], &mut builder);
         assert!(result.is_ok());
         let outputs = result.unwrap();
 
@@ -343,7 +349,11 @@ mod tests {
         assert!(err.is_err());
         assert!(matches!(
             err.unwrap_err(),
-            TranslationError::WrongInputCount { expected: 1, got: 0, .. }
+            TranslationError::WrongInputCount {
+                expected: 1,
+                got: 0,
+                ..
+            }
         ));
     }
 
