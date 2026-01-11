@@ -55,8 +55,8 @@ jobs:
       - name: Setup hologram at /hologram
         run: |
           sudo mv hologram-repo /hologram
-          sudo mkdir -p /hologram/externals
-          sudo mv hologram-backend-repo /hologram/externals/hologram-backend
+          sudo mkdir -p /hologram/crates
+          sudo mv hologram-backend-repo /hologram/crates/backend
 
       - name: Cache cargo registry
         uses: actions/cache@v4
@@ -118,8 +118,8 @@ jobs:
       - name: Setup hologram at /hologram
         run: |
           sudo mv hologram-repo /hologram
-          sudo mkdir -p /hologram/externals
-          sudo mv hologram-backend-repo /hologram/externals/hologram-backend
+          sudo mkdir -p /hologram/crates
+          sudo mv hologram-backend-repo /hologram/crates/backend
 
       - name: Cache cargo registry
         uses: actions/cache@v4
@@ -179,8 +179,8 @@ jobs:
       - name: Setup hologram at /hologram
         run: |
           sudo mv hologram-repo /hologram
-          sudo mkdir -p /hologram/externals
-          sudo mv hologram-backend-repo /hologram/externals/hologram-backend
+          sudo mkdir -p /hologram/crates
+          sudo mv hologram-backend-repo /hologram/crates/backend
 
       - name: Cache cargo registry
         uses: actions/cache@v4
@@ -240,8 +240,8 @@ jobs:
       - name: Setup hologram at /hologram
         run: |
           sudo mv hologram-repo /hologram
-          sudo mkdir -p /hologram/externals
-          sudo mv hologram-backend-repo /hologram/externals/hologram-backend
+          sudo mkdir -p /hologram/crates
+          sudo mv hologram-backend-repo /hologram/crates/backend
 
       - name: Cache cargo registry
         uses: actions/cache@v4
@@ -302,8 +302,8 @@ jobs:
       - name: Setup hologram at /hologram
         run: |
           sudo mv hologram-repo /hologram
-          sudo mkdir -p /hologram/externals
-          sudo mv hologram-backend-repo /hologram/externals/hologram-backend
+          sudo mkdir -p /hologram/crates
+          sudo mv hologram-backend-repo /hologram/crates/backend
 
       - name: Cache cargo registry
         uses: actions/cache@v4
@@ -365,8 +365,8 @@ jobs:
       - name: Setup hologram at /hologram
         run: |
           sudo mv hologram-repo /hologram
-          sudo mkdir -p /hologram/externals
-          sudo mv hologram-backend-repo /hologram/externals/hologram-backend
+          sudo mkdir -p /hologram/crates
+          sudo mv hologram-backend-repo /hologram/crates/backend
 
       - name: Cache cargo registry
         uses: actions/cache@v4
@@ -433,8 +433,8 @@ jobs:
       - name: Setup hologram at /hologram
         run: |
           sudo mv hologram-repo /hologram
-          sudo mkdir -p /hologram/externals
-          sudo mv hologram-backend-repo /hologram/externals/hologram-backend
+          sudo mkdir -p /hologram/crates
+          sudo mv hologram-backend-repo /hologram/crates/backend
 
       - name: Cache cargo registry
         uses: actions/cache@v4
