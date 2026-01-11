@@ -12,15 +12,15 @@
 
 set -e
 
-echo "🔧 Running pre-commit checks..."
+echo "Running pre-commit checks..."
 
 # Format code
-echo "📝 Formatting code with cargo fmt..."
+echo "Formatting code with cargo fmt..."
 cargo fmt --all
 
 # Check if formatting changed any files
 if ! git diff --quiet; then
-    echo "⚠️  Code was reformatted. The changes have been applied."
+    echo "Code was reformatted. The changes have been applied."
     echo "   Please review and stage the formatted files before committing."
     echo ""
     echo "   Files changed:"
@@ -32,11 +32,11 @@ if ! git diff --quiet; then
 fi
 
 # Run clippy
-echo "🔍 Running clippy..."
+echo "Running clippy..."
 cargo clippy --all-targets -- -D warnings
 
 # Run tests
-echo "🧪 Running tests..."
+echo "Running tests..."
 cargo test --all --lib
 
-echo "✅ All pre-commit checks passed!"
+echo "All pre-commit checks passed!"

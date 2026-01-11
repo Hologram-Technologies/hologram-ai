@@ -4,3 +4,6 @@
 **/*.jpg
 **/*.jpeg
 *.json
+
+# Local cargo configuration (for path overrides)
+/.cargo/

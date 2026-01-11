@@ -25,38 +25,15 @@ jobs:
 
       - name: Configure git for private repos
         run: |
-          # Configure git credential helper with token
           echo "https://x-access-token:${{ secrets.HOLOGRAM_PAT }}@github.com" >> ~/.git-credentials
           git config --global credential.helper 'store --file ~/.git-credentials'
-          # Rewrite SSH URLs to HTTPS (must match exact prefix patterns)
           git config --global --add url."https://github.com/".insteadOf "git@github.com:"
           git config --global --add url."https://github.com/".insteadOf "ssh://git@github.com/"
-          # Configure cargo to use git CLI so it respects git config
           mkdir -p ~/.cargo
           cat >> ~/.cargo/config.toml << 'EOF'
           [net]
           git-fetch-with-cli = true
           EOF
-
-      - name: Clone hologram dependencies
-        uses: actions/checkout@v4
-        with:
-          repository: UOR-Foundation/hologram
-          path: hologram-repo
-          token: ${{ secrets.HOLOGRAM_PAT }}
-
-      - name: Clone hologram-backend
-        uses: actions/checkout@v4
-        with:
-          repository: UOR-Foundation/hologram-backend
-          path: hologram-backend-repo
-          token: ${{ secrets.HOLOGRAM_PAT }}
-
-      - name: Setup hologram at /hologram
-        run: |
-          sudo mv hologram-repo /hologram
-          sudo mkdir -p /hologram/crates
-          sudo mv hologram-backend-repo /hologram/crates/backend
 
       - name: Cache cargo registry
         uses: actions/cache@v4
@@ -88,38 +65,15 @@ jobs:
 
       - name: Configure git for private repos
         run: |
-          # Configure git credential helper with token
           echo "https://x-access-token:${{ secrets.HOLOGRAM_PAT }}@github.com" >> ~/.git-credentials
           git config --global credential.helper 'store --file ~/.git-credentials'
-          # Rewrite SSH URLs to HTTPS (must match exact prefix patterns)
           git config --global --add url."https://github.com/".insteadOf "git@github.com:"
           git config --global --add url."https://github.com/".insteadOf "ssh://git@github.com/"
-          # Configure cargo to use git CLI so it respects git config
           mkdir -p ~/.cargo
           cat >> ~/.cargo/config.toml << 'EOF'
           [net]
           git-fetch-with-cli = true
           EOF
-
-      - name: Clone hologram dependencies
-        uses: actions/checkout@v4
-        with:
-          repository: UOR-Foundation/hologram
-          path: hologram-repo
-          token: ${{ secrets.HOLOGRAM_PAT }}
-
-      - name: Clone hologram-backend
-        uses: actions/checkout@v4
-        with:
-          repository: UOR-Foundation/hologram-backend
-          path: hologram-backend-repo
-          token: ${{ secrets.HOLOGRAM_PAT }}
-
-      - name: Setup hologram at /hologram
-        run: |
-          sudo mv hologram-repo /hologram
-          sudo mkdir -p /hologram/crates
-          sudo mv hologram-backend-repo /hologram/crates/backend
 
       - name: Cache cargo registry
         uses: actions/cache@v4
@@ -149,38 +103,15 @@ jobs:
 
       - name: Configure git for private repos
         run: |
-          # Configure git credential helper with token
           echo "https://x-access-token:${{ secrets.HOLOGRAM_PAT }}@github.com" >> ~/.git-credentials
           git config --global credential.helper 'store --file ~/.git-credentials'
-          # Rewrite SSH URLs to HTTPS (must match exact prefix patterns)
           git config --global --add url."https://github.com/".insteadOf "git@github.com:"
           git config --global --add url."https://github.com/".insteadOf "ssh://git@github.com/"
-          # Configure cargo to use git CLI so it respects git config
           mkdir -p ~/.cargo
           cat >> ~/.cargo/config.toml << 'EOF'
           [net]
           git-fetch-with-cli = true
           EOF
-
-      - name: Clone hologram dependencies
-        uses: actions/checkout@v4
-        with:
-          repository: UOR-Foundation/hologram
-          path: hologram-repo
-          token: ${{ secrets.HOLOGRAM_PAT }}
-
-      - name: Clone hologram-backend
-        uses: actions/checkout@v4
-        with:
-          repository: UOR-Foundation/hologram-backend
-          path: hologram-backend-repo
-          token: ${{ secrets.HOLOGRAM_PAT }}
-
-      - name: Setup hologram at /hologram
-        run: |
-          sudo mv hologram-repo /hologram
-          sudo mkdir -p /hologram/crates
-          sudo mv hologram-backend-repo /hologram/crates/backend
 
       - name: Cache cargo registry
         uses: actions/cache@v4
@@ -210,38 +141,15 @@ jobs:
 
       - name: Configure git for private repos
         run: |
-          # Configure git credential helper with token
           echo "https://x-access-token:${{ secrets.HOLOGRAM_PAT }}@github.com" >> ~/.git-credentials
           git config --global credential.helper 'store --file ~/.git-credentials'
-          # Rewrite SSH URLs to HTTPS (must match exact prefix patterns)
           git config --global --add url."https://github.com/".insteadOf "git@github.com:"
           git config --global --add url."https://github.com/".insteadOf "ssh://git@github.com/"
-          # Configure cargo to use git CLI so it respects git config
           mkdir -p ~/.cargo
           cat >> ~/.cargo/config.toml << 'EOF'
           [net]
           git-fetch-with-cli = true
           EOF
-
-      - name: Clone hologram dependencies
-        uses: actions/checkout@v4
-        with:
-          repository: UOR-Foundation/hologram
-          path: hologram-repo
-          token: ${{ secrets.HOLOGRAM_PAT }}
-
-      - name: Clone hologram-backend
-        uses: actions/checkout@v4
-        with:
-          repository: UOR-Foundation/hologram-backend
-          path: hologram-backend-repo
-          token: ${{ secrets.HOLOGRAM_PAT }}
-
-      - name: Setup hologram at /hologram
-        run: |
-          sudo mv hologram-repo /hologram
-          sudo mkdir -p /hologram/crates
-          sudo mv hologram-backend-repo /hologram/crates/backend
 
       - name: Cache cargo registry
         uses: actions/cache@v4
@@ -272,38 +180,15 @@ jobs:
 
       - name: Configure git for private repos
         run: |
-          # Configure git credential helper with token
           echo "https://x-access-token:${{ secrets.HOLOGRAM_PAT }}@github.com" >> ~/.git-credentials
           git config --global credential.helper 'store --file ~/.git-credentials'
-          # Rewrite SSH URLs to HTTPS (must match exact prefix patterns)
           git config --global --add url."https://github.com/".insteadOf "git@github.com:"
           git config --global --add url."https://github.com/".insteadOf "ssh://git@github.com/"
-          # Configure cargo to use git CLI so it respects git config
           mkdir -p ~/.cargo
           cat >> ~/.cargo/config.toml << 'EOF'
           [net]
           git-fetch-with-cli = true
           EOF
-
-      - name: Clone hologram dependencies
-        uses: actions/checkout@v4
-        with:
-          repository: UOR-Foundation/hologram
-          path: hologram-repo
-          token: ${{ secrets.HOLOGRAM_PAT }}
-
-      - name: Clone hologram-backend
-        uses: actions/checkout@v4
-        with:
-          repository: UOR-Foundation/hologram-backend
-          path: hologram-backend-repo
-          token: ${{ secrets.HOLOGRAM_PAT }}
-
-      - name: Setup hologram at /hologram
-        run: |
-          sudo mv hologram-repo /hologram
-          sudo mkdir -p /hologram/crates
-          sudo mv hologram-backend-repo /hologram/crates/backend
 
       - name: Cache cargo registry
         uses: actions/cache@v4
@@ -335,38 +220,15 @@ jobs:
 
       - name: Configure git for private repos
         run: |
-          # Configure git credential helper with token
           echo "https://x-access-token:${{ secrets.HOLOGRAM_PAT }}@github.com" >> ~/.git-credentials
           git config --global credential.helper 'store --file ~/.git-credentials'
-          # Rewrite SSH URLs to HTTPS (must match exact prefix patterns)
           git config --global --add url."https://github.com/".insteadOf "git@github.com:"
           git config --global --add url."https://github.com/".insteadOf "ssh://git@github.com/"
-          # Configure cargo to use git CLI so it respects git config
           mkdir -p ~/.cargo
           cat >> ~/.cargo/config.toml << 'EOF'
           [net]
           git-fetch-with-cli = true
           EOF
-
-      - name: Clone hologram dependencies
-        uses: actions/checkout@v4
-        with:
-          repository: UOR-Foundation/hologram
-          path: hologram-repo
-          token: ${{ secrets.HOLOGRAM_PAT }}
-
-      - name: Clone hologram-backend
-        uses: actions/checkout@v4
-        with:
-          repository: UOR-Foundation/hologram-backend
-          path: hologram-backend-repo
-          token: ${{ secrets.HOLOGRAM_PAT }}
-
-      - name: Setup hologram at /hologram
-        run: |
-          sudo mv hologram-repo /hologram
-          sudo mkdir -p /hologram/crates
-          sudo mv hologram-backend-repo /hologram/crates/backend
 
       - name: Cache cargo registry
         uses: actions/cache@v4
@@ -403,38 +265,15 @@ jobs:
 
       - name: Configure git for private repos
         run: |
-          # Configure git credential helper with token
           echo "https://x-access-token:${{ secrets.HOLOGRAM_PAT }}@github.com" >> ~/.git-credentials
           git config --global credential.helper 'store --file ~/.git-credentials'
-          # Rewrite SSH URLs to HTTPS (must match exact prefix patterns)
           git config --global --add url."https://github.com/".insteadOf "git@github.com:"
           git config --global --add url."https://github.com/".insteadOf "ssh://git@github.com/"
-          # Configure cargo to use git CLI so it respects git config
           mkdir -p ~/.cargo
           cat >> ~/.cargo/config.toml << 'EOF'
           [net]
           git-fetch-with-cli = true
           EOF
-
-      - name: Clone hologram dependencies
-        uses: actions/checkout@v4
-        with:
-          repository: UOR-Foundation/hologram
-          path: hologram-repo
-          token: ${{ secrets.HOLOGRAM_PAT }}
-
-      - name: Clone hologram-backend
-        uses: actions/checkout@v4
-        with:
-          repository: UOR-Foundation/hologram-backend
-          path: hologram-backend-repo
-          token: ${{ secrets.HOLOGRAM_PAT }}
-
-      - name: Setup hologram at /hologram
-        run: |
-          sudo mv hologram-repo /hologram
-          sudo mkdir -p /hologram/crates
-          sudo mv hologram-backend-repo /hologram/crates/backend
 
       - name: Cache cargo registry
         uses: actions/cache@v4

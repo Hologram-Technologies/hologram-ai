@@ -15,8 +15,8 @@ license = "MIT OR Apache-2.0"
 repository = "https://github.com/uor-framework/hologram-ai"
 
 [workspace.dependencies]
-# Hologram
-hologram = { path = "/hologram" }
+# Hologram - fetched from git for CI, patched locally via .cargo/config.toml for development
+hologram = { git = "https://github.com/UOR-Foundation/hologram", branch = "main" }
 
 # Internal crates
 hologram-ai-common = { path = "crates/hologram-ai-common" }
@@ -58,6 +58,3 @@ tokenizers = "0.20"
 
 # Testing
 criterion = { version = "0.5", features = ["html_reports"] }
-
-[patch."https://github.com/UOR-Foundation/hologram-backend.git"]
-hologram-backend = { path = "/hologram/crates/backend" }
