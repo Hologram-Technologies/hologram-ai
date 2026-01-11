@@ -2,6 +2,16 @@
 //!
 //! Tests the full ONNX→IR→execution pipeline with a real BERT model.
 //!
+//! **NOTE:** These are heavyweight integration tests that require:
+//! - A BERT model (~440MB) at models/bert-base/model.onnx
+//! - Significant memory (~2GB) for compilation
+//! - Time (~17s per compilation)
+//!
+//! Most tests are `#[ignore]` by default. Run with:
+//! ```bash
+//! cargo test -p hologram-ai-onnx --test bert_compilation -- --ignored
+//! ```
+//!
 //! These tests run serially to avoid memory exhaustion when running
 //! multiple large model compilations concurrently.
 
@@ -20,6 +30,7 @@ const RUNTIME_SEQ_LEN: usize = 128;
 
 #[test]
 #[serial]
+#[ignore = "Heavyweight: compiles full BERT model (~17s, 520MB); run with --ignored"]
 fn test_bert_compilation() {
     // Skip if model doesn't exist
     let model_path = Path::new(env!("CARGO_MANIFEST_DIR")).join(BERT_MODEL_PATH);
@@ -110,6 +121,7 @@ fn test_bert_parsing() {
 /// Test compiling BERT to unified bundle (HOLB) with embedded weights.
 #[test]
 #[serial]
+#[ignore = "Heavyweight: compiles full BERT model (~17s, 520MB); run with --ignored"]
 fn test_bert_compile_to_bundle() {
     let model_path = Path::new(env!("CARGO_MANIFEST_DIR")).join(BERT_MODEL_PATH);
     let holo_path = Path::new(env!("CARGO_MANIFEST_DIR")).join(BERT_HOLO_PATH);
@@ -256,6 +268,7 @@ const BERT_EMBEDDED_HOLO_PATH: &str = "../../models/bert-base/model_with_vocab.h
 /// This test creates a V2 bundle with the vocabulary embedded as a section.
 #[test]
 #[serial]
+#[ignore = "Heavyweight: compiles full BERT model (~17s, 520MB); run with --ignored"]
 fn test_bert_compile_with_embedded_vocab() {
     use hologram_ai_onnx::core::{EmbeddedFileConfig, UnifiedBundleReader, VocabularySection};
 
@@ -367,8 +380,10 @@ fn test_bert_compile_with_embedded_vocab() {
 }
 
 /// Test reading vocabulary from an existing bundle.
+/// This is lightweight but depends on test_bert_compile_with_embedded_vocab.
 #[test]
 #[serial]
+#[ignore = "Depends on heavyweight test_bert_compile_with_embedded_vocab; run with --ignored"]
 fn test_bert_read_embedded_vocab() {
     use hologram_ai_onnx::core::{UnifiedBundleReader, VocabularySection};
 

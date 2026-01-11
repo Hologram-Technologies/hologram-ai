@@ -1,4 +1,13 @@
 //! BERT output decoding test - demonstrates masked language model prediction.
+//!
+//! **NOTE:** This is a heavyweight integration test that requires:
+//! - A compiled BERT bundle at models/bert-base/model.holo
+//! - Run test_bert_compile_to_bundle first to create it
+//!
+//! Run with:
+//! ```bash
+//! cargo test -p hologram-ai-onnx --test bert_decode -- --ignored
+//! ```
 
 use std::collections::HashMap;
 use std::fs;
@@ -40,6 +49,7 @@ fn top_k(logits: &[f32], k: usize) -> Vec<(usize, f32)> {
 }
 
 #[test]
+#[ignore = "Heavyweight: requires compiled BERT model; run with --ignored"]
 fn test_bert_mask_prediction() {
     use hologram_ai::runtime::{ModelExecutor, Tensor};
 
