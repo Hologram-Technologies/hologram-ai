@@ -166,11 +166,8 @@ See [docs/working/benchmarks.md](docs/working/benchmarks.md) for detailed benchm
 # Build all crates
 cargo build --release
 
-# Run all tests
-CARGO_NET_GIT_FETCH_WITH_CLI=true cargo test
-
-# Run specific test suite
-cargo test -p hologram-onnx-core --test decomposition_tests
+# Run all tests (lightweight only, ~5s)
+cargo test --workspace --lib
 
 # Check for issues
 cargo clippy --all-targets
@@ -180,6 +177,49 @@ cargo doc --no-deps --open
 
 # Run benchmarks
 cargo bench
+```
+
+### Test Tiers
+
+Tests are organized into tiers based on resource requirements:
+
+**Lightweight tests** (run by default):
+- Unit tests in `--lib`
+- Mock model tests in `lightweight_tests.rs`
+- Fast parsing tests (~0.5s each)
+
+```bash
+# Run all lightweight tests
+cargo test --workspace --lib
+```
+
+**Heavyweight tests** (ignored by default):
+- Full model compilation (BERT, T5, etc.)
+- Require ~2GB memory
+- Take ~17s per compilation
+- Require model files in `models/` directory
+
+```bash
+# Run BERT compilation tests
+cargo test -p hologram-ai-onnx --test bert_compilation -- --ignored
+
+# Run BERT decoding test
+cargo test -p hologram-ai-onnx --test bert_decode -- --ignored
+
+# Run all ignored tests
+cargo test --workspace -- --ignored
+```
+
+**Integration tests** (CI only):
+- Download MNIST model from GitHub
+- Full compilation and execution pipeline
+
+```bash
+# Run integration tests locally
+mkdir -p crates/hologram-ai-onnx/tests/fixtures
+curl -L https://github.com/onnx/models/raw/main/validated/vision/classification/mnist/model/mnist-12.onnx \
+  -o crates/hologram-ai-onnx/tests/fixtures/mnist-12.onnx
+cargo test -p hologram-ai-onnx --test '*'
 ```
 
 ## License
