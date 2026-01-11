@@ -1041,19 +1041,29 @@ impl UnifiedBundleWriter {
 /// Reader for unified bundle files (HOLB format).
 ///
 /// Provides zero-copy access to bundle sections. Can work with borrowed bytes
-/// or memory-mapped files.
+/// or memory-mapped files. Supports both V1 (without sections) and V2 (with
+/// embedded sections) bundle formats.
 #[derive(Debug)]
 pub struct UnifiedBundleReader<'a> {
     header: HoloBundleHeader,
     data: &'a [u8],
+    /// V2-specific: parsed section entries (empty for V1 bundles)
+    section_entries: Vec<SectionTableEntry>,
+    /// V2-specific: offset to start of sections data
+    sections_data_offset: usize,
 }
 
 impl<'a> UnifiedBundleReader<'a> {
     /// Create a reader from a byte slice.
     ///
     /// Parses and validates the header. The data slice must remain valid
-    /// for the lifetime of the reader.
+    /// for the lifetime of the reader. Automatically detects V1 vs V2 format.
     pub fn from_bytes(data: &'a [u8]) -> Result<Self> {
+        use crate::core::serialization::{
+            BUNDLE_HEADER_SIZE_V2, HoloBundleHeaderV2, deserialize_sections_table,
+            detect_bundle_version,
+        };
+
         if data.len() < BUNDLE_HEADER_SIZE {
             return Err(OnnxError::InvalidModel(
                 "Unified bundle too small for header".into(),
@@ -1069,26 +1079,96 @@ impl<'a> UnifiedBundleReader<'a> {
             )));
         }
 
-        // Parse header
-        let header = HoloBundleHeader::from_bytes(data)?;
-        header.validate()?;
+        // Detect bundle version
+        let version = detect_bundle_version(data)?;
 
-        // Validate data size
-        let required_size = if header.has_weights() {
-            header.weights_offset as usize + header.weights_size as usize
+        if version == 2 {
+            // V2 bundle with sections
+            if data.len() < BUNDLE_HEADER_SIZE_V2 {
+                return Err(OnnxError::InvalidModel(
+                    "V2 bundle too small for header".into(),
+                ));
+            }
+
+            let header_v2 = HoloBundleHeaderV2::from_bytes(data)?;
+
+            // Validate data size
+            let required_size = if header_v2.weights_size > 0 {
+                header_v2.weights_offset as usize + header_v2.weights_size as usize
+            } else {
+                header_v2.graph_offset as usize + header_v2.graph_size as usize
+            };
+
+            if data.len() < required_size {
+                return Err(OnnxError::InvalidModel(format!(
+                    "V2 bundle truncated: need {} bytes, have {}",
+                    required_size,
+                    data.len()
+                )));
+            }
+
+            // Parse sections table
+            let (section_entries, sections_data_offset) = if header_v2.sections_count > 0 {
+                let table_offset = header_v2.sections_table_offset as usize;
+                let table_bytes = &data[table_offset..];
+                let entries =
+                    deserialize_sections_table(table_bytes, header_v2.sections_count as usize)?;
+
+                // Calculate sections data offset (after the table)
+                let table_size = entries.iter().map(|e| e.serialized_size()).sum::<usize>();
+                let data_offset = table_offset + table_size;
+
+                (entries, data_offset)
+            } else {
+                (Vec::new(), 0)
+            };
+
+            // Convert V2 header to V1 header for compatibility
+            let header = HoloBundleHeader {
+                magic: header_v2.magic,
+                version: header_v2.version,
+                flags: header_v2.flags,
+                graph_offset: header_v2.graph_offset,
+                graph_size: header_v2.graph_size,
+                weights_offset: header_v2.weights_offset,
+                weights_size: header_v2.weights_size,
+                graph_checksum: header_v2.graph_checksum,
+                weights_checksum: header_v2.weights_checksum,
+            };
+
+            Ok(Self {
+                header,
+                data,
+                section_entries,
+                sections_data_offset,
+            })
         } else {
-            header.graph_offset as usize + header.graph_size as usize
-        };
+            // V1 bundle (no sections)
+            let header = HoloBundleHeader::from_bytes(data)?;
+            header.validate()?;
 
-        if data.len() < required_size {
-            return Err(OnnxError::InvalidModel(format!(
-                "Unified bundle truncated: need {} bytes, have {}",
-                required_size,
-                data.len()
-            )));
+            // Validate data size
+            let required_size = if header.has_weights() {
+                header.weights_offset as usize + header.weights_size as usize
+            } else {
+                header.graph_offset as usize + header.graph_size as usize
+            };
+
+            if data.len() < required_size {
+                return Err(OnnxError::InvalidModel(format!(
+                    "Unified bundle truncated: need {} bytes, have {}",
+                    required_size,
+                    data.len()
+                )));
+            }
+
+            Ok(Self {
+                header,
+                data,
+                section_entries: Vec::new(),
+                sections_data_offset: 0,
+            })
         }
-
-        Ok(Self { header, data })
     }
 
     /// Get the bundle header.
@@ -1164,6 +1244,87 @@ impl<'a> UnifiedBundleReader<'a> {
     /// Get the weights size.
     pub fn weights_size(&self) -> usize {
         self.header.weights_size as usize
+    }
+
+    // =========================================================================
+    // V2 Section Access Methods
+    // =========================================================================
+
+    /// Get the bundle version (1 or 2).
+    pub fn version(&self) -> u32 {
+        self.header.version
+    }
+
+    /// Get the section table entries (empty for V1 bundles).
+    pub fn sections(&self) -> &[SectionTableEntry] {
+        &self.section_entries
+    }
+
+    /// Check if a section with the given ID exists.
+    pub fn has_section(&self, id: &str) -> bool {
+        self.section_entries.iter().any(|e| e.id == id)
+    }
+
+    /// Get the raw bytes of a section by ID.
+    ///
+    /// Returns `None` if the section doesn't exist.
+    pub fn get_section_bytes(&self, id: &str) -> Option<&'a [u8]> {
+        let entry = self.section_entries.iter().find(|e| e.id == id)?;
+        let start = self.sections_data_offset + entry.offset as usize;
+        let end = start + entry.size as usize;
+        if end <= self.data.len() {
+            Some(&self.data[start..end])
+        } else {
+            None
+        }
+    }
+
+    /// Extract a typed section by ID.
+    ///
+    /// The section type `T` must implement [`FromEmbeddedSection`].
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// use hologram_ai_onnx::core::{UnifiedBundleReader, VocabularySection};
+    ///
+    /// let reader = UnifiedBundleReader::from_bytes(&bundle_bytes)?;
+    /// if let Some(vocab) = reader.get_section::<VocabularySection>() {
+    ///     println!("Vocabulary size: {}", vocab.len());
+    /// }
+    /// ```
+    pub fn get_section<T: crate::core::sections::FromEmbeddedSection>(&self) -> Option<T> {
+        let bytes = self.get_section_bytes(T::SECTION_ID)?;
+        T::from_bytes(bytes).ok()
+    }
+
+    /// Verify the checksum of a section by ID.
+    ///
+    /// Returns `None` if the section doesn't exist.
+    /// Returns `Some(true)` if checksum matches, `Some(false)` otherwise.
+    pub fn verify_section_checksum(&self, id: &str) -> Option<bool> {
+        let entry = self.section_entries.iter().find(|e| e.id == id)?;
+        let bytes = self.get_section_bytes(id)?;
+        let actual = crc32_checksum(bytes);
+        Some(actual == entry.checksum)
+    }
+
+    /// Verify all section checksums.
+    ///
+    /// Returns `true` if all sections pass checksum verification,
+    /// or if there are no sections.
+    pub fn verify_all_section_checksums(&self) -> bool {
+        for entry in &self.section_entries {
+            if let Some(bytes) = self.get_section_bytes(&entry.id) {
+                let actual = crc32_checksum(bytes);
+                if actual != entry.checksum {
+                    return false;
+                }
+            } else {
+                return false;
+            }
+        }
+        true
     }
 }
 

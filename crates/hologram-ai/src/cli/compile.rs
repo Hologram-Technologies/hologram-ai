@@ -9,7 +9,7 @@
 
 use anyhow::{Context, Result};
 #[cfg(feature = "onnx")]
-use hologram_ai_onnx::core::{OnnxConfig, parse_model};
+use hologram_ai_onnx::core::{EmbeddedFileConfig, OnnxConfig, parse_model};
 use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
@@ -28,6 +28,7 @@ use tracing::{debug, info};
 /// * `enable_resize_upscaling` - Enable Resize upscaling (false saves memory)
 /// * `input_shapes` - Optional map of input name -> concrete shape dimensions
 /// * `bundle` - Create a unified bundle with embedded weights (HOLB format)
+/// * `embed_files` - Files to embed in the bundle (vocabulary, config, etc.)
 ///
 /// # Returns
 ///
@@ -45,6 +46,7 @@ pub fn compile_command(
     enable_resize_upscaling: bool,
     input_shapes: &HashMap<String, Vec<usize>>,
     bundle: bool,
+    embed_files: &[EmbeddedFileConfig],
 ) -> Result<()> {
     info!("Compiling ONNX model: {}", input.display());
     debug!("Output path: {}", output.display());
@@ -87,7 +89,7 @@ pub fn compile_command(
         info!("Model updated with concrete input shapes");
     }
 
-    // Create configuration
+    // Create configuration with embedded files
     let config = OnnxConfig {
         weight_threshold,
         enable_partitioning: partition,
@@ -97,21 +99,32 @@ pub fn compile_command(
         pack_weights: true,
         memory_budget,
         enable_resize_upscaling,
-        embedded_files: Vec::new(),
+        embedded_files: embed_files.to_vec(),
     };
 
     config
         .validate()
         .map_err(|e| anyhow::anyhow!("Invalid configuration: {}", e))?;
 
+    // Log embedded files if any
+    if !embed_files.is_empty() {
+        info!("Embedding {} files in bundle", embed_files.len());
+        for file in embed_files {
+            debug!("  - {:?}: {}", file.section_type, file.path.display());
+        }
+    }
+
     // Compile using the OnnxCompiler API
     info!("Starting compilation pipeline...");
     let compiler = hologram_ai_onnx::OnnxCompiler::with_config(config);
 
+    // Get base path for resolving relative embedded file paths
+    let base_path = input.parent().unwrap_or(Path::new("."));
+
     if bundle {
         // Compile to unified bundle (HOLB format)
         let bundle_bytes = compiler
-            .compile_to_bundle(&onnx_bytes)
+            .compile_to_bundle_with_base_path(&onnx_bytes, base_path)
             .context("ONNX compilation to bundle failed")?;
 
         info!(
@@ -231,6 +244,7 @@ mod tests {
             true,
             &HashMap::new(),
             false, // bundle
+            &[],   // embed_files
         );
         assert!(result.is_err());
         assert!(

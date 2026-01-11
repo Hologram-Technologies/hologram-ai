@@ -84,6 +84,28 @@ enum Commands {
         /// Disable with --no-bundle for separate .holo + .weights files.
         #[arg(long, default_value = "true", action = clap::ArgAction::Set)]
         bundle: bool,
+
+        /// Embed files in the bundle (vocabulary, tokenizer config, etc.)
+        ///
+        /// Format: type:path or type:path:custom_id
+        ///
+        /// Types:
+        ///   vocabulary       - Line-based vocabulary (vocab.txt)
+        ///   vocabulary_json  - JSON vocabulary (vocab.json)
+        ///   tokenizer_config - Tokenizer config (tokenizer_config.json)
+        ///   model_config     - Model config (config.json)
+        ///   special_tokens   - Special tokens map (special_tokens_map.json)
+        ///   preprocessor     - Preprocessor config (preprocessor_config.json)
+        ///   sentencepiece    - SentencePiece model (*.model)
+        ///   generation       - Generation config (generation_config.json)
+        ///   raw:content_type - Raw file with custom content type
+        ///
+        /// Examples:
+        ///   --embed vocabulary:vocab.txt
+        ///   --embed tokenizer_config:tokenizer_config.json
+        ///   --embed raw:application/octet-stream:data.bin:my_data
+        #[arg(long = "embed", value_name = "TYPE:PATH[:ID]")]
+        embed_files: Vec<String>,
     },
 
     /// Compile tokenizer to .holo format for hologram execution
@@ -388,6 +410,7 @@ pub fn run() -> anyhow::Result<()> {
             weight_threshold,
             input_shapes,
             bundle,
+            embed_files,
         } => {
             // Parse input shapes from "name=d1,d2,d3" format
             let parsed_shapes: std::collections::HashMap<String, Vec<usize>> = input_shapes
@@ -407,6 +430,9 @@ pub fn run() -> anyhow::Result<()> {
                 })
                 .collect();
 
+            // Parse embedded files
+            let parsed_embed_files = parse_embed_files(&embed_files)?;
+
             // If a config file is provided, use it for compiler settings
             if let Some(config_path) = config {
                 compile_with_config(
@@ -418,6 +444,7 @@ pub fn run() -> anyhow::Result<()> {
                     memory_budget,
                     weight_threshold,
                     bundle,
+                    &parsed_embed_files,
                 )
             } else {
                 // Traditional compile with explicit input
@@ -437,6 +464,7 @@ pub fn run() -> anyhow::Result<()> {
                     true, // enable_resize_upscaling
                     &parsed_shapes,
                     bundle,
+                    &parsed_embed_files,
                 )
             }
         }
@@ -610,6 +638,87 @@ pub fn run() -> anyhow::Result<()> {
     }
 }
 
+/// Parse embed file specifications from CLI arguments.
+///
+/// Format: type:path or type:path:custom_id
+/// For raw type: raw:content_type:path or raw:content_type:path:custom_id
+#[cfg(feature = "onnx")]
+fn parse_embed_files(
+    specs: &[String],
+) -> anyhow::Result<Vec<hologram_ai_onnx::core::EmbeddedFileConfig>> {
+    use hologram_ai_onnx::core::{EmbeddedFileConfig, SectionType};
+
+    let mut result = Vec::new();
+
+    for spec in specs {
+        let parts: Vec<&str> = spec.split(':').collect();
+        if parts.len() < 2 {
+            anyhow::bail!(
+                "Invalid embed format '{}'. Expected type:path or type:path:custom_id",
+                spec
+            );
+        }
+
+        let type_str = parts[0];
+        let (section_type, path, custom_id) = if type_str == "raw" {
+            // raw:content_type:path[:custom_id]
+            if parts.len() < 3 {
+                anyhow::bail!(
+                    "Invalid raw embed format '{}'. Expected raw:content_type:path[:custom_id]",
+                    spec
+                );
+            }
+            let content_type = parts[1].to_string();
+            let path = parts[2];
+            let custom_id = if parts.len() > 3 {
+                Some(parts[3].to_string())
+            } else {
+                None
+            };
+            (SectionType::Raw { content_type }, path, custom_id)
+        } else {
+            // type:path[:custom_id]
+            let path = parts[1];
+            let custom_id = if parts.len() > 2 {
+                Some(parts[2].to_string())
+            } else {
+                None
+            };
+
+            let section_type = match type_str {
+                "vocabulary" | "vocab" => SectionType::Vocabulary,
+                "vocabulary_json" | "vocab_json" => SectionType::VocabularyJson,
+                "tokenizer_config" | "tokenizer" => SectionType::TokenizerConfig,
+                "model_config" | "config" => SectionType::ModelConfig,
+                "special_tokens" => SectionType::SpecialTokensMap,
+                "preprocessor" | "preprocessor_config" => SectionType::PreprocessorConfig,
+                "sentencepiece" | "spm" => SectionType::SentencePiece,
+                "generation" | "generation_config" => SectionType::GenerationConfig,
+                _ => {
+                    anyhow::bail!(
+                        "Unknown embed type '{}'. Valid types: vocabulary, vocabulary_json, \
+                         tokenizer_config, model_config, special_tokens, preprocessor, \
+                         sentencepiece, generation, raw",
+                        type_str
+                    );
+                }
+            };
+            (section_type, path, custom_id)
+        };
+
+        let mut config = EmbeddedFileConfig::new(PathBuf::from(path), section_type);
+        config.custom_id = custom_id;
+        result.push(config);
+    }
+
+    Ok(result)
+}
+
+#[cfg(not(feature = "onnx"))]
+fn parse_embed_files(_specs: &[String]) -> anyhow::Result<Vec<()>> {
+    Ok(Vec::new())
+}
+
 /// Compile models using settings from a unified config file.
 #[allow(clippy::too_many_arguments)] // CLI override helper mirrors flag surface.
 fn compile_with_config(
@@ -621,6 +730,8 @@ fn compile_with_config(
     memory_budget_override: Option<usize>,
     weight_threshold_override: usize,
     bundle: bool,
+    #[cfg(feature = "onnx")] embed_files: &[hologram_ai_onnx::core::EmbeddedFileConfig],
+    #[cfg(not(feature = "onnx"))] _embed_files: &[()],
 ) -> anyhow::Result<()> {
     use crate::config::UnifiedConfig;
     #[cfg(feature = "onnx")]
@@ -672,6 +783,7 @@ fn compile_with_config(
             compiler_config.enable_resize_upscaling,
             &std::collections::HashMap::new(), // No input shapes from config yet
             bundle,
+            embed_files,
         );
     }
 
@@ -718,6 +830,7 @@ fn compile_with_config(
             compiler_config.enable_resize_upscaling,
             &std::collections::HashMap::new(), // No input shapes from config yet
             bundle,
+            embed_files,
         )?;
     }
 
