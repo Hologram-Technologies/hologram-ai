@@ -131,7 +131,19 @@
       "Bash(RUST_LOG=info,hologram_backend=warn,hologram_compiler=warn cargo run:*)",
       "Bash(RUST_LOG=hologram_backend::executor=trace cargo run:*)",
       "Bash(./target/release/hologram compile:*)",
-      "Bash(RUST_BACKTRACE=1 RUST_LOG=info ./target/release/hologram-ai:*)"
+      "Bash(RUST_BACKTRACE=1 RUST_LOG=info ./target/release/hologram-ai:*)",
+      "Bash(RUST_LOG=hologram_backend::cpu::kernels=info cargo run:*)",
+      "Bash(RUST_LOG=hologram_ai_onnx=info cargo test:*)",
+      "Bash(RUST_LOG=hologram_backend::executor=info cargo run:*)",
+      "Bash(git -C /workspace status)",
+      "Bash(git -C /workspace diff --stat)",
+      "Bash(git -C /workspace log --oneline -5)",
+      "Bash(git -C /hologram log --oneline --all)",
+      "Bash(git -C /hologram log --oneline --grep=\"erf\" -5)",
+      "Bash(git -C /hologram log:*)",
+      "Bash(git -C /workspace diff --staged --stat)",
+      "Bash(git commit -m \"$\\(cat <<''EOF''\nfeat\\(hologram-ai-onnx\\): add LayerNorm scale/bias support and BERT tests\n\n- Fix LayerNormTranslator to apply scale \\(gamma\\) and bias \\(beta\\) if provided\n- Add BERT compilation and runtime execution tests\n- Add BERT mask prediction decode test with vocabulary support\n- Update shapes module for improved dynamic dimension handling\n\nThe LayerNorm translator now properly handles the optional scale and bias\ninputs per the ONNX specification, multiplying the normalized output by\nscale and adding bias when provided.\n\nCo-Authored-By: Claude Opus 4.5 <noreply@anthropic.com>\nEOF\n\\)\")",
+      "Bash(git commit -m \"$\\(cat <<''EOF''\ndocs: add plan 26 for trait-based embeddable sections\n\nAdd design specification for single-file model distribution with\nembedded auxiliary data \\(vocabulary, configs, tokenizer settings\\).\n\nKey features:\n- EmbeddableSection trait for extensible section types\n- FromEmbeddedSection trait for deserialization\n- Built-in section types for common AI model files\n- V2 bundle header format with sections table\n- Backward compatible with V1 bundles\n\nCo-Authored-By: Claude Opus 4.5 <noreply@anthropic.com>\nEOF\n\\)\")"
     ]
   }
 }
