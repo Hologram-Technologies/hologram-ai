@@ -1193,6 +1193,7 @@ version = "0.1.0"
 dependencies = [
  "libc",
  "rayon",
+ "rustc-hash",
  "sha2",
  "thiserror 2.0.17",
 ]
@@ -1231,6 +1232,7 @@ name = "hologram-isa"
 version = "0.1.0"
 dependencies = [
  "hologram-common",
+ "rustc-hash",
  "thiserror 2.0.17",
 ]
 
