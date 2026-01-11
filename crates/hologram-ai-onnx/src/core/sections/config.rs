@@ -3,7 +3,7 @@
 //! This module provides section types for embedding JSON configuration files
 //! commonly used with AI models (tokenizer config, model config, etc.).
 
-use super::error::EmbedResult;
+use super::error::{EmbedError, EmbedResult};
 use super::traits::{EmbeddableSection, FromEmbeddedSection};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -47,9 +47,9 @@ impl TokenizerConfigSection {
     /// # Errors
     /// Returns an error if the JSON is invalid.
     pub fn from_json_str(json: &str) -> EmbedResult<Self> {
-        Ok(Self {
-            config: serde_json::from_str(json)?,
-        })
+        let config = serde_json::from_str(json)
+            .map_err(|e| EmbedError::invalid_data(format!("JSON parse error: {e}")))?;
+        Ok(Self { config })
     }
 
     /// Get the raw JSON configuration.
@@ -140,9 +140,9 @@ impl ModelConfigSection {
 
     /// Create from a JSON string.
     pub fn from_json_str(json: &str) -> EmbedResult<Self> {
-        Ok(Self {
-            config: serde_json::from_str(json)?,
-        })
+        let config = serde_json::from_str(json)
+            .map_err(|e| EmbedError::invalid_data(format!("JSON parse error: {e}")))?;
+        Ok(Self { config })
     }
 
     /// Get the raw JSON configuration.
@@ -242,9 +242,9 @@ impl SpecialTokensSection {
 
     /// Create from a JSON string.
     pub fn from_json_str(json: &str) -> EmbedResult<Self> {
-        Ok(Self {
-            tokens: serde_json::from_str(json)?,
-        })
+        let tokens = serde_json::from_str(json)
+            .map_err(|e| EmbedError::invalid_data(format!("JSON parse error: {e}")))?;
+        Ok(Self { tokens })
     }
 
     /// Get the raw JSON token mapping.
@@ -311,9 +311,9 @@ impl FromEmbeddedSection for SpecialTokensSection {
     const SECTION_ID: &'static str = "special_tokens_map";
 
     fn from_bytes(bytes: &[u8]) -> EmbedResult<Self> {
-        Ok(Self {
-            tokens: serde_json::from_slice(bytes)?,
-        })
+        let tokens = serde_json::from_slice(bytes)
+            .map_err(|e| EmbedError::invalid_data(format!("JSON parse error: {e}")))?;
+        Ok(Self { tokens })
     }
 }
 
@@ -352,9 +352,9 @@ impl GenerationConfigSection {
 
     /// Create from a JSON string.
     pub fn from_json_str(json: &str) -> EmbedResult<Self> {
-        Ok(Self {
-            config: serde_json::from_str(json)?,
-        })
+        let config = serde_json::from_str(json)
+            .map_err(|e| EmbedError::invalid_data(format!("JSON parse error: {e}")))?;
+        Ok(Self { config })
     }
 
     /// Get the raw JSON configuration.
@@ -426,9 +426,9 @@ impl FromEmbeddedSection for GenerationConfigSection {
     const SECTION_ID: &'static str = "generation_config";
 
     fn from_bytes(bytes: &[u8]) -> EmbedResult<Self> {
-        Ok(Self {
-            config: serde_json::from_slice(bytes)?,
-        })
+        let config = serde_json::from_slice(bytes)
+            .map_err(|e| EmbedError::invalid_data(format!("JSON parse error: {e}")))?;
+        Ok(Self { config })
     }
 }
 
@@ -451,9 +451,9 @@ impl PreprocessorConfigSection {
 
     /// Create from a JSON string.
     pub fn from_json_str(json: &str) -> EmbedResult<Self> {
-        Ok(Self {
-            config: serde_json::from_str(json)?,
-        })
+        let config = serde_json::from_str(json)
+            .map_err(|e| EmbedError::invalid_data(format!("JSON parse error: {e}")))?;
+        Ok(Self { config })
     }
 
     /// Get the raw JSON configuration.
@@ -500,9 +500,9 @@ impl FromEmbeddedSection for PreprocessorConfigSection {
     const SECTION_ID: &'static str = "preprocessor_config";
 
     fn from_bytes(bytes: &[u8]) -> EmbedResult<Self> {
-        Ok(Self {
-            config: serde_json::from_slice(bytes)?,
-        })
+        let config = serde_json::from_slice(bytes)
+            .map_err(|e| EmbedError::invalid_data(format!("JSON parse error: {e}")))?;
+        Ok(Self { config })
     }
 }
 

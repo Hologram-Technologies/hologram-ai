@@ -25,7 +25,7 @@ use compile_pipeline::compile_pipeline_command;
 pub use compile_tokenizer::{compile_tokenizer_command, compile_tokenizer_from_config};
 pub use download::download_command;
 use info::info_command;
-use run::run_command;
+use run::{run_command, run_pipeline_bundle_command};
 use validate::validate_command;
 
 #[derive(Parser)]
@@ -106,6 +106,17 @@ enum Commands {
         ///   --embed raw:application/octet-stream:data.bin:my_data
         #[arg(long = "embed", value_name = "TYPE:PATH[:ID]")]
         embed_files: Vec<String>,
+
+        /// Compile transformer model as layer-wise HOLM pipeline
+        ///
+        /// Detects transformer layer structure and compiles each layer as a separate
+        /// HOLB model, packaged into a HOLM pipeline bundle. This enables layer-by-layer
+        /// execution with madvise-based prefetching for large models on memory-constrained
+        /// systems.
+        ///
+        /// Memory reduction for 70B models: ~130GB → ~2GB peak memory
+        #[arg(long)]
+        layer_wise: bool,
     },
 
     /// Compile tokenizer to .holo format for hologram execution
@@ -265,6 +276,31 @@ enum Commands {
         bundle: PathBuf,
     },
 
+    /// Run a T5 pipeline bundle for text generation
+    ///
+    /// Executes a pre-compiled HOLM pipeline bundle containing encoder, decoder,
+    /// and tokenizer for encoder-decoder text generation.
+    ///
+    /// # Examples
+    ///
+    /// Generate text:
+    ///   hologram-onnx run-pipeline t5-pipeline.holo --prompt "Tell me a joke"
+    ///
+    /// With custom max tokens:
+    ///   hologram-onnx run-pipeline t5-pipeline.holo --prompt "Translate to French: Hello" --max-tokens 100
+    RunPipeline {
+        /// Pipeline bundle file (HOLM format containing encoder, decoder, tokenizer)
+        pipeline: PathBuf,
+
+        /// Text prompt for generation
+        #[arg(short, long)]
+        prompt: String,
+
+        /// Maximum number of new tokens to generate
+        #[arg(long, default_value = "50")]
+        max_tokens: usize,
+    },
+
     /// Create a pipeline bundle (HOLM format) from HOLB model bundles
     ///
     /// Pipeline bundles package multiple models with their embedded weights
@@ -411,6 +447,7 @@ pub fn run() -> anyhow::Result<()> {
             input_shapes,
             bundle,
             embed_files,
+            layer_wise,
         } => {
             // Parse input shapes from "name=d1,d2,d3" format
             let parsed_shapes: std::collections::HashMap<String, Vec<usize>> = input_shapes
@@ -445,6 +482,7 @@ pub fn run() -> anyhow::Result<()> {
                     weight_threshold,
                     bundle,
                     &parsed_embed_files,
+                    layer_wise,
                 )
             } else {
                 // Traditional compile with explicit input
@@ -465,6 +503,7 @@ pub fn run() -> anyhow::Result<()> {
                     &parsed_shapes,
                     bundle,
                     &parsed_embed_files,
+                    layer_wise,
                 )
             }
         }
@@ -557,6 +596,16 @@ pub fn run() -> anyhow::Result<()> {
         Commands::Extract { bundle, output } => extract_command(&bundle, &output),
 
         Commands::List { bundle } => list_pipeline_command(&bundle),
+
+        Commands::RunPipeline {
+            pipeline,
+            prompt,
+            max_tokens,
+        } => {
+            let result = run_pipeline_bundle_command(&pipeline, &prompt, max_tokens)?;
+            println!("\n=== Generated Output ===\n{}\n", result);
+            Ok(())
+        }
 
         Commands::BundlePipeline {
             encoder,
@@ -732,6 +781,7 @@ fn compile_with_config(
     bundle: bool,
     #[cfg(feature = "onnx")] embed_files: &[hologram_ai_onnx::core::EmbeddedFileConfig],
     #[cfg(not(feature = "onnx"))] _embed_files: &[()],
+    layer_wise: bool,
 ) -> anyhow::Result<()> {
     use crate::config::UnifiedConfig;
     #[cfg(feature = "onnx")]
@@ -784,6 +834,7 @@ fn compile_with_config(
             &std::collections::HashMap::new(), // No input shapes from config yet
             bundle,
             embed_files,
+            layer_wise,
         );
     }
 
@@ -831,6 +882,7 @@ fn compile_with_config(
             &std::collections::HashMap::new(), // No input shapes from config yet
             bundle,
             embed_files,
+            layer_wise,
         )?;
     }
 

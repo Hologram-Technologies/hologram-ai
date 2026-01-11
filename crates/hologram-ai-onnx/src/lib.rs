@@ -424,6 +424,135 @@ impl OnnxCompiler {
         Ok(bundle)
     }
 
+    /// Compile ONNX model with layer-wise splitting for memory-efficient inference.
+    ///
+    /// This method detects transformer layer structure in the model and compiles
+    /// each layer as a separate HOLB model, packaged into a single HOLM pipeline.
+    ///
+    /// # Use Cases
+    ///
+    /// - Large models (70B+ parameters) that don't fit in memory
+    /// - Memory-constrained inference environments
+    /// - Layer-by-layer execution with weight prefetching
+    ///
+    /// # Returns
+    ///
+    /// A HOLM pipeline bundle containing one HOLB model per layer.
+    ///
+    /// # Errors
+    ///
+    /// Returns `LayerWiseError` if:
+    /// - No transformer layer structure is detected
+    /// - Layer extraction fails
+    /// - Individual layer compilation fails
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let compiler = OnnxCompiler::new();
+    /// let onnx_bytes = std::fs::read("llama-70b.onnx")?;
+    /// let pipeline_bytes = compiler.compile_layer_wise(&onnx_bytes)?;
+    /// std::fs::write("llama-70b.holo", pipeline_bytes)?;
+    /// ```
+    pub fn compile_layer_wise(&self, onnx_bytes: &[u8]) -> Result<Vec<u8>> {
+        use core::{PipelineBundleWriter, layer_detection, layer_splitter};
+        use tracing::{debug, info};
+
+        info!("Starting layer-wise ONNX compilation");
+
+        // Step 1: Parse and validate ONNX model
+        debug!("Parsing ONNX protobuf");
+        let model = parse_model(onnx_bytes)?;
+        validate_model(&model)?;
+        let opset_version = core::extract_opset_version(&model);
+        info!("ONNX opset version: {}", opset_version);
+
+        // Get the graph
+        let graph = model
+            .graph
+            .as_ref()
+            .ok_or_else(|| OnnxError::InvalidModel("Model has no graph".into()))?;
+
+        // Step 2: Detect transformer layer structure
+        debug!("Detecting transformer layers");
+        let layers = layer_detection::detect_transformer_layers(graph).ok_or_else(|| {
+            OnnxError::LayerWiseError(
+                "No transformer layer structure detected. Model may not be a transformer.".into(),
+            )
+        })?;
+
+        info!(
+            "Detected {} transformer layers (prefix: {})",
+            layers.len(),
+            layers
+                .first()
+                .map(|l| l.prefix.as_str())
+                .unwrap_or("unknown")
+        );
+
+        // Step 3: Split into per-layer models
+        debug!("Splitting model by layers");
+        let layer_models = layer_splitter::split_by_layers(&model, &layers).map_err(|e| {
+            OnnxError::LayerWiseError(format!("Failed to split model by layers: {}", e))
+        })?;
+
+        // Step 4: Compile each layer to HOLB
+        let mut pipeline_writer = PipelineBundleWriter::new();
+
+        for (layer_name, layer_model) in layer_models {
+            info!("Compiling layer: {}", layer_name);
+
+            // Compile this layer's graph to BackendPlan
+            let layer_graph = layer_model
+                .graph
+                .as_ref()
+                .ok_or_else(|| OnnxError::LayerWiseError("Layer has no graph".into()))?;
+
+            debug!("Translating layer {} to IR", layer_name);
+            let ir_func = translate_graph_to_ir(layer_graph)?;
+
+            debug!("Compiling layer {} to BackendPlan", layer_name);
+            let backend_type = hologram::BackendType::Cpu;
+            let mut plan = hologram::compiler::compile_ir(&ir_func, backend_type).map_err(|e| {
+                OnnxError::IrTranslationError(format!(
+                    "Failed to compile layer {}: {:?}",
+                    layer_name, e
+                ))
+            })?;
+
+            // Extract weights (they'll be embedded in the HOLB)
+            let weight_bytes = std::mem::take(&mut plan.constant_data);
+            debug!(
+                "Layer {} has {} bytes of weights",
+                layer_name,
+                weight_bytes.len()
+            );
+
+            // Serialize plan to HOLP format
+            let graph_bytes = serialize_backend_plan(&plan)?;
+
+            // Create unified bundle for this layer
+            let mut layer_writer = core::UnifiedBundleWriter::new();
+            layer_writer.set_graph_bytes(graph_bytes);
+            layer_writer.set_weights_bytes(weight_bytes);
+            let holb_bytes = layer_writer.finish();
+
+            // Add to pipeline
+            pipeline_writer.add_model(&layer_name, holb_bytes)?;
+        }
+
+        // Step 5: Build the pipeline bundle
+        let pipeline_bytes = pipeline_writer.finish();
+
+        info!(
+            "Layer-wise compilation complete: {} layers, {} bytes total",
+            layers.len(),
+            pipeline_bytes.len()
+        );
+
+        Ok(pipeline_bytes)
+    }
+
     /// Load section data from a file configuration.
     ///
     /// Returns (section_id, content_type, data) tuple.

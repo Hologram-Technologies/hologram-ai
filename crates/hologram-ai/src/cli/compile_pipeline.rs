@@ -204,8 +204,9 @@ fn compile_pipeline_from_sources(
                     true, // decompose_pooling
                     true, // enable_resize_upscaling
                     &HashMap::new(),
-                    true, // bundle = true (create HOLB)
-                    &[],  // embed_files (none for pipeline compilation)
+                    true,  // bundle = true (create HOLB)
+                    &[],   // embed_files (none for pipeline compilation)
+                    false, // layer_wise = false (standard compilation)
                 )
                 .with_context(|| format!("Failed to compile ONNX model '{}'", name))?;
             }

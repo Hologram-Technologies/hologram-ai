@@ -3,7 +3,7 @@
 //! This module provides the [`VocabularySection`] type for embedding
 //! token vocabularies in .holo bundles.
 
-use super::error::EmbedResult;
+use super::error::{EmbedError, EmbedResult};
 use super::traits::{EmbeddableSection, FromEmbeddedSection};
 use std::collections::HashMap;
 
@@ -85,7 +85,8 @@ impl VocabularySection {
     /// let vocab = VocabularySection::from_json(json)?;
     /// ```
     pub fn from_json(json_str: &str) -> EmbedResult<Self> {
-        let map: HashMap<String, usize> = serde_json::from_str(json_str)?;
+        let map: HashMap<String, usize> = serde_json::from_str(json_str)
+            .map_err(|e| EmbedError::invalid_data(format!("JSON parse error: {e}")))?;
 
         // Find the maximum ID to determine vector size
         let max_id = map.values().copied().max().unwrap_or(0);

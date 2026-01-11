@@ -1004,6 +1004,7 @@ name = "hologram"
 version = "0.1.0"
 dependencies = [
  "hologram-backend",
+ "hologram-bundle",
  "hologram-common",
  "hologram-compiler",
  "hologram-core",
@@ -1146,6 +1147,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "hologram-bundle"
+version = "0.1.0"
+dependencies = [
+ "hologram-core",
+ "thiserror 2.0.17",
+]
+
+[[package]]
 name = "hologram-common"
 version = "0.1.0"
 dependencies = [
@@ -1161,6 +1170,7 @@ dependencies = [
  "blake3",
  "flate2",
  "hologram-backend",
+ "hologram-core",
  "hologram-ir",
  "hologram-isa",
  "parking_lot",
@@ -1169,7 +1179,6 @@ dependencies = [
  "rustc-hash",
  "serde",
  "serde_json",
- "sha2",
  "tar",
  "toml",
  "tracing",
@@ -1184,6 +1193,7 @@ version = "0.1.0"
 dependencies = [
  "libc",
  "rayon",
+ "sha2",
  "thiserror 2.0.17",
 ]
 
@@ -1229,6 +1239,7 @@ version = "0.1.0"
 dependencies = [
  "hologram-backend",
  "hologram-common",
+ "hologram-core",
  "hologram-error",
  "rkyv",
  "serde",

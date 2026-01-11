@@ -105,4 +105,22 @@ time cargo test -p hologram-ai-onnx test_bert_mask_prediction -- --nocapture 2>&
 
 ---
 
-Can we define the sections with a trait so if there are other things we need to embed they can just implement the trait?
+Can we define the sections with a trait so if there are other things we need to embed they can just implement the trait
+
+---
+
+In `hologram` we support networking (investigate `hologram-network`). One of the features we're trying to realize is that we can have distributed compute and distributed storage. We want to be able to support subgraphs as well, so that we can have intelligent compilation and distributed computing. Subgraphs enable "docker-like" layer support (layers being groups of computation/storage that other inputs can depend upon). 
+
+When we compile we want to have groups where dependencies are resolved at compile time and at runtime we should be able to execute groups of computation in a multi-thread way so that we have faster execution overall. Will our new graph engine be able to support this?
+
+Remember, O(1) (with `hologram`), zero-copy (all data is located in a specific plane), and as minimal runtime performance interaction as much as possible.
+
+A hard requirement is that our graphs can be composed of multiple subgraphs. Subgraphs are basically other graphs that have already been compiled (either previously in another `.holo` file or simultaneously compiled at the same time). We must support subgraphs.
+
+---
+
+We need to make sure we still have traits that define what can go into a `.holo` file. We implemented this in a previous section, but I believe it's in this crate where I actually think we might want to move that functionality into `hologram` and `hologram-compiler` rather than in here.
+
+---
+
+I need you to review the `hologram` crate as we just updated it to support embeddable sections using traits

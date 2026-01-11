@@ -81,6 +81,20 @@ impl ModelExecutor {
         Ok(Self { executor, backend })
     }
 
+    /// Create a new executor from an existing PlanExecutor and backend.
+    ///
+    /// This is useful when loading models from a pipeline bundle.
+    ///
+    /// # Arguments
+    /// * `executor` - Pre-compiled PlanExecutor
+    /// * `backend` - Backend for execution
+    ///
+    /// # Returns
+    /// ModelExecutor ready for execution
+    pub fn from_plan_executor(executor: PlanExecutor, backend: Box<dyn ProgramBackend>) -> Self {
+        Self { executor, backend }
+    }
+
     /// Get buffer requirements from the plan.
     fn get_buffer_requirements(&self) -> BufferRequirements {
         let plan = self.executor.plan();

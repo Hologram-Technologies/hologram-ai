@@ -12,6 +12,8 @@
 mod bundle;
 mod error;
 mod ir_to_graph;
+pub mod layer_detection;
+pub mod layer_splitter;
 mod parser;
 mod partitioning;
 pub mod sections;

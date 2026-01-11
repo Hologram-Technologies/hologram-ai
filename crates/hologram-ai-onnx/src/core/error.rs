@@ -118,6 +118,10 @@ pub enum OnnxError {
     /// Internal error (should not happen).
     #[error("Internal error: {0}")]
     InternalError(String),
+
+    /// Layer-wise compilation error.
+    #[error("Layer-wise compilation error: {0}")]
+    LayerWiseError(String),
 }
 
 impl OnnxError {

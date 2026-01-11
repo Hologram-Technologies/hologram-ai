@@ -29,6 +29,7 @@ use tracing::{debug, info};
 /// * `input_shapes` - Optional map of input name -> concrete shape dimensions
 /// * `bundle` - Create a unified bundle with embedded weights (HOLB format)
 /// * `embed_files` - Files to embed in the bundle (vocabulary, config, etc.)
+/// * `layer_wise` - Compile transformer model as layer-wise HOLM pipeline
 ///
 /// # Returns
 ///
@@ -47,6 +48,7 @@ pub fn compile_command(
     input_shapes: &HashMap<String, Vec<usize>>,
     bundle: bool,
     embed_files: &[EmbeddedFileConfig],
+    layer_wise: bool,
 ) -> Result<()> {
     info!("Compiling ONNX model: {}", input.display());
     debug!("Output path: {}", output.display());
@@ -64,6 +66,7 @@ pub fn compile_command(
     debug!("Decompose Conv2D: {}", decompose_conv2d);
     debug!("Decompose Pooling: {}", decompose_pooling);
     debug!("Enable Resize Upscaling: {}", enable_resize_upscaling);
+    debug!("Layer-wise compilation: {}", layer_wise);
 
     // Read ONNX model
     info!("Reading ONNX model...");
@@ -121,7 +124,27 @@ pub fn compile_command(
     // Get base path for resolving relative embedded file paths
     let base_path = input.parent().unwrap_or(Path::new("."));
 
-    if bundle {
+    if layer_wise {
+        // Compile transformer model layer-by-layer (HOLM pipeline format)
+        info!("Detecting transformer layers and compiling layer-wise...");
+        let pipeline_bytes = compiler
+            .compile_layer_wise(&onnx_bytes)
+            .context("Layer-wise ONNX compilation failed")?;
+
+        info!(
+            "Layer-wise compilation successful: {} bytes HOLM pipeline",
+            pipeline_bytes.len()
+        );
+
+        // Write .holo pipeline file
+        let holo_path = output.with_extension("holo");
+        fs::write(&holo_path, &pipeline_bytes)
+            .with_context(|| format!("Failed to write pipeline to {}", holo_path.display()))?;
+        info!(
+            "Written: {} (layer-wise HOLM pipeline)",
+            holo_path.display()
+        );
+    } else if bundle {
         // Compile to unified bundle (HOLB format)
         let bundle_bytes = compiler
             .compile_to_bundle_with_base_path(&onnx_bytes, base_path)
@@ -245,6 +268,7 @@ mod tests {
             &HashMap::new(),
             false, // bundle
             &[],   // embed_files
+            false, // layer_wise
         );
         assert!(result.is_err());
         assert!(
