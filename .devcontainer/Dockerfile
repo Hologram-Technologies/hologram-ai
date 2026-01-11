@@ -24,7 +24,9 @@ RUN ARCH=$(uname -m) && \
     # Install just
     curl -sL "https://github.com/casey/just/releases/download/${JUST_VERSION}/just-${JUST_VERSION}-${ARCH}-unknown-linux-musl.tar.gz" | tar xz -C /tmp && \
     mv /tmp/just /usr/local/bin/ && \
-    rm -f /tmp/just.1 /tmp/CHANGELOG.md /tmp/LICENSE /tmp/README.md
+    rm -f /tmp/just.1 /tmp/CHANGELOG.md /tmp/LICENSE /tmp/README.md && \
+    # Install cargo-nextest (faster test runner)
+    curl -LsSf "https://get.nexte.st/latest/linux" | tar zxf - -C /usr/local/bin
 
 # Install GitHub CLI (gh) - https://github.com/cli/cli/blob/trunk/docs/install_linux.md#debian
 RUN mkdir -p -m 755 /etc/apt/keyrings && \

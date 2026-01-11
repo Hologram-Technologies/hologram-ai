@@ -35,8 +35,12 @@ fi
 echo "Running clippy..."
 cargo clippy --all-targets -- -D warnings
 
-# Run tests
+# Run tests (prefer nextest for speed, fallback to cargo test)
 echo "Running tests..."
-cargo test --all --lib
+if command -v cargo-nextest &> /dev/null; then
+    cargo nextest run --workspace --lib --no-fail-fast
+else
+    cargo test --workspace --lib
+fi
 
 echo "All pre-commit checks passed!"

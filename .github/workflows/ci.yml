@@ -86,8 +86,11 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-test-onnx-
 
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@nextest
+
       - name: Run tests
-        run: cargo test -p hologram-ai-onnx --lib
+        run: cargo nextest run -p hologram-ai-onnx --lib --no-fail-fast
         env:
           CARGO_NET_GIT_FETCH_WITH_CLI: true
 
@@ -124,8 +127,11 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-test-common-
 
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@nextest
+
       - name: Run tests
-        run: cargo test -p hologram-ai-common --lib
+        run: cargo nextest run -p hologram-ai-common --lib --no-fail-fast
         env:
           CARGO_NET_GIT_FETCH_WITH_CLI: true
 
@@ -162,8 +168,11 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-test-main-
 
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@nextest
+
       - name: Run tests
-        run: cargo test -p hologram-ai --lib
+        run: cargo nextest run -p hologram-ai --lib --no-fail-fast
         env:
           CARGO_NET_GIT_FETCH_WITH_CLI: true
 
@@ -247,8 +256,11 @@ jobs:
           curl -L https://github.com/onnx/models/raw/main/validated/vision/classification/mnist/model/mnist-12.onnx \
             -o crates/hologram-ai-onnx/tests/fixtures/mnist-12.onnx
 
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@nextest
+
       - name: Run integration tests
-        run: cargo test -p hologram-ai-onnx --test '*'
+        run: cargo nextest run -p hologram-ai-onnx --test '*' --no-fail-fast
         env:
           CARGO_NET_GIT_FETCH_WITH_CLI: true
 
