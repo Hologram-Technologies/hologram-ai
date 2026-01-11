@@ -49,9 +49,28 @@ impl OnnxTranslator for LayerNormTranslator {
             (axis..rank).collect()
         };
 
-        let result = builder
+        // Step 1: Apply LayerNorm (mean subtraction and normalization)
+        let normalized = builder
             .unary(NodeOp::LayerNorm { epsilon, axes }, inputs[0])
             .map_err(|e| TranslationError::IrBuilder(e.to_string()))?;
+
+        // Step 2: Apply scale (gamma) if provided
+        let scaled = if inputs.len() > 1 {
+            builder
+                .binary(NodeOp::Mul, normalized, inputs[1])
+                .map_err(|e| TranslationError::IrBuilder(e.to_string()))?
+        } else {
+            normalized
+        };
+
+        // Step 3: Apply bias (beta) if provided
+        let result = if inputs.len() > 2 {
+            builder
+                .binary(NodeOp::Add, scaled, inputs[2])
+                .map_err(|e| TranslationError::IrBuilder(e.to_string()))?
+        } else {
+            scaled
+        };
 
         Ok(vec![result])
     }

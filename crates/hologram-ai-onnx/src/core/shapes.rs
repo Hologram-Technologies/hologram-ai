@@ -62,9 +62,10 @@ fn resolve_symbolic_dimension(name: &str, position: usize) -> Dim {
     }
 
     // Sequence length dimensions
+    // Default to 512 to match common model compilation/runtime sizes
     if lower.contains("sequence") || lower.contains("seq_len") || lower.contains("seq") {
-        tracing::debug!("Resolved symbolic dimension '{}' to 128 (sequence)", name);
-        return Dim::Static(128);
+        tracing::debug!("Resolved symbolic dimension '{}' to 512 (sequence)", name);
+        return Dim::Static(512);
     }
 
     // Past/cache sequence length (for KV caches, typically starts at 0 or matches seq_len)
@@ -76,7 +77,7 @@ fn resolve_symbolic_dimension(name: &str, position: usize) -> Dim {
     // If no name match, use position-based defaults
     let default = match position {
         0 => 1,     // First dimension is usually batch
-        1 => 128,   // Second dimension is usually sequence length
+        1 => 512,   // Second dimension is usually sequence length
         _ => 512,   // Other dimensions might be hidden_dim
     };
 
