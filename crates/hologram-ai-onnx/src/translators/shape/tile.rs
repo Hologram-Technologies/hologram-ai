@@ -43,7 +43,7 @@ impl OnnxTranslator for TileTranslator {
             .graph()
             .node(data)
             .ok_or_else(|| TranslationError::IrBuilder("Tile: data input not found".to_string()))?;
-        let data_shape = data_node.shape.clone();
+        let data_shape = data_node.op.shape.clone();
 
         // Get repeats node
         let repeats_node = builder.graph().node(repeats_input).ok_or_else(|| {
@@ -51,7 +51,7 @@ impl OnnxTranslator for TileTranslator {
         })?;
 
         // Try to get repeats as constant for shape inference
-        let repeats: Option<Vec<i64>> = match &repeats_node.op {
+        let repeats: Option<Vec<i64>> = match &repeats_node.op.op {
             NodeOp::Constant { data } => match data {
                 ConstantData::I64(vals) => Some(vals.clone()),
                 ConstantData::I32(vals) => Some(vals.iter().map(|&v| v as i64).collect()),
@@ -101,7 +101,7 @@ impl OnnxTranslator for TileTranslator {
         );
 
         // Try constant folding if data is also constant
-        if let NodeOp::Constant { data: const_data } = &data_node.op {
+        if let NodeOp::Constant { data: const_data } = &data_node.op.op {
             // Get concrete dimensions for constant folding
             let input_dims_concrete: Vec<usize> = input_dims
                 .iter()
@@ -296,7 +296,7 @@ mod tests {
 
         let node = builder.graph().node(outputs[0]).unwrap();
         // Should be constant folded
-        if let NodeOp::Constant { data } = &node.op {
+        if let NodeOp::Constant { data } = &node.op.op {
             if let ConstantData::F32(values) = data {
                 // Tiled to 4x4
                 assert_eq!(values.len(), 16);

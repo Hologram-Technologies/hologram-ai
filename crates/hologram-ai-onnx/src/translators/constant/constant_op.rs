@@ -235,8 +235,8 @@ mod tests {
 
         // Verify output shape
         let output_node = builder.graph().node(outputs[0]).unwrap();
-        assert_eq!(output_node.shape.rank(), 2);
-        assert_eq!(output_node.dtype, DType::F32);
+        assert_eq!(output_node.op.shape.rank(), 2);
+        assert_eq!(output_node.op.dtype, DType::F32);
     }
 
     #[test]
@@ -252,8 +252,8 @@ mod tests {
 
         let outputs = result.unwrap();
         let output_node = builder.graph().node(outputs[0]).unwrap();
-        assert_eq!(output_node.shape.rank(), 1);
-        assert_eq!(output_node.dtype, DType::I64);
+        assert_eq!(output_node.op.shape.rank(), 1);
+        assert_eq!(output_node.op.dtype, DType::I64);
     }
 
     #[test]
@@ -269,7 +269,7 @@ mod tests {
 
         let outputs = result.unwrap();
         let output_node = builder.graph().node(outputs[0]).unwrap();
-        assert_eq!(output_node.shape.rank(), 0);
+        assert_eq!(output_node.op.shape.rank(), 0);
     }
 
     #[test]
@@ -285,7 +285,7 @@ mod tests {
 
         let outputs = result.unwrap();
         let output_node = builder.graph().node(outputs[0]).unwrap();
-        assert_eq!(output_node.dtype, DType::Bool);
+        assert_eq!(output_node.op.dtype, DType::Bool);
     }
 
     #[test]
@@ -301,7 +301,7 @@ mod tests {
 
         let outputs = result.unwrap();
         let output_node = builder.graph().node(outputs[0]).unwrap();
-        assert_eq!(output_node.shape.dims.len(), 1);
+        assert_eq!(output_node.op.shape.dims.len(), 1);
     }
 
     // ===== Invalid Input Tests =====

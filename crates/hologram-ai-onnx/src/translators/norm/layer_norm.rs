@@ -42,7 +42,7 @@ impl OnnxTranslator for LayerNormTranslator {
             .graph()
             .node(inputs[0])
             .ok_or_else(|| TranslationError::IrBuilder("Invalid input node".to_string()))?;
-        let rank = input_node.shape.rank() as i32;
+        let rank = input_node.op.shape.rank() as i32;
 
         // Normalize over last dimensions from axis onwards
         let axes: Vec<i32> = if axis < 0 {

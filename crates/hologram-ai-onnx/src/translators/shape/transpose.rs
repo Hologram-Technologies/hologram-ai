@@ -47,11 +47,11 @@ impl OnnxTranslator for TransposeTranslator {
             perm_attr.iter().map(|&x| x as usize).collect()
         } else {
             // Default: reverse all axes
-            (0..input_node.shape.rank()).rev().collect()
+            (0..input_node.op.shape.rank()).rev().collect()
         };
 
         // Validate permutation
-        let rank = input_node.shape.rank();
+        let rank = input_node.op.shape.rank();
         if perm.len() != rank {
             return Err(TranslationError::invalid_attribute(
                 "perm",
@@ -82,9 +82,10 @@ impl OnnxTranslator for TransposeTranslator {
         }
 
         // Check if input is a Constant for constant folding
-        if let NodeOp::Constant { data: const_data } = &input_node.op {
+        if let NodeOp::Constant { data: const_data } = &input_node.op.op {
             // Get input shape dimensions as static values
             let in_dims: Vec<usize> = input_node
+                .op
                 .shape
                 .dims
                 .iter()
@@ -232,7 +233,7 @@ mod tests {
 
         // Default perm reverses axes: [2,3,4] -> [4,3,2]
         let node = builder.graph().node(outputs[0]).unwrap();
-        assert_eq!(node.shape.dims, Shape::static_shape(&[4, 3, 2]).dims);
+        assert_eq!(node.op.shape.dims, Shape::static_shape(&[4, 3, 2]).dims);
     }
 
     #[test]
@@ -248,7 +249,7 @@ mod tests {
 
         // perm [0,2,1]: [2,3,4] -> [2,4,3]
         let node = builder.graph().node(outputs[0]).unwrap();
-        assert_eq!(node.shape.dims, Shape::static_shape(&[2, 4, 3]).dims);
+        assert_eq!(node.op.shape.dims, Shape::static_shape(&[2, 4, 3]).dims);
     }
 
     #[test]
@@ -264,7 +265,7 @@ mod tests {
 
         // Transpose: [3,4] -> [4,3]
         let node = builder.graph().node(outputs[0]).unwrap();
-        assert_eq!(node.shape.dims, Shape::static_shape(&[4, 3]).dims);
+        assert_eq!(node.op.shape.dims, Shape::static_shape(&[4, 3]).dims);
     }
 
     #[test]
@@ -284,7 +285,7 @@ mod tests {
 
         let node = builder.graph().node(outputs[0]).unwrap();
         // Should be constant folded
-        if let NodeOp::Constant { data } = &node.op {
+        if let NodeOp::Constant { data } = &node.op.op {
             if let ConstantData::F32(values) = data {
                 // Transposed: [[1,4], [2,5], [3,6]]
                 assert_eq!(values.as_slice(), &[1.0, 4.0, 2.0, 5.0, 3.0, 6.0]);
@@ -310,7 +311,10 @@ mod tests {
         let outputs = result.unwrap();
 
         let node = builder.graph().node(outputs[0]).unwrap();
-        assert_eq!(node.shape.dims, Shape::static_shape(&[1, 224, 224, 3]).dims);
+        assert_eq!(
+            node.op.shape.dims,
+            Shape::static_shape(&[1, 224, 224, 3]).dims
+        );
     }
 
     #[test]
@@ -326,7 +330,7 @@ mod tests {
         let outputs = result.unwrap();
 
         let node = builder.graph().node(outputs[0]).unwrap();
-        assert_eq!(node.shape.dims, Shape::static_shape(&[2, 3]).dims);
+        assert_eq!(node.op.shape.dims, Shape::static_shape(&[2, 3]).dims);
     }
 
     #[test]

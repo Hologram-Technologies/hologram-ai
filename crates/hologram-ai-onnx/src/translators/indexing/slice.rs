@@ -2,7 +2,7 @@
 
 use crate::proto::NodeProto;
 use crate::translators::{InputRequirement, OnnxAttributes, OnnxTranslator, TranslationError};
-use hologram::ir::{ConstantData, GraphBuilder, NodeIndex, NodeOp};
+use hologram::ir::{ConstantData, GraphBuilder, IrNode, NodeIndex, NodeOp};
 
 /// Translator for ONNX Slice operation.
 ///
@@ -72,15 +72,15 @@ impl OnnxTranslator for SliceTranslator {
                 TranslationError::IrBuilder("Slice: ends node not found".to_string())
             })?;
 
-            let starts_is_constant = matches!(starts_node.op, NodeOp::Constant { .. });
-            let ends_is_constant = matches!(ends_node.op, NodeOp::Constant { .. });
+            let starts_is_constant = matches!(starts_node.op.op, NodeOp::Constant { .. });
+            let ends_is_constant = matches!(ends_node.op.op, NodeOp::Constant { .. });
 
             // Check axes if provided
             let axes_is_constant = if inputs.len() > 3 {
                 let axes_node = builder.graph().node(inputs[3]).ok_or_else(|| {
                     TranslationError::IrBuilder("Slice: axes node not found".to_string())
                 })?;
-                matches!(axes_node.op, NodeOp::Constant { .. })
+                matches!(axes_node.op.op, NodeOp::Constant { .. })
             } else {
                 true
             };
@@ -90,7 +90,7 @@ impl OnnxTranslator for SliceTranslator {
                 let steps_node = builder.graph().node(inputs[4]).ok_or_else(|| {
                     TranslationError::IrBuilder("Slice: steps node not found".to_string())
                 })?;
-                matches!(steps_node.op, NodeOp::Constant { .. })
+                matches!(steps_node.op.op, NodeOp::Constant { .. })
             } else {
                 true
             };
@@ -173,8 +173,8 @@ impl OnnxTranslator for SliceTranslator {
 
 impl SliceTranslator {
     /// Extract i64 values from a constant node.
-    fn extract_i64_constant(node: &hologram::ir::Node) -> Result<Vec<i64>, TranslationError> {
-        if let NodeOp::Constant { data } = &node.op {
+    fn extract_i64_constant(node: &IrNode) -> Result<Vec<i64>, TranslationError> {
+        if let NodeOp::Constant { data } = &node.op.op {
             match data {
                 ConstantData::I64(values) => Ok(values.clone()),
                 ConstantData::I32(values) => Ok(values.iter().map(|&v| v as i64).collect()),

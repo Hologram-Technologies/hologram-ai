@@ -47,7 +47,7 @@ impl OnnxTranslator for RangeTranslator {
             })?;
 
             // Check if all inputs are constants for constant folding
-            match (&start_node.op, &limit_node.op, &delta_node.op) {
+            match (&start_node.op.op, &limit_node.op.op, &delta_node.op.op) {
                 (
                     NodeOp::Constant { data: start_data },
                     NodeOp::Constant { data: limit_data },
@@ -288,7 +288,7 @@ mod tests {
 
         let output = result.unwrap();
         let node = builder.graph().node(output[0]).unwrap();
-        if let NodeOp::Constant { data } = &node.op {
+        if let NodeOp::Constant { data } = &node.op.op {
             if let ConstantData::I64(values) = data {
                 assert_eq!(values, &vec![3, 6]);
             } else {
@@ -312,7 +312,7 @@ mod tests {
         let node = builder.graph().node(output[0]).unwrap();
         if let NodeOp::Constant {
             data: ConstantData::I64(values),
-        } = &node.op
+        } = &node.op.op
         {
             assert_eq!(values, &vec![10, 8, 6]);
         }
@@ -333,7 +333,7 @@ mod tests {
         let node = builder.graph().node(output[0]).unwrap();
         if let NodeOp::Constant {
             data: ConstantData::F32(values),
-        } = &node.op
+        } = &node.op.op
         {
             assert_eq!(values.len(), 4);
             assert!((values[0] - 0.0).abs() < 1e-6);
@@ -356,7 +356,7 @@ mod tests {
         let node = builder.graph().node(output[0]).unwrap();
         if let NodeOp::Constant {
             data: ConstantData::I64(values),
-        } = &node.op
+        } = &node.op.op
         {
             assert_eq!(values.len(), 0);
         }

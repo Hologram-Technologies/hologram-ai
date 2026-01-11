@@ -141,7 +141,7 @@ mod tests {
 
         let output = result.unwrap()[0];
         let output_node = builder.graph().node(output).unwrap();
-        assert_eq!(output_node.shape.rank(), 3);
+        assert_eq!(output_node.op.shape.rank(), 3);
     }
 
     // ===== Constant Folding Tests =====

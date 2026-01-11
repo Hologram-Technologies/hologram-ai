@@ -50,7 +50,7 @@ impl OnnxTranslator for ReshapeTranslator {
         })?;
 
         // Check if shape is constant for optimization
-        let new_shape = match &shape_node.op {
+        let new_shape = match &shape_node.op.op {
             NodeOp::Constant { data } => match data {
                 ConstantData::I64(values) => Some(values.clone()),
                 ConstantData::I32(values) => Some(values.iter().map(|&v| v as i64).collect()),

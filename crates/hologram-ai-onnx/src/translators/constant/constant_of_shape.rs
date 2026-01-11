@@ -46,7 +46,7 @@ impl OnnxTranslator for ConstantOfShapeTranslator {
         let (fill_value_data, _fill_dtype) = parse_fill_value(node);
 
         // Check if shape input is constant - if so, use constant folding (optimization)
-        if let NodeOp::Constant { data } = &shape_node.op {
+        if let NodeOp::Constant { data } = &shape_node.op.op {
             let shape_dims = match data {
                 ConstantData::I64(values) => values.iter().map(|&v| v as usize).collect::<Vec<_>>(),
                 ConstantData::I32(values) => values.iter().map(|&v| v as usize).collect::<Vec<_>>(),
@@ -245,9 +245,9 @@ mod tests {
 
         // Verify output is a 2x3 tensor filled with 0.0 (default)
         let output_node = builder.graph().node(outputs[0]).unwrap();
-        assert_eq!(output_node.shape.rank(), 2);
+        assert_eq!(output_node.op.shape.rank(), 2);
 
-        if let NodeOp::Constant { data } = &output_node.op {
+        if let NodeOp::Constant { data } = &output_node.op.op {
             if let ConstantData::F32(values) = data {
                 assert_eq!(values.len(), 6); // 2 * 3
                 assert!(values.iter().all(|&v| v == 0.0));
@@ -273,7 +273,7 @@ mod tests {
         let outputs = result.unwrap();
         let output_node = builder.graph().node(outputs[0]).unwrap();
 
-        if let NodeOp::Constant { data } = &output_node.op {
+        if let NodeOp::Constant { data } = &output_node.op.op {
             if let ConstantData::F32(values) = data {
                 assert_eq!(values.len(), 3);
                 assert!(values.iter().all(|&v| v == 5.0));
@@ -299,7 +299,7 @@ mod tests {
         let outputs = result.unwrap();
         let output_node = builder.graph().node(outputs[0]).unwrap();
 
-        if let NodeOp::Constant { data } = &output_node.op {
+        if let NodeOp::Constant { data } = &output_node.op.op {
             if let ConstantData::I64(values) = data {
                 assert_eq!(values.len(), 4);
                 assert!(values.iter().all(|&v| v == 42));
@@ -327,7 +327,7 @@ mod tests {
         let output_node = builder.graph().node(outputs[0]).unwrap();
 
         // Scalar has 1 element
-        if let NodeOp::Constant { data } = &output_node.op {
+        if let NodeOp::Constant { data } = &output_node.op.op {
             if let ConstantData::F32(values) = data {
                 assert_eq!(values.len(), 1);
                 assert_eq!(values[0], 1.0);
@@ -353,8 +353,8 @@ mod tests {
         let outputs = result.unwrap();
         let output_node = builder.graph().node(outputs[0]).unwrap();
 
-        assert_eq!(output_node.shape.rank(), 3);
-        if let NodeOp::Constant { data } = &output_node.op {
+        assert_eq!(output_node.op.shape.rank(), 3);
+        if let NodeOp::Constant { data } = &output_node.op.op {
             if let ConstantData::F32(values) = data {
                 assert_eq!(values.len(), 24); // 2 * 3 * 4
             } else {

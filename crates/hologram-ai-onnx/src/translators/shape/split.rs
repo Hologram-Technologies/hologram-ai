@@ -44,7 +44,7 @@ impl OnnxTranslator for SplitTranslator {
         let input_node = builder.graph().node(data).ok_or_else(|| {
             TranslationError::IrBuilder("Split: input node not found".to_string())
         })?;
-        let input_shape = input_node.shape.clone();
+        let input_shape = input_node.op.shape.clone();
         let rank = input_shape.rank() as i64;
 
         // Get axis attribute (default: 0)
@@ -82,7 +82,7 @@ impl OnnxTranslator for SplitTranslator {
                 TranslationError::IrBuilder("Split: split input not found".to_string())
             })?;
 
-            if let NodeOp::Constant { data: const_data } = &split_node.op {
+            if let NodeOp::Constant { data: const_data } = &split_node.op.op {
                 match const_data {
                     ConstantData::I64(values) => values.iter().map(|&v| v as usize).collect(),
                     ConstantData::I32(values) => values.iter().map(|&v| v as usize).collect(),

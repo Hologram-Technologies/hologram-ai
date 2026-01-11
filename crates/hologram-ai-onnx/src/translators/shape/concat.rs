@@ -44,12 +44,12 @@ impl OnnxTranslator for ConcatTranslator {
         let first_node = builder.graph().node(inputs[0]).ok_or_else(|| {
             TranslationError::IrBuilder("Concat: first input not found".to_string())
         })?;
-        let rank = first_node.shape.rank() as i32;
+        let rank = first_node.op.shape.rank() as i32;
 
         // Check that all inputs have the same rank (ONNX requirement)
         for (i, &input) in inputs.iter().enumerate().skip(1) {
             if let Some(node) = builder.graph().node(input) {
-                let input_rank = node.shape.rank() as i32;
+                let input_rank = node.op.shape.rank() as i32;
                 if input_rank != rank {
                     return Err(TranslationError::ShapeInference(format!(
                         "Concat: All inputs must have the same rank. First input has rank {}, but input {} has rank {}",
@@ -115,7 +115,7 @@ fn try_constant_fold_concat(inputs: &[NodeIndex], builder: &mut GraphBuilder) ->
         builder
             .graph()
             .node(idx)
-            .is_some_and(|node| matches!(node.op, NodeOp::Constant { .. }))
+            .is_some_and(|node| matches!(node.op.op, NodeOp::Constant { .. }))
     });
 
     if !all_constants {
@@ -124,7 +124,7 @@ fn try_constant_fold_concat(inputs: &[NodeIndex], builder: &mut GraphBuilder) ->
 
     // Get first node to determine type
     let first_node = builder.graph().node(inputs[0])?;
-    if let NodeOp::Constant { data: first_data } = &first_node.op {
+    if let NodeOp::Constant { data: first_data } = &first_node.op.op {
         match first_data {
             ConstantData::I64(_) => {
                 let mut result_values = Vec::new();
@@ -132,7 +132,7 @@ fn try_constant_fold_concat(inputs: &[NodeIndex], builder: &mut GraphBuilder) ->
                     let node = builder.graph().node(idx)?;
                     if let NodeOp::Constant {
                         data: ConstantData::I64(values),
-                    } = &node.op
+                    } = &node.op.op
                     {
                         result_values.extend_from_slice(values);
                     } else {
@@ -148,7 +148,7 @@ fn try_constant_fold_concat(inputs: &[NodeIndex], builder: &mut GraphBuilder) ->
                     let node = builder.graph().node(idx)?;
                     if let NodeOp::Constant {
                         data: ConstantData::I32(values),
-                    } = &node.op
+                    } = &node.op.op
                     {
                         result_values.extend_from_slice(values);
                     } else {
@@ -164,7 +164,7 @@ fn try_constant_fold_concat(inputs: &[NodeIndex], builder: &mut GraphBuilder) ->
                     let node = builder.graph().node(idx)?;
                     if let NodeOp::Constant {
                         data: ConstantData::F32(values),
-                    } = &node.op
+                    } = &node.op.op
                     {
                         result_values.extend_from_slice(values);
                     } else {
@@ -299,7 +299,7 @@ mod tests {
         let outputs = result.unwrap();
 
         let node = builder.graph().node(outputs[0]).unwrap();
-        if let NodeOp::Constant { data } = &node.op {
+        if let NodeOp::Constant { data } = &node.op.op {
             if let ConstantData::I64(values) = data {
                 assert_eq!(values.as_slice(), &[1i64, 2, 3, 4, 5]);
             } else {
@@ -323,7 +323,7 @@ mod tests {
         let outputs = result.unwrap();
 
         let node = builder.graph().node(outputs[0]).unwrap();
-        if let NodeOp::Constant { data } = &node.op {
+        if let NodeOp::Constant { data } = &node.op.op {
             if let ConstantData::I32(values) = data {
                 assert_eq!(values.as_slice(), &[10i32, 20, 30]);
             } else {

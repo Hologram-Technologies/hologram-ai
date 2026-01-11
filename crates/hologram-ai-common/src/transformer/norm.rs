@@ -96,8 +96,8 @@ impl<'a> NormBuilder<'a> {
             .graph()
             .node(input)
             .ok_or_else(|| CommonError::GraphBuildError("Invalid input node".to_string()))?;
-        let shape = input_node.shape.clone();
-        let dtype = input_node.dtype;
+        let shape = input_node.op.shape.clone();
+        let dtype = input_node.op.dtype;
 
         // Add LayerNorm operation using direct graph access
         let graph = builder.graph_mut();

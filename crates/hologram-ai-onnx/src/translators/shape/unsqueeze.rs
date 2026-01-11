@@ -42,8 +42,8 @@ impl OnnxTranslator for UnsqueezeTranslator {
         let input_node = builder.graph().node(data).ok_or_else(|| {
             TranslationError::IrBuilder("Unsqueeze: input node not found".to_string())
         })?;
-        let input_shape = input_node.shape.clone();
-        let input_dtype = input_node.dtype;
+        let input_shape = input_node.op.shape.clone();
+        let input_dtype = input_node.op.dtype;
 
         // Get axes - either from second input (opset 13+) or from attribute
         let axes: Vec<i32> = if inputs.len() >= 2 {
@@ -54,7 +54,7 @@ impl OnnxTranslator for UnsqueezeTranslator {
 
             if let NodeOp::Constant {
                 data: constant_data,
-            } = &axes_node.op
+            } = &axes_node.op.op
             {
                 match constant_data {
                     ConstantData::I64(values) => values.iter().map(|&v| v as i32).collect(),
@@ -146,7 +146,7 @@ impl OnnxTranslator for UnsqueezeTranslator {
         );
 
         // Constant folding: if input is a constant, create unsqueezed constant
-        if let NodeOp::Constant { data: const_data } = &input_node.op {
+        if let NodeOp::Constant { data: const_data } = &input_node.op.op {
             // For constants, data stays the same - only shape changes
             let folded_data = const_data.clone();
             tracing::debug!("Unsqueeze: constant folding succeeded");
@@ -212,10 +212,10 @@ mod tests {
 
         let node = builder.graph().node(outputs[0]).unwrap();
         // [2, 3] -> [1, 2, 3]
-        assert_eq!(node.shape.rank(), 3);
-        assert_eq!(node.shape.dims[0], Dim::Static(1));
-        assert_eq!(node.shape.dims[1], Dim::Static(2));
-        assert_eq!(node.shape.dims[2], Dim::Static(3));
+        assert_eq!(node.op.shape.rank(), 3);
+        assert_eq!(node.op.shape.dims[0], Dim::Static(1));
+        assert_eq!(node.op.shape.dims[1], Dim::Static(2));
+        assert_eq!(node.op.shape.dims[2], Dim::Static(3));
     }
 
     #[test]
@@ -231,11 +231,11 @@ mod tests {
 
         let node = builder.graph().node(outputs[0]).unwrap();
         // [2, 3] -> [1, 2, 3, 1]
-        assert_eq!(node.shape.rank(), 4);
-        assert_eq!(node.shape.dims[0], Dim::Static(1));
-        assert_eq!(node.shape.dims[1], Dim::Static(2));
-        assert_eq!(node.shape.dims[2], Dim::Static(3));
-        assert_eq!(node.shape.dims[3], Dim::Static(1));
+        assert_eq!(node.op.shape.rank(), 4);
+        assert_eq!(node.op.shape.dims[0], Dim::Static(1));
+        assert_eq!(node.op.shape.dims[1], Dim::Static(2));
+        assert_eq!(node.op.shape.dims[2], Dim::Static(3));
+        assert_eq!(node.op.shape.dims[3], Dim::Static(1));
     }
 
     #[test]
@@ -252,10 +252,10 @@ mod tests {
 
         let node = builder.graph().node(outputs[0]).unwrap();
         // [2, 3] -> [2, 3, 1]
-        assert_eq!(node.shape.rank(), 3);
-        assert_eq!(node.shape.dims[0], Dim::Static(2));
-        assert_eq!(node.shape.dims[1], Dim::Static(3));
-        assert_eq!(node.shape.dims[2], Dim::Static(1));
+        assert_eq!(node.op.shape.rank(), 3);
+        assert_eq!(node.op.shape.dims[0], Dim::Static(2));
+        assert_eq!(node.op.shape.dims[1], Dim::Static(3));
+        assert_eq!(node.op.shape.dims[2], Dim::Static(1));
     }
 
     #[test]
@@ -272,10 +272,10 @@ mod tests {
 
         let node = builder.graph().node(outputs[0]).unwrap();
         // [2, 3] -> [2, 1, 3]
-        assert_eq!(node.shape.rank(), 3);
-        assert_eq!(node.shape.dims[0], Dim::Static(2));
-        assert_eq!(node.shape.dims[1], Dim::Static(1));
-        assert_eq!(node.shape.dims[2], Dim::Static(3));
+        assert_eq!(node.op.shape.rank(), 3);
+        assert_eq!(node.op.shape.dims[0], Dim::Static(2));
+        assert_eq!(node.op.shape.dims[1], Dim::Static(1));
+        assert_eq!(node.op.shape.dims[2], Dim::Static(3));
     }
 
     #[test]
@@ -294,7 +294,7 @@ mod tests {
 
         let node = builder.graph().node(outputs[0]).unwrap();
         // Should be constant folded
-        if let NodeOp::Constant { data } = &node.op {
+        if let NodeOp::Constant { data } = &node.op.op {
             if let ConstantData::F32(values) = data {
                 assert_eq!(values.len(), 6);
             } else {
@@ -304,7 +304,7 @@ mod tests {
             panic!("Expected Constant node");
         }
         // Shape should be [1, 2, 3]
-        assert_eq!(node.shape.rank(), 3);
+        assert_eq!(node.op.shape.rank(), 3);
     }
 
     #[test]
@@ -320,8 +320,8 @@ mod tests {
 
         let node = builder.graph().node(outputs[0]).unwrap();
         // [] -> [1]
-        assert_eq!(node.shape.rank(), 1);
-        assert_eq!(node.shape.dims[0], Dim::Static(1));
+        assert_eq!(node.op.shape.rank(), 1);
+        assert_eq!(node.op.shape.dims[0], Dim::Static(1));
     }
 
     #[test]
@@ -337,11 +337,11 @@ mod tests {
 
         let node = builder.graph().node(outputs[0]).unwrap();
         // [2, 3, 4] -> [2, 3, 1, 4]
-        assert_eq!(node.shape.rank(), 4);
-        assert_eq!(node.shape.dims[0], Dim::Static(2));
-        assert_eq!(node.shape.dims[1], Dim::Static(3));
-        assert_eq!(node.shape.dims[2], Dim::Static(1));
-        assert_eq!(node.shape.dims[3], Dim::Static(4));
+        assert_eq!(node.op.shape.rank(), 4);
+        assert_eq!(node.op.shape.dims[0], Dim::Static(2));
+        assert_eq!(node.op.shape.dims[1], Dim::Static(3));
+        assert_eq!(node.op.shape.dims[2], Dim::Static(1));
+        assert_eq!(node.op.shape.dims[3], Dim::Static(4));
     }
 
     // ===== Invalid Input Tests =====

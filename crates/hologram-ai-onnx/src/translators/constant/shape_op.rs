@@ -42,7 +42,7 @@ impl OnnxTranslator for ShapeOpTranslator {
         let input_node = builder.graph().node(data_input).ok_or_else(|| {
             TranslationError::IrBuilder("Shape: input node not found".to_string())
         })?;
-        let rank = input_node.shape.rank() as i64;
+        let rank = input_node.op.shape.rank() as i64;
 
         // Extract start/end indices if specified (ONNX opset 15+)
         let start = node.get_int_or("start", 0);
@@ -61,7 +61,7 @@ impl OnnxTranslator for ShapeOpTranslator {
         }
 
         // Get dimensions from input shape
-        let dims = &input_node.shape.dims;
+        let dims = &input_node.op.shape.dims;
 
         // Check if all dimensions in the range are static
         let mut all_static = true;
@@ -149,10 +149,10 @@ mod tests {
 
         // Output should be constant [2, 3]
         let output_node = builder.graph().node(outputs[0]).unwrap();
-        assert_eq!(output_node.shape.rank(), 1);
-        assert_eq!(output_node.dtype, DType::I64);
+        assert_eq!(output_node.op.shape.rank(), 1);
+        assert_eq!(output_node.op.dtype, DType::I64);
 
-        if let NodeOp::Constant { data } = &output_node.op {
+        if let NodeOp::Constant { data } = &output_node.op.op {
             if let ConstantData::I64(values) = data {
                 assert_eq!(values.as_slice(), &[2i64, 3]);
             } else {
@@ -177,7 +177,7 @@ mod tests {
         let outputs = result.unwrap();
         let output_node = builder.graph().node(outputs[0]).unwrap();
 
-        if let NodeOp::Constant { data } = &output_node.op {
+        if let NodeOp::Constant { data } = &output_node.op.op {
             if let ConstantData::I64(values) = data {
                 assert_eq!(values.as_slice(), &[1i64, 3, 224, 224]);
             } else {
@@ -202,7 +202,7 @@ mod tests {
         let outputs = result.unwrap();
         let output_node = builder.graph().node(outputs[0]).unwrap();
 
-        if let NodeOp::Constant { data } = &output_node.op {
+        if let NodeOp::Constant { data } = &output_node.op.op {
             if let ConstantData::I64(values) = data {
                 assert_eq!(values.as_slice(), &[3i64, 4]);
             } else {
@@ -228,7 +228,7 @@ mod tests {
         let outputs = result.unwrap();
         let output_node = builder.graph().node(outputs[0]).unwrap();
 
-        if let NodeOp::Constant { data } = &output_node.op {
+        if let NodeOp::Constant { data } = &output_node.op.op {
             if let ConstantData::I64(values) = data {
                 assert_eq!(values.as_slice(), &[4i64]);
             } else {
@@ -260,8 +260,8 @@ mod tests {
 
         let outputs = result.unwrap();
         let output_node = builder.graph().node(outputs[0]).unwrap();
-        assert_eq!(output_node.shape.rank(), 1);
-        assert_eq!(output_node.dtype, DType::I64);
+        assert_eq!(output_node.op.shape.rank(), 1);
+        assert_eq!(output_node.op.dtype, DType::I64);
     }
 
     #[test]
@@ -283,7 +283,7 @@ mod tests {
         let output_node = builder.graph().node(outputs[0]).unwrap();
 
         // Should be constant since we extracted only static dims
-        if let NodeOp::Constant { data } = &output_node.op {
+        if let NodeOp::Constant { data } = &output_node.op.op {
             if let ConstantData::I64(values) = data {
                 assert_eq!(values.as_slice(), &[768i64]);
             } else {
@@ -309,7 +309,7 @@ mod tests {
         let output_node = builder.graph().node(outputs[0]).unwrap();
 
         // Scalar has rank 0, so output is empty 1D tensor
-        if let NodeOp::Constant { data } = &output_node.op {
+        if let NodeOp::Constant { data } = &output_node.op.op {
             if let ConstantData::I64(values) = data {
                 assert!(values.is_empty());
             } else {

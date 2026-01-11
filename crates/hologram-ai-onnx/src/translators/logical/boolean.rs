@@ -31,7 +31,7 @@ impl OnnxTranslator for AndTranslator {
                 .graph()
                 .node(inputs[0])
                 .ok_or_else(|| TranslationError::IrBuilder("Invalid input node".to_string()))?;
-            input_node.shape.clone()
+            input_node.op.shape.clone()
         };
 
         let idx = builder.graph_mut().add_op(
@@ -75,7 +75,7 @@ impl OnnxTranslator for OrTranslator {
                 .graph()
                 .node(inputs[0])
                 .ok_or_else(|| TranslationError::IrBuilder("Invalid input node".to_string()))?;
-            input_node.shape.clone()
+            input_node.op.shape.clone()
         };
 
         let idx = builder.graph_mut().add_op(
@@ -119,7 +119,7 @@ impl OnnxTranslator for NotTranslator {
                 .graph()
                 .node(inputs[0])
                 .ok_or_else(|| TranslationError::IrBuilder("Invalid input node".to_string()))?;
-            input_node.shape.clone()
+            input_node.op.shape.clone()
         };
 
         let idx = builder.graph_mut().add_op(

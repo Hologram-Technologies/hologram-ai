@@ -53,10 +53,10 @@ impl OnnxTranslator for CastTranslator {
             .node(inputs[0])
             .ok_or_else(|| TranslationError::IrBuilder("Cast: input not found".to_string()))?;
 
-        if let NodeOp::Constant { data } = &input_node.op {
+        if let NodeOp::Constant { data } = &input_node.op.op {
             // Attempt constant folding for common type casts
             if let Some(folded_data) = Self::constant_fold_cast(data, dtype) {
-                let output_shape = input_node.shape.clone();
+                let output_shape = input_node.op.shape.clone();
                 let result = builder.constant(folded_data, output_shape);
                 return Ok(vec![result]);
             }
@@ -204,7 +204,7 @@ mod tests {
         // Verify constant folding occurred
         let output = result.unwrap();
         let output_node = builder.graph().node(output[0]).unwrap();
-        if let NodeOp::Constant { data } = &output_node.op {
+        if let NodeOp::Constant { data } = &output_node.op.op {
             if let ConstantData::F32(values) = data {
                 assert_eq!(values, &[1.0, 2.0, 3.0, 4.0]);
             } else {
@@ -230,7 +230,7 @@ mod tests {
 
         let output = result.unwrap();
         let output_node = builder.graph().node(output[0]).unwrap();
-        if let NodeOp::Constant { data } = &output_node.op {
+        if let NodeOp::Constant { data } = &output_node.op.op {
             if let ConstantData::I64(values) = data {
                 assert_eq!(values, &[10i64, 20, 30]);
             } else {

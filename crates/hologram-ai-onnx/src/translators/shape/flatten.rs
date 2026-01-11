@@ -45,7 +45,7 @@ impl OnnxTranslator for FlattenTranslator {
         let input_node = builder.graph().node(data).ok_or_else(|| {
             TranslationError::IrBuilder("Flatten: input node not found".to_string())
         })?;
-        let input_shape = input_node.shape.clone();
+        let input_shape = input_node.op.shape.clone();
         let rank = input_shape.rank() as i64;
 
         // Get axis attribute (default: 1)
@@ -100,7 +100,7 @@ impl OnnxTranslator for FlattenTranslator {
             );
 
             // Handle constant folding
-            if let NodeOp::Constant { data: const_data } = &input_node.op {
+            if let NodeOp::Constant { data: const_data } = &input_node.op.op {
                 let folded_data = const_data.clone();
                 let result =
                     builder.constant(folded_data, Shape::static_shape(&[first_dim, second_dim]));
@@ -301,7 +301,7 @@ mod tests {
 
         let node = builder.graph().node(outputs[0]).unwrap();
         // Should be constant folded
-        if let NodeOp::Constant { data } = &node.op {
+        if let NodeOp::Constant { data } = &node.op.op {
             if let ConstantData::F32(values) = data {
                 assert_eq!(values.len(), 6);
             } else {

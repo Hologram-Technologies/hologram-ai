@@ -83,8 +83,8 @@ impl OnnxTranslator for ConvTransposeTranslator {
             .graph()
             .node(input)
             .ok_or_else(|| TranslationError::IrBuilder("Invalid input node".to_string()))?;
-        let shape = input_node.shape.clone();
-        let dtype = input_node.dtype;
+        let shape = input_node.op.shape.clone();
+        let dtype = input_node.op.dtype;
 
         // Create transposed convolution node
         let idx = builder.graph_mut().add_op(
