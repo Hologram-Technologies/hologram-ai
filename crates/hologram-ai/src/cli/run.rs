@@ -2220,9 +2220,19 @@ pub fn run_pipeline_bundle_command(
     };
 
     // Create attention mask
+    // T5 ONNX export uses inverted mask: 0 for valid positions, 1 for masked (padding)
+    // The model computes: (1 + inverted_mask) * -inf = -2*inf for valid, -inf for padding
+    // This is wrong - need to use standard mask format
+    // Standard: 1 for valid, 0 for padding - model should compute (1 - mask) * -inf
     let attention_mask: Vec<f32> = (0..max_length)
         .map(|i| if i < actual_len { 1.0 } else { 0.0 })
         .collect();
+
+    // Debug: print first 10 mask values
+    info!(
+        "  Attention mask first 10: {:?}",
+        &attention_mask[..10.min(max_length)]
+    );
 
     let input_ids_f32: Vec<f32> = input_ids.iter().map(|&t| t as f32).collect();
 
@@ -2413,15 +2423,32 @@ pub fn run_pipeline_bundle_command(
             .map(|(idx, _)| idx as u32)
             .unwrap_or(1);
 
+        // Debug: show logit statistics for first few steps
         if step < 5 {
-            debug!(
-                "  Step {}: token {} (logit max: {:.2})",
-                step,
+            let logit_min = last_logits.iter().copied().fold(f32::INFINITY, f32::min);
+            let logit_max = last_logits
+                .iter()
+                .copied()
+                .fold(f32::NEG_INFINITY, f32::max);
+            let logit_mean: f32 = last_logits.iter().sum::<f32>() / last_logits.len() as f32;
+
+            // Find top 5 tokens by logit value
+            let mut indexed: Vec<(usize, f32)> = last_logits
+                .iter()
+                .enumerate()
+                .map(|(i, &v)| (i, v))
+                .collect();
+            indexed.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+            let top5: Vec<_> = indexed.iter().take(5).collect();
+
+            info!(
+                "  Step {}: pos={}, logit_range=[{:.4}, {:.4}], mean={:.4}, top5={:?}",
+                step, seq_pos, logit_min, logit_max, logit_mean, top5
+            );
+            info!(
+                "    -> selected token {} (logit={:.4})",
                 next_token,
-                last_logits
-                    .iter()
-                    .copied()
-                    .fold(f32::NEG_INFINITY, f32::max)
+                last_logits.get(next_token as usize).unwrap_or(&0.0)
             );
         }
 
