@@ -123,4 +123,10 @@ We need to make sure we still have traits that define what can go into a `.holo`
 
 ---
 
-I need you to review the `hologram` crate as we just updated it to support embeddable sections using traits
+And once the T5 compilations and execution works, I want to run it with the `--profile` so we can see where we can optimize.
+
+---
+
+Can you help identify places for optimization using instrumentation. Give me a report of where the most time was spent in all the functions we're running so we can target finding and squeezing out more performance gains.
+
+We have instrumentation implemented here.

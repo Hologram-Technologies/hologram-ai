@@ -160,6 +160,70 @@ cargo bench --bench execution_bench
 
 See [docs/working/benchmarks.md](docs/working/benchmarks.md) for detailed benchmark documentation.
 
+## Performance Profiling
+
+Use `--profile` to identify bottlenecks in compilation and execution:
+
+```bash
+# Profile compilation
+cargo run -p hologram-ai -- --profile compile model.onnx -o model.holo
+
+# Profile execution
+cargo run -p hologram-ai -- --profile run model.holo
+```
+
+This outputs timing for each phase:
+
+```
+INFO compile_onnx{onnx_size=12345678}: close time.busy=2.3s
+INFO   parse_onnx: close time.busy=150ms
+INFO   translate_to_ir{nodes=1234}: close time.busy=800ms
+INFO   compile_ir: close time.busy=1.2s
+INFO   serialize_holo: close time.busy=50ms
+```
+
+### Compilation Phases
+
+| Phase | Description |
+|-------|-------------|
+| `parse_onnx` | Parse ONNX protobuf |
+| `translate_to_ir` | Convert ONNX ops to hologram IR |
+| `compile_ir` | Compile IR to BackendPlan |
+| `serialize_holo` | Serialize to .holo format |
+| `create_bundle` | Create unified bundle (if --bundle) |
+
+### Execution Phases
+
+| Phase | Description |
+|-------|-------------|
+| `load_unified_bundle` | Load and parse .holo bundle |
+| `mmap_bundle` | Memory-map the file |
+| `deserialize_graph` | Deserialize computation graph |
+| `create_executor` | Create execution plan |
+| `model_execute` | Full model execution |
+| `execute_plan` | Run the computation graph |
+| `input_mapping` | Upload inputs to backend |
+| `download_outputs` | Download results from backend |
+
+Without `--profile`, these spans have zero overhead and produce no output.
+
+### Deep Profiling (Hologram Internals)
+
+To see timing spans from inside the hologram backend (kernels, lookup tables, buffer operations), build with the `instrumentation` feature:
+
+```bash
+# Build with deep instrumentation
+cargo build -p hologram-ai --features instrumentation
+
+# Run with profiling to see all spans
+cargo run -p hologram-ai --features instrumentation -- --profile run model.holo
+```
+
+This enables tracing in:
+- `hologram-lookup` - Lookup table operations
+- `hologram-backend` - Buffer allocation, kernel dispatch
+- `hologram-compiler` - IR compilation phases
+
 ## Development
 
 ```bash

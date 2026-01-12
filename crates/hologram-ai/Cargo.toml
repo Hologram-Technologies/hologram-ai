@@ -61,6 +61,8 @@ image-output = ["dep:image"]
 audio-output = ["dep:hound"]
 text-output = ["dep:tokenizers"]
 all-outputs = ["image-output", "audio-output", "text-output"]
+# Deep instrumentation - enables tracing spans inside hologram crate
+instrumentation = ["hologram/instrumentation"]
 
 [dev-dependencies]
 criterion.workspace = true

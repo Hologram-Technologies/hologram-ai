@@ -2162,50 +2162,62 @@ pub fn run_pipeline_bundle_command(
         anyhow::bail!("Pipeline bundle must contain a decoder model");
     }
 
-    // Tokenize input (using fallback since tokenizer model may not be in standard format)
+    // Load SentencePiece tokenizer from tokenizer.json adjacent to pipeline file
+    info!("");
+    info!("Loading tokenizer...");
+    let tokenizer_path = pipeline_path
+        .parent()
+        .map(|p| p.join("tokenizer.json"))
+        .filter(|p| p.exists());
+
+    let tokenizer: Option<crate::tokenizers::sentencepiece::SentencePieceTokenizer> =
+        tokenizer_path.as_ref().and_then(|path| {
+            use crate::tokenizers::Tokenizer;
+            match crate::tokenizers::sentencepiece::SentencePieceTokenizer::from_file(path) {
+                Ok(tok) => {
+                    info!(
+                        "  Loaded SentencePiece tokenizer (vocab size: {})",
+                        tok.vocab_size()
+                    );
+                    Some(tok)
+                }
+                Err(e) => {
+                    warn!("  Failed to load tokenizer from {:?}: {}", path, e);
+                    None
+                }
+            }
+        });
+
+    // Tokenize input
     info!("");
     info!("Tokenizing input...");
     let max_length = 512usize; // Must match compiled model's sequence length
 
-    // T5 tokenization: simple word-based for demo
-    let mut input_ids: Vec<u32> = Vec::new();
-
-    for word in prompt.split_whitespace() {
-        let token = match word.to_lowercase().as_str() {
-            "tell" => 129,
-            "me" => 140,
-            "a" => 3,
-            "joke" => 5765,
-            "in" => 16,
-            "english" => 1566,
-            "translate" => 13959,
-            "hello" => 8774,
-            "how" => 149,
-            "are" => 33,
-            "you" => 25,
-            "what" => 125,
-            "is" => 19,
-            "the" => 8,
-            "weather" => 1969,
-            "today" => 469,
-            _ => {
-                let sum: u32 = word.bytes().map(|b| b as u32).sum();
-                100 + (sum % 30000)
+    let (input_ids, actual_len) = if let Some(ref tok) = tokenizer {
+        use crate::tokenizers::Tokenizer;
+        match tok.encode(prompt, max_length) {
+            Ok(tokens) => {
+                let actual_len = tokens
+                    .iter()
+                    .take_while(|&&t| t != tok.pad_token_id())
+                    .count()
+                    .max(1);
+                info!(
+                    "  Tokenized with SentencePiece: {} tokens (non-pad)",
+                    actual_len
+                );
+                info!("  First tokens: {:?}", &tokens[..actual_len.min(10)]);
+                (tokens, actual_len)
             }
-        };
-        input_ids.push(token);
-    }
-
-    input_ids.push(1); // Add EOS token
-
-    let actual_len = input_ids.len();
-    info!("  Tokenized to {} tokens: {:?}", actual_len, &input_ids);
-
-    // Pad to max_length
-    while input_ids.len() < max_length {
-        input_ids.push(0);
-    }
-    input_ids.truncate(max_length);
+            Err(e) => {
+                warn!("  Tokenization failed: {}, using fallback", e);
+                fallback_tokenize(prompt, max_length)
+            }
+        }
+    } else {
+        warn!("  No tokenizer available - using fallback tokenization");
+        fallback_tokenize(prompt, max_length)
+    };
 
     // Create attention mask
     let attention_mask: Vec<f32> = (0..max_length)
@@ -2233,6 +2245,19 @@ pub fn run_pipeline_bundle_command(
     let encoder_start = std::time::Instant::now();
     let encoder_outputs = encoder.execute(encoder_inputs)?;
     info!("  Encoder completed in {:?}", encoder_start.elapsed());
+
+    // Debug: show available output keys and their shapes
+    info!("  Available encoder outputs:");
+    for (key, tensor) in &encoder_outputs {
+        let non_zero = tensor.to_f32().iter().filter(|&&x| x != 0.0).count();
+        info!(
+            "    '{}': shape={:?}, non-zero={}/{}",
+            key,
+            tensor.shape,
+            non_zero,
+            tensor.to_f32().len()
+        );
+    }
 
     // Get encoder hidden states
     let encoder_hidden_states = encoder_outputs
@@ -2271,6 +2296,26 @@ pub fn run_pipeline_bundle_command(
         .take(10)
         .collect();
     debug!("  First 10 non-zero values: {:?}", first_nonzero);
+
+    // Clean encoder hidden states: replace NaN/Inf with 0.0 to prevent decoder corruption
+    let hidden_states_data: Vec<f32> = if nan_count > 0 || inf_count > 0 {
+        warn!(
+            "  Cleaning {} NaN and {} Inf values from encoder output",
+            nan_count, inf_count
+        );
+        hidden_states_data
+            .into_iter()
+            .map(|x| {
+                if x.is_nan() || x.is_infinite() {
+                    0.0
+                } else {
+                    x
+                }
+            })
+            .collect()
+    } else {
+        hidden_states_data
+    };
 
     // Drop encoder to free memory
     drop(encoder);
@@ -2338,8 +2383,30 @@ pub fn run_pipeline_bundle_command(
             &logits[logits.len().saturating_sub(vocab_size)..]
         };
 
-        // Greedy decoding: argmax
-        let next_token = last_logits
+        // Count NaN/Inf in logits for debugging
+        let nan_count = last_logits.iter().filter(|x| x.is_nan()).count();
+        let inf_count = last_logits.iter().filter(|x| x.is_infinite()).count();
+        if nan_count > 0 || inf_count > 0 {
+            debug!(
+                "  Step {}: logits have {} NaN, {} Inf values",
+                step, nan_count, inf_count
+            );
+        }
+
+        // Clean logits: replace NaN/Inf with very negative values to exclude them from argmax
+        let cleaned_logits: Vec<f32> = last_logits
+            .iter()
+            .map(|&x| {
+                if x.is_nan() || x.is_infinite() {
+                    f32::MIN // Use MIN so these tokens are never selected
+                } else {
+                    x
+                }
+            })
+            .collect();
+
+        // Greedy decoding: argmax on cleaned logits
+        let next_token = cleaned_logits
             .iter()
             .enumerate()
             .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
@@ -2386,7 +2453,7 @@ pub fn run_pipeline_bundle_command(
         &generated_tokens[..generated_tokens.len().min(20)]
     );
 
-    let decoded_text = decode_t5_tokens(&generated_tokens);
+    let decoded_text = decode_tokens_with_tokenizer(&generated_tokens, tokenizer.as_ref());
 
     info!("");
     info!("=== Generated Text ===");
@@ -2395,66 +2462,77 @@ pub fn run_pipeline_bundle_command(
     Ok(decoded_text)
 }
 
-/// Simple T5 token decoder (placeholder - production should use tokenizer model).
-fn decode_t5_tokens(tokens: &[u32]) -> String {
-    // Map common T5 tokens back to words
-    let mut words = Vec::new();
+/// Fallback tokenization when no tokenizer is available.
+fn fallback_tokenize(prompt: &str, max_length: usize) -> (Vec<u32>, usize) {
+    let mut input_ids: Vec<u32> = Vec::new();
 
-    for &token in tokens {
-        let word = match token {
-            0 => continue, // skip pad
-            1 => break,    // EOS - stop
-            3 => "a",
-            8 => "the",
-            16 => "in",
-            19 => "is",
-            25 => "you",
-            33 => "are",
-            125 => "what",
-            129 => "tell",
-            140 => "me",
-            149 => "how",
-            469 => "today",
-            1566 => "english",
-            1969 => "weather",
-            5765 => "joke",
-            8774 => "hello",
-            13959 => "translate",
-            // Common output tokens
-            27 => "it",
-            31 => "this",
-            48 => "I",
-            58 => "can",
-            65 => "was",
-            78 => "at",
-            96 => "we",
-            113 => "do",
-            121 => "have",
-            151 => "be",
-            261 => "why",
-            296 => "did",
-            364 => "because",
-            449 => "go",
+    for word in prompt.split_whitespace() {
+        let token = match word.to_lowercase().as_str() {
+            "tell" => 129,
+            "me" => 140,
+            "a" => 3,
+            "joke" => 5765,
+            "in" => 16,
+            "english" => 1566,
+            "translate" => 13959,
+            "hello" => 8774,
+            "how" => 149,
+            "are" => 33,
+            "you" => 25,
+            "what" => 125,
+            "is" => 19,
+            "the" => 8,
+            "weather" => 1969,
+            "today" => 469,
             _ => {
-                // Unknown token - skip or show as [token_id]
-                continue;
+                let sum: u32 = word.bytes().map(|b| b as u32).sum();
+                100 + (sum % 30000)
             }
         };
-        words.push(word);
+        input_ids.push(token);
     }
 
-    if words.is_empty() {
-        // If we couldn't decode any tokens, show raw token IDs
-        format!(
-            "[Raw tokens: {:?}]",
-            tokens
-                .iter()
-                .filter(|&&t| t != 0 && t != 1)
-                .collect::<Vec<_>>()
-        )
-    } else {
-        words.join(" ")
+    input_ids.push(1); // Add EOS token
+    let actual_len = input_ids.len();
+
+    // Pad to max_length
+    while input_ids.len() < max_length {
+        input_ids.push(0);
     }
+    input_ids.truncate(max_length);
+
+    (input_ids, actual_len)
+}
+
+/// Decode tokens using the tokenizer if available, otherwise show raw tokens.
+fn decode_tokens_with_tokenizer(
+    tokens: &[u32],
+    tokenizer: Option<&crate::tokenizers::sentencepiece::SentencePieceTokenizer>,
+) -> String {
+    use crate::tokenizers::Tokenizer;
+
+    if let Some(tok) = tokenizer {
+        match tok.decode(tokens) {
+            Ok(text) => {
+                let text = text.trim().to_string();
+                if !text.is_empty() {
+                    return text;
+                }
+            }
+            Err(e) => {
+                warn!("Tokenizer decode error: {}", e);
+            }
+        }
+    }
+
+    // Fallback: show raw token IDs
+    format!(
+        "[Raw tokens: {:?}]",
+        tokens
+            .iter()
+            .filter(|&&t| t != 0 && t != 1)
+            .collect::<Vec<_>>()
+    )
 }
 
 #[cfg(test)]

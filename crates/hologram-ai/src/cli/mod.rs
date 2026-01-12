@@ -55,6 +55,10 @@ struct Cli {
     /// Enable verbose logging
     #[arg(short, long, global = true)]
     verbose: bool,
+
+    /// Enable performance profiling (shows span timing for loading/execution phases)
+    #[arg(long, global = true)]
+    profile: bool,
 }
 
 #[derive(Subcommand)]
@@ -447,13 +451,29 @@ pub fn run() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
     // Initialize logging
-    let log_level = if cli.verbose { "debug" } else { "info" };
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(log_level)),
-        )
-        .init();
+    if cli.profile {
+        // Profile mode: show span timing for compile and runtime phases
+        // When built with --features instrumentation, also captures hologram internal spans
+        use tracing_subscriber::fmt::format::FmtSpan;
+        tracing_subscriber::fmt()
+            .with_env_filter(
+                "hologram_ai::runtime=info,hologram_ai_onnx=info,\
+                 hologram_telemetry=info,hologram_lookup=info,\
+                 hologram_backend=info,hologram_compiler=info",
+            )
+            .with_span_events(FmtSpan::CLOSE)
+            .with_target(false)
+            .init();
+    } else {
+        // Normal mode: standard logging
+        let log_level = if cli.verbose { "debug" } else { "info" };
+        tracing_subscriber::fmt()
+            .with_env_filter(
+                tracing_subscriber::EnvFilter::try_from_default_env()
+                    .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(log_level)),
+            )
+            .init();
+    }
 
     match cli.command {
         Commands::Compile {

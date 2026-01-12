@@ -45,35 +45,43 @@ use hologram_ai_onnx::core::{HoloFormat, PipelineBundleReader, UnifiedBundleRead
 /// - File cannot be read
 /// - Deserialization fails (corrupted .holo file)
 /// - Backend creation fails
+#[tracing::instrument(
+    name = "load_and_compile_holo",
+    skip_all,
+    fields(path = %path.display())
+)]
 pub fn load_and_compile_holo(
     path: &Path,
 ) -> Result<(
     hologram::backend::BackendPlan,
     Box<dyn hologram::backend::ProgramBackend>,
 )> {
-    tracing::info!("Loading .holo file: {}", path.display());
-
-    // Use hologram's read_holo() API
-    // This automatically:
-    // 1. Verifies magic bytes
-    // 2. Deserializes SerializableBackendPlan
-    // 3. Resolves kernel IDs to function pointers based on CPU capabilities
-    let plan = hologram::compiler::read_holo(path)
-        .map_err(|e| anyhow::anyhow!("Failed to load .holo file: {:?}", e))?;
+    // Phase 1: Read and deserialize
+    let plan = {
+        let _span = tracing::info_span!("deserialize_holo").entered();
+        hologram::compiler::read_holo(path)
+            .map_err(|e| anyhow::anyhow!("Failed to load .holo file: {:?}", e))?
+    };
 
     tracing::debug!("Deserialized BackendPlan from .holo file");
 
-    // Use hologram's backend creation with proper fallback handling
-    let backend = match hologram::backend::create_backend(plan.backend_type.clone()) {
-        Ok(backend) => backend,
-        Err(e) => {
-            tracing::warn!("Failed to create backend: {}. Falling back to CPU", e);
-            hologram::backend::create_best_backend()
+    // Phase 2: Create backend
+    let backend = {
+        let _span = tracing::info_span!(
+            "create_backend",
+            backend_type = ?plan.backend_type
+        )
+        .entered();
+        match hologram::backend::create_backend(plan.backend_type.clone()) {
+            Ok(backend) => backend,
+            Err(e) => {
+                tracing::warn!("Failed to create backend: {}. Falling back to CPU", e);
+                hologram::backend::create_best_backend()
+            }
         }
     };
 
-    tracing::info!("Using backend: {:?}", backend.backend_type());
-    tracing::info!("Successfully loaded BackendPlan from .holo file");
+    tracing::info!(backend = ?backend.backend_type(), "Successfully loaded BackendPlan");
 
     Ok((plan, backend))
 }
@@ -110,44 +118,57 @@ pub fn load_and_compile_holo(
 /// // Execute inference
 /// executor.execute(&inputs, &mut outputs, &mut *backend)?;
 /// ```
+#[tracing::instrument(
+    name = "load_with_external_weights",
+    skip_all,
+    fields(
+        holo_path = %holo_path.display(),
+        weights_path = %weights_path.display()
+    )
+)]
 pub fn load_with_external_weights(
     holo_path: &Path,
     weights_path: &Path,
 ) -> Result<(PlanExecutor, Box<dyn hologram::backend::ProgramBackend>)> {
-    tracing::info!(
-        "Loading .holo file with external weights: {} + {}",
-        holo_path.display(),
-        weights_path.display()
-    );
-
-    // Load and deserialize the .holo file
-    let plan = hologram::compiler::read_holo(holo_path)
-        .map_err(|e| anyhow::anyhow!("Failed to load .holo file: {:?}", e))?;
+    // Phase 1: Deserialize .holo file
+    let plan = {
+        let _span = tracing::info_span!("deserialize_holo").entered();
+        hologram::compiler::read_holo(holo_path)
+            .map_err(|e| anyhow::anyhow!("Failed to load .holo file: {:?}", e))?
+    };
 
     tracing::debug!(
-        "Deserialized BackendPlan (constant_data: {} bytes, will use mmap instead)",
-        plan.constant_data.len()
+        constant_data_bytes = plan.constant_data.len(),
+        "Deserialized BackendPlan (will use mmap instead)"
     );
 
-    // Create backend with fallback
-    let backend = match hologram::backend::create_backend(plan.backend_type.clone()) {
-        Ok(backend) => backend,
-        Err(e) => {
-            tracing::warn!("Failed to create backend: {}. Falling back to CPU", e);
-            hologram::backend::create_best_backend()
+    // Phase 2: Create backend
+    let backend = {
+        let _span = tracing::info_span!(
+            "create_backend",
+            backend_type = ?plan.backend_type
+        )
+        .entered();
+        match hologram::backend::create_backend(plan.backend_type.clone()) {
+            Ok(backend) => backend,
+            Err(e) => {
+                tracing::warn!("Failed to create backend: {}. Falling back to CPU", e);
+                hologram::backend::create_best_backend()
+            }
         }
     };
 
-    tracing::info!("Using backend: {:?}", backend.backend_type());
+    tracing::info!(backend = ?backend.backend_type(), "Using backend");
 
-    // Create executor with memory-mapped external constants
-    let executor = PlanExecutor::with_external_constants(plan, &*backend, weights_path)
-        .map_err(|e| anyhow::anyhow!("Failed to create executor with external weights: {:?}", e))?;
+    // Phase 3: Create executor with mmap'd weights
+    let executor = {
+        let _span = tracing::info_span!("create_executor_mmap").entered();
+        PlanExecutor::with_external_constants(plan, &*backend, weights_path).map_err(|e| {
+            anyhow::anyhow!("Failed to create executor with external weights: {:?}", e)
+        })?
+    };
 
-    tracing::info!(
-        "Successfully loaded model with external weights from {}",
-        weights_path.display()
-    );
+    tracing::info!("Successfully loaded model with external weights");
 
     Ok((executor, backend))
 }
@@ -222,38 +243,41 @@ pub fn load_holo_file(
 /// let (executor, backend) = load_holo_auto(Path::new("model.holo"))?;
 /// executor.execute(&inputs, &mut outputs, &mut *backend)?;
 /// ```
+#[tracing::instrument(
+    name = "load_holo_auto",
+    skip_all,
+    fields(path = %path.display())
+)]
 pub fn load_holo_auto(
     path: &Path,
 ) -> Result<(PlanExecutor, Box<dyn hologram::backend::ProgramBackend>)> {
-    // Read magic bytes to detect format
-    let mut file = File::open(path)
-        .map_err(|e| anyhow::anyhow!("Failed to open file '{}': {}", path.display(), e))?;
+    // Phase 1: Detect format
+    let (format, magic) = {
+        let _span = tracing::info_span!("detect_format").entered();
+        let mut file = File::open(path)
+            .map_err(|e| anyhow::anyhow!("Failed to open file '{}': {}", path.display(), e))?;
 
-    let mut magic = [0u8; 4];
-    file.read_exact(&mut magic)
-        .map_err(|e| anyhow::anyhow!("Failed to read magic bytes: {}", e))?;
-    drop(file);
+        let mut magic = [0u8; 4];
+        file.read_exact(&mut magic)
+            .map_err(|e| anyhow::anyhow!("Failed to read magic bytes: {}", e))?;
+        drop(file);
 
-    let format = HoloFormat::detect(&magic);
+        (HoloFormat::detect(&magic), magic)
+    };
 
+    tracing::info!(format = ?format, "Detected file format");
+
+    // Phase 2: Route to appropriate loader
     match format {
-        HoloFormat::Bundle => {
-            tracing::info!("Detected unified bundle format (HOLB): {}", path.display());
-            load_unified_bundle(path)
-        }
-        HoloFormat::Pipeline => {
-            // Pipeline bundles contain multiple models - use load_pipeline_bundle instead
-            Err(anyhow::anyhow!(
-                "Pipeline bundle detected: {}. Use load_pipeline_bundle() and specify model name.",
-                path.display()
-            ))
-        }
+        HoloFormat::Bundle => load_unified_bundle(path),
+        HoloFormat::Pipeline => Err(anyhow::anyhow!(
+            "Pipeline bundle detected: {}. Use load_pipeline_bundle() and specify model name.",
+            path.display()
+        )),
         HoloFormat::Plan | HoloFormat::Legacy => {
-            tracing::info!("Detected legacy format (HOLP): {}", path.display());
-            // Check for companion .weights file
             let weights_path = path.with_extension("weights");
             if weights_path.exists() {
-                tracing::info!("Found external weights file: {}", weights_path.display());
+                tracing::info!(weights_path = %weights_path.display(), "Found external weights file");
                 load_with_external_weights(path, &weights_path)
             } else {
                 load_holo_file(path, None)
@@ -271,69 +295,102 @@ pub fn load_holo_auto(
 ///
 /// The bundle contains both the computation graph and weights in a single file.
 /// Weights are memory-mapped from the page-aligned section within the bundle.
+#[tracing::instrument(
+    name = "load_unified_bundle",
+    skip_all,
+    fields(path = %path.display())
+)]
 fn load_unified_bundle(
     path: &Path,
 ) -> Result<(PlanExecutor, Box<dyn hologram::backend::ProgramBackend>)> {
-    // Memory-map the entire bundle file
-    let mmap = MappedInput::open(path)
-        .map_err(|e| anyhow::anyhow!("Failed to mmap bundle '{}': {}", path.display(), e))?;
+    // Phase 1: Memory-map the bundle
+    let mmap = {
+        let _span = tracing::info_span!("mmap_bundle").entered();
+        let m = MappedInput::open(path)
+            .map_err(|e| anyhow::anyhow!("Failed to mmap bundle '{}': {}", path.display(), e))?;
+        m.advise_sequential();
+        m
+    };
 
-    // Hint sequential access pattern for typical transformer execution
-    // This enables aggressive read-ahead by the OS kernel
-    mmap.advise_sequential();
+    let mmap_size = mmap.as_slice().len();
+    tracing::debug!(mmap_size_bytes = mmap_size, "Memory-mapped bundle");
 
-    // Parse bundle header and validate, extracting needed values before moving mmap
-    let (plan, weights_offset) = {
+    // Phase 2: Parse header and verify checksums
+    let (plan, weights_offset, _graph_size, weights_size) = {
+        let _span = tracing::info_span!("parse_bundle_header").entered();
+
         let reader = UnifiedBundleReader::from_bytes(mmap.as_slice())
             .map_err(|e| anyhow::anyhow!("Failed to parse bundle header: {:?}", e))?;
 
-        // Verify checksums
-        if !reader.verify_checksums() {
-            return Err(anyhow::anyhow!("Bundle checksum verification failed"));
+        // Phase 2a: Verify checksums
+        {
+            let _checksum_span = tracing::info_span!("verify_checksums").entered();
+            if !reader.verify_checksums() {
+                return Err(anyhow::anyhow!("Bundle checksum verification failed"));
+            }
         }
 
-        tracing::info!(
-            "Bundle: graph={} bytes, weights={} bytes, weights_offset={}",
-            reader.graph_size(),
-            reader.weights_size(),
-            reader.weights_mmap_offset().unwrap_or(0)
-        );
-
-        // Deserialize the graph section (HOLP format)
-        let plan = hologram::compiler::read_holo_from_bytes(reader.graph_bytes())
-            .map_err(|e| anyhow::anyhow!("Failed to deserialize graph from bundle: {:?}", e))?;
-
+        let graph_size = reader.graph_size();
+        let weights_size = reader.weights_size();
         let weights_offset = reader.weights_mmap_offset();
 
-        (plan, weights_offset)
+        tracing::info!(
+            graph_bytes = graph_size,
+            weights_bytes = weights_size,
+            weights_offset = weights_offset.unwrap_or(0),
+            "Bundle sections parsed"
+        );
+
+        // Phase 2b: Deserialize graph
+        let plan = {
+            let _deser_span =
+                tracing::info_span!("deserialize_graph", graph_bytes = graph_size).entered();
+            hologram::compiler::read_holo_from_bytes(reader.graph_bytes())
+                .map_err(|e| anyhow::anyhow!("Failed to deserialize graph from bundle: {:?}", e))?
+        };
+
+        (plan, weights_offset, graph_size, weights_size)
     }; // reader goes out of scope here, releasing borrow of mmap
 
-    tracing::debug!("Deserialized BackendPlan from bundle");
-
-    // Create backend
-    let backend = match hologram::backend::create_backend(plan.backend_type.clone()) {
-        Ok(backend) => backend,
-        Err(e) => {
-            tracing::warn!("Failed to create backend: {}. Falling back to CPU", e);
-            hologram::backend::create_best_backend()
+    // Phase 3: Create backend
+    let backend = {
+        let _span = tracing::info_span!(
+            "create_backend",
+            backend_type = ?plan.backend_type
+        )
+        .entered();
+        match hologram::backend::create_backend(plan.backend_type.clone()) {
+            Ok(backend) => backend,
+            Err(e) => {
+                tracing::warn!("Failed to create backend: {}. Falling back to CPU", e);
+                hologram::backend::create_best_backend()
+            }
         }
     };
 
-    tracing::info!("Using backend: {:?}", backend.backend_type());
+    tracing::info!(backend = ?backend.backend_type(), "Using backend");
 
-    // Create executor with mmap'd weights at the bundle offset
+    // Phase 4: Create executor with mmap'd weights
     let mmap_arc = Arc::new(mmap);
-    let executor = if let Some(offset) = weights_offset {
-        PlanExecutor::with_mmap_constants_at_offset(plan, &*backend, mmap_arc, offset).map_err(
-            |e| anyhow::anyhow!("Failed to create executor with bundle weights: {:?}", e),
-        )?
-    } else {
-        // No weights in bundle - just create normal executor
-        PlanExecutor::new(plan, &*backend)
-            .map_err(|e| anyhow::anyhow!("Failed to create executor: {:?}", e))?
+    let executor = {
+        let _span = tracing::info_span!(
+            "create_executor",
+            has_weights = weights_offset.is_some(),
+            weights_size = weights_size
+        )
+        .entered();
+
+        if let Some(offset) = weights_offset {
+            PlanExecutor::with_mmap_constants_at_offset(plan, &*backend, mmap_arc, offset).map_err(
+                |e| anyhow::anyhow!("Failed to create executor with bundle weights: {:?}", e),
+            )?
+        } else {
+            PlanExecutor::new(plan, &*backend)
+                .map_err(|e| anyhow::anyhow!("Failed to create executor: {:?}", e))?
+        }
     };
 
-    tracing::info!("Successfully loaded unified bundle: {}", path.display());
+    tracing::info!("Successfully loaded unified bundle");
 
     Ok((executor, backend))
 }
@@ -594,39 +651,60 @@ impl PipelineBundle {
 /// let (encoder_exec, encoder_backend) = pipeline.load_model("encoder")?;
 /// let (decoder_exec, decoder_backend) = pipeline.load_model("decoder")?;
 /// ```
+#[tracing::instrument(
+    name = "load_pipeline_bundle",
+    skip_all,
+    fields(path = %path.display())
+)]
 pub fn load_pipeline_bundle(path: &Path) -> Result<PipelineBundle> {
-    // Memory-map the pipeline file
-    let mmap = MappedInput::open(path).map_err(|e| {
-        anyhow::anyhow!("Failed to mmap pipeline bundle '{}': {}", path.display(), e)
-    })?;
+    // Phase 1: Memory-map the pipeline
+    let mmap = {
+        let _span = tracing::info_span!("mmap_pipeline").entered();
+        MappedInput::open(path).map_err(|e| {
+            anyhow::anyhow!("Failed to mmap pipeline bundle '{}': {}", path.display(), e)
+        })?
+    };
 
-    // Parse the pipeline header and index
-    let reader = PipelineBundleReader::from_bytes(mmap.as_slice())
-        .map_err(|e| anyhow::anyhow!("Failed to parse pipeline bundle header: {:?}", e))?;
+    let mmap_size = mmap.as_slice().len();
+    tracing::debug!(mmap_size_bytes = mmap_size, "Memory-mapped pipeline");
 
-    // Verify checksums
-    if !reader.verify_index_checksum() {
-        return Err(anyhow::anyhow!(
-            "Pipeline index checksum verification failed"
-        ));
-    }
+    // Phase 2: Parse header and verify checksum
+    let model_info = {
+        let _span = tracing::info_span!("parse_pipeline_header").entered();
 
-    tracing::info!(
-        "Loaded pipeline bundle with {} models: {:?}",
-        reader.model_count(),
-        reader.model_names()
-    );
+        let reader = PipelineBundleReader::from_bytes(mmap.as_slice())
+            .map_err(|e| anyhow::anyhow!("Failed to parse pipeline bundle header: {:?}", e))?;
 
-    // Extract model info (we can't keep the reader because it borrows mmap)
-    let model_info: Vec<(String, usize, usize)> = reader
-        .model_names()
-        .iter()
-        .filter_map(|name| {
-            reader
-                .get_entry(name)
-                .map(|entry| (name.to_string(), entry.offset as usize, entry.size as usize))
-        })
-        .collect();
+        // Phase 2a: Verify checksum
+        {
+            let _checksum_span = tracing::info_span!("verify_index_checksum").entered();
+            if !reader.verify_index_checksum() {
+                return Err(anyhow::anyhow!(
+                    "Pipeline index checksum verification failed"
+                ));
+            }
+        }
+
+        let model_count = reader.model_count();
+        let model_names = reader.model_names();
+
+        tracing::info!(
+            model_count = model_count,
+            models = ?model_names,
+            "Pipeline bundle loaded"
+        );
+
+        // Extract model info
+        reader
+            .model_names()
+            .iter()
+            .filter_map(|name| {
+                reader
+                    .get_entry(name)
+                    .map(|entry| (name.to_string(), entry.offset as usize, entry.size as usize))
+            })
+            .collect()
+    };
 
     Ok(PipelineBundle {
         mmap: Arc::new(mmap),

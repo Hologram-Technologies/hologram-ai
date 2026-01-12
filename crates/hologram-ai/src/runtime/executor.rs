@@ -379,16 +379,22 @@ impl ModelExecutor {
     /// let outputs = executor.execute(inputs)?;
     /// let result = outputs.get("output").unwrap();
     /// ```
+    #[tracing::instrument(
+        name = "model_execute",
+        skip_all,
+        fields(num_inputs = inputs.len())
+    )]
     pub fn execute(&mut self, inputs: HashMap<String, Tensor>) -> Result<HashMap<String, Tensor>> {
-        tracing::debug!("Executing model with {} inputs", inputs.len());
+        // Phase 1: Get buffer requirements
+        let requirements = {
+            let _span = tracing::info_span!("get_buffer_requirements").entered();
+            self.get_buffer_requirements()
+        };
 
-        // Get buffer requirements from plan
-        let requirements = self.get_buffer_requirements();
         tracing::info!(
-            "Plan requires {} inputs, {} outputs (output_sizes: {:?})",
-            requirements.num_inputs,
-            requirements.num_outputs,
-            requirements.output_sizes
+            plan_inputs = requirements.num_inputs,
+            plan_outputs = requirements.num_outputs,
+            "Buffer requirements"
         );
 
         // Extract sorted input tensors for shape resolution
@@ -400,79 +406,65 @@ impl ModelExecutor {
             .map(|name| inputs.get(name).unwrap())
             .collect();
 
-        // Map named inputs to positional buffers (alphabetically sorted)
-        let input_handles = self.map_inputs_to_buffers(&inputs, &requirements)?;
+        // Phase 2: Map inputs to buffers (upload)
+        let input_handles = {
+            let _span = tracing::info_span!("input_mapping", num_inputs = inputs.len()).entered();
+            self.map_inputs_to_buffers(&inputs, &requirements)?
+        };
 
-        // Allocate output buffers with runtime shape resolution
-        let (output_handles, output_shapes) =
-            self.allocate_output_buffers_with_shapes(&requirements, &sorted_tensors)?;
+        // Phase 3: Allocate output buffers
+        let (output_handles, output_shapes) = {
+            let _span =
+                tracing::info_span!("allocate_outputs", num_outputs = requirements.num_outputs)
+                    .entered();
+            self.allocate_output_buffers_with_shapes(&requirements, &sorted_tensors)?
+        };
 
-        // DEBUG: Check buffer references
-        let plan = self.executor.plan();
-        tracing::info!("Total operations in plan: {}", plan.ops.len());
+        // Get operation count for logging
+        let total_ops = self.executor.plan().ops.len();
+        tracing::debug!(
+            input_buffers = input_handles.len(),
+            output_buffers = output_handles.len(),
+            total_ops = total_ops,
+            "Buffers allocated"
+        );
 
-        // Count operations by input count
-        let mut single_input = 0;
-        let mut dual_input = 0;
-        let mut no_input = 0;
-        let mut multi_input = 0;
+        // Phase 4: Execute the plan
+        {
+            let _span = tracing::info_span!("execute_plan", total_ops = total_ops).entered();
+            self.executor
+                .execute(&input_handles, &output_handles, &*self.backend)
+                .map_err(|e| anyhow::anyhow!("Model execution failed: {:?}", e))?;
+        }
 
-        for op in &plan.ops {
-            match op.input_refs.len() {
-                0 => no_input += 1,
-                1 => single_input += 1,
-                2 => dual_input += 1,
-                _ => multi_input += 1,
+        tracing::debug!("Plan execution completed");
+
+        // Phase 5: Download outputs
+        let outputs = {
+            let _span = tracing::info_span!("download_outputs", num_outputs = output_handles.len())
+                .entered();
+            self.buffers_to_outputs(output_handles.clone(), output_shapes, &requirements)?
+        };
+
+        // Phase 6: Cleanup buffers
+        {
+            let _span = tracing::info_span!(
+                "cleanup_buffers",
+                input_count = input_handles.len(),
+                output_count = output_handles.len()
+            )
+            .entered();
+
+            for handle in input_handles {
+                self.backend
+                    .free_buffer(handle)
+                    .map_err(|e| anyhow::anyhow!("Failed to free input buffer: {:?}", e))?;
             }
-        }
-
-        tracing::info!(
-            "Operation breakdown: {} no-input (constants), {} single-input, {} dual-input, {} multi-input",
-            no_input,
-            single_input,
-            dual_input,
-            multi_input
-        );
-        tracing::info!(
-            "We're passing {} input buffers, {} output buffers",
-            input_handles.len(),
-            output_handles.len()
-        );
-
-        // DEBUG: Verify input tensors have valid data BEFORE upload
-        for (name, tensor) in &inputs {
-            let data = tensor.to_f32();
-            let non_zero = data.iter().filter(|&&x| x != 0.0).count();
-            tracing::info!(
-                "Input '{}': {} values, {} non-zero, first 10: {:?}",
-                name,
-                data.len(),
-                non_zero,
-                &data.iter().take(10).copied().collect::<Vec<f32>>()
-            );
-        }
-
-        // Execute the plan
-        self.executor
-            .execute(&input_handles, &output_handles, &*self.backend)
-            .map_err(|e| anyhow::anyhow!("Model execution failed: {:?}", e))?;
-
-        tracing::debug!("Model execution completed successfully");
-
-        // Convert output buffers to named tensors (using computed shapes)
-        let outputs =
-            self.buffers_to_outputs(output_handles.clone(), output_shapes, &requirements)?;
-
-        // Free all buffers
-        for handle in input_handles {
-            self.backend
-                .free_buffer(handle)
-                .map_err(|e| anyhow::anyhow!("Failed to free input buffer: {:?}", e))?;
-        }
-        for handle in output_handles {
-            self.backend
-                .free_buffer(handle)
-                .map_err(|e| anyhow::anyhow!("Failed to free output buffer: {:?}", e))?;
+            for handle in output_handles {
+                self.backend
+                    .free_buffer(handle)
+                    .map_err(|e| anyhow::anyhow!("Failed to free output buffer: {:?}", e))?;
+            }
         }
 
         Ok(outputs)

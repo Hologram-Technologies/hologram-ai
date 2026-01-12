@@ -119,17 +119,21 @@ impl OnnxCompiler {
     /// A tuple of `(holo_bytes, weight_bytes)`:
     /// - `holo_bytes`: Serialized OperationGraph for the .holo file
     /// - `weight_bytes`: External weight data for the .weights file (may be empty)
+    #[tracing::instrument(
+        name = "compile_onnx",
+        skip_all,
+        fields(onnx_size = onnx_bytes.len())
+    )]
     pub fn compile(&self, onnx_bytes: &[u8]) -> Result<(Vec<u8>, Vec<u8>)> {
-        use tracing::{debug, info};
-
-        info!("Starting ONNX compilation");
-
-        // Step 1: Parse and validate ONNX model
-        debug!("Parsing ONNX protobuf");
-        let model = parse_model(onnx_bytes)?;
-        validate_model(&model)?;
-        let opset_version = core::extract_opset_version(&model);
-        info!("ONNX opset version: {}", opset_version);
+        // Phase 1: Parse and validate ONNX model
+        let (model, opset_version) = {
+            let _span = tracing::info_span!("parse_onnx").entered();
+            let model = parse_model(onnx_bytes)?;
+            validate_model(&model)?;
+            let opset_version = core::extract_opset_version(&model);
+            (model, opset_version)
+        };
+        tracing::info!(opset_version = opset_version, "Parsed ONNX model");
 
         // Get the graph
         let graph = model
@@ -139,104 +143,123 @@ impl OnnxCompiler {
 
         // Check if partitioning is needed
         if self.config.enable_partitioning && graph.node.len() > self.config.partition_size {
-            info!(
-                "Large graph detected ({} nodes), using partitioning",
-                graph.node.len()
+            tracing::info!(
+                nodes = graph.node.len(),
+                "Large graph detected, using partitioning"
             );
             return self.compile_partitioned(onnx_bytes);
         }
 
-        // Step 2: Translate ONNX → IR with symbolic shapes
-        debug!("Translating ONNX to IR");
-        let ir_func = translate_graph_to_ir(graph)?;
-        info!("IR translation complete");
+        // Phase 2: Translate ONNX → IR with symbolic shapes
+        let ir_func = {
+            let _span = tracing::info_span!("translate_to_ir", nodes = graph.node.len()).entered();
+            translate_graph_to_ir(graph)?
+        };
 
-        // Step 3: Compile to BackendPlan using hologram-compiler
-        debug!("Compiling IR to BackendPlan");
-
-        let backend_type = hologram::BackendType::Cpu;
-        let mut plan = hologram::compiler::compile_ir(&ir_func, backend_type)
-            .map_err(|e| OnnxError::IrTranslationError(format!("Failed to compile IR: {:?}", e)))?;
+        // Phase 3: Compile to BackendPlan using hologram-compiler
+        let mut plan = {
+            let _span = tracing::info_span!("compile_ir").entered();
+            let backend_type = hologram::BackendType::Cpu;
+            hologram::compiler::compile_ir(&ir_func, backend_type).map_err(|e| {
+                OnnxError::IrTranslationError(format!("Failed to compile IR: {:?}", e))
+            })?
+        };
 
         // Extract constant_data to external weights file if above threshold
         let weight_bytes = if plan.constant_data.len() > self.config.weight_threshold {
-            info!(
-                "Extracting {} bytes of constant data to external weights file (threshold: {} bytes)",
-                plan.constant_data.len(),
-                self.config.weight_threshold
+            tracing::info!(
+                weight_bytes = plan.constant_data.len(),
+                threshold = self.config.weight_threshold,
+                "Extracting weights to external file"
             );
             std::mem::take(&mut plan.constant_data)
         } else {
-            debug!(
-                "Keeping {} bytes of constant data embedded in .holo file",
-                plan.constant_data.len()
-            );
             Vec::new()
         };
 
-        debug!("Serializing BackendPlan to .holo format");
-        let holo_bytes = serialize_backend_plan(&plan)?;
+        // Phase 4: Serialize to .holo format
+        let holo_bytes = {
+            let _span = tracing::info_span!("serialize_holo").entered();
+            serialize_backend_plan(&plan)?
+        };
 
-        info!(
-            "Compilation complete: {} bytes .holo, {} bytes .weights",
-            holo_bytes.len(),
-            weight_bytes.len()
+        tracing::info!(
+            holo_bytes = holo_bytes.len(),
+            weight_bytes = weight_bytes.len(),
+            "Compilation complete"
         );
 
         Ok((holo_bytes, weight_bytes))
     }
 
     /// Compile large model using graph partitioning.
+    #[tracing::instrument(
+        name = "compile_partitioned",
+        skip_all,
+        fields(onnx_size = onnx_bytes.len())
+    )]
     pub fn compile_partitioned(&self, onnx_bytes: &[u8]) -> Result<(Vec<u8>, Vec<u8>)> {
-        use tracing::{debug, info};
-
-        info!("Starting partitioned compilation");
-
-        // Parse model
-        let model = parse_model(onnx_bytes)?;
-        validate_model(&model)?;
+        // Phase 1: Parse model
+        let model = {
+            let _span = tracing::info_span!("parse_onnx").entered();
+            let model = parse_model(onnx_bytes)?;
+            validate_model(&model)?;
+            model
+        };
 
         let graph = model
             .graph
             .as_ref()
             .ok_or_else(|| OnnxError::InvalidModel("Model has no graph".into()))?;
 
-        // Analyze partitioning structure
-        let partitioner = core::GraphPartitioner::new();
-        let partitions = partitioner.partition(graph)?;
-        info!(
-            "Analyzed graph: {} nodes split into {} partitions",
-            graph.node.len(),
-            partitions.len()
+        // Phase 2: Analyze partitioning structure
+        let partitions = {
+            let _span = tracing::info_span!("partition_graph", nodes = graph.node.len()).entered();
+            let partitioner = core::GraphPartitioner::new();
+            partitioner.partition(graph)?
+        };
+        tracing::info!(
+            nodes = graph.node.len(),
+            partitions = partitions.len(),
+            "Graph partitioned"
         );
 
-        // Compile the full graph
-        debug!("Translating ONNX to IR");
-        let ir_func = translate_graph_to_ir(graph)?;
+        // Phase 3: Translate to IR
+        let ir_func = {
+            let _span = tracing::info_span!("translate_to_ir").entered();
+            translate_graph_to_ir(graph)?
+        };
 
-        // Compile to BackendPlan using hologram-compiler
-        debug!("Compiling IR to BackendPlan");
-        let backend_type = hologram::BackendType::Cpu;
-        let mut plan = hologram::compiler::compile_ir(&ir_func, backend_type)
-            .map_err(|e| OnnxError::IrTranslationError(format!("Failed to compile IR: {:?}", e)))?;
+        // Phase 4: Compile to BackendPlan
+        let mut plan = {
+            let _span = tracing::info_span!("compile_ir").entered();
+            let backend_type = hologram::BackendType::Cpu;
+            hologram::compiler::compile_ir(&ir_func, backend_type).map_err(|e| {
+                OnnxError::IrTranslationError(format!("Failed to compile IR: {:?}", e))
+            })?
+        };
 
         // Extract constant_data to external weights file if above threshold
         let weight_bytes = if plan.constant_data.len() > self.config.weight_threshold {
-            info!(
-                "Extracting {} bytes of constant data to external weights file",
-                plan.constant_data.len()
+            tracing::info!(
+                weight_bytes = plan.constant_data.len(),
+                "Extracting weights to external file"
             );
             std::mem::take(&mut plan.constant_data)
         } else {
             Vec::new()
         };
 
-        let holo_bytes = serialize_backend_plan(&plan)?;
+        // Phase 5: Serialize
+        let holo_bytes = {
+            let _span = tracing::info_span!("serialize_holo").entered();
+            serialize_backend_plan(&plan)?
+        };
 
-        info!(
-            "Partitioned compilation complete: {} bytes .holo, {} bytes .weights",
-            holo_bytes.len(),
-            weight_bytes.len()
+        tracing::info!(
+            holo_bytes = holo_bytes.len(),
+            weight_bytes = weight_bytes.len(),
+            "Partitioned compilation complete"
         );
 
         Ok((holo_bytes, weight_bytes))
@@ -246,17 +269,21 @@ impl OnnxCompiler {
     ///
     /// If `embedded_files` are configured, this produces a V2 bundle with
     /// embedded sections for vocabulary, tokenizer config, etc.
+    #[tracing::instrument(
+        name = "compile_to_bundle",
+        skip_all,
+        fields(onnx_size = onnx_bytes.len())
+    )]
     pub fn compile_to_bundle(&self, onnx_bytes: &[u8]) -> Result<Vec<u8>> {
-        use tracing::{debug, info};
-
-        info!("Starting ONNX compilation to unified bundle");
-
-        // Step 1: Parse and validate ONNX model
-        debug!("Parsing ONNX protobuf");
-        let model = parse_model(onnx_bytes)?;
-        validate_model(&model)?;
-        let opset_version = core::extract_opset_version(&model);
-        info!("ONNX opset version: {}", opset_version);
+        // Phase 1: Parse and validate ONNX model
+        let (model, opset_version) = {
+            let _span = tracing::info_span!("parse_onnx").entered();
+            let model = parse_model(onnx_bytes)?;
+            validate_model(&model)?;
+            let opset_version = core::extract_opset_version(&model);
+            (model, opset_version)
+        };
+        tracing::info!(opset_version = opset_version, "Parsed ONNX model");
 
         // Get the graph
         let graph = model
@@ -264,58 +291,59 @@ impl OnnxCompiler {
             .as_ref()
             .ok_or_else(|| OnnxError::InvalidModel("Model has no graph".into()))?;
 
-        // Step 2: Translate ONNX → IR with symbolic shapes
-        debug!("Translating ONNX to IR");
-        let ir_func = translate_graph_to_ir(graph)?;
-        info!("IR translation complete");
+        // Phase 2: Translate ONNX → IR with symbolic shapes
+        let ir_func = {
+            let _span = tracing::info_span!("translate_to_ir", nodes = graph.node.len()).entered();
+            translate_graph_to_ir(graph)?
+        };
 
-        // Step 3: Compile to BackendPlan using hologram-compiler
-        debug!("Compiling IR to BackendPlan");
-        let backend_type = hologram::BackendType::Cpu;
-        let mut plan = hologram::compiler::compile_ir(&ir_func, backend_type)
-            .map_err(|e| OnnxError::IrTranslationError(format!("Failed to compile IR: {:?}", e)))?;
+        // Phase 3: Compile to BackendPlan using hologram-compiler
+        let mut plan = {
+            let _span = tracing::info_span!("compile_ir").entered();
+            let backend_type = hologram::BackendType::Cpu;
+            hologram::compiler::compile_ir(&ir_func, backend_type).map_err(|e| {
+                OnnxError::IrTranslationError(format!("Failed to compile IR: {:?}", e))
+            })?
+        };
 
         // Extract weights from plan (they'll be embedded in the bundle)
         let weight_bytes = std::mem::take(&mut plan.constant_data);
-        info!(
-            "Extracted {} bytes of weights for bundle",
-            weight_bytes.len()
+        tracing::debug!(
+            weight_bytes = weight_bytes.len(),
+            "Extracted weights for bundle"
         );
 
-        // Step 4: Serialize plan to HOLP format (without weights)
-        debug!("Serializing BackendPlan");
-        let graph_bytes = serialize_backend_plan(&plan)?;
+        // Phase 4: Serialize plan to HOLP format (without weights)
+        let graph_bytes = {
+            let _span = tracing::info_span!("serialize_holo").entered();
+            serialize_backend_plan(&plan)?
+        };
 
-        // Step 5: Create unified bundle
-        debug!("Creating unified bundle");
-        let mut writer = core::UnifiedBundleWriter::new();
-        writer.set_graph_bytes(graph_bytes);
-        writer.set_weights_bytes(weight_bytes);
+        // Phase 5: Create unified bundle
+        let bundle = {
+            let _span = tracing::info_span!(
+                "create_bundle",
+                embedded_sections = self.config.embedded_files.len()
+            )
+            .entered();
 
-        // Step 6: Load and embed sections if configured
-        if !self.config.embedded_files.is_empty() {
-            info!(
-                "Embedding {} sections in bundle",
-                self.config.embedded_files.len()
-            );
+            let mut writer = core::UnifiedBundleWriter::new();
+            writer.set_graph_bytes(graph_bytes);
+            writer.set_weights_bytes(weight_bytes);
+
+            // Load and embed sections if configured
             for file_config in &self.config.embedded_files {
-                debug!("Loading section from {:?}", file_config.path);
                 let (section_id, content_type, data) = self.load_section_data(file_config)?;
                 writer.add_raw_section(&section_id, &content_type, data);
-                debug!("Added section '{}'", section_id);
             }
-        }
 
-        let bundle = writer.finish();
+            writer.finish()
+        };
 
-        info!(
-            "Compilation to bundle complete: {} bytes total{}",
-            bundle.len(),
-            if self.config.produces_v2_bundle() {
-                " (V2 with sections)"
-            } else {
-                ""
-            }
+        tracing::info!(
+            bundle_bytes = bundle.len(),
+            v2 = self.config.produces_v2_bundle(),
+            "Bundle compilation complete"
         );
 
         Ok(bundle)

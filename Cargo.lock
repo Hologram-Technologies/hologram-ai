@@ -604,6 +604,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "dashmap"
+version = "6.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5041cc499144891f3790297212f32a74fb938e5136a14943f338ef9e0ae276cf"
+dependencies = [
+ "cfg-if",
+ "crossbeam-utils",
+ "hashbrown 0.14.5",
+ "lock_api",
+ "once_cell",
+ "parking_lot_core",
+]
+
+[[package]]
 name = "derive_builder"
 version = "0.20.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -977,6 +991,12 @@ dependencies = [
 
 [[package]]
 name = "hashbrown"
+version = "0.14.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e5274423e17b7c9fc20b6e7e208532f9b19825d82dfd615708b70edd83df41f1"
+
+[[package]]
+name = "hashbrown"
 version = "0.15.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9229cfe53dfd69f0609a49f65461bd93001ea1ef889cd5529dd176593f5338a1"
@@ -1013,6 +1033,7 @@ dependencies = [
  "hologram-isa",
  "hologram-lookup",
  "hologram-registry",
+ "hologram-telemetry",
  "libc",
  "rayon",
 ]
@@ -1135,6 +1156,7 @@ dependencies = [
  "hologram-ir",
  "hologram-isa",
  "hologram-lookup",
+ "hologram-telemetry",
  "libc",
  "ndarray",
  "parking_lot",
@@ -1174,6 +1196,7 @@ dependencies = [
  "hologram-graph",
  "hologram-ir",
  "hologram-isa",
+ "hologram-telemetry",
  "parking_lot",
  "rkyv",
  "rustc-hash",
@@ -1240,6 +1263,7 @@ dependencies = [
 name = "hologram-lookup"
 version = "0.1.0"
 dependencies = [
+ "hologram-telemetry",
  "libc",
  "rayon",
  "tracing",
@@ -1258,6 +1282,16 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.17",
  "tokio",
+]
+
+[[package]]
+name = "hologram-telemetry"
+version = "0.1.0"
+dependencies = [
+ "dashmap",
+ "parking_lot",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
@@ -3448,6 +3482,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "tracing-serde"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "704b1aeb7be0d0a84fc9828cae51dab5970fee5088f83d1dd7ee6f6246fc6ff1"
+dependencies = [
+ "serde",
+ "tracing-core",
+]
+
+[[package]]
 name = "tracing-subscriber"
 version = "0.3.22"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3457,12 +3501,15 @@ dependencies = [
  "nu-ansi-term",
  "once_cell",
  "regex-automata",
+ "serde",
+ "serde_json",
  "sharded-slab",
  "smallvec",
  "thread_local",
  "tracing",
  "tracing-core",
  "tracing-log",
+ "tracing-serde",
 ]
 
 [[package]]
