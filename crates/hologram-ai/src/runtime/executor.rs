@@ -7,6 +7,7 @@ use std::path::Path;
 use super::loader::{load_holo_auto, load_with_external_weights};
 use super::tensors::Tensor;
 
+use hologram::backend::{BackendPlan, BufferRef, KernelId};
 use hologram::backend::{BufferHandle, PlanExecutor, ProgramBackend};
 
 /// Buffer requirements from BackendPlan metadata.
@@ -29,6 +30,8 @@ pub struct ModelExecutor {
     executor: PlanExecutor,
     /// Backend for buffer management
     backend: Box<dyn ProgramBackend>,
+    /// Optional input order override (uses LayerHeader input ordering when available)
+    input_order: Option<Vec<String>>,
 }
 
 impl ModelExecutor {
@@ -44,7 +47,11 @@ impl ModelExecutor {
     /// ModelExecutor ready for execution
     pub fn from_holo_file(path: &Path) -> Result<Self> {
         let (executor, backend) = load_holo_auto(path)?;
-        Ok(Self { executor, backend })
+        Ok(Self {
+            executor,
+            backend,
+            input_order: None,
+        })
     }
 
     /// Create a new executor from .holo and .weights files.
@@ -78,7 +85,11 @@ impl ModelExecutor {
         // Load .holo and create executor with mmap'd weights
         let (executor, backend) = load_with_external_weights(holo_path, weights_path)?;
 
-        Ok(Self { executor, backend })
+        Ok(Self {
+            executor,
+            backend,
+            input_order: None,
+        })
     }
 
     /// Create a new executor from an existing PlanExecutor and backend.
@@ -92,7 +103,32 @@ impl ModelExecutor {
     /// # Returns
     /// ModelExecutor ready for execution
     pub fn from_plan_executor(executor: PlanExecutor, backend: Box<dyn ProgramBackend>) -> Self {
-        Self { executor, backend }
+        Self {
+            executor,
+            backend,
+            input_order: None,
+        }
+    }
+
+    /// Create a new executor with an explicit input order override.
+    ///
+    /// This is useful when loading models from a pipeline bundle that embed
+    /// a LayerHeader describing the expected input ordering.
+    pub fn from_plan_executor_with_inputs(
+        executor: PlanExecutor,
+        backend: Box<dyn ProgramBackend>,
+        input_order: Vec<String>,
+    ) -> Self {
+        Self {
+            executor,
+            backend,
+            input_order: Some(input_order),
+        }
+    }
+
+    /// Access the compiled backend plan.
+    pub fn plan(&self) -> &hologram::backend::BackendPlan {
+        self.executor.plan()
     }
 
     /// Get buffer requirements from the plan.
@@ -110,18 +146,18 @@ impl ModelExecutor {
         }
     }
 
-    /// Map named inputs to positional indices using alphabetical order.
+    /// Map named inputs to positional indices.
     ///
-    /// Since BackendPlan doesn't store ONNX tensor names, we use alphabetical
-    /// ordering as a convention to map named inputs to buffer indices.
+    /// When `input_order` is present, it is used to preserve the compiler's
+    /// input ordering (e.g. from LayerHeader). Otherwise, inputs are mapped
+    /// using alphabetical ordering as a convention.
     fn map_inputs_to_buffers(
         &mut self,
         named_inputs: &HashMap<String, Tensor>,
         requirements: &BufferRequirements,
     ) -> Result<Vec<BufferHandle>> {
-        // Sort input names alphabetically for consistent ordering
-        let mut input_names: Vec<_> = named_inputs.keys().cloned().collect();
-        input_names.sort();
+        let input_names =
+            resolve_input_order(named_inputs, requirements, self.input_order.as_deref())?;
 
         // Validate input count
         if input_names.len() != requirements.num_inputs {
@@ -186,6 +222,7 @@ impl ModelExecutor {
     ) -> Result<(Vec<BufferHandle>, Vec<[usize; 4]>)> {
         let mut handles = Vec::with_capacity(requirements.num_outputs);
         let mut shapes = Vec::with_capacity(requirements.num_outputs);
+        let trace_outputs = std::env::var("HOLOGRAM_TRACE_OUTPUT_LAYOUT").is_ok();
 
         for (idx, &metadata_size_bytes) in requirements.output_sizes.iter().enumerate() {
             // Compute actual output shape and size if shape_expr exists
@@ -279,6 +316,21 @@ impl ModelExecutor {
                 // No shape_expr, use static metadata
                 (metadata_size_bytes, requirements.output_shapes[idx])
             };
+
+            if trace_outputs {
+                let shape_expr = requirements.output_shape_exprs[idx]
+                    .as_ref()
+                    .map(|expr| format!("{:?}", expr))
+                    .unwrap_or_else(|| "None".to_string());
+                tracing::info!(
+                    "Output layout idx={} size_bytes={} shape={:?} metadata_bytes={} shape_expr={}",
+                    idx,
+                    actual_size,
+                    actual_shape,
+                    metadata_size_bytes,
+                    shape_expr
+                );
+            }
 
             tracing::trace!(
                 "Allocating output buffer {}: {} bytes, shape {:?}",
@@ -385,6 +437,10 @@ impl ModelExecutor {
         fields(num_inputs = inputs.len())
     )]
     pub fn execute(&mut self, inputs: HashMap<String, Tensor>) -> Result<HashMap<String, Tensor>> {
+        if std::env::var("HOLOGRAM_VALIDATE_PLAN").is_ok() {
+            validate_plan_workspace(self.executor.plan())?;
+        }
+
         // Phase 1: Get buffer requirements
         let requirements = {
             let _span = tracing::info_span!("get_buffer_requirements").entered();
@@ -397,10 +453,8 @@ impl ModelExecutor {
             "Buffer requirements"
         );
 
-        // Extract sorted input tensors for shape resolution
-        // (Must sort alphabetically to match buffer index ordering)
-        let mut input_names: Vec<_> = inputs.keys().cloned().collect();
-        input_names.sort();
+        // Extract ordered input tensors for shape resolution
+        let input_names = resolve_input_order(&inputs, &requirements, self.input_order.as_deref())?;
         let sorted_tensors: Vec<&Tensor> = input_names
             .iter()
             .map(|name| inputs.get(name).unwrap())
@@ -505,9 +559,226 @@ impl ModelExecutor {
     }
 }
 
+fn validate_plan_workspace(plan: &BackendPlan) -> Result<()> {
+    let mut errors = Vec::new();
+    for (op_index, op) in plan.ops.iter().enumerate() {
+        let category = op.kernel_id.category();
+        let expected_bytes = match category {
+            KernelId::CATEGORY_ELEMENTWISE_BINARY
+            | KernelId::CATEGORY_ACTIVATION
+            | KernelId::CATEGORY_TRANSCENDENTAL => {
+                let elems = op.params.dims[0].max(1);
+                elems
+                    .checked_mul(std::mem::size_of::<f32>())
+                    .ok_or_else(|| anyhow::anyhow!("Output size overflow at op {}", op_index))?
+            }
+            _ => continue,
+        };
+
+        for output in &op.output_refs {
+            if let BufferRef::Workspace(slot) = output {
+                let region = plan.workspace_layout.regions.get(*slot).ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "Workspace slot {} out of bounds ({} regions)",
+                        slot,
+                        plan.workspace_layout.regions.len()
+                    )
+                })?;
+                if expected_bytes > region.size {
+                    errors.push(format!(
+                        "Workspace overflow risk at OP[{}]: kernel={:?} idx={} dims={:?} input_refs={:?} output_refs={:?} expects {} bytes, region '{}' (slot {}) size {}",
+                        op_index,
+                        op.kernel_id,
+                        op.kernel_idx,
+                        op.params.dims,
+                        op.input_refs,
+                        op.output_refs,
+                        expected_bytes,
+                        region.name,
+                        slot,
+                        region.size
+                    ));
+                }
+            }
+        }
+    }
+
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        if let Ok(path) = std::env::var("HOLOGRAM_VALIDATE_PLAN_DUMP") {
+            let report = errors.join("\n");
+            if let Err(err) = std::fs::write(&path, report) {
+                tracing::warn!(
+                    "Failed to write plan validation report to {}: {:?}",
+                    path,
+                    err
+                );
+            }
+        }
+        Err(anyhow::anyhow!(
+            "Plan workspace validation failed:\n{}",
+            errors.join("\n")
+        ))
+    }
+}
+
+fn resolve_input_order(
+    named_inputs: &HashMap<String, Tensor>,
+    requirements: &BufferRequirements,
+    input_order: Option<&[String]>,
+) -> Result<Vec<String>> {
+    if let Some(order) = input_order {
+        if order.len() != requirements.num_inputs {
+            tracing::warn!(
+                "Input order length {} does not match plan input count {}; falling back to sorted inputs",
+                order.len(),
+                requirements.num_inputs
+            );
+            let mut input_names: Vec<_> = named_inputs.keys().cloned().collect();
+            input_names.sort();
+            return Ok(input_names);
+        }
+
+        let mut resolved = Vec::with_capacity(order.len());
+        for name in order {
+            if !named_inputs.contains_key(name) {
+                return Err(anyhow::anyhow!(
+                    "Missing required input '{}' (expected order: {:?})",
+                    name,
+                    order
+                ));
+            }
+            resolved.push(name.clone());
+        }
+
+        if named_inputs.len() != requirements.num_inputs {
+            return Err(anyhow::anyhow!(
+                "Expected {} inputs, got {}. Expected inputs (ordered): {:?}",
+                requirements.num_inputs,
+                named_inputs.len(),
+                order
+            ));
+        }
+
+        Ok(resolved)
+    } else {
+        // Sort input names alphabetically for consistent ordering
+        let mut input_names: Vec<_> = named_inputs.keys().cloned().collect();
+        input_names.sort();
+        Ok(input_names)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use hologram::backend::{BackendPlan, BackendType, EpilogueChain, KernelParams, PlanOp};
+    use hologram::backend::{ThreadPartition, WorkspaceLayout};
+    use std::collections::HashMap;
+
+    fn requirements_with_inputs(count: usize) -> BufferRequirements {
+        BufferRequirements {
+            num_inputs: count,
+            num_outputs: 0,
+            input_sizes: vec![],
+            input_shapes: vec![],
+            output_sizes: vec![],
+            output_shapes: vec![],
+            output_shape_exprs: vec![],
+        }
+    }
+
+    #[test]
+    fn test_validate_plan_workspace_detects_overflow() {
+        let mut plan = BackendPlan::new(BackendType::Cpu);
+        let mut layout = WorkspaceLayout::new();
+        layout.add_region("workspace_0", 4096, 64);
+        plan.workspace_layout = layout;
+
+        let params = KernelParams {
+            dims: [65536, 0, 0, 0],
+            ..KernelParams::default()
+        };
+        let op = PlanOp {
+            kernel_id: KernelId::ELEM_ADD,
+            kernel_idx: 0,
+            params,
+            epilogue: EpilogueChain::new(),
+            partition: ThreadPartition::sequential(),
+            input_refs: vec![BufferRef::Workspace(0), BufferRef::Workspace(0)],
+            output_refs: vec![BufferRef::Workspace(0)],
+        };
+        plan.ops.push(op);
+
+        let err = validate_plan_workspace(&plan).unwrap_err();
+        assert!(err.to_string().contains("Workspace overflow risk at OP[0]"));
+    }
+
+    #[test]
+    fn test_validate_plan_workspace_accepts_sized_region() {
+        let mut plan = BackendPlan::new(BackendType::Cpu);
+        let mut layout = WorkspaceLayout::new();
+        layout.add_region("workspace_0", 262144, 64);
+        plan.workspace_layout = layout;
+
+        let params = KernelParams {
+            dims: [65536, 0, 0, 0],
+            ..KernelParams::default()
+        };
+        let op = PlanOp {
+            kernel_id: KernelId::ELEM_ADD,
+            kernel_idx: 0,
+            params,
+            epilogue: EpilogueChain::new(),
+            partition: ThreadPartition::sequential(),
+            input_refs: vec![BufferRef::Workspace(0), BufferRef::Workspace(0)],
+            output_refs: vec![BufferRef::Workspace(0)],
+        };
+        plan.ops.push(op);
+
+        validate_plan_workspace(&plan).unwrap();
+    }
+
+    #[test]
+    fn test_resolve_input_order_uses_header_order() {
+        let mut inputs = HashMap::new();
+        inputs.insert("input_ids".to_string(), Tensor::new(vec![1.0], vec![1]));
+        inputs.insert(
+            "attention_mask".to_string(),
+            Tensor::new(vec![1.0], vec![1]),
+        );
+        let order = vec!["input_ids".to_string(), "attention_mask".to_string()];
+        let requirements = requirements_with_inputs(2);
+
+        let resolved = resolve_input_order(&inputs, &requirements, Some(&order)).unwrap();
+        assert_eq!(resolved, order);
+    }
+
+    #[test]
+    fn test_resolve_input_order_missing_name() {
+        let mut inputs = HashMap::new();
+        inputs.insert("input_ids".to_string(), Tensor::new(vec![1.0], vec![1]));
+        let order = vec!["input_ids".to_string(), "attention_mask".to_string()];
+        let requirements = requirements_with_inputs(2);
+
+        let err = resolve_input_order(&inputs, &requirements, Some(&order)).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("Missing required input 'attention_mask'")
+        );
+    }
+
+    #[test]
+    fn test_resolve_input_order_falls_back_to_sorted() {
+        let mut inputs = HashMap::new();
+        inputs.insert("b".to_string(), Tensor::new(vec![1.0], vec![1]));
+        inputs.insert("a".to_string(), Tensor::new(vec![1.0], vec![1]));
+        let requirements = requirements_with_inputs(2);
+
+        let resolved = resolve_input_order(&inputs, &requirements, None).unwrap();
+        assert_eq!(resolved, vec!["a".to_string(), "b".to_string()]);
+    }
 
     #[test]
     #[ignore = "Requires compiled encoder.holo fixture"]

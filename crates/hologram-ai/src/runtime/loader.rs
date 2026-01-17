@@ -17,13 +17,18 @@
 //! This enables lazy loading of large weights (GB-sized) via memory mapping.
 
 use anyhow::Result;
+use hologram::backend::core::mapped_input::MappedInput;
 use hologram::backend::executor::PlanExecutor;
-use hologram::core::memory::MappedInput;
+use hologram::compiler::api::read_holo_from_bytes_with_header;
+#[cfg(unix)]
+use libc;
 use std::fs::File;
 use std::io::Read;
 use std::path::Path;
 use std::sync::Arc;
 
+#[cfg(feature = "onnx")]
+use hologram_ai_onnx::core::sections::InputOrderSection;
 #[cfg(feature = "onnx")]
 use hologram_ai_onnx::core::{HoloFormat, PipelineBundleReader, UnifiedBundleReader};
 
@@ -308,7 +313,7 @@ fn load_unified_bundle(
         let _span = tracing::info_span!("mmap_bundle").entered();
         let m = MappedInput::open(path)
             .map_err(|e| anyhow::anyhow!("Failed to mmap bundle '{}': {}", path.display(), e))?;
-        m.advise_sequential();
+        advise_sequential(&m);
         m
     };
 
@@ -482,7 +487,7 @@ impl PipelineBundle {
         );
 
         // Advise the OS to prefetch this range
-        self.mmap.advise_willneed_range(*model_offset, *model_size);
+        advise_willneed_range(&self.mmap, *model_offset, *model_size);
 
         Ok(())
     }
@@ -534,7 +539,7 @@ impl PipelineBundle {
         );
 
         // Advise the OS that we're done with this range
-        self.mmap.advise_dontneed_range(*model_offset, *model_size);
+        advise_dontneed_range(&self.mmap, *model_offset, *model_size);
 
         Ok(())
     }
@@ -628,6 +633,149 @@ impl PipelineBundle {
         tracing::info!("Successfully loaded model '{}' from pipeline", name);
 
         Ok((executor, backend))
+    }
+
+    fn select_entry_layer(
+        header: &hologram::compiler::format::LayerHeaderData,
+    ) -> Option<&hologram::compiler::format::LayerDescriptorData> {
+        if let Some(first_level) = header.schedule.first()
+            && let Some(first_id) = first_level.first()
+            && let Some(layer) = header.layer(*first_id)
+        {
+            return Some(layer);
+        }
+
+        header.layers.first()
+    }
+
+    /// Load a model from the pipeline and extract its input order if available.
+    ///
+    /// This uses the embedded layer header to preserve compiler input ordering
+    /// when constructing a `ModelExecutor`.
+    #[allow(clippy::type_complexity)]
+    pub fn load_model_with_inputs(
+        &self,
+        name: &str,
+    ) -> Result<(
+        PlanExecutor,
+        Box<dyn hologram::backend::ProgramBackend>,
+        Option<Vec<String>>,
+    )> {
+        // Find the model entry
+        let (_, model_offset, model_size) = self
+            .model_info
+            .iter()
+            .find(|(n, _, _)| n == name)
+            .ok_or_else(|| anyhow::anyhow!("Model '{}' not found in pipeline", name))?;
+
+        tracing::info!(
+            "Loading model '{}' from pipeline at offset {}, size {}",
+            name,
+            model_offset,
+            model_size
+        );
+
+        // Get the model bytes (HOLB format)
+        let model_bytes = &self.mmap.as_slice()[*model_offset..*model_offset + *model_size];
+
+        // Parse as HOLB bundle
+        let model_reader = UnifiedBundleReader::from_bytes(model_bytes)
+            .map_err(|e| anyhow::anyhow!("Failed to parse model '{}' as HOLB: {:?}", name, e))?;
+
+        // Verify checksums
+        if !model_reader.verify_checksums() {
+            return Err(anyhow::anyhow!(
+                "Model '{}' checksum verification failed",
+                name
+            ));
+        }
+
+        // Deserialize the graph with optional header
+        let (plan, header) =
+            read_holo_from_bytes_with_header(model_reader.graph_bytes()).map_err(|e| {
+                anyhow::anyhow!("Failed to deserialize model '{}' graph: {:?}", name, e)
+            })?;
+
+        let input_order = model_reader
+            .get_section::<InputOrderSection>()
+            .map(|section| section.inputs)
+            .or_else(|| {
+                header.as_ref().and_then(|data| {
+                    let plan_inputs = plan.layout_metadata.num_inputs;
+
+                    if let Some(layer) = Self::select_entry_layer(data)
+                        && layer.inputs.len() == plan_inputs
+                    {
+                        return Some(
+                            layer
+                                .inputs
+                                .iter()
+                                .map(|port| port.name.clone())
+                                .collect::<Vec<String>>(),
+                        );
+                    }
+
+                    for layer in &data.layers {
+                        if layer.inputs.len() == plan_inputs {
+                            return Some(
+                                layer
+                                    .inputs
+                                    .iter()
+                                    .map(|port| port.name.clone())
+                                    .collect::<Vec<String>>(),
+                            );
+                        }
+                    }
+
+                    None
+                })
+            });
+
+        // Create backend
+        let backend = match hologram::backend::create_backend(plan.backend_type.clone()) {
+            Ok(backend) => backend,
+            Err(e) => {
+                tracing::warn!(
+                    "Failed to create backend for '{}': {}. Falling back to CPU",
+                    name,
+                    e
+                );
+                hologram::backend::create_best_backend()
+            }
+        };
+
+        // Create executor with mmap'd weights
+        let executor = if let Some(weights_offset_in_holb) = model_reader.weights_mmap_offset() {
+            // Calculate absolute offset in the pipeline file
+            let absolute_weights_offset = *model_offset + weights_offset_in_holb;
+            tracing::info!(
+                "WEIGHTS OFFSET DEBUG: model='{}', model_offset={}, weights_offset_in_holb={}, absolute_weights_offset={}",
+                name,
+                model_offset,
+                weights_offset_in_holb,
+                absolute_weights_offset
+            );
+            PlanExecutor::with_mmap_constants_at_offset(
+                plan,
+                &*backend,
+                Arc::clone(&self.mmap),
+                absolute_weights_offset,
+            )
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "Failed to create executor for '{}' with weights: {:?}",
+                    name,
+                    e
+                )
+            })?
+        } else {
+            PlanExecutor::new(plan, &*backend)
+                .map_err(|e| anyhow::anyhow!("Failed to create executor for '{}': {:?}", name, e))?
+        };
+
+        tracing::info!("Successfully loaded model '{}' from pipeline", name);
+
+        Ok((executor, backend, input_order))
     }
 }
 
@@ -1052,6 +1200,66 @@ impl Drop for LayerContext<'_> {
         let _ = self.executor.release_layer(self.index);
     }
 }
+
+#[cfg(unix)]
+fn advise_sequential(mmap: &MappedInput) {
+    let data = mmap.as_slice();
+    if data.is_empty() {
+        return;
+    }
+    unsafe {
+        libc::madvise(data.as_ptr() as *mut _, data.len(), libc::MADV_SEQUENTIAL);
+    }
+}
+
+#[cfg(not(unix))]
+fn advise_sequential(_mmap: &MappedInput) {}
+
+#[cfg(unix)]
+fn advise_willneed_range(mmap: &MappedInput, offset: usize, size: usize) {
+    let data = mmap.as_slice();
+    if data.is_empty() || offset >= data.len() {
+        return;
+    }
+    let end = offset.saturating_add(size).min(data.len());
+    let len = end.saturating_sub(offset);
+    if len == 0 {
+        return;
+    }
+    unsafe {
+        libc::madvise(
+            data.as_ptr().add(offset) as *mut _,
+            len,
+            libc::MADV_WILLNEED,
+        );
+    }
+}
+
+#[cfg(not(unix))]
+fn advise_willneed_range(_mmap: &MappedInput, _offset: usize, _size: usize) {}
+
+#[cfg(unix)]
+fn advise_dontneed_range(mmap: &MappedInput, offset: usize, size: usize) {
+    let data = mmap.as_slice();
+    if data.is_empty() || offset >= data.len() {
+        return;
+    }
+    let end = offset.saturating_add(size).min(data.len());
+    let len = end.saturating_sub(offset);
+    if len == 0 {
+        return;
+    }
+    unsafe {
+        libc::madvise(
+            data.as_ptr().add(offset) as *mut _,
+            len,
+            libc::MADV_DONTNEED,
+        );
+    }
+}
+
+#[cfg(not(unix))]
+fn advise_dontneed_range(_mmap: &MappedInput, _offset: usize, _size: usize) {}
 
 #[cfg(test)]
 mod tests {

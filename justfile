@@ -22,8 +22,9 @@ build-cli:
     cargo build --bin hologram-onnx
 
 # Run all tests
+# Run all tests (uses nextest for faster parallel execution)
 test:
-    cargo test --workspace
+    cargo nextest run --workspace --no-fail-fast
 
 # Run tests with all features
 test-all:

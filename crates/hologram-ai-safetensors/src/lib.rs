@@ -92,22 +92,15 @@ impl SafeTensorsCompiler {
 
         // Compile to backend plan
         let backend_type = hologram::BackendType::Cpu;
-        let mut plan = hologram::compiler::compile_ir(&graph, backend_type)
-            .map_err(|e| SafeTensorsError::CompilationError(format!("{:?}", e)))?;
+        let (mut plan, header) =
+            hologram::compiler::compile_ir_with_header(&graph, backend_type)
+                .map_err(|e| SafeTensorsError::CompilationError(format!("{:?}", e)))?;
 
         // Extract weights for external storage
         let weight_bytes = std::mem::take(&mut plan.constant_data);
 
-        // Serialize the plan
-        let serializable = plan.to_serializable();
-        let plan_bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&serializable)
-            .map(|b| b.to_vec())
-            .map_err(|e| SafeTensorsError::SerializationError(e.to_string()))?;
-
-        // Add magic bytes
-        let mut holo_bytes = Vec::with_capacity(4 + plan_bytes.len());
-        holo_bytes.extend_from_slice(&hologram::compiler::HOLO_MAGIC);
-        holo_bytes.extend_from_slice(&plan_bytes);
+        // Serialize the plan with layer header
+        let holo_bytes = serialize_backend_plan_with_header(&plan, &header)?;
 
         Ok((holo_bytes, weight_bytes))
     }
@@ -117,4 +110,28 @@ impl Default for SafeTensorsCompiler {
     fn default() -> Self {
         Self::new()
     }
+}
+
+fn serialize_backend_plan_with_header(
+    plan: &hologram::backend::BackendPlan,
+    header: &hologram::compiler::format::LayerHeaderData,
+) -> Result<Vec<u8>> {
+    let serializable = plan.to_serializable();
+    let plan_bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&serializable)
+        .map(|b| b.to_vec())
+        .map_err(|e| SafeTensorsError::SerializationError(e.to_string()))?;
+    let header_bytes = rkyv::to_bytes::<rkyv::rancor::Error>(header)
+        .map(|b| b.to_vec())
+        .map_err(|e| SafeTensorsError::SerializationError(e.to_string()))?;
+    let header_len = u32::try_from(header_bytes.len())
+        .map_err(|_| SafeTensorsError::SerializationError("LayerHeader too large".to_string()))?;
+
+    let mut holo_bytes = Vec::with_capacity(12 + header_bytes.len() + plan_bytes.len());
+    holo_bytes.extend_from_slice(&hologram::compiler::HOLO_MAGIC);
+    holo_bytes.extend_from_slice(&hologram::backend::plan::PLAN_FORMAT_VERSION.to_le_bytes());
+    holo_bytes.extend_from_slice(&header_len.to_le_bytes());
+    holo_bytes.extend_from_slice(&header_bytes);
+    holo_bytes.extend_from_slice(&plan_bytes);
+
+    Ok(holo_bytes)
 }

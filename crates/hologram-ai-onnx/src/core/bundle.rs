@@ -858,6 +858,15 @@ impl UnifiedBundleWriter {
         });
     }
 
+    /// Add a typed section that implements `EmbeddableSection`.
+    pub fn add_section<T: crate::core::sections::EmbeddableSection>(&mut self, section: T) {
+        self.sections.push(SectionData {
+            id: section.section_id().to_string(),
+            content_type: section.content_type().to_string(),
+            data: section.to_bytes(),
+        });
+    }
+
     /// Check if a section with the given ID exists.
     pub fn has_section(&self, id: &str) -> bool {
         self.sections.iter().any(|s| s.id == id)

@@ -44,53 +44,34 @@ use crate::{OnnxError, Result};
 // Re-export hologram's symbolic shape system
 pub use hologram::ir::{Dim, Shape};
 
-/// Resolve a symbolic dimension name to a concrete value.
+/// Preserve symbolic dimension names for proper shape propagation.
 ///
-/// Maps common ONNX symbolic dimension names to sensible defaults:
-/// - `batch_size`, `batch`, `N` → 1
-/// - `sequence_length`, `seq_len`, `encoder_sequence_length`, `decoder_sequence_length` → 128
-/// - Other names: use position-based defaults (dim 0 → 1, dim 1 → 128, others → 512)
+/// Keeps symbolic dimensions as `Dim::Symbolic` so the compiler can generate
+/// proper DimExpr::InputRef expressions that reference input dimensions at runtime.
 ///
-/// This allows models with symbolic dimensions to compile without explicit `--input-shape` flags.
+/// Special cases:
+/// - `batch_size`, `batch`, `N` → Dim::Static(1) (batch is always 1 for inference)
+/// - Other symbolic dimensions → Dim::Symbolic (preserved for runtime resolution)
 fn resolve_symbolic_dimension(name: &str, position: usize) -> Dim {
     let lower = name.to_lowercase();
 
-    // Batch dimensions
+    // Batch dimensions can be resolved to 1 for inference
     if lower.contains("batch") || lower == "n" {
-        tracing::debug!("Resolved symbolic dimension '{}' to 1 (batch)", name);
+        tracing::debug!(
+            "Resolved symbolic dimension '{}' to Static(1) (batch)",
+            name
+        );
         return Dim::Static(1);
     }
 
-    // Sequence length dimensions
-    // Default to 512 to match common model compilation/runtime sizes
-    if lower.contains("sequence") || lower.contains("seq_len") || lower.contains("seq") {
-        tracing::debug!("Resolved symbolic dimension '{}' to 512 (sequence)", name);
-        return Dim::Static(512);
-    }
-
-    // Past/cache sequence length (for KV caches, typically starts at 0 or matches seq_len)
-    if lower.contains("past") {
-        tracing::debug!("Resolved symbolic dimension '{}' to 0 (past)", name);
-        return Dim::Static(0);
-    }
-
-    // If no name match, use position-based defaults
-    let default = match position {
-        0 => 1,   // First dimension is usually batch
-        1 => 512, // Second dimension is usually sequence length
-        _ => 512, // Other dimensions might be hidden_dim
-    };
-
-    if !name.is_empty() {
-        tracing::debug!(
-            "Resolved unknown symbolic dimension '{}' at position {} to {} (position-based default)",
-            name,
-            position,
-            default
-        );
-    }
-
-    Dim::Static(default)
+    // Preserve all other symbolic dimensions for proper shape propagation
+    // This allows the compiler to create DimExpr::InputRef for runtime resolution
+    tracing::debug!(
+        "Preserving symbolic dimension '{}' at position {} as Symbolic",
+        name,
+        position
+    );
+    Dim::Symbolic(name.to_string())
 }
 
 /// Symbolic shape wrapper with ONNX-specific functionality.
@@ -252,6 +233,7 @@ impl SymbolicShape {
                         // Concrete dimension
                         Dim::Static(*v as usize)
                     }
+                    Some(DimValue::DimValue(_)) => Dim::Dynamic,
                     Some(DimValue::DimParam(param)) if !param.is_empty() => {
                         // Named symbolic dimension - resolve common names to defaults
                         resolve_symbolic_dimension(param, idx)
@@ -261,6 +243,52 @@ impl SymbolicShape {
                         resolve_symbolic_dimension("", idx)
                     }
                 }
+            })
+            .collect();
+
+        Ok(Self::new(dims))
+    }
+
+    /// Create symbolic shape from ONNX ValueInfoProto, preserving symbolic dims.
+    ///
+    /// This keeps `dim_param` values as symbolic dimensions instead of
+    /// resolving them to defaults. Use this for output shapes when the compiler
+    /// should emit runtime shape expressions.
+    pub fn from_value_info_preserve_symbolic(value_info: &ValueInfoProto) -> Result<Self> {
+        use crate::proto::tensor_shape_proto::dimension::Value as DimValue;
+        use crate::proto::type_proto::Value;
+
+        let type_proto = value_info.r#type.as_ref().ok_or_else(|| {
+            OnnxError::InvalidModel(format!(
+                "Value '{}' has no type information",
+                value_info.name
+            ))
+        })?;
+
+        let tensor_type = match &type_proto.value {
+            Some(Value::TensorType(tt)) => tt,
+            _ => {
+                return Err(OnnxError::InvalidModel(format!(
+                    "Value '{}' is not a tensor",
+                    value_info.name
+                )));
+            }
+        };
+
+        let shape_proto = tensor_type.shape.as_ref().ok_or_else(|| {
+            OnnxError::InvalidModel(format!("Tensor '{}' has no shape", value_info.name))
+        })?;
+
+        let dims: Vec<Dim> = shape_proto
+            .dim
+            .iter()
+            .map(|dim| match &dim.value {
+                Some(DimValue::DimValue(v)) if *v > 0 => Dim::Static(*v as usize),
+                Some(DimValue::DimValue(_)) => Dim::Dynamic,
+                Some(DimValue::DimParam(param)) if !param.is_empty() => {
+                    Dim::Symbolic(param.to_string())
+                }
+                _ => Dim::Dynamic,
             })
             .collect();
 
@@ -749,5 +777,76 @@ mod tests {
         let inner_shape: Shape = symbolic_shape.clone().into();
         let back: SymbolicShape = inner_shape.into();
         assert_eq!(back.rank(), 2);
+    }
+
+    #[test]
+    fn test_symbolic_shape_preserves_dim_params() {
+        use crate::proto::tensor_shape_proto::dimension::Value as DimValue;
+        use crate::proto::type_proto::Value as TypeValue;
+        use crate::proto::{TensorShapeProto, TypeProto, ValueInfoProto};
+
+        let shape = TensorShapeProto {
+            dim: vec![
+                crate::proto::tensor_shape_proto::Dimension {
+                    value: Some(DimValue::DimValue(1)),
+                    ..Default::default()
+                },
+                crate::proto::tensor_shape_proto::Dimension {
+                    value: Some(DimValue::DimParam("decoder_sequence_length".to_string())),
+                    ..Default::default()
+                },
+                crate::proto::tensor_shape_proto::Dimension {
+                    value: Some(DimValue::DimValue(512)),
+                    ..Default::default()
+                },
+            ],
+        };
+
+        let value_info = ValueInfoProto {
+            name: "logits".to_string(),
+            r#type: Some(TypeProto {
+                value: Some(TypeValue::TensorType(crate::proto::type_proto::Tensor {
+                    elem_type: crate::proto::tensor_proto::DataType::Float as i32,
+                    shape: Some(shape),
+                })),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let shape = SymbolicShape::from_value_info_preserve_symbolic(&value_info).unwrap();
+        assert!(matches!(shape.dims()[1], Dim::Symbolic(_)));
+    }
+
+    #[test]
+    fn test_value_info_zero_dim_is_dynamic() {
+        use crate::proto::tensor_shape_proto::dimension::Value as DimValue;
+        use crate::proto::type_proto::Value as TypeValue;
+        use crate::proto::{TensorShapeProto, TypeProto, ValueInfoProto};
+
+        let shape = TensorShapeProto {
+            dim: vec![crate::proto::tensor_shape_proto::Dimension {
+                value: Some(DimValue::DimValue(0)),
+                ..Default::default()
+            }],
+        };
+
+        let value_info = ValueInfoProto {
+            name: "zero_dim".to_string(),
+            r#type: Some(TypeProto {
+                value: Some(TypeValue::TensorType(crate::proto::type_proto::Tensor {
+                    elem_type: crate::proto::tensor_proto::DataType::Float as i32,
+                    shape: Some(shape.clone()),
+                })),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let resolved = SymbolicShape::from_value_info(&value_info).unwrap();
+        assert!(matches!(resolved.dims()[0], Dim::Dynamic));
+
+        let preserved = SymbolicShape::from_value_info_preserve_symbolic(&value_info).unwrap();
+        assert!(matches!(preserved.dims()[0], Dim::Dynamic));
     }
 }

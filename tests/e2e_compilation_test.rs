@@ -265,6 +265,14 @@ fn test_compile_and_deserialize() {
 
     // Verify output format - .holo files start with HOLO_MAGIC
     use hologram::compiler::HOLO_MAGIC;
-    assert!(holo_bytes.len() >= 4, "Holo bytes too short");
+    assert!(holo_bytes.len() >= 12, "Holo bytes too short");
     assert_eq!(&holo_bytes[0..4], &HOLO_MAGIC, "Invalid magic bytes");
+    let version = u32::from_le_bytes([holo_bytes[4], holo_bytes[5], holo_bytes[6], holo_bytes[7]]);
+    assert_eq!(
+        version,
+        hologram::backend::plan::PLAN_FORMAT_VERSION,
+        "Unexpected plan format version"
+    );
+    let header_len = u32::from_le_bytes([holo_bytes[8], holo_bytes[9], holo_bytes[10], holo_bytes[11]]);
+    assert!(header_len > 0, "Missing layer header");
 }

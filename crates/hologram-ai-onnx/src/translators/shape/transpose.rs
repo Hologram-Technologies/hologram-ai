@@ -82,32 +82,44 @@ impl OnnxTranslator for TransposeTranslator {
         }
 
         // Check if input is a Constant for constant folding
+        // Only fold if all dimensions are static (skip if any symbolic dims)
+        let all_static = input_node
+            .op
+            .shape
+            .dims
+            .iter()
+            .all(|d| d.static_value().is_some());
+
         if let NodeOp::Constant { data: const_data } = &input_node.op.op {
-            // Get input shape dimensions as static values
-            let in_dims: Vec<usize> = input_node
-                .op
-                .shape
-                .dims
-                .iter()
-                .map(|d| d.static_value().unwrap_or(1))
-                .collect();
+            // Only fold if all dimensions are static
+            if all_static {
+                // Get input shape dimensions as static values
+                let in_dims: Vec<usize> = input_node
+                    .op
+                    .shape
+                    .dims
+                    .iter()
+                    .filter_map(|d| d.static_value())
+                    .collect();
 
-            // Calculate output shape
-            let out_dims: Vec<Dim> = perm.iter().map(|&p| Dim::Static(in_dims[p])).collect();
-            let out_shape = Shape::new(out_dims);
+                // Calculate output shape
+                let out_dims: Vec<Dim> = perm.iter().map(|&p| Dim::Static(in_dims[p])).collect();
+                let out_shape = Shape::new(out_dims);
 
-            // Perform the transpose
-            let transposed_data = transpose_constant_data(const_data, &in_dims, &perm);
+                // Perform the transpose
+                let transposed_data = transpose_constant_data(const_data, &in_dims, &perm);
 
-            tracing::debug!(
-                "Transpose: constant folding {:?} with perm {:?} -> shape {:?}",
-                in_dims,
-                perm,
-                out_shape
-            );
+                tracing::debug!(
+                    "Transpose: constant folding {:?} with perm {:?} -> shape {:?}",
+                    in_dims,
+                    perm,
+                    out_shape
+                );
 
-            let result = builder.constant(transposed_data, out_shape);
-            return Ok(vec![result]);
+                let result = builder.constant(transposed_data, out_shape);
+                return Ok(vec![result]);
+            }
+            // else: fall through to non-constant path to preserve symbolic dims
         }
 
         // Non-constant path: emit transpose op
@@ -452,5 +464,59 @@ mod tests {
         let data = vec![42.0f32];
         let result = transpose_nd(&data, &[], &[]);
         assert_eq!(result, vec![42.0]);
+    }
+
+    // ===== Symbolic Dimension Tests =====
+
+    #[test]
+    fn test_transpose_preserves_symbolic_dims() {
+        let translator = TransposeTranslator;
+        let mut builder = GraphBuilder::new();
+
+        // Input with symbolic batch and sequence dimensions
+        let shape = Shape::new(vec![
+            Dim::Symbolic("batch".to_string()),
+            Dim::Symbolic("seq_len".to_string()),
+            Dim::Static(512),
+        ]);
+        let x = builder.input("x", shape, DType::F32);
+
+        // Transpose [batch, seq, hidden] -> [seq, batch, hidden]
+        let result = translator.translate(&make_node_with_perm(vec![1, 0, 2]), &[x], &mut builder);
+        assert!(result.is_ok());
+        let outputs = result.unwrap();
+        assert_eq!(outputs.len(), 1);
+
+        // Check output shape preserves symbolic dimensions
+        let node = builder.graph().node(outputs[0]).unwrap();
+        assert_eq!(
+            node.op.shape.dims,
+            vec![
+                Dim::Symbolic("seq_len".to_string()),
+                Dim::Symbolic("batch".to_string()),
+                Dim::Static(512),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_transpose_with_dynamic_dim() {
+        let translator = TransposeTranslator;
+        let mut builder = GraphBuilder::new();
+
+        // Input with one dynamic dimension
+        let shape = Shape::new(vec![Dim::Static(4), Dim::Dynamic, Dim::Static(8)]);
+        let x = builder.input("x", shape, DType::F32);
+
+        let result = translator.translate(&make_node_with_perm(vec![2, 1, 0]), &[x], &mut builder);
+        assert!(result.is_ok());
+        let outputs = result.unwrap();
+
+        // Check output shape preserves dynamic dimension
+        let node = builder.graph().node(outputs[0]).unwrap();
+        assert_eq!(
+            node.op.shape.dims,
+            vec![Dim::Static(8), Dim::Dynamic, Dim::Static(4)]
+        );
     }
 }

@@ -50,8 +50,8 @@ pub use core::{EmbeddedFileConfig, SectionType};
 // Re-export section traits and types
 pub use core::sections::{
     EmbedError, EmbedResult, EmbeddableSection, FromEmbeddedSection, GenerationConfigSection,
-    ModelConfigSection, PreprocessorConfigSection, RawFileSection, SentencePieceSection,
-    SpecialTokensSection, TokenizerConfigSection, VocabularySection,
+    InputOrderSection, ModelConfigSection, PreprocessorConfigSection, RawFileSection,
+    SentencePieceSection, SpecialTokensSection, TokenizerConfigSection, VocabularySection,
 };
 
 // Re-export hologram-ir types for convenience
@@ -75,7 +75,9 @@ pub use hologram::ir::{GraphBuilder, NodeIndex, OperationGraph};
 /// let (holo_bytes, weight_bytes) = compiler.compile(&onnx_bytes)?;
 ///
 /// fs::write("model.holo", holo_bytes)?;
-/// fs::write("model.weights", weight_bytes)?;
+/// if !weight_bytes.is_empty() {
+///     fs::write("model.weights", weight_bytes)?;
+/// }
 /// ```
 pub struct OnnxCompiler {
     config: OnnxConfig,
@@ -108,7 +110,7 @@ impl OnnxCompiler {
     /// 1. Parse ONNX protobuf
     /// 2. Translate to IR with symbolic shapes
     /// 3. Apply hologram-ir graph building
-    /// 4. Serialize to .holo + .weights files
+    /// 4. Serialize to .holo format (weights embedded)
     ///
     /// # Arguments
     ///
@@ -117,8 +119,8 @@ impl OnnxCompiler {
     /// # Returns
     ///
     /// A tuple of `(holo_bytes, weight_bytes)`:
-    /// - `holo_bytes`: Serialized OperationGraph for the .holo file
-    /// - `weight_bytes`: External weight data for the .weights file (may be empty)
+    /// - `holo_bytes`: Serialized .holo bytes (includes embedded weights)
+    /// - `weight_bytes`: Optional external weights copy for separate storage (may be empty)
     #[tracing::instrument(
         name = "compile_onnx",
         skip_all,
@@ -157,22 +159,22 @@ impl OnnxCompiler {
         };
 
         // Phase 3: Compile to BackendPlan using hologram-compiler
-        let mut plan = {
+        let (mut plan, header) = {
             let _span = tracing::info_span!("compile_ir").entered();
             let backend_type = hologram::BackendType::Cpu;
-            hologram::compiler::compile_ir(&ir_func, backend_type).map_err(|e| {
-                OnnxError::IrTranslationError(format!("Failed to compile IR: {:?}", e))
-            })?
+            self.compile_ir_with_config(&ir_func, backend_type)?
         };
+        repair_output_metadata_from_graph(&mut plan, graph);
+        dump_plan_if_requested(&plan, "onnx_compile")?;
 
-        // Extract constant_data to external weights file if above threshold
+        // Capture weights for external use without stripping them from the plan.
         let weight_bytes = if plan.constant_data.len() > self.config.weight_threshold {
             tracing::info!(
                 weight_bytes = plan.constant_data.len(),
                 threshold = self.config.weight_threshold,
-                "Extracting weights to external file"
+                "Capturing weights for external file"
             );
-            std::mem::take(&mut plan.constant_data)
+            plan.constant_data.clone()
         } else {
             Vec::new()
         };
@@ -180,7 +182,7 @@ impl OnnxCompiler {
         // Phase 4: Serialize to .holo format
         let holo_bytes = {
             let _span = tracing::info_span!("serialize_holo").entered();
-            serialize_backend_plan(&plan)?
+            serialize_backend_plan_with_header(&plan, &header)?
         };
 
         tracing::info!(
@@ -231,21 +233,21 @@ impl OnnxCompiler {
         };
 
         // Phase 4: Compile to BackendPlan
-        let mut plan = {
+        let (mut plan, header) = {
             let _span = tracing::info_span!("compile_ir").entered();
             let backend_type = hologram::BackendType::Cpu;
-            hologram::compiler::compile_ir(&ir_func, backend_type).map_err(|e| {
-                OnnxError::IrTranslationError(format!("Failed to compile IR: {:?}", e))
-            })?
+            self.compile_ir_with_config(&ir_func, backend_type)?
         };
+        repair_output_metadata_from_graph(&mut plan, graph);
+        dump_plan_if_requested(&plan, "onnx_partitioned")?;
 
-        // Extract constant_data to external weights file if above threshold
+        // Capture weights for external use without stripping them from the plan.
         let weight_bytes = if plan.constant_data.len() > self.config.weight_threshold {
             tracing::info!(
                 weight_bytes = plan.constant_data.len(),
-                "Extracting weights to external file"
+                "Capturing weights for external file"
             );
-            std::mem::take(&mut plan.constant_data)
+            plan.constant_data.clone()
         } else {
             Vec::new()
         };
@@ -253,7 +255,7 @@ impl OnnxCompiler {
         // Phase 5: Serialize
         let holo_bytes = {
             let _span = tracing::info_span!("serialize_holo").entered();
-            serialize_backend_plan(&plan)?
+            serialize_backend_plan_with_header(&plan, &header)?
         };
 
         tracing::info!(
@@ -298,25 +300,25 @@ impl OnnxCompiler {
         };
 
         // Phase 3: Compile to BackendPlan using hologram-compiler
-        let mut plan = {
+        let (mut plan, header) = {
             let _span = tracing::info_span!("compile_ir").entered();
             let backend_type = hologram::BackendType::Cpu;
-            hologram::compiler::compile_ir(&ir_func, backend_type).map_err(|e| {
-                OnnxError::IrTranslationError(format!("Failed to compile IR: {:?}", e))
-            })?
+            self.compile_ir_with_config(&ir_func, backend_type)?
         };
+        repair_output_metadata_from_graph(&mut plan, graph);
+        dump_plan_if_requested(&plan, "onnx_bundle")?;
 
-        // Extract weights from plan (they'll be embedded in the bundle)
-        let weight_bytes = std::mem::take(&mut plan.constant_data);
+        // Capture weights from plan (they'll be embedded in the bundle).
+        let weight_bytes = plan.constant_data.clone();
         tracing::debug!(
             weight_bytes = weight_bytes.len(),
-            "Extracted weights for bundle"
+            "Captured weights for bundle"
         );
 
-        // Phase 4: Serialize plan to HOLP format (without weights)
+        // Phase 4: Serialize plan to .holo format.
         let graph_bytes = {
             let _span = tracing::info_span!("serialize_holo").entered();
-            serialize_backend_plan(&plan)?
+            serialize_backend_plan_with_header(&plan, &header)?
         };
 
         // Phase 5: Create unified bundle
@@ -330,6 +332,13 @@ impl OnnxCompiler {
             let mut writer = core::UnifiedBundleWriter::new();
             writer.set_graph_bytes(graph_bytes);
             writer.set_weights_bytes(weight_bytes);
+            writer.add_section(core::sections::LayerHeaderSection {
+                header: header.clone(),
+            });
+            let input_order = Self::external_input_order(graph);
+            if !input_order.is_empty() {
+                writer.add_section(core::sections::InputOrderSection::new(input_order));
+            }
 
             // Load and embed sections if configured
             for file_config in &self.config.embedded_files {
@@ -402,25 +411,33 @@ impl OnnxCompiler {
         // Step 3: Compile to BackendPlan using hologram-compiler
         debug!("Compiling IR to BackendPlan");
         let backend_type = hologram::BackendType::Cpu;
-        let mut plan = hologram::compiler::compile_ir(&ir_func, backend_type)
-            .map_err(|e| OnnxError::IrTranslationError(format!("Failed to compile IR: {:?}", e)))?;
+        let (mut plan, header) = self.compile_ir_with_config(&ir_func, backend_type)?;
+        repair_output_metadata_from_graph(&mut plan, graph);
+        dump_plan_if_requested(&plan, "onnx_bundle")?;
 
-        // Extract weights from plan (they'll be embedded in the bundle)
-        let weight_bytes = std::mem::take(&mut plan.constant_data);
+        // Capture weights from plan (they'll be embedded in the bundle).
+        let weight_bytes = plan.constant_data.clone();
         info!(
-            "Extracted {} bytes of weights for bundle",
+            "Captured {} bytes of weights for bundle",
             weight_bytes.len()
         );
 
-        // Step 4: Serialize plan to HOLP format (without weights)
+        // Step 4: Serialize plan to .holo format.
         debug!("Serializing BackendPlan");
-        let graph_bytes = serialize_backend_plan(&plan)?;
+        let graph_bytes = serialize_backend_plan_with_header(&plan, &header)?;
 
         // Step 5: Create unified bundle
         debug!("Creating unified bundle");
         let mut writer = core::UnifiedBundleWriter::new();
         writer.set_graph_bytes(graph_bytes);
         writer.set_weights_bytes(weight_bytes);
+        writer.add_section(core::sections::LayerHeaderSection {
+            header: header.clone(),
+        });
+        let input_order = Self::external_input_order(graph);
+        if !input_order.is_empty() {
+            writer.add_section(core::sections::InputOrderSection::new(input_order));
+        }
 
         // Step 6: Load and embed sections if configured
         if !self.config.embedded_files.is_empty() {
@@ -541,15 +558,19 @@ impl OnnxCompiler {
 
             debug!("Compiling layer {} to BackendPlan", layer_name);
             let backend_type = hologram::BackendType::Cpu;
-            let mut plan = hologram::compiler::compile_ir(&ir_func, backend_type).map_err(|e| {
-                OnnxError::IrTranslationError(format!(
-                    "Failed to compile layer {}: {:?}",
-                    layer_name, e
-                ))
-            })?;
+            let (mut plan, header) = self
+                .compile_ir_with_config(&ir_func, backend_type)
+                .map_err(|e| match e {
+                    OnnxError::MemoryBudgetExceeded { .. } => e,
+                    _ => OnnxError::IrTranslationError(format!(
+                        "Failed to compile layer {}: {}",
+                        layer_name, e
+                    )),
+                })?;
+            repair_output_metadata_from_graph(&mut plan, layer_graph);
 
-            // Extract weights (they'll be embedded in the HOLB)
-            let weight_bytes = std::mem::take(&mut plan.constant_data);
+            // Capture weights (they'll be embedded in the HOLB).
+            let weight_bytes = plan.constant_data.clone();
             debug!(
                 "Layer {} has {} bytes of weights",
                 layer_name,
@@ -557,12 +578,19 @@ impl OnnxCompiler {
             );
 
             // Serialize plan to HOLP format
-            let graph_bytes = serialize_backend_plan(&plan)?;
+            let graph_bytes = serialize_backend_plan_with_header(&plan, &header)?;
 
             // Create unified bundle for this layer
             let mut layer_writer = core::UnifiedBundleWriter::new();
             layer_writer.set_graph_bytes(graph_bytes);
             layer_writer.set_weights_bytes(weight_bytes);
+            layer_writer.add_section(core::sections::LayerHeaderSection {
+                header: header.clone(),
+            });
+            let input_order = Self::external_input_order(layer_graph);
+            if !input_order.is_empty() {
+                layer_writer.add_section(core::sections::InputOrderSection::new(input_order));
+            }
             let holb_bytes = layer_writer.finish();
 
             // Add to pipeline
@@ -579,6 +607,42 @@ impl OnnxCompiler {
         );
 
         Ok(pipeline_bytes)
+    }
+
+    /// Collect external input names in ONNX order (excluding initializers).
+    fn external_input_order(graph: &proto::GraphProto) -> Vec<String> {
+        let initializer_names: std::collections::HashSet<&str> = graph
+            .initializer
+            .iter()
+            .map(|init| init.name.as_str())
+            .collect();
+
+        let mut inputs: Vec<String> = graph
+            .input
+            .iter()
+            .filter(|input| !initializer_names.contains(input.name.as_str()))
+            .map(|input| input.name.clone())
+            .collect();
+
+        inputs.sort();
+        inputs
+    }
+
+    fn compile_ir_with_config(
+        &self,
+        ir_func: &hologram::OperationGraph,
+        backend_type: hologram::BackendType,
+    ) -> Result<(
+        hologram::backend::BackendPlan,
+        hologram::compiler::format::LayerHeaderData,
+    )> {
+        let pipeline_config = build_hologram_pipeline_config(&self.config)?;
+        let result = if let Some(config) = pipeline_config {
+            hologram::compiler::compile_ir_with_header_config(ir_func, backend_type, config)
+        } else {
+            hologram::compiler::compile_ir_with_header(ir_func, backend_type)
+        };
+        result.map_err(|err| map_hologram_compile_error(err, self.config.memory_budget))
     }
 
     /// Load section data from a file configuration.
@@ -636,16 +700,605 @@ impl OnnxCompiler {
     }
 }
 
+fn build_hologram_pipeline_config(
+    config: &core::OnnxConfig,
+) -> Result<Option<hologram::compiler::pipeline::PipelineConfig>> {
+    let budget_mb = match config.memory_budget {
+        Some(budget_mb) => budget_mb,
+        None => return Ok(None),
+    };
+
+    let bytes = budget_mb
+        .checked_mul(1024 * 1024)
+        .ok_or_else(|| OnnxError::InternalError("memory_budget too large".into()))?;
+
+    Ok(Some(
+        hologram::compiler::pipeline::PipelineConfig::default().with_low_memory(Some(bytes)),
+    ))
+}
+
+fn map_hologram_compile_error(
+    err: hologram::compiler::api::HoloPlanError,
+    memory_budget_mb: Option<usize>,
+) -> OnnxError {
+    use hologram::compiler::pipeline::CompilationError;
+
+    match err {
+        hologram::compiler::api::HoloPlanError::Compilation(
+            CompilationError::MemoryLimitError(message),
+        ) => {
+            if let Some((used_bytes, budget_bytes)) = parse_constant_budget_bytes(&message) {
+                return OnnxError::memory_budget_exceeded(
+                    bytes_to_mb(used_bytes),
+                    bytes_to_mb(budget_bytes),
+                );
+            }
+            if let Some(budget_mb) = memory_budget_mb {
+                return OnnxError::memory_budget_exceeded(0, budget_mb);
+            }
+            OnnxError::HologramError(format!("Memory limit exceeded: {}", message))
+        }
+        _ => OnnxError::HologramError(format!("Failed to compile IR: {}", err)),
+    }
+}
+
+fn parse_constant_budget_bytes(message: &str) -> Option<(usize, usize)> {
+    let mut used_bytes = None;
+    let mut budget_bytes = None;
+
+    let mut iter = message.split_whitespace();
+    while let Some(word) = iter.next() {
+        if word == "bytes" {
+            used_bytes = iter.next().and_then(|value| value.parse::<usize>().ok());
+        }
+        if word == "budget" {
+            budget_bytes = iter.next().and_then(|value| value.parse::<usize>().ok());
+        }
+    }
+
+    match (used_bytes, budget_bytes) {
+        (Some(used), Some(budget)) => Some((used, budget)),
+        _ => None,
+    }
+}
+
+fn bytes_to_mb(bytes: usize) -> usize {
+    let mb = 1024 * 1024;
+    bytes.div_ceil(mb)
+}
+
 impl Default for OnnxCompiler {
     fn default() -> Self {
         Self::new()
     }
 }
 
-/// Serialize a BackendPlan to .holo format bytes.
-fn serialize_backend_plan(plan: &hologram::backend::BackendPlan) -> Result<Vec<u8>> {
+fn dump_plan_if_requested(plan: &hologram::backend::BackendPlan, label: &str) -> Result<()> {
+    let raw_path = match std::env::var("HOLOGRAM_DUMP_PLAN") {
+        Ok(value) => value,
+        Err(_) => return Ok(()),
+    };
+    if raw_path.trim().is_empty() {
+        return Ok(());
+    }
+
+    let path = std::path::PathBuf::from(raw_path.trim());
+    let output_path = resolve_plan_dump_path(path, label)?;
+    let report = format_plan_dump(plan, label);
+    std::fs::write(&output_path, report)?;
+    tracing::info!(
+        path = %output_path.display(),
+        label = label,
+        "Wrote plan dump"
+    );
+    Ok(())
+}
+
+fn repair_output_metadata_from_graph(
+    plan: &mut hologram::backend::BackendPlan,
+    graph: &crate::proto::GraphProto,
+) {
+    if graph.output.is_empty() {
+        return;
+    }
+
+    let mut output_entries: Vec<&crate::proto::ValueInfoProto> = graph.output.iter().collect();
+    output_entries.sort_by_key(|info| info.name.as_str());
+
+    for (id, output) in output_entries.iter().enumerate() {
+        // Use preserve_symbolic to maintain symbolic dimension names
+        let declared_shape =
+            match crate::core::SymbolicShape::from_value_info_preserve_symbolic(output) {
+                Ok(shape) => shape,
+                Err(_) => continue,
+            };
+
+        // Track if output has symbolic dimensions (for DimExpr resolution at runtime)
+        let has_symbolic = declared_shape.dims().iter().any(|d| {
+            matches!(
+                d,
+                hologram::ir::Dim::Symbolic(_) | hologram::ir::Dim::Dynamic
+            )
+        });
+
+        // Convert to concrete dimensions for buffer allocation
+        // Use defaults for symbolic dims but mark for runtime resolution
+        let dims: Vec<usize> = declared_shape
+            .dims()
+            .iter()
+            .enumerate()
+            .map(|(idx, dim)| match dim {
+                hologram::ir::Dim::Static(n) => *n,
+                hologram::ir::Dim::Dynamic => default_output_dim_value(idx, None),
+                hologram::ir::Dim::Symbolic(name) => {
+                    // Log that we're using a default for symbolic dimension
+                    tracing::debug!(
+                        "Output dim '{}' is symbolic, using default for allocation",
+                        name
+                    );
+                    default_output_dim_value(idx, Some(name.as_str()))
+                }
+            })
+            .collect();
+
+        // If has symbolic dims, mark output_sizes as 0 to allow runtime resolution
+        let _ = has_symbolic; // TODO: Use this to set output_sizes=0 when DimExpr is fully supported
+
+        if plan.layout_metadata.output_shapes.len() <= id {
+            plan.layout_metadata.output_shapes.resize(id + 1, [0; 4]);
+        }
+        if plan.layout_metadata.output_sizes.len() <= id {
+            plan.layout_metadata.output_sizes.resize(id + 1, 0);
+        }
+
+        let has_zero = plan.layout_metadata.output_shapes[id].contains(&0);
+        let needs_size = plan.layout_metadata.output_sizes[id] == 0;
+
+        if has_zero || needs_size {
+            let shape_4d = shape_to_4d(&dims);
+            let numel = shape_4d.iter().product::<usize>().max(1);
+            let size_bytes = numel.saturating_mul(std::mem::size_of::<f32>());
+            plan.layout_metadata.output_shapes[id] = shape_4d;
+            plan.layout_metadata.output_sizes[id] = size_bytes;
+        }
+    }
+}
+
+fn default_output_dim_value(index: usize, name_hint: Option<&str>) -> usize {
+    if let Some(name) = name_hint {
+        let lower = name.to_ascii_lowercase();
+        if lower.contains("batch") || lower == "n" {
+            return 1;
+        }
+        if lower.contains("seq") || lower.contains("length") {
+            return 512;
+        }
+        if lower.contains("hidden") || lower.contains("embed") || lower.contains("feature") {
+            return 512;
+        }
+        if lower.contains("past") || lower.contains("cache") {
+            return 512;
+        }
+    }
+
+    match index {
+        0 => 1,
+        _ => 512,
+    }
+}
+
+fn shape_to_4d(shape: &[usize]) -> [usize; 4] {
+    match shape.len() {
+        0 => [1, 1, 1, 1],
+        1 => [shape[0], 1, 1, 1],
+        2 => [shape[0], shape[1], 1, 1],
+        3 => [shape[0], shape[1], shape[2], 1],
+        _ => [shape[0], shape[1], shape[2], shape[3]],
+    }
+}
+
+fn resolve_plan_dump_path(path: std::path::PathBuf, label: &str) -> Result<std::path::PathBuf> {
+    let raw_path = path.to_string_lossy();
+    let treat_as_dir = raw_path.ends_with('/')
+        || raw_path.ends_with('\\')
+        || raw_path.ends_with(std::path::MAIN_SEPARATOR);
+
+    if path.exists() && path.is_dir() {
+        let file_name = format!("{}_plan.txt", label);
+        return Ok(path.join(file_name));
+    }
+
+    if treat_as_dir {
+        std::fs::create_dir_all(&path)?;
+        let file_name = format!("{}_plan.txt", label);
+        return Ok(path.join(file_name));
+    }
+
+    if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
+        std::fs::create_dir_all(parent)?;
+    }
+
+    Ok(path)
+}
+
+fn format_plan_dump(plan: &hologram::backend::BackendPlan, label: &str) -> String {
+    let mut output = String::new();
+    push_line(&mut output, &format!("label: {}", label));
+    push_line(&mut output, &format!("backend: {:?}", plan.backend_type));
+    push_line(&mut output, &format!("ops: {}", plan.ops.len()));
+    push_line(
+        &mut output,
+        &format!(
+            "workspace_total_bytes: {}",
+            plan.workspace_layout.total_size
+        ),
+    );
+    push_line(
+        &mut output,
+        &format!("workspace_alignment: {}", plan.workspace_layout.alignment),
+    );
+    push_line(
+        &mut output,
+        &format!("workspace_regions: {}", plan.workspace_layout.regions.len()),
+    );
+
+    for (idx, region) in plan.workspace_layout.regions.iter().enumerate() {
+        push_line(
+            &mut output,
+            &format!(
+                "region[{}]: name={}, offset={}, size={}, alignment={}",
+                idx, region.name, region.offset, region.size, region.alignment
+            ),
+        );
+    }
+
+    push_line(&mut output, "workspace_producers:");
+    let producers = collect_workspace_producers(plan);
+    for (slot, region) in plan.workspace_layout.regions.iter().enumerate() {
+        match producers.get(&slot) {
+            Some(info) => {
+                let (numel, assumed_bytes) = plan_output_requirements(info, 4);
+                let requirement = match (numel, assumed_bytes) {
+                    (Some(numel), Some(bytes)) => {
+                        format!("numel_dim0={} assumed_f32_bytes={}", numel, bytes)
+                    }
+                    (Some(numel), None) => format!("numel={} assumed_f32_bytes=overflow", numel),
+                    (None, _) => "numel_dim0=unknown".to_string(),
+                };
+                let mismatch = match assumed_bytes {
+                    Some(bytes) if bytes > region.size => " undersized",
+                    _ => "",
+                };
+                push_line(
+                    &mut output,
+                    &format!(
+                        "workspace[{}]: name={} size={} producer_op={} kernel_id=0x{:04X} dims={:?} {}{}",
+                        slot,
+                        region.name,
+                        region.size,
+                        info.op_index,
+                        info.kernel_id.0,
+                        info.dims,
+                        requirement,
+                        mismatch
+                    ),
+                );
+            }
+            None => {
+                push_line(
+                    &mut output,
+                    &format!(
+                        "workspace[{}]: name={} size={} producer_op=unknown",
+                        slot, region.name, region.size
+                    ),
+                );
+            }
+        }
+    }
+
+    push_line(&mut output, "ops_detail:");
+    for (idx, op) in plan.ops.iter().enumerate() {
+        let kernel_name = kernel_name(op.kernel_id);
+        let category = kernel_category_name(op.kernel_id);
+        push_line(
+            &mut output,
+            &format!(
+                "op[{}]: kernel_id=0x{:04X} ({}) category={} kernel_idx={} dims={:?}",
+                idx, op.kernel_id.0, kernel_name, category, op.kernel_idx, op.params.dims
+            ),
+        );
+        let inputs = format_buffer_refs(&plan.workspace_layout, &op.input_refs);
+        let outputs = format_buffer_refs(&plan.workspace_layout, &op.output_refs);
+        push_line(&mut output, &format!("  inputs: {}", inputs));
+        push_line(&mut output, &format!("  outputs: {}", outputs));
+    }
+
+    output
+}
+
+fn push_line(output: &mut String, line: &str) {
+    output.push_str(line);
+    output.push('\n');
+}
+
+#[derive(Debug, Clone)]
+struct WorkspaceProducer {
+    op_index: usize,
+    kernel_id: hologram::backend::KernelId,
+    dims: [usize; 4],
+}
+
+fn collect_workspace_producers(
+    plan: &hologram::backend::BackendPlan,
+) -> std::collections::HashMap<usize, WorkspaceProducer> {
+    let mut producers = std::collections::HashMap::new();
+    for (op_index, op) in plan.ops.iter().enumerate() {
+        for output_ref in &op.output_refs {
+            if let hologram::backend::BufferRef::Workspace(slot) = output_ref {
+                producers.entry(*slot).or_insert_with(|| WorkspaceProducer {
+                    op_index,
+                    kernel_id: op.kernel_id,
+                    dims: op.params.dims,
+                });
+            }
+        }
+    }
+    producers
+}
+
+fn plan_output_requirements(
+    producer: &WorkspaceProducer,
+    element_size: usize,
+) -> (Option<usize>, Option<usize>) {
+    let elems = producer.dims[0].max(1);
+    let bytes = elems.checked_mul(element_size);
+    let numel = Some(elems);
+    (numel, bytes)
+}
+
+fn format_buffer_refs(
+    layout: &hologram::backend::WorkspaceLayout,
+    refs: &[hologram::backend::BufferRef],
+) -> String {
+    let mut parts = Vec::with_capacity(refs.len());
+    for buffer_ref in refs {
+        parts.push(format_buffer_ref(layout, buffer_ref));
+    }
+    parts.join(", ")
+}
+
+fn format_buffer_ref(
+    layout: &hologram::backend::WorkspaceLayout,
+    buffer_ref: &hologram::backend::BufferRef,
+) -> String {
+    match buffer_ref {
+        hologram::backend::BufferRef::Input(idx) => format!("Input({})", idx),
+        hologram::backend::BufferRef::Output(idx) => format!("Output({})", idx),
+        hologram::backend::BufferRef::Workspace(slot) => {
+            if let Some(region) = layout.region(*slot) {
+                format!(
+                    "Workspace({}:{}@{}+{})",
+                    slot, region.name, region.offset, region.size
+                )
+            } else {
+                format!("Workspace({})", slot)
+            }
+        }
+        hologram::backend::BufferRef::Constant { offset, size } => {
+            format!("Constant(offset={}, size={})", offset, size)
+        }
+        hologram::backend::BufferRef::ExternalConstant { path, offset, size } => {
+            format!(
+                "ExternalConstant(path={}, offset={}, size={})",
+                path, offset, size
+            )
+        }
+    }
+}
+
+fn kernel_category_name(kernel_id: hologram::backend::KernelId) -> &'static str {
+    match kernel_id.category() {
+        hologram::backend::KernelId::CATEGORY_NOOP => "noop",
+        hologram::backend::KernelId::CATEGORY_GEMM => "gemm",
+        hologram::backend::KernelId::CATEGORY_CONV => "conv",
+        hologram::backend::KernelId::CATEGORY_ELEMENTWISE_BINARY => "elementwise_binary",
+        hologram::backend::KernelId::CATEGORY_ACTIVATION => "activation",
+        hologram::backend::KernelId::CATEGORY_TRANSCENDENTAL => "transcendental",
+        hologram::backend::KernelId::CATEGORY_REDUCE => "reduce",
+        hologram::backend::KernelId::CATEGORY_TENSOR_OPS => "tensor_ops",
+        hologram::backend::KernelId::CATEGORY_NORMALIZATION => "normalization",
+        hologram::backend::KernelId::CATEGORY_LOSS => "loss",
+        hologram::backend::KernelId::CATEGORY_COMPARISON => "comparison",
+        hologram::backend::KernelId::CATEGORY_BITWISE => "bitwise",
+        hologram::backend::KernelId::CATEGORY_LINALG => "linalg",
+        hologram::backend::KernelId::CATEGORY_POOLING => "pooling",
+        hologram::backend::KernelId::CATEGORY_METADATA => "metadata",
+        _ => "dynamic",
+    }
+}
+
+fn kernel_name(kernel_id: hologram::backend::KernelId) -> String {
+    if kernel_id == hologram::backend::KernelId::NOOP {
+        return "NOOP".to_string();
+    }
+
+    match kernel_name_from_category(kernel_id) {
+        Some(name) => name.to_string(),
+        None => format!("UNKNOWN_0x{:04X}", kernel_id.0),
+    }
+}
+
+fn kernel_name_from_category(kernel_id: hologram::backend::KernelId) -> Option<&'static str> {
+    let idx = kernel_id.index() as usize;
+    match kernel_id.category() {
+        hologram::backend::KernelId::CATEGORY_GEMM => kernel_name_from_list(
+            idx,
+            &["GEMM_STANDARD", "GEMM_STRASSEN", "GEMM_TILED", "GEMM_BATCH"],
+        ),
+        hologram::backend::KernelId::CATEGORY_CONV => kernel_name_from_list(
+            idx,
+            &[
+                "CONV_DIRECT",
+                "CONV_IM2COL",
+                "CONV_WINOGRAD_F23",
+                "CONV_WINOGRAD_F43",
+                "CONV_1D",
+                "CONV_DEPTHWISE",
+            ],
+        ),
+        hologram::backend::KernelId::CATEGORY_ELEMENTWISE_BINARY => kernel_name_from_list(
+            idx,
+            &[
+                "ELEM_ADD", "ELEM_SUB", "ELEM_MUL", "ELEM_DIV", "ELEM_MAX", "ELEM_MIN", "ELEM_POW",
+                "ELEM_MOD",
+            ],
+        ),
+        hologram::backend::KernelId::CATEGORY_ACTIVATION => kernel_name_from_list(
+            idx,
+            &[
+                "ACT_RELU",
+                "ACT_SIGMOID",
+                "ACT_TANH",
+                "ACT_GELU",
+                "ACT_SILU",
+                "ACT_MISH",
+                "ACT_SOFTPLUS",
+                "ACT_LEAKY_RELU",
+                "ACT_RELU_U8",
+                "ACT_SIGMOID_U8",
+                "ACT_TANH_U8",
+                "ACT_GELU_U8",
+                "ACT_SILU_U8",
+                "ACT_FUSED_SIGMOID_RELU_U8",
+                "ACT_FUSED_SIGMOID_TANH_U8",
+                "ACT_FUSED_SIGMOID_TANH_RELU_U8",
+            ],
+        ),
+        hologram::backend::KernelId::CATEGORY_TRANSCENDENTAL => kernel_name_from_list(
+            idx,
+            &[
+                "TRANS_EXP",
+                "TRANS_LOG",
+                "TRANS_SQRT",
+                "TRANS_SIN",
+                "TRANS_COS",
+                "TRANS_TAN",
+                "TRANS_ASIN",
+                "TRANS_ACOS",
+                "UNARY_NEG",
+                "UNARY_ABS",
+                "TRANS_ERF",
+            ],
+        ),
+        hologram::backend::KernelId::CATEGORY_REDUCE => kernel_name_from_list(
+            idx,
+            &[
+                "REDUCE_SUM",
+                "REDUCE_MAX",
+                "REDUCE_MIN",
+                "REDUCE_MEAN",
+                "REDUCE_VARIANCE",
+                "REDUCE_ARGMAX",
+                "REDUCE_ARGMIN",
+                "REDUCE_PROD",
+                "REDUCE_ARGMAX_LAST_TOKEN",
+            ],
+        ),
+        hologram::backend::KernelId::CATEGORY_TENSOR_OPS => kernel_name_from_list(
+            idx,
+            &[
+                "TENSOR_GATHER",
+                "TENSOR_SLICE",
+                "TENSOR_CONCAT",
+                "TENSOR_RESHAPE",
+                "TENSOR_EXPAND",
+                "TENSOR_TILE",
+                "TENSOR_SQUEEZE",
+                "TENSOR_UNSQUEEZE",
+                "TENSOR_TRANSPOSE",
+                "TENSOR_SHAPE",
+                "TENSOR_RANGE",
+                "TENSOR_CONSTANT_SHAPE",
+                "TENSOR_TRILU",
+                "TENSOR_SCATTER_ND",
+                "TENSOR_SPLIT",
+            ],
+        ),
+        hologram::backend::KernelId::CATEGORY_NORMALIZATION => kernel_name_from_list(
+            idx,
+            &[
+                "NORM_BATCH",
+                "NORM_LAYER",
+                "NORM_SOFTMAX",
+                "NORM_LOG_SOFTMAX",
+                "NORM_INSTANCE",
+                "NORM_GROUP",
+            ],
+        ),
+        hologram::backend::KernelId::CATEGORY_LOSS => kernel_name_from_list(
+            idx,
+            &["LOSS_CROSS_ENTROPY", "LOSS_MSE", "LOSS_MAE", "LOSS_HUBER"],
+        ),
+        hologram::backend::KernelId::CATEGORY_COMPARISON => kernel_name_from_list(
+            idx,
+            &[
+                "CMP_LESS",
+                "CMP_EQUAL",
+                "CMP_GREATER",
+                "CMP_LESS_EQUAL",
+                "CMP_GREATER_EQUAL",
+                "CMP_NOT_EQUAL",
+            ],
+        ),
+        hologram::backend::KernelId::CATEGORY_BITWISE => kernel_name_from_list(
+            idx,
+            &[
+                "BIT_AND", "BIT_OR", "BIT_XOR", "BIT_NOT", "BIT_SHL", "BIT_SHR",
+            ],
+        ),
+        hologram::backend::KernelId::CATEGORY_LINALG => kernel_name_from_list(
+            idx,
+            &[
+                "LINALG_MATVEC",
+                "LINALG_VECMAT",
+                "LINALG_DOT",
+                "LINALG_OUTER",
+                "LINALG_BATCH_MATMUL",
+            ],
+        ),
+        hologram::backend::KernelId::CATEGORY_POOLING => kernel_name_from_list(
+            idx,
+            &["POOL_MAX", "POOL_AVG", "POOL_GLOBAL_MAX", "POOL_GLOBAL_AVG"],
+        ),
+        _ => None,
+    }
+}
+
+fn kernel_name_from_list(idx: usize, names: &[&'static str]) -> Option<&'static str> {
+    if idx == 0 {
+        return None;
+    }
+    names.get(idx - 1).copied()
+}
+
+/// Serialize a BackendPlan with a LayerHeader to .holo format bytes.
+fn serialize_backend_plan_with_header(
+    plan: &hologram::backend::BackendPlan,
+    header: &hologram::compiler::format::LayerHeaderData,
+) -> Result<Vec<u8>> {
+    const HOLO_ALIGN: usize = 4096;
+
+    if header.layers.is_empty() {
+        return Err(OnnxError::SerializationError(
+            "LayerHeader must contain at least one layer".to_string(),
+        ));
+    }
+
+    let mut plan_clone = plan.clone();
+    let weights = std::mem::take(&mut plan_clone.constant_data);
+
     // Convert to serializable form (function pointers → kernel IDs)
-    let serializable = plan.to_serializable();
+    let serializable = plan_clone.to_serializable();
 
     // Serialize using rkyv
     let plan_bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&serializable)
@@ -654,10 +1307,35 @@ fn serialize_backend_plan(plan: &hologram::backend::BackendPlan) -> Result<Vec<u
             OnnxError::IrTranslationError(format!("Failed to serialize BackendPlan: {}", e))
         })?;
 
-    // Prepend magic bytes
-    let mut holo_bytes = Vec::with_capacity(4 + plan_bytes.len());
+    let header_bytes = rkyv::to_bytes::<rkyv::rancor::Error>(header)
+        .map(|bytes| bytes.to_vec())
+        .map_err(|e| {
+            OnnxError::IrTranslationError(format!("Failed to serialize LayerHeader: {}", e))
+        })?;
+    let header_len = u32::try_from(header_bytes.len()).map_err(|_| {
+        OnnxError::IrTranslationError("LayerHeader too large to serialize".to_string())
+    })?;
+
+    let plan_len = u64::try_from(plan_bytes.len())
+        .map_err(|_| OnnxError::SerializationError("Plan too large to serialize".to_string()))?;
+    let weights_len = u64::try_from(weights.len())
+        .map_err(|_| OnnxError::SerializationError("Weights too large to serialize".to_string()))?;
+
+    // Layout: magic | version | header_len | plan_len | weights_len | header | plan | pad | weights
+    let payload_len = 4 + 8 + 8 + header_bytes.len() + plan_bytes.len();
+    let pad = (HOLO_ALIGN - (payload_len % HOLO_ALIGN)) % HOLO_ALIGN;
+    let mut holo_bytes = Vec::with_capacity(8 + payload_len + pad + weights.len());
     holo_bytes.extend_from_slice(&hologram::compiler::HOLO_MAGIC);
+    holo_bytes.extend_from_slice(&hologram::backend::plan::PLAN_FORMAT_VERSION.to_le_bytes());
+    holo_bytes.extend_from_slice(&header_len.to_le_bytes());
+    holo_bytes.extend_from_slice(&plan_len.to_le_bytes());
+    holo_bytes.extend_from_slice(&weights_len.to_le_bytes());
+    holo_bytes.extend_from_slice(&header_bytes);
     holo_bytes.extend_from_slice(&plan_bytes);
+    if pad > 0 {
+        holo_bytes.extend(std::iter::repeat_n(0u8, pad));
+    }
+    holo_bytes.extend_from_slice(&weights);
 
     Ok(holo_bytes)
 }
@@ -671,6 +1349,9 @@ pub fn compile_onnx(onnx_bytes: &[u8]) -> Result<(Vec<u8>, Vec<u8>)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::proto::tensor_shape_proto::dimension::Value as DimValue;
+    use crate::proto::type_proto::Value as TypeValue;
+    use crate::proto::{GraphProto, TensorProto, TensorShapeProto, TypeProto, ValueInfoProto};
 
     #[test]
     fn test_onnx_compiler_new() {
@@ -692,5 +1373,165 @@ mod tests {
         };
         let compiler = OnnxCompiler::with_config(config);
         assert_eq!(compiler.config.weight_threshold, 8192);
+    }
+
+    #[test]
+    fn test_external_input_order_preserves_graph_order() {
+        let graph = GraphProto {
+            input: vec![
+                ValueInfoProto {
+                    name: "z_input".to_string(),
+                    ..Default::default()
+                },
+                ValueInfoProto {
+                    name: "m_input".to_string(),
+                    ..Default::default()
+                },
+                ValueInfoProto {
+                    name: "a_input".to_string(),
+                    ..Default::default()
+                },
+            ],
+            initializer: vec![TensorProto {
+                name: "m_input".to_string(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+
+        let order = OnnxCompiler::external_input_order(&graph);
+        assert_eq!(order, vec!["a_input".to_string(), "z_input".to_string()]);
+    }
+
+    #[test]
+    fn test_format_plan_dump_includes_ops_and_regions() {
+        let mut plan = hologram::backend::BackendPlan::new(hologram::BackendType::Cpu);
+        plan.workspace_layout.add_region("workspace_0", 128, 64);
+        plan.ops.push(hologram::backend::PlanOp {
+            kernel_id: hologram::backend::KernelId::ELEM_ADD,
+            kernel_idx: 0,
+            params: hologram::backend::KernelParams::default(),
+            epilogue: hologram::backend::EpilogueChain::new(),
+            partition: hologram::backend::ThreadPartition::sequential(),
+            input_refs: vec![
+                hologram::backend::BufferRef::Workspace(0),
+                hologram::backend::BufferRef::Workspace(0),
+            ],
+            output_refs: vec![hologram::backend::BufferRef::Workspace(0)],
+        });
+
+        let output = format_plan_dump(&plan, "test");
+        assert!(output.contains("workspace_0"));
+        assert!(output.contains("workspace_producers"));
+        assert!(output.contains("op[0]"));
+        assert!(output.contains("ELEM_ADD"));
+    }
+
+    #[test]
+    fn test_repair_output_metadata_from_graph_fills_zero_dims() {
+        let shape = TensorShapeProto {
+            dim: vec![
+                crate::proto::tensor_shape_proto::Dimension {
+                    value: Some(DimValue::DimValue(1)),
+                    ..Default::default()
+                },
+                crate::proto::tensor_shape_proto::Dimension {
+                    value: Some(DimValue::DimValue(8)),
+                    ..Default::default()
+                },
+                crate::proto::tensor_shape_proto::Dimension {
+                    value: Some(DimValue::DimParam(
+                        "past_decoder_sequence_length + 1".to_string(),
+                    )),
+                    ..Default::default()
+                },
+                crate::proto::tensor_shape_proto::Dimension {
+                    value: Some(DimValue::DimValue(64)),
+                    ..Default::default()
+                },
+            ],
+        };
+        let output = ValueInfoProto {
+            name: "present.1.decoder.key".to_string(),
+            r#type: Some(TypeProto {
+                value: Some(TypeValue::TensorType(crate::proto::type_proto::Tensor {
+                    elem_type: crate::proto::tensor_proto::DataType::Float as i32,
+                    shape: Some(shape),
+                })),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let graph = GraphProto {
+            output: vec![output],
+            ..Default::default()
+        };
+
+        let mut plan = hologram::backend::BackendPlan::new(hologram::BackendType::Cpu);
+        plan.layout_metadata.num_outputs = 1;
+        plan.layout_metadata.output_shapes = vec![[1, 8, 0, 64]];
+        plan.layout_metadata.output_sizes = vec![0];
+
+        repair_output_metadata_from_graph(&mut plan, &graph);
+
+        assert_eq!(plan.layout_metadata.output_shapes[0], [1, 8, 512, 64]);
+        assert_eq!(plan.layout_metadata.output_sizes[0], 8 * 512 * 64 * 4);
+    }
+
+    #[test]
+    fn test_build_hologram_pipeline_config_with_budget() {
+        let config = OnnxConfig {
+            memory_budget: Some(2),
+            ..Default::default()
+        };
+        let pipeline = build_hologram_pipeline_config(&config).unwrap();
+        let pipeline = pipeline.expect("expected pipeline config");
+        assert!(pipeline.low_memory);
+        assert_eq!(pipeline.max_constant_bytes, Some(2 * 1024 * 1024));
+    }
+
+    #[test]
+    fn test_parse_constant_budget_bytes() {
+        let msg = "Constant bytes 123456 exceed budget 789012";
+        let parsed = parse_constant_budget_bytes(msg);
+        assert_eq!(parsed, Some((123456, 789012)));
+    }
+
+    #[test]
+    fn test_serialize_backend_plan_with_header_roundtrip_layout() {
+        let mut builder = GraphBuilder::new();
+        let input = builder.input(
+            "input",
+            hologram::ir::Shape::static_shape(&[1, 1]),
+            hologram::ir::DType::F32,
+        );
+        let _ = builder.output("output", input);
+        let graph = builder.build();
+
+        let (mut plan, header) =
+            hologram::compiler::compile_ir_with_header(&graph, hologram::BackendType::Cpu)
+                .expect("compile plan");
+        plan.constant_data = vec![1, 2, 3, 4, 5, 6];
+
+        let bytes = serialize_backend_plan_with_header(&plan, &header).expect("serialize .holo");
+        assert!(bytes.len() >= 28);
+
+        let header_len = u32::from_le_bytes(bytes[8..12].try_into().unwrap()) as usize;
+        let plan_len = u64::from_le_bytes(bytes[12..20].try_into().unwrap()) as usize;
+        let weights_len = u64::from_le_bytes(bytes[20..28].try_into().unwrap()) as usize;
+        assert!(header_len > 0);
+        assert_eq!(weights_len, plan.constant_data.len());
+
+        let weights_offset_unaligned = 4 + 8 + 8 + header_len + plan_len;
+        let pad = (4096 - (weights_offset_unaligned % 4096)) % 4096;
+        let weights_offset = 8 + weights_offset_unaligned + pad;
+        assert_eq!((weights_offset - 8) % 4096, 0);
+
+        let (round_plan, round_header) =
+            hologram::compiler::api::read_holo_from_bytes_with_header(&bytes).expect("read .holo");
+        assert_eq!(round_plan.constant_data, plan.constant_data);
+        let round_header = round_header.expect("header");
+        assert_eq!(round_header.layers.len(), 1);
+        assert_eq!(round_header.layers[0].name, "main");
     }
 }

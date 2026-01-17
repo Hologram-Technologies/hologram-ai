@@ -22,6 +22,8 @@ use super::Tokenizer;
 use anyhow::{Context, Result};
 use std::collections::HashMap;
 use std::path::Path;
+use tracing::warn;
+use unicode_normalization::UnicodeNormalization;
 
 /// SentencePiece tokenizer using Unigram language model.
 #[derive(Debug, Clone)]
@@ -42,6 +44,10 @@ pub struct SentencePieceTokenizer {
     pad_token_id: u32,
     eos_token_id: u32,
     unk_token_id: u32,
+    special_token_ids: Vec<u32>,
+
+    /// Normalizer configuration extracted from tokenizer.json
+    normalizer: NormalizerConfig,
 }
 
 /// Prefix trie for efficient token lookup.
@@ -116,6 +122,151 @@ struct ViterbiNode {
     start_pos: usize,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NormalizerStep {
+    Lowercase,
+    ReplaceWhitespace,
+    CollapseWhitespace,
+    Nfkc,
+    Nfc,
+    StripAccents,
+}
+
+#[derive(Debug, Clone)]
+struct NormalizerConfig {
+    steps: Vec<NormalizerStep>,
+    unsupported: Vec<String>,
+}
+
+impl NormalizerConfig {
+    fn from_tokenizer_json(json: &serde_json::Value) -> Self {
+        let mut config = NormalizerConfig {
+            steps: Vec::new(),
+            unsupported: Vec::new(),
+        };
+
+        if let Some(normalizer) = json.get("normalizer") {
+            config.apply_normalizer(normalizer);
+        } else {
+            config.steps = vec![
+                NormalizerStep::ReplaceWhitespace,
+                NormalizerStep::CollapseWhitespace,
+            ];
+        }
+
+        if !config.unsupported.is_empty() {
+            warn!(
+                "SentencePiece normalizer contains unsupported steps: {:?}",
+                config.unsupported
+            );
+        }
+
+        config
+    }
+
+    fn apply_normalizer(&mut self, node: &serde_json::Value) {
+        if let Some(kind) = node.get("type").and_then(|v| v.as_str()) {
+            match kind {
+                "Sequence" => {
+                    if let Some(items) = node.get("normalizers").and_then(|v| v.as_array()) {
+                        for item in items {
+                            self.apply_normalizer(item);
+                        }
+                    }
+                }
+                "Lowercase" => {
+                    self.steps.push(NormalizerStep::Lowercase);
+                }
+                "Replace" => {
+                    if let Some(pattern) = node.get("pattern").and_then(|v| v.as_str()) {
+                        if pattern.contains("\\s") {
+                            self.steps.push(NormalizerStep::ReplaceWhitespace);
+                            self.steps.push(NormalizerStep::CollapseWhitespace);
+                        } else {
+                            self.unsupported.push(format!("Replace({pattern})"));
+                        }
+                    }
+                }
+                "StripAccents" => {
+                    self.steps.push(NormalizerStep::StripAccents);
+                }
+                "NFKC" => {
+                    self.steps.push(NormalizerStep::Nfkc);
+                }
+                "NFC" => {
+                    self.steps.push(NormalizerStep::Nfc);
+                }
+                other => {
+                    self.unsupported.push(other.to_string());
+                }
+            }
+        }
+    }
+
+    fn normalize(&self, text: &str) -> String {
+        let mut value = text.to_string();
+        for step in &self.steps {
+            match step {
+                NormalizerStep::Lowercase => {
+                    value = value.chars().flat_map(|c| c.to_lowercase()).collect();
+                }
+                NormalizerStep::ReplaceWhitespace => {
+                    value = value
+                        .chars()
+                        .map(|c| if c.is_whitespace() { ' ' } else { c })
+                        .collect();
+                }
+                NormalizerStep::CollapseWhitespace => {
+                    value = collapse_whitespace(&value);
+                }
+                NormalizerStep::Nfkc => {
+                    value = value.nfkc().collect();
+                }
+                NormalizerStep::Nfc => {
+                    value = value.nfc().collect();
+                }
+                NormalizerStep::StripAccents => {
+                    value = strip_accents(&value);
+                }
+            }
+        }
+
+        let trimmed = value.trim();
+        if trimmed.is_empty() {
+            return String::new();
+        }
+
+        let mut sentencepiece = trimmed.replace(' ', "▁");
+        if !sentencepiece.starts_with('▁') {
+            sentencepiece.insert(0, '▁');
+        }
+        sentencepiece
+    }
+}
+
+fn collapse_whitespace(text: &str) -> String {
+    let mut output = String::new();
+    let mut last_was_space = false;
+    for ch in text.chars() {
+        if ch.is_whitespace() {
+            if !last_was_space {
+                output.push(' ');
+                last_was_space = true;
+            }
+        } else {
+            output.push(ch);
+            last_was_space = false;
+        }
+    }
+    output
+}
+
+fn strip_accents(text: &str) -> String {
+    text.nfd()
+        .filter(|c| !unicode_normalization::char::is_combining_mark(*c))
+        .collect()
+}
+
 impl SentencePieceTokenizer {
     /// Load SentencePiece tokenizer from tokenizer.json file.
     ///
@@ -160,6 +311,29 @@ impl SentencePieceTokenizer {
         let eos_token_id = vocab_data.token_to_id.get("</s>").copied().unwrap_or(1);
         let unk_token_id = vocab_data.token_to_id.get("<unk>").copied().unwrap_or(2);
 
+        let normalizer = NormalizerConfig::from_tokenizer_json(&json);
+        let mut special_token_ids = Vec::new();
+        if let Some(added_tokens) = json.get("added_tokens").and_then(|v| v.as_array()) {
+            for entry in added_tokens {
+                let is_special = entry
+                    .get("special")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                if !is_special {
+                    continue;
+                }
+                let Some(id) = entry.get("id").and_then(|v| v.as_u64()) else {
+                    continue;
+                };
+                let id = id as u32;
+                if id != pad_token_id && id != eos_token_id && id != unk_token_id {
+                    special_token_ids.push(id);
+                }
+            }
+        }
+        special_token_ids.sort_unstable();
+        special_token_ids.dedup();
+
         Ok(Self {
             vocab: vocab_data.token_to_id,
             id_to_token: vocab_data.id_to_token,
@@ -168,6 +342,8 @@ impl SentencePieceTokenizer {
             pad_token_id,
             eos_token_id,
             unk_token_id,
+            special_token_ids,
+            normalizer,
         })
     }
 
@@ -187,8 +363,7 @@ impl SentencePieceTokenizer {
             return vec![];
         }
 
-        // Normalize text: replace spaces with ▁ (SentencePiece marker)
-        let normalized = format!("▁{}", text.replace(' ', "▁"));
+        let normalized = self.normalizer.normalize(text);
         let char_count = normalized.chars().count();
 
         if char_count == 0 {
@@ -280,11 +455,30 @@ impl SentencePieceTokenizer {
         tokens.reverse();
         tokens
     }
+
+    /// Get the EOS token id.
+    pub fn eos_token_id(&self) -> u32 {
+        self.eos_token_id
+    }
+
+    /// Get the UNK token id.
+    pub fn unk_token_id(&self) -> u32 {
+        self.unk_token_id
+    }
+
+    /// Get special token ids (excluding PAD/EOS/UNK).
+    pub fn special_token_ids(&self) -> &[u32] {
+        &self.special_token_ids
+    }
 }
 
 impl Tokenizer for SentencePieceTokenizer {
     fn encode(&self, text: &str, max_length: usize) -> Result<Vec<u32>> {
         let mut tokens = self.tokenize_unigram(text);
+
+        if tokens.len() < max_length && tokens.last() != Some(&self.eos_token_id) {
+            tokens.push(self.eos_token_id);
+        }
 
         // Truncate to max_length
         tokens.truncate(max_length);
@@ -309,6 +503,10 @@ impl Tokenizer for SentencePieceTokenizer {
             // Stop at EOS tokens
             if token_id == self.eos_token_id {
                 break;
+            }
+
+            if token_id == self.unk_token_id || self.special_token_ids.contains(&token_id) {
+                continue;
             }
 
             if let Some(token) = self.id_to_token.get(&token_id) {
@@ -340,6 +538,7 @@ impl Tokenizer for SentencePieceTokenizer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
 
     #[test]
     fn test_prefix_trie() {
@@ -368,6 +567,53 @@ mod tests {
 
         // Should find no matches
         assert_eq!(matches.len(), 0);
+    }
+
+    #[test]
+    fn test_normalizer_whitespace() {
+        let config = NormalizerConfig {
+            steps: vec![
+                NormalizerStep::ReplaceWhitespace,
+                NormalizerStep::CollapseWhitespace,
+            ],
+            unsupported: Vec::new(),
+        };
+        let normalized = config.normalize("  Hello\tworld\n");
+        assert_eq!(normalized, "▁Hello▁world");
+    }
+
+    #[test]
+    fn test_special_tokens_parsed_and_skipped() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("tokenizer.json");
+        let tokenizer_json = r#"{
+  "model": {
+    "vocab": [
+      ["<pad>", 0.0],
+      ["</s>", 0.0],
+      ["<unk>", 0.0],
+      ["▁hello", 0.0],
+      ["▁world", 0.0]
+    ]
+  },
+  "added_tokens": [
+    {"id": 0, "content": "<pad>", "special": true},
+    {"id": 1, "content": "</s>", "special": true},
+    {"id": 2, "content": "<unk>", "special": true},
+    {"id": 5, "content": "<extra_id_0>", "special": true}
+  ]
+}"#;
+        fs::write(&path, tokenizer_json).unwrap();
+
+        let tokenizer = SentencePieceTokenizer::from_file(&path).unwrap();
+        assert_eq!(tokenizer.special_token_ids(), &[5]);
+
+        let tokens = vec![0, 3, 5, 4, 1];
+        let decoded = tokenizer.decode(&tokens).unwrap();
+        assert_eq!(decoded, "hello world");
+
+        let encoded = tokenizer.encode("hello world", 6).unwrap();
+        assert_eq!(encoded[2], tokenizer.eos_token_id());
     }
 
     #[test]

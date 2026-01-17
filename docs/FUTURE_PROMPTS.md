@@ -130,3 +130,66 @@ And once the T5 compilations and execution works, I want to run it with the `--p
 Can you help identify places for optimization using instrumentation. Give me a report of where the most time was spent in all the functions we're running so we can target finding and squeezing out more performance gains.
 
 We have instrumentation implemented here.
+
+---
+
+We're working on the `hologram-ai-onnx` and `hologram-ai-gguf` crate here. For this session you have write read and write access to `/hologram` (the locaton of the `hologram` crate for now)
+
+We don't really want to do much custom work inside this crate. All the work we should be doing in this crate is map to operations in the `hologram` dependency. If we need to create fused operations in the `hologram` crate, you should. The rationale here is that `hologram` should be the crate that contains all the low-level operatons supported by the ultra fast backends. 
+
+The whole point of this `hologram-ai-onnx` and `hologram-ai-gguf` crates are to just handle the mapping. *IF* there is a case where operations are just for ai work, that's what should be contained either in `hologram-ai`/`hologram-ai-common` (or a new crate, where it makes sense `hologram-ai-operations`), then it needs to be contained in this library crate. Any operations described here have to be _fused_ operations that sit inside the `OperationGraph` that `hologram` depends upon.
+
+This library is just an implementation of the compiler here (our `hologram-ai`) that takes advantage of the IR Graph (`OperationGraph`) that's exposed to `hologram` and runs through the entire chain (as described in `/hologram/crates/compiler/README.md`). 
+
+Can you examine this crate and all the code we have here and tell me how far we've drifted off this idea, if we have and create a plan that shrinks that gap?
+
+---
+
+HOLOGRAM_TRACE_OPS=1 RUST_BACKTRACE=1 cargo run -p hologram-ai --release -- run-pipeline models/t5-small/t5-pipeline-new.holo --prompt "tell me a joke" --max-tokens 1 > /workspace/tmp-run-manual.log 2>&1
+
+---
+
+I want you to delete all the legacy `.holo` files. 
+
+The goal of all of this is to use the latest `hologram` pipeline with layers and all the updated workflow. Can you please try to update this crate to make sure we can run models with memory-mapped weights using our `EmbeddableSection` as well as the tokenizer, etc. The `LayerHeader` for running the model is in the entrypoint of our model (either onnx or gguf).
+
+We want to take advantage of the performance runtime of `hologram` and run onnx models atop the computational runtime.
+
+Can you explore this approach with the latest updated `hologram` library crate.
+
+---
+
+I want you to keep integrating on quality. 
+
+Add beam search with length penalty and no‑repeat‑ngram to stabilize outputs.
+Align SentencePiece normalization with tokenizer.json normalizer sequence (implement NFKC/StripAccents support).
+Add vocab/logits filtering to exclude <unk>/special tokens during sampling and force EOS only after an “end‑of‑sentence” probability threshold.
+
+---
+
+Does `hologram` have traits? In the ideal world, we would have consumers of that `hologram` as a dependency be able to take advantage of the `hologram` compiler and all the optimizations in there, but have external crates (like this one) be able to define their own individual options. `hologram-ai` for onnx/gguf/(others?) and hologram-python, hologram-typescript are other examples that shouldn't touch the `hologram` compiler
+
+---
+
+We're not loading from a `.weights` file though, we're embedding those weights in the `.holo` archive. Can you confirm this? That's what the `EmbeddableSection` trait should be doing.
+
+I don't want you to default a sequence length. Why would we do that? We want to preserve symbolic dimensions if there are none in the compiled.
+
+---
+
+How can we speed up tose computational costs though? The compiler generates a graph which should enable us to process subgraphs in parallel... what can we do to speed-up those computational costs with this parallel nature of our compled graph?
+
+---
+
+I want you to make the real fix... I prefer propagating symbolic dimensions through shape inference, but if we need to have a dynamic workspace allocation at runtime that seems like a sensible fix
+
+---
+
+Since we have operation and symbolic shape support in `hologram`,  my expectation for these graphs is that we could just use those operations to satisfy the graph naturally. Why are we having such a difficult time getting these graphs to run. Symbolic shapes and dynamic dimensions should allow us to map these graph operations naturally to those that are supported in `hologram`, right?
+
+---
+
+Next Steps
+Investigate why execution is slow - there might be workspace allocation or kernel execution issues
+Continue with Phase 2 - fix Split, Reshape, Transpose translators to handle symbolic dims gracefully
+Consider architecture improvements - extend DimExpr to kernel parameters for true runtime resolution

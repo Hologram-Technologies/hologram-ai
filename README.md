@@ -13,6 +13,7 @@ hologram-onnx compiles ONNX models to Hologram's optimized `.holo` format, enabl
 - **ISA Optimizations**: Conv2D → Im2Col+GEMM decomposition, SIMD vectorization, O(1) space complexity
 - **Weight Deduplication**: Automatic detection and deduplication of identical weights
 - **Graph Partitioning**: Support for large models (3000+ nodes) with memory-efficient compilation
+- **HOLM Pipeline Bundles**: Layer-wise compilation with memory-mapped execution for large transformer models
 
 ## Architecture
 
@@ -117,6 +118,50 @@ hologram-onnx leverages Hologram's ISA-level optimizations for high performance:
 - **Optimal Conv2D**: Convolutions decomposed to matrix multiplication
 - **SIMD vectorization**: 4-wide SIMD for matrix operations
 - **Cache efficiency**: Tile-based GEMM with optimal memory access patterns
+
+## HOLM Pipeline Archives
+
+For large transformer models, hologram-onnx supports layer-wise compilation into HOLM (Hologram Layer Model) archives. This enables memory-efficient inference on models larger than available RAM.
+
+### Features
+
+- **Automatic Layer Detection**: Recognizes transformer patterns (BERT, T5, GPT-2, LLaMA, etc.)
+- **Memory-Mapped Weights**: Weights accessed via mmap, never fully loaded into memory
+- **Streaming Execution**: Prefetch layer N+1 while executing layer N, release layer N-1
+- **Embedded Metadata**: Tokenizer vocabulary, generation config, and model metadata in single file
+
+### Supported Architectures
+
+| Pattern | Example Models |
+|---------|---------------|
+| `encoder.layer.N` | BERT, RoBERTa, DistilBERT |
+| `decoder.block.N` | T5, BART |
+| `transformer.h.N` | GPT-2, OPT |
+| `model.layers.N` | LLaMA, Mistral |
+
+### Usage
+
+```bash
+# Compile with layer-wise splitting
+cargo run -p hologram-ai -- compile model.onnx -o model.holo --layer-wise
+
+# Execute with streaming (automatic for HOLM files)
+cargo run -p hologram-ai -- run model.holo --input input.json
+```
+
+### Format Layout
+
+```
+HOLM File:
+├── Header (64 bytes) - magic "HOLM", model count
+├── Index - per-layer offset, size, CRC32
+├── [4KB alignment padding]
+├── Layer 0 (HOLB) - graph + weights (page-aligned)
+├── Layer 1 (HOLB) - graph + weights (page-aligned)
+└── ...
+```
+
+Each layer is page-aligned (4KB) for efficient memory mapping.
 
 ## Performance
 

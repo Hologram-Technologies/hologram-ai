@@ -113,6 +113,7 @@
 
 mod config;
 mod error;
+mod input_order;
 mod raw;
 mod sentencepiece;
 mod traits;
@@ -120,6 +121,9 @@ mod vocabulary;
 
 // Re-export core traits
 pub use traits::{CloneableSection, EmbeddableSection, FromEmbeddedSection};
+
+// Re-export layer header section from hologram bundle
+pub use hologram::bundle::LayerHeaderSection;
 
 // Re-export error types
 pub use error::{EmbedError, EmbedResult};
@@ -132,6 +136,7 @@ pub use config::{
     GenerationConfigSection, ModelConfigSection, PreprocessorConfigSection, SpecialTokensSection,
     TokenizerConfigSection,
 };
+pub use input_order::InputOrderSection;
 
 // Re-export sentencepiece section
 pub use sentencepiece::SentencePieceSection;
@@ -156,7 +161,9 @@ mod tests {
             GenerationConfigSection::SECTION_ID,
             PreprocessorConfigSection::SECTION_ID,
             SentencePieceSection::SECTION_ID,
+            InputOrderSection::SECTION_ID,
             RawFileSection::SECTION_ID,
+            LayerHeaderSection::SECTION_ID,
         ];
 
         let mut unique_ids = std::collections::HashSet::new();

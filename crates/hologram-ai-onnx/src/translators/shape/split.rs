@@ -65,14 +65,11 @@ impl OnnxTranslator for SplitTranslator {
         let axis_usize = axis as usize;
 
         // Get the dimension size at the split axis
+        // Symbolic/Dynamic dimensions are allowed - hologram will resolve at runtime
         let axis_dim = &input_shape.dims[axis_usize];
-        let axis_size = match axis_dim {
-            Dim::Static(s) => *s,
-            _ => {
-                return Err(TranslationError::ShapeInference(
-                    "Split: cannot split along dynamic dimension".to_string(),
-                ));
-            }
+        let axis_size: Option<usize> = match axis_dim {
+            Dim::Static(s) => Some(*s),
+            Dim::Symbolic(_) | Dim::Dynamic => None,
         };
 
         // Get split sizes - from second input (opset 13+) or attribute
@@ -104,32 +101,55 @@ impl OnnxTranslator for SplitTranslator {
             // No split sizes specified - check for num_outputs or split equally
             let num_outputs = node.get_int("num_outputs").unwrap_or(0) as usize;
             if num_outputs > 0 {
-                // Split into equal parts
-                if axis_size % num_outputs != 0 {
-                    return Err(TranslationError::ShapeInference(format!(
-                        "Split: cannot split dimension {} into {} equal parts",
-                        axis_size, num_outputs
-                    )));
+                // Split into equal parts - requires known axis size
+                match axis_size {
+                    Some(size) => {
+                        if size % num_outputs != 0 {
+                            return Err(TranslationError::ShapeInference(format!(
+                                "Split: cannot split dimension {} into {} equal parts",
+                                size, num_outputs
+                            )));
+                        }
+                        let part_size = size / num_outputs;
+                        vec![part_size; num_outputs]
+                    }
+                    None => {
+                        // For symbolic dimensions with num_outputs, we cannot compute
+                        // exact split sizes at compile time. This requires explicit split sizes.
+                        return Err(TranslationError::ShapeInference(
+                            "Split: symbolic axis dimension requires explicit split sizes"
+                                .to_string(),
+                        ));
+                    }
                 }
-                let part_size = axis_size / num_outputs;
-                vec![part_size; num_outputs]
             } else {
                 // Default: return input as single output (identity)
-                vec![axis_size]
+                match axis_size {
+                    Some(size) => vec![size],
+                    None => {
+                        // For symbolic dimension, return single output preserving the symbolic shape
+                        // The slice operation will preserve symbolic dimensions
+                        vec![0] // Marker for "full dimension" - handled below
+                    }
+                }
             }
         };
 
-        // Validate split sizes sum to axis dimension
+        // Validate split sizes sum to axis dimension (only when axis_size is known)
+        // For symbolic dimensions, skip validation - hologram will resolve at runtime
         let sum: usize = split_sizes.iter().sum();
-        if sum != axis_size {
-            return Err(TranslationError::ShapeInference(format!(
-                "Split: split sizes sum ({}) does not match axis dimension ({})",
-                sum, axis_size
-            )));
+        if let Some(size) = axis_size {
+            // Check for special case: single output with marker 0 for full symbolic dimension
+            if !(split_sizes.len() == 1 && split_sizes[0] == 0) && sum != size {
+                return Err(TranslationError::ShapeInference(format!(
+                    "Split: split sizes sum ({}) does not match axis dimension ({})",
+                    sum, size
+                )));
+            }
         }
 
         tracing::debug!(
-            "Split: axis = {}, axis_size = {}, split_sizes = {:?}",
+            "Split: axis = {}, axis_size = {:?}, split_sizes = {:?}",
             axis,
             axis_size,
             split_sizes
@@ -140,6 +160,13 @@ impl OnnxTranslator for SplitTranslator {
         let mut start = 0usize;
 
         for &size in &split_sizes {
+            // Handle special case: size=0 means full dimension (symbolic identity split)
+            if size == 0 {
+                // For symbolic identity split, just pass through the input
+                outputs.push(data);
+                continue;
+            }
+
             // Use Slice to extract this portion
             // starts: [0, ..., start, ..., 0]
             // ends: [dim0, ..., start+size, ..., dimN]
@@ -433,5 +460,73 @@ mod tests {
         let req = translator.input_requirement();
         assert!(matches!(req, InputRequirement::Range(1, 2)));
         assert!(!req.accepts_zero());
+    }
+
+    // ===== Symbolic Dimension Tests =====
+
+    #[test]
+    fn test_split_symbolic_axis_with_explicit_sizes() {
+        let translator = SplitTranslator;
+        let mut builder = GraphBuilder::new();
+
+        // Input with symbolic first dimension
+        let shape = Shape::new(vec![Dim::Symbolic("seq_len".to_string()), Dim::Static(4)]);
+        let x = builder.input("x", shape, DType::F32);
+
+        // Split on static dimension (axis=1) with explicit sizes - should work
+        let result = translator.translate(&make_node_with_split(1, vec![2, 2]), &[x], &mut builder);
+        assert!(result.is_ok());
+        let outputs = result.unwrap();
+        assert_eq!(outputs.len(), 2);
+    }
+
+    #[test]
+    fn test_split_symbolic_axis_identity() {
+        let translator = SplitTranslator;
+        let mut builder = GraphBuilder::new();
+
+        // Input with symbolic first dimension
+        let shape = Shape::new(vec![Dim::Symbolic("seq_len".to_string()), Dim::Static(4)]);
+        let x = builder.input("x", shape, DType::F32);
+
+        // Split on symbolic dimension without split sizes or num_outputs - identity
+        let result = translator.translate(&make_node_with_axis(0), &[x], &mut builder);
+        assert!(result.is_ok());
+        let outputs = result.unwrap();
+        // Should return single output (identity pass-through)
+        assert_eq!(outputs.len(), 1);
+    }
+
+    #[test]
+    fn test_split_symbolic_axis_with_num_outputs_fails() {
+        let translator = SplitTranslator;
+        let mut builder = GraphBuilder::new();
+
+        // Input with symbolic first dimension
+        let shape = Shape::new(vec![Dim::Symbolic("seq_len".to_string()), Dim::Static(4)]);
+        let x = builder.input("x", shape, DType::F32);
+
+        // Split on symbolic dimension with num_outputs - should fail
+        // (can't compute equal split sizes without knowing axis dimension)
+        let result = translator.translate(&make_node_with_num_outputs(0, 2), &[x], &mut builder);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.to_string().contains("symbolic"));
+    }
+
+    #[test]
+    fn test_split_dynamic_dim_identity() {
+        let translator = SplitTranslator;
+        let mut builder = GraphBuilder::new();
+
+        // Input with dynamic first dimension
+        let shape = Shape::new(vec![Dim::Dynamic, Dim::Static(4)]);
+        let x = builder.input("x", shape, DType::F32);
+
+        // Split on dynamic dimension without split sizes - identity
+        let result = translator.translate(&make_node_with_axis(0), &[x], &mut builder);
+        assert!(result.is_ok());
+        let outputs = result.unwrap();
+        assert_eq!(outputs.len(), 1);
     }
 }

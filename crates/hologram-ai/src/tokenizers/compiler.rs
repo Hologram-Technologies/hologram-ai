@@ -213,19 +213,12 @@ pub fn compile_tokenizer_to_holo(config: &TokenizerConfig, output_path: &Path) -
 
     // Step 3: Compile to BackendPlan
     let backend_type = hologram::BackendType::Cpu;
-    let backend_plan = hologram::compiler::compile_ir(&ir_graph, backend_type)
-        .map_err(|e| anyhow::anyhow!("Failed to compile tokenizer IR: {:?}", e))?;
+    let (backend_plan, header) =
+        hologram::compiler::compile_ir_with_header(&ir_graph, backend_type)
+            .map_err(|e| anyhow::anyhow!("Failed to compile tokenizer IR: {:?}", e))?;
 
     // Step 4: Serialize to .holo format
-    let serializable = backend_plan.to_serializable();
-    let plan_bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&serializable)
-        .map(|bytes| bytes.to_vec())
-        .map_err(|e| anyhow::anyhow!("Failed to serialize BackendPlan: {}", e))?;
-
-    // Prepend magic bytes
-    let mut holo_bytes = Vec::with_capacity(4 + plan_bytes.len());
-    holo_bytes.extend_from_slice(&hologram::compiler::HOLO_MAGIC);
-    holo_bytes.extend_from_slice(&plan_bytes);
+    let holo_bytes = serialize_backend_plan_with_header(&backend_plan, &header)?;
 
     // Step 5: Write to file
     fs::write(output_path, holo_bytes)
@@ -281,24 +274,18 @@ pub fn compile_tokenizer_to_bundle(config: &TokenizerConfig, output_path: &Path)
 
     // Step 3: Compile to BackendPlan
     let backend_type = hologram::BackendType::Cpu;
-    let backend_plan = hologram::compiler::compile_ir(&ir_graph, backend_type)
-        .map_err(|e| anyhow::anyhow!("Failed to compile tokenizer IR: {:?}", e))?;
+    let (backend_plan, header) =
+        hologram::compiler::compile_ir_with_header(&ir_graph, backend_type)
+            .map_err(|e| anyhow::anyhow!("Failed to compile tokenizer IR: {:?}", e))?;
 
     // Step 4: Serialize to bytes
-    let serializable = backend_plan.to_serializable();
-    let plan_bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&serializable)
-        .map(|bytes| bytes.to_vec())
-        .map_err(|e| anyhow::anyhow!("Failed to serialize BackendPlan: {}", e))?;
-
-    // Prepend HOLP magic (graph format, not bundle magic)
-    let mut graph_bytes = Vec::with_capacity(4 + plan_bytes.len());
-    graph_bytes.extend_from_slice(&hologram::compiler::HOLO_MAGIC);
-    graph_bytes.extend_from_slice(&plan_bytes);
+    let graph_bytes = serialize_backend_plan_with_header(&backend_plan, &header)?;
 
     // Step 5: Create HOLB bundle with empty weights
     let mut writer = UnifiedBundleWriter::new();
     writer.set_graph_bytes(graph_bytes);
     writer.set_weights_bytes(Vec::new()); // Tokenizers have no external weights
+    writer.add_section(hologram_ai_onnx::core::sections::LayerHeaderSection { header });
 
     let bundle_bytes = writer.finish();
 
@@ -311,6 +298,30 @@ pub fn compile_tokenizer_to_bundle(config: &TokenizerConfig, output_path: &Path)
         output_path.display()
     );
     Ok(())
+}
+
+fn serialize_backend_plan_with_header(
+    plan: &hologram::backend::BackendPlan,
+    header: &hologram::compiler::format::LayerHeaderData,
+) -> Result<Vec<u8>> {
+    let serializable = plan.to_serializable();
+    let plan_bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&serializable)
+        .map(|bytes| bytes.to_vec())
+        .map_err(|e| anyhow::anyhow!("Failed to serialize BackendPlan: {}", e))?;
+    let header_bytes = rkyv::to_bytes::<rkyv::rancor::Error>(header)
+        .map(|bytes| bytes.to_vec())
+        .map_err(|e| anyhow::anyhow!("Failed to serialize LayerHeader: {}", e))?;
+    let header_len = u32::try_from(header_bytes.len())
+        .map_err(|_| anyhow::anyhow!("LayerHeader too large to serialize"))?;
+
+    let mut holo_bytes = Vec::with_capacity(12 + header_bytes.len() + plan_bytes.len());
+    holo_bytes.extend_from_slice(&hologram::compiler::HOLO_MAGIC);
+    holo_bytes.extend_from_slice(&hologram::backend::plan::PLAN_FORMAT_VERSION.to_le_bytes());
+    holo_bytes.extend_from_slice(&header_len.to_le_bytes());
+    holo_bytes.extend_from_slice(&header_bytes);
+    holo_bytes.extend_from_slice(&plan_bytes);
+
+    Ok(holo_bytes)
 }
 
 #[cfg(test)]

@@ -37,6 +37,8 @@ serde_json.workspace = true
 toml.workspace = true
 rkyv.workspace = true
 half.workspace = true
+libc.workspace = true
+unicode-normalization.workspace = true
 
 # CLI
 clap.workspace = true

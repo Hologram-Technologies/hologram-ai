@@ -142,6 +142,139 @@ fn translate_node_via_registry(
         .map_err(crate::OnnxError::from)
 }
 
+fn translate_if_node(
+    node: &crate::proto::NodeProto,
+    builder: &mut hologram::ir::GraphBuilder,
+    parent_values: &std::collections::HashMap<String, hologram::NodeIndex>,
+) -> Result<Vec<hologram::NodeIndex>> {
+    use tracing::debug;
+
+    let condition_name = node.input.first().ok_or_else(|| {
+        crate::OnnxError::InvalidModel("If node missing condition input".to_string())
+    })?;
+    let condition = parent_values.get(condition_name).copied().ok_or_else(|| {
+        crate::OnnxError::MissingInput(format!(
+            "If condition '{}' not found in parent graph",
+            condition_name
+        ))
+    })?;
+
+    let then_graph = find_if_branch(node, "then_branch")?;
+    let else_graph = find_if_branch(node, "else_branch")?;
+
+    debug!(
+        "Translating If node '{}' with {} then nodes, {} else nodes",
+        node.name,
+        then_graph.node.len(),
+        else_graph.node.len()
+    );
+
+    let then_outputs = translate_subgraph(then_graph, builder, parent_values)?;
+    let else_outputs = translate_subgraph(else_graph, builder, parent_values)?;
+
+    if then_outputs.len() != else_outputs.len() {
+        return Err(crate::OnnxError::InvalidModel(format!(
+            "If branches output count mismatch: then={}, else={}",
+            then_outputs.len(),
+            else_outputs.len()
+        )));
+    }
+
+    if node.output.len() != then_outputs.len() {
+        return Err(crate::OnnxError::InvalidModel(format!(
+            "If node outputs {} do not match branch outputs {}",
+            node.output.len(),
+            then_outputs.len()
+        )));
+    }
+
+    let mut selected = Vec::with_capacity(then_outputs.len());
+    for (then_out, else_out) in then_outputs.iter().zip(else_outputs.iter()) {
+        let out = builder.where_select(condition, *then_out, *else_out)?;
+        selected.push(out);
+    }
+
+    Ok(selected)
+}
+
+fn find_if_branch<'a>(
+    node: &'a crate::proto::NodeProto,
+    name: &str,
+) -> Result<&'a crate::proto::GraphProto> {
+    let attr = node
+        .attribute
+        .iter()
+        .find(|attr| attr.name == name)
+        .ok_or_else(|| {
+            crate::OnnxError::InvalidModel(format!("If node missing '{}' attribute", name))
+        })?;
+
+    attr.g.as_ref().ok_or_else(|| {
+        crate::OnnxError::InvalidModel(format!("If node attribute '{}' missing graph value", name))
+    })
+}
+
+fn translate_subgraph(
+    graph: &crate::proto::GraphProto,
+    builder: &mut hologram::ir::GraphBuilder,
+    parent_values: &std::collections::HashMap<String, hologram::NodeIndex>,
+) -> Result<Vec<hologram::NodeIndex>> {
+    use std::collections::HashMap;
+    use tracing::trace;
+
+    let mut value_map: HashMap<String, hologram::NodeIndex> = parent_values.clone();
+
+    for input in &graph.input {
+        if value_map.contains_key(&input.name) {
+            continue;
+        }
+        // Preserve symbolic dimensions for proper DimExpr resolution at runtime
+        let shape = crate::core::SymbolicShape::from_value_info_preserve_symbolic(input)?;
+        let dtype = extract_dtype_from_value_info(input)?;
+        let node_idx = builder.input(&input.name, shape.into_inner(), dtype);
+        value_map.insert(input.name.clone(), node_idx);
+    }
+
+    for initializer in &graph.initializer {
+        if value_map.contains_key(&initializer.name) {
+            continue;
+        }
+        let (constant_data, shape) = tensor_proto_to_constant(initializer)?;
+        let node_idx = builder.constant(constant_data, shape);
+        value_map.insert(initializer.name.clone(), node_idx);
+    }
+
+    for (idx, node) in graph.node.iter().enumerate() {
+        trace!(
+            "Translating subgraph node {}/{}: {} ({})",
+            idx + 1,
+            graph.node.len(),
+            node.name,
+            node.op_type
+        );
+        let outputs = if node.op_type == "If" {
+            translate_if_node(node, builder, &value_map)?
+        } else {
+            translate_node_via_registry(node, builder, &value_map)?
+        };
+        for (output_name, output_idx) in node.output.iter().zip(outputs.iter()) {
+            if !output_name.is_empty() {
+                value_map.insert(output_name.clone(), *output_idx);
+            }
+        }
+    }
+
+    let mut outputs = Vec::with_capacity(graph.output.len());
+    for output in &graph.output {
+        let idx = value_map.get(&output.name).copied().ok_or_else(|| {
+            crate::OnnxError::InvalidModel(format!("Subgraph output '{}' not found", output.name))
+        })?;
+        outputs.push(idx);
+    }
+
+    Ok(outputs)
+}
+
 /// Translate ONNX GraphProto to hologram IR.
 ///
 /// This is the main entry point for ONNX→IR translation. It:
@@ -173,9 +306,10 @@ pub fn translate_graph_to_ir(graph: &crate::proto::GraphProto) -> Result<IRFunct
     let mut value_map: HashMap<String, hologram::NodeIndex> = HashMap::new();
 
     // Step 1: Process inputs with symbolic shapes
+    // Use preserve_symbolic to maintain symbolic dimensions for DimExpr resolution
     debug!("Processing {} graph inputs", graph.input.len());
     for (i, input) in graph.input.iter().enumerate() {
-        let shape = crate::core::SymbolicShape::from_value_info(input)?;
+        let shape = crate::core::SymbolicShape::from_value_info_preserve_symbolic(input)?;
 
         // Determine dtype from ONNX type
         let dtype = extract_dtype_from_value_info(input)?;
@@ -238,7 +372,11 @@ pub fn translate_graph_to_ir(graph: &crate::proto::GraphProto) -> Result<IRFunct
         }
 
         // Translate this ONNX node to IR operations using the new registry
-        let output_indices = translate_node_via_registry(node, &mut builder, &value_map)?;
+        let output_indices = if node.op_type == "If" {
+            translate_if_node(node, &mut builder, &value_map)?
+        } else {
+            translate_node_via_registry(node, &mut builder, &value_map)?
+        };
 
         // Map outputs to their node indices
         for (output_name, output_idx) in node.output.iter().zip(output_indices.iter()) {
@@ -367,9 +505,10 @@ pub fn translate_graph_to_ir_with_groups(graph: &crate::proto::GraphProto) -> Re
     }
 
     // Step 1: Process inputs with symbolic shapes
+    // Use preserve_symbolic to maintain symbolic dimensions for DimExpr resolution
     debug!("Processing {} graph inputs", graph.input.len());
     for input in &graph.input {
-        let shape = crate::core::SymbolicShape::from_value_info(input)?;
+        let shape = crate::core::SymbolicShape::from_value_info_preserve_symbolic(input)?;
         let dtype = extract_dtype_from_value_info(input)?;
 
         trace!(
@@ -414,7 +553,11 @@ pub fn translate_graph_to_ir_with_groups(graph: &crate::proto::GraphProto) -> Re
         // Group assignment is handled at graph level by attention_detection.rs.
         // Individual node translation uses the standard registry - this is correct
         // separation of concerns (pattern detection vs. operation translation).
-        let output_indices = translate_node_via_registry(node, &mut builder, &value_map)?;
+        let output_indices = if node.op_type == "If" {
+            translate_if_node(node, &mut builder, &value_map)?
+        } else {
+            translate_node_via_registry(node, &mut builder, &value_map)?
+        };
 
         for (output_name, output_idx) in node.output.iter().zip(output_indices.iter()) {
             if !output_name.is_empty() {
@@ -645,6 +788,108 @@ fn parse_raw_data_f16(raw: &[u8]) -> Result<Vec<half::f16>> {
 
 #[cfg(test)]
 mod tests {
-    // Tests removed: These tests relied on old IR API internals that no longer exist.
-    // The OperationGraph type is now a simple wrapper around IRFunction.
+    use super::*;
+    use crate::proto::tensor_shape_proto::dimension::Value as DimValue;
+    use crate::proto::type_proto::Value as TypeValue;
+    use crate::proto::{
+        AttributeProto, GraphProto, NodeProto, TensorShapeProto, TypeProto, ValueInfoProto,
+    };
+    use hologram::ir::NodeOp;
+
+    fn value_info(name: &str, elem_type: i32, dims: &[i64]) -> ValueInfoProto {
+        let shape = TensorShapeProto {
+            dim: dims
+                .iter()
+                .map(|&d| crate::proto::tensor_shape_proto::Dimension {
+                    value: Some(DimValue::DimValue(d)),
+                    ..Default::default()
+                })
+                .collect(),
+        };
+        ValueInfoProto {
+            name: name.to_string(),
+            r#type: Some(TypeProto {
+                value: Some(TypeValue::TensorType(crate::proto::type_proto::Tensor {
+                    elem_type,
+                    shape: Some(shape),
+                })),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+    }
+
+    fn build_if_graph() -> GraphProto {
+        let then_graph = GraphProto {
+            name: "then_branch".to_string(),
+            input: vec![value_info("x", 1, &[1])],
+            output: vec![value_info("out", 1, &[1])],
+            node: vec![NodeProto {
+                op_type: "Identity".to_string(),
+                input: vec!["x".to_string()],
+                output: vec!["out".to_string()],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+
+        let else_graph = GraphProto {
+            name: "else_branch".to_string(),
+            input: vec![value_info("y", 1, &[1])],
+            output: vec![value_info("out", 1, &[1])],
+            node: vec![NodeProto {
+                op_type: "Identity".to_string(),
+                input: vec!["y".to_string()],
+                output: vec!["out".to_string()],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+
+        GraphProto {
+            name: "if_graph".to_string(),
+            input: vec![
+                value_info("cond", 9, &[1]),
+                value_info("x", 1, &[1]),
+                value_info("y", 1, &[1]),
+            ],
+            output: vec![value_info("out", 1, &[1])],
+            node: vec![NodeProto {
+                name: "if_node".to_string(),
+                op_type: "If".to_string(),
+                input: vec!["cond".to_string()],
+                output: vec!["out".to_string()],
+                attribute: vec![
+                    AttributeProto {
+                        name: "then_branch".to_string(),
+                        g: Some(then_graph),
+                        ..Default::default()
+                    },
+                    AttributeProto {
+                        name: "else_branch".to_string(),
+                        g: Some(else_graph),
+                        ..Default::default()
+                    },
+                ],
+                ..Default::default()
+            }],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn test_translate_if_node_creates_where() {
+        let graph = build_if_graph();
+        let ir_func = translate_graph_to_ir(&graph).expect("translation failed");
+
+        let has_where = ir_func
+            .nodes()
+            .any(|(_, node)| matches!(node.op.op, NodeOp::Where));
+        assert!(has_where, "expected Where op for If lowering");
+
+        assert!(
+            ir_func.outputs.contains_key("out"),
+            "expected output 'out' to be registered"
+        );
+    }
 }

@@ -13,6 +13,8 @@
 use crate::config::{
     ModelDef, OutputDef, OutputHandlerType, RuntimeConfig, StageDef, UnifiedConfig,
 };
+use crate::runtime::Tensor;
+use crate::tokenizers::Tokenizer;
 use anyhow::{Context, Result};
 use std::collections::HashMap;
 use std::path::Path;
@@ -2131,10 +2133,18 @@ pub fn run_direct_command(
 /// # Returns
 ///
 /// Returns the generated text, or an error if generation fails.
+#[allow(clippy::too_many_arguments)]
 pub fn run_pipeline_bundle_command(
     pipeline_path: &Path,
     prompt: &str,
     max_new_tokens: usize,
+    min_new_tokens: usize,
+    top_k: usize,
+    temperature: f32,
+    beam_size: usize,
+    length_penalty: f32,
+    no_repeat_ngram: usize,
+    eos_prob_threshold: f32,
 ) -> Result<String> {
     use crate::runtime::{ModelExecutor, Tensor, load_pipeline_bundle};
 
@@ -2142,6 +2152,13 @@ pub fn run_pipeline_bundle_command(
     info!("Pipeline: {}", pipeline_path.display());
     info!("Prompt: \"{}\"", prompt);
     info!("Max new tokens: {}", max_new_tokens);
+    info!("Min new tokens: {}", min_new_tokens);
+    info!("Top-k: {}", top_k);
+    info!("Temperature: {:.3}", temperature);
+    info!("Beam size: {}", beam_size);
+    info!("Length penalty: {:.3}", length_penalty);
+    info!("No-repeat ngram: {}", no_repeat_ngram);
+    info!("EOS prob threshold: {:.3}", eos_prob_threshold);
 
     // Load pipeline bundle
     info!("");
@@ -2162,13 +2179,42 @@ pub fn run_pipeline_bundle_command(
         anyhow::bail!("Pipeline bundle must contain a decoder model");
     }
 
+    // Load encoder early to infer the compiled sequence length.
+    let (encoder_plan, encoder_backend, encoder_inputs) =
+        pipeline.load_model_with_inputs("encoder")?;
+    let max_length = infer_sequence_length_from_plan(encoder_plan.plan()).unwrap_or_else(|| {
+        warn!("  Falling back to max_length=512 (unable to infer from model plan)");
+        512
+    });
+    let mut token_max_length = max_length;
+    if let Ok(value) = std::env::var("HOLOGRAM_T5_MAX_LENGTH")
+        && let Ok(override_len) = value.parse::<usize>()
+        && override_len > 0
+    {
+        token_max_length = override_len.min(max_length);
+        info!(
+            "  Overriding token max_length with HOLOGRAM_T5_MAX_LENGTH={} (plan max_length={})",
+            token_max_length, max_length
+        );
+    }
+
     // Load SentencePiece tokenizer from tokenizer.json adjacent to pipeline file
     info!("");
     info!("Loading tokenizer...");
-    let tokenizer_path = pipeline_path
-        .parent()
-        .map(|p| p.join("tokenizer.json"))
-        .filter(|p| p.exists());
+    let tokenizer_path = pipeline_path.parent().and_then(|dir| {
+        let direct = dir.join("tokenizer.json");
+        if direct.exists() {
+            return Some(direct);
+        }
+        dir.parent().and_then(|parent| {
+            let fallback = parent.join("tokenizer.json");
+            if fallback.exists() {
+                Some(fallback)
+            } else {
+                None
+            }
+        })
+    });
 
     let tokenizer: Option<crate::tokenizers::sentencepiece::SentencePieceTokenizer> =
         tokenizer_path.as_ref().and_then(|path| {
@@ -2191,11 +2237,14 @@ pub fn run_pipeline_bundle_command(
     // Tokenize input
     info!("");
     info!("Tokenizing input...");
-    let max_length = 512usize; // Must match compiled model's sequence length
+    info!(
+        "  Using model max_length: {} (token max_length: {})",
+        max_length, token_max_length
+    );
 
-    let (input_ids, actual_len) = if let Some(ref tok) = tokenizer {
+    let (mut input_ids, actual_len) = if let Some(ref tok) = tokenizer {
         use crate::tokenizers::Tokenizer;
-        match tok.encode(prompt, max_length) {
+        match tok.encode(prompt, token_max_length) {
             Ok(tokens) => {
                 let actual_len = tokens
                     .iter()
@@ -2211,21 +2260,29 @@ pub fn run_pipeline_bundle_command(
             }
             Err(e) => {
                 warn!("  Tokenization failed: {}, using fallback", e);
-                fallback_tokenize(prompt, max_length)
+                fallback_tokenize(prompt, token_max_length)
             }
         }
     } else {
         warn!("  No tokenizer available - using fallback tokenization");
-        fallback_tokenize(prompt, max_length)
+        fallback_tokenize(prompt, token_max_length)
     };
+
+    let pad_token_id_for_input = tokenizer
+        .as_ref()
+        .map(|tok| tok.pad_token_id())
+        .unwrap_or(0);
+    if input_ids.len() < max_length {
+        input_ids.resize(max_length, pad_token_id_for_input);
+    }
 
     // Create attention mask
     // T5 ONNX export uses inverted mask: 0 for valid positions, 1 for masked (padding)
     // The model computes: (1 + inverted_mask) * -inf = -2*inf for valid, -inf for padding
     // This is wrong - need to use standard mask format
     // Standard: 1 for valid, 0 for padding - model should compute (1 - mask) * -inf
-    let attention_mask: Vec<f32> = (0..max_length)
-        .map(|i| if i < actual_len { 1.0 } else { 0.0 })
+    let attention_mask: Vec<u32> = (0..max_length)
+        .map(|i| if i < actual_len { 1 } else { 0 })
         .collect();
 
     // Debug: print first 10 mask values
@@ -2234,22 +2291,26 @@ pub fn run_pipeline_bundle_command(
         &attention_mask[..10.min(max_length)]
     );
 
-    let input_ids_f32: Vec<f32> = input_ids.iter().map(|&t| t as f32).collect();
-
     // Load and run encoder using ModelExecutor
     info!("");
     info!("Running encoder...");
-    let (encoder_plan, encoder_backend) = pipeline.load_model("encoder")?;
-    let mut encoder = ModelExecutor::from_plan_executor(encoder_plan, encoder_backend);
+    let mut encoder = match encoder_inputs {
+        Some(order) => {
+            ModelExecutor::from_plan_executor_with_inputs(encoder_plan, encoder_backend, order)
+        }
+        None => ModelExecutor::from_plan_executor(encoder_plan, encoder_backend),
+    };
 
+    let attention_mask_f32: Vec<f32> = attention_mask.iter().map(|&v| v as f32).collect();
+    let input_ids_f32: Vec<f32> = input_ids.iter().map(|&v| v as f32).collect();
     let mut encoder_inputs = std::collections::HashMap::new();
     encoder_inputs.insert(
         "attention_mask".to_string(),
-        Tensor::new(attention_mask.clone(), vec![1, max_length]),
+        Tensor::new(attention_mask_f32.clone(), vec![1, max_length]),
     );
     encoder_inputs.insert(
         "input_ids".to_string(),
-        Tensor::new(input_ids_f32.clone(), vec![1, max_length]),
+        Tensor::new(input_ids_f32, vec![1, max_length]),
     );
 
     let encoder_start = std::time::Instant::now();
@@ -2333,31 +2394,83 @@ pub fn run_pipeline_bundle_command(
     // Load decoder for generation
     info!("");
     info!("Running decoder (auto-regressive generation)...");
-    let (decoder_plan, decoder_backend) = pipeline.load_model("decoder")?;
-    let mut decoder = ModelExecutor::from_plan_executor(decoder_plan, decoder_backend);
+    let (decoder_plan, decoder_backend, decoder_inputs) =
+        pipeline.load_model_with_inputs("decoder")?;
+    let mut decoder = match decoder_inputs {
+        Some(order) => {
+            ModelExecutor::from_plan_executor_with_inputs(decoder_plan, decoder_backend, order)
+        }
+        None => ModelExecutor::from_plan_executor(decoder_plan, decoder_backend),
+    };
+    let decoder_input_count = decoder.plan().layout_metadata.num_inputs;
+    let decoder_output_count = decoder.plan().layout_metadata.num_outputs;
+    let kv_layers = infer_t5_kv_layers(decoder_output_count);
+    let decoder_supports_kv = decoder_input_count > 3 && kv_layers.is_some();
+    let kv_input_names = if decoder_supports_kv {
+        Some(t5_decoder_input_names(kv_layers.unwrap_or(0)))
+    } else {
+        None
+    };
+    let kv_input_sizes = if let Some(ref names) = kv_input_names {
+        Some(build_input_size_map(decoder.plan(), names)?)
+    } else {
+        None
+    };
+    if decoder_supports_kv {
+        info!(
+            "  Decoder KV-cache enabled: {} layers ({} inputs, {} outputs)",
+            kv_layers.unwrap_or(0),
+            decoder_input_count,
+            decoder_output_count
+        );
+    } else if decoder_input_count > 3 {
+        warn!(
+            "  Decoder expects {} inputs but KV-cache outputs could not be inferred ({} outputs).",
+            decoder_input_count, decoder_output_count
+        );
+    } else {
+        info!(
+            "  Decoder KV-cache disabled ({} inputs, {} outputs).",
+            decoder_input_count, decoder_output_count
+        );
+    }
 
     // T5 decoder vocab size
     let vocab_size = 32128usize;
 
     // Initialize decoder with start token
     let mut generated_tokens: Vec<u32> = vec![0]; // Start with pad token
+    let mut kv_cache: Option<DecoderKvCache> = None;
 
-    // Auto-regressive generation loop
+    let (pad_token_id, eos_token_id, unk_token_id) = if let Some(ref tok) = tokenizer {
+        (tok.pad_token_id(), tok.eos_token_id(), tok.unk_token_id())
+    } else {
+        (0, 1, 2)
+    };
+    let special_token_ids = tokenizer
+        .as_ref()
+        .map(|tok| tok.special_token_ids())
+        .unwrap_or(&[]);
+
+    let mut rng = XorShift64::seeded();
     let gen_start = std::time::Instant::now();
-    for step in 0..max_new_tokens {
-        // Build decoder input
-        let mut decoder_input_ids = vec![0.0f32; max_length];
-        for (i, &tok) in generated_tokens.iter().enumerate() {
+
+    let mut run_decoder_step = |tokens: &[u32],
+                                use_cache: bool,
+                                kv: Option<DecoderKvCache>|
+     -> Result<(Tensor, Option<DecoderKvCache>)> {
+        let mut decoder_input_ids = vec![0u32; max_length];
+        for (i, &tok) in tokens.iter().enumerate() {
             if i < max_length {
-                decoder_input_ids[i] = tok as f32;
+                decoder_input_ids[i] = tok;
             }
         }
 
-        // Prepare decoder inputs
+        let decoder_input_ids_f32: Vec<f32> = decoder_input_ids.iter().map(|&v| v as f32).collect();
         let mut decoder_inputs = std::collections::HashMap::new();
         decoder_inputs.insert(
             "encoder_attention_mask".to_string(),
-            Tensor::new(attention_mask.clone(), vec![1, max_length]),
+            Tensor::new(attention_mask_f32.clone(), vec![1, max_length]),
         );
         decoder_inputs.insert(
             "encoder_hidden_states".to_string(),
@@ -2368,101 +2481,199 @@ pub fn run_pipeline_bundle_command(
         );
         decoder_inputs.insert(
             "input_ids".to_string(),
-            Tensor::new(decoder_input_ids, vec![1, max_length]),
+            Tensor::new(decoder_input_ids_f32, vec![1, max_length]),
         );
 
-        // Execute decoder
-        let decoder_outputs = decoder.execute(decoder_inputs)?;
-
-        // Get logits
-        let logits_tensor = decoder_outputs
-            .get("output")
-            .or_else(|| decoder_outputs.values().next())
-            .ok_or_else(|| anyhow::anyhow!("Decoder produced no output"))?;
-
-        let logits = logits_tensor.to_f32().to_vec();
-
-        // Get logits for the last generated token position
-        let seq_pos = generated_tokens.len() - 1;
-        let logits_start = seq_pos * vocab_size;
-        let logits_end = logits_start + vocab_size;
-
-        let last_logits = if logits_end <= logits.len() {
-            &logits[logits_start..logits_end]
-        } else {
-            &logits[logits.len().saturating_sub(vocab_size)..]
-        };
-
-        // Count NaN/Inf in logits for debugging
-        let nan_count = last_logits.iter().filter(|x| x.is_nan()).count();
-        let inf_count = last_logits.iter().filter(|x| x.is_infinite()).count();
-        if nan_count > 0 || inf_count > 0 {
-            debug!(
-                "  Step {}: logits have {} NaN, {} Inf values",
-                step, nan_count, inf_count
-            );
-        }
-
-        // Clean logits: replace NaN/Inf with very negative values to exclude them from argmax
-        let cleaned_logits: Vec<f32> = last_logits
-            .iter()
-            .map(|&x| {
-                if x.is_nan() || x.is_infinite() {
-                    f32::MIN // Use MIN so these tokens are never selected
+        if decoder_supports_kv {
+            let size_map = kv_input_sizes
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("Decoder KV-cache size map was not initialized"))?;
+            let cache = if use_cache {
+                if let Some(cache) = kv {
+                    cache
                 } else {
-                    x
+                    DecoderKvCache::zeros(kv_layers.unwrap_or(0), size_map)?
                 }
-            })
-            .collect();
+            } else {
+                DecoderKvCache::zeros(kv_layers.unwrap_or(0), size_map)?
+            };
 
-        // Greedy decoding: argmax on cleaned logits
-        let next_token = cleaned_logits
-            .iter()
-            .enumerate()
-            .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
-            .map(|(idx, _)| idx as u32)
-            .unwrap_or(1);
+            for (name, tensor) in cache.as_inputs() {
+                decoder_inputs.insert(name, tensor);
+            }
 
-        // Debug: show logit statistics for first few steps
-        if step < 5 {
-            let logit_min = last_logits.iter().copied().fold(f32::INFINITY, f32::min);
-            let logit_max = last_logits
-                .iter()
+            let branch_size = size_map
+                .get("use_cache_branch")
                 .copied()
-                .fold(f32::NEG_INFINITY, f32::max);
-            let logit_mean: f32 = last_logits.iter().sum::<f32>() / last_logits.len() as f32;
-
-            // Find top 5 tokens by logit value
-            let mut indexed: Vec<(usize, f32)> = last_logits
-                .iter()
-                .enumerate()
-                .map(|(i, &v)| (i, v))
-                .collect();
-            indexed.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-            let top5: Vec<_> = indexed.iter().take(5).collect();
-
-            info!(
-                "  Step {}: pos={}, logit_range=[{:.4}, {:.4}], mean={:.4}, top5={:?}",
-                step, seq_pos, logit_min, logit_max, logit_mean, top5
-            );
-            info!(
-                "    -> selected token {} (logit={:.4})",
-                next_token,
-                last_logits.get(next_token as usize).unwrap_or(&0.0)
+                .ok_or_else(|| anyhow::anyhow!("Missing size metadata for 'use_cache_branch'"))?;
+            decoder_inputs.insert(
+                "use_cache_branch".to_string(),
+                tensor_from_size(branch_size, if use_cache { 1.0 } else { 0.0 })?,
             );
         }
 
-        // Check for EOS token
-        if next_token == 1 {
-            info!("  Generation stopped at step {} (EOS token)", step + 1);
-            break;
+        let decoder_outputs = decoder.execute(decoder_inputs)?;
+        let step_outputs =
+            extract_decoder_step_outputs(decoder_outputs, kv_layers, decoder_supports_kv)?;
+        Ok((step_outputs.logits, step_outputs.kv_cache))
+    };
+
+    if beam_size > 1 {
+        let mut beams = vec![BeamState::new(vec![pad_token_id], 0.0)];
+        for step in 0..max_new_tokens {
+            let mut candidates: Vec<BeamState> = Vec::new();
+
+            for beam in &beams {
+                if beam.finished {
+                    candidates.push(beam.clone());
+                    continue;
+                }
+
+                let (logits_tensor, _kv_out) = run_decoder_step(&beam.tokens, false, None)?;
+                let logits = logits_tensor.to_f32();
+                let seq_pos = beam.tokens.len().saturating_sub(1);
+                let logits_start = seq_pos * vocab_size;
+                let logits_end = logits_start + vocab_size;
+                let last_logits = if logits_end <= logits.len() {
+                    &logits[logits_start..logits_end]
+                } else {
+                    &logits[logits.len().saturating_sub(vocab_size)..]
+                };
+
+                let eos_prob = softmax_prob(last_logits, eos_token_id as usize, temperature);
+                let allow_eos = (step + 1) >= min_new_tokens && eos_prob >= eos_prob_threshold;
+
+                let filtered_logits = apply_token_filters(
+                    last_logits,
+                    step,
+                    pad_token_id,
+                    unk_token_id,
+                    eos_token_id,
+                    allow_eos,
+                    special_token_ids,
+                );
+                let log_probs = log_softmax(&filtered_logits, temperature);
+                let top = top_k_log_probs(&log_probs, top_k);
+
+                for (token, logp) in top {
+                    if no_repeat_ngram > 0
+                        && violates_no_repeat_ngram(&beam.tokens, token, no_repeat_ngram)
+                    {
+                        continue;
+                    }
+
+                    let mut new_tokens = beam.tokens.clone();
+                    new_tokens.push(token);
+                    let mut new_beam = BeamState::new(new_tokens, beam.score + logp);
+                    if token == eos_token_id {
+                        new_beam.finished = true;
+                    }
+                    candidates.push(new_beam);
+                }
+            }
+
+            if candidates.is_empty() {
+                break;
+            }
+
+            candidates.sort_by(|a, b| {
+                let score_a = length_penalized(a.score, a.tokens.len(), length_penalty);
+                let score_b = length_penalized(b.score, b.tokens.len(), length_penalty);
+                score_b
+                    .partial_cmp(&score_a)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
+
+            candidates.truncate(beam_size);
+            beams = candidates;
+
+            if beams.iter().all(|b| b.finished) {
+                break;
+            }
         }
 
-        generated_tokens.push(next_token);
+        if let Some(best) = beams.into_iter().max_by(|a, b| {
+            let score_a = length_penalized(a.score, a.tokens.len(), length_penalty);
+            let score_b = length_penalized(b.score, b.tokens.len(), length_penalty);
+            score_a
+                .partial_cmp(&score_b)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        }) {
+            generated_tokens = best.tokens;
+        }
+    } else {
+        for step in 0..max_new_tokens {
+            let (logits_tensor, kv_out) =
+                run_decoder_step(&generated_tokens, kv_cache.is_some(), kv_cache.clone())?;
+            let logits = logits_tensor.to_f32();
+            kv_cache = kv_out;
+            if step == 0 && std::env::var("HOLOGRAM_TRACE_LOGITS_SHAPE").is_ok() {
+                info!("  Decoder logits shape: {:?}", logits_tensor.shape);
+            }
 
-        if generated_tokens.len() >= max_length {
-            info!("  Reached max length {}", max_length);
-            break;
+            let seq_pos = generated_tokens.len().saturating_sub(1);
+            let logits_start = seq_pos * vocab_size;
+            let logits_end = logits_start + vocab_size;
+            let last_logits = if logits_end <= logits.len() {
+                &logits[logits_start..logits_end]
+            } else {
+                &logits[logits.len().saturating_sub(vocab_size)..]
+            };
+
+            let eos_prob = softmax_prob(last_logits, eos_token_id as usize, temperature);
+            let allow_eos = (step + 1) >= min_new_tokens && eos_prob >= eos_prob_threshold;
+            let filtered_logits = apply_token_filters(
+                last_logits,
+                step,
+                pad_token_id,
+                unk_token_id,
+                eos_token_id,
+                allow_eos,
+                special_token_ids,
+            );
+            if step == 0
+                && let Some(limit) = std::env::var("HOLOGRAM_TRACE_TOPK")
+                    .ok()
+                    .and_then(|val| val.parse::<usize>().ok())
+                    .filter(|val| *val > 0)
+            {
+                let log_probs = log_softmax(&filtered_logits, temperature);
+                let top = top_k_log_probs(&log_probs, limit);
+                let mut rendered = Vec::with_capacity(top.len());
+                for (token, logp) in top {
+                    let text = tokenizer
+                        .as_ref()
+                        .and_then(|tok| tok.decode(&[token]).ok())
+                        .unwrap_or_else(|| format!("<{}>", token));
+                    rendered.push(format!("{}:{:.3}({})", token, logp, text));
+                }
+                info!("  TopK tokens step0: [{}]", rendered.join(", "));
+            }
+
+            let next_token = if top_k <= 1 || !temperature.is_finite() || temperature <= 0.0 {
+                select_argmax_with_repeat(&filtered_logits, &generated_tokens, no_repeat_ngram)
+            } else {
+                select_sample_with_repeat(
+                    &filtered_logits,
+                    top_k,
+                    temperature,
+                    &generated_tokens,
+                    no_repeat_ngram,
+                    &mut rng,
+                )
+            };
+
+            if next_token == eos_token_id && allow_eos {
+                info!("  Generation stopped at step {} (EOS token)", step + 1);
+                break;
+            }
+
+            generated_tokens.push(next_token);
+
+            if generated_tokens.len() >= max_length {
+                info!("  Reached max length {}", max_length);
+                break;
+            }
         }
     }
 
@@ -2487,6 +2698,484 @@ pub fn run_pipeline_bundle_command(
     info!("{}", decoded_text);
 
     Ok(decoded_text)
+}
+
+fn argmax_logits(logits: &[f32]) -> u32 {
+    let mut max_idx = 0usize;
+    let mut max_val = f32::NEG_INFINITY;
+    for (idx, &value) in logits.iter().enumerate() {
+        if value.is_nan() {
+            continue;
+        }
+        if value > max_val {
+            max_val = value;
+            max_idx = idx;
+        }
+    }
+    max_idx as u32
+}
+
+fn apply_token_filters(
+    logits: &[f32],
+    step: usize,
+    pad_id: u32,
+    unk_id: u32,
+    eos_id: u32,
+    allow_eos: bool,
+    special_ids: &[u32],
+) -> Vec<f32> {
+    let mut filtered = logits.to_vec();
+    if (pad_id as usize) < filtered.len() && step > 0 {
+        filtered[pad_id as usize] = f32::NEG_INFINITY;
+    }
+    if (unk_id as usize) < filtered.len() {
+        filtered[unk_id as usize] = f32::NEG_INFINITY;
+    }
+    if !allow_eos && (eos_id as usize) < filtered.len() {
+        filtered[eos_id as usize] = f32::NEG_INFINITY;
+    }
+    for &token_id in special_ids {
+        if token_id == eos_id && allow_eos {
+            continue;
+        }
+        let idx = token_id as usize;
+        if idx < filtered.len() {
+            filtered[idx] = f32::NEG_INFINITY;
+        }
+    }
+    filtered
+}
+
+fn log_softmax(logits: &[f32], temperature: f32) -> Vec<f32> {
+    let temp = if temperature.is_finite() && temperature > 0.0 {
+        temperature
+    } else {
+        1.0
+    };
+    let max_logit = logits.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+    let mut sum = 0.0f64;
+    for &value in logits {
+        if value.is_finite() {
+            sum += (((value - max_logit) / temp) as f64).exp();
+        }
+    }
+    let log_sum = if sum > 0.0 {
+        sum.ln() as f32
+    } else {
+        f32::INFINITY
+    };
+    logits
+        .iter()
+        .map(|&value| {
+            if value.is_finite() && log_sum.is_finite() {
+                (value - max_logit) / temp - log_sum
+            } else {
+                f32::NEG_INFINITY
+            }
+        })
+        .collect()
+}
+
+fn top_k_log_probs(log_probs: &[f32], k: usize) -> Vec<(u32, f32)> {
+    let k = k.min(log_probs.len()).max(1);
+    let mut indexed: Vec<(usize, f32)> =
+        log_probs.iter().enumerate().map(|(i, &v)| (i, v)).collect();
+    indexed.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    indexed
+        .into_iter()
+        .take(k)
+        .map(|(idx, logp)| (idx as u32, logp))
+        .collect()
+}
+
+fn softmax_prob(logits: &[f32], token_id: usize, temperature: f32) -> f32 {
+    if token_id >= logits.len() {
+        return 0.0;
+    }
+    let temp = if temperature.is_finite() && temperature > 0.0 {
+        temperature
+    } else {
+        1.0
+    };
+    let max_logit = logits.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+    let mut sum = 0.0f64;
+    for &value in logits {
+        if value.is_finite() {
+            sum += (((value - max_logit) / temp) as f64).exp();
+        }
+    }
+    if sum <= 0.0 {
+        return 0.0;
+    }
+    let value = logits[token_id];
+    if !value.is_finite() {
+        return 0.0;
+    }
+    let numerator = (((value - max_logit) / temp) as f64).exp();
+    (numerator / sum) as f32
+}
+
+fn length_penalized(score: f32, length: usize, penalty: f32) -> f32 {
+    if penalty <= 0.0 {
+        return score;
+    }
+    let len = length.max(1) as f32;
+    let norm = ((5.0 + len) / 6.0).powf(penalty);
+    score / norm
+}
+
+fn violates_no_repeat_ngram(tokens: &[u32], next_token: u32, n: usize) -> bool {
+    if n == 0 || tokens.len() + 1 < n {
+        return false;
+    }
+    if tokens.len() < n {
+        return false;
+    }
+    let start = tokens.len() + 1 - n;
+    let mut new_ngram = Vec::with_capacity(n);
+    new_ngram.extend_from_slice(&tokens[start..tokens.len()]);
+    new_ngram.push(next_token);
+
+    for idx in 0..=tokens.len().saturating_sub(n) {
+        if tokens[idx..idx + n] == new_ngram[..] {
+            return true;
+        }
+    }
+
+    false
+}
+
+fn select_argmax_with_repeat(logits: &[f32], tokens: &[u32], no_repeat_ngram: usize) -> u32 {
+    let mut indexed: Vec<(usize, f32)> = logits.iter().enumerate().map(|(i, &v)| (i, v)).collect();
+    indexed.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    for (idx, _) in indexed {
+        let token = idx as u32;
+        if !violates_no_repeat_ngram(tokens, token, no_repeat_ngram) {
+            return token;
+        }
+    }
+    argmax_logits(logits)
+}
+
+fn select_sample_with_repeat(
+    logits: &[f32],
+    top_k: usize,
+    temperature: f32,
+    tokens: &[u32],
+    no_repeat_ngram: usize,
+    rng: &mut XorShift64,
+) -> u32 {
+    let log_probs = log_softmax(logits, temperature);
+    let mut candidates = top_k_log_probs(&log_probs, top_k);
+    candidates.retain(|(token, _)| !violates_no_repeat_ngram(tokens, *token, no_repeat_ngram));
+    if candidates.is_empty() {
+        return select_argmax_with_repeat(logits, tokens, no_repeat_ngram);
+    }
+
+    let max_logp = candidates
+        .iter()
+        .map(|(_, v)| *v)
+        .fold(f32::NEG_INFINITY, f32::max);
+    let mut weights: Vec<f64> = candidates
+        .iter()
+        .map(|(_, v)| ((*v - max_logp) as f64).exp())
+        .collect();
+    let total: f64 = weights.iter().sum();
+    if !total.is_finite() || total <= 0.0 {
+        return candidates[0].0;
+    }
+    let mut target = rng.next_f64() * total;
+    for ((token, _), weight) in candidates.iter().zip(weights.drain(..)) {
+        if target <= weight {
+            return *token;
+        }
+        target -= weight;
+    }
+    candidates[0].0
+}
+
+#[derive(Debug, Clone)]
+struct XorShift64 {
+    state: u64,
+}
+
+impl XorShift64 {
+    fn seeded() -> Self {
+        let seed = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos() as u64)
+            .unwrap_or(0x9E3779B97F4A7C15);
+        Self::new(seed)
+    }
+
+    fn new(seed: u64) -> Self {
+        let mut state = seed;
+        if state == 0 {
+            state = 0x9E3779B97F4A7C15;
+        }
+        Self { state }
+    }
+
+    fn next_u64(&mut self) -> u64 {
+        let mut x = self.state;
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        self.state = x;
+        x
+    }
+
+    fn next_f64(&mut self) -> f64 {
+        let value = self.next_u64() >> 11;
+        (value as f64) / ((1u64 << 53) as f64)
+    }
+}
+
+fn infer_sequence_length_from_plan(plan: &hologram::backend::BackendPlan) -> Option<usize> {
+    plan.layout_metadata
+        .input_shapes
+        .iter()
+        .filter_map(|shape| {
+            let seq_len = shape[1];
+            if shape[2] == 1 && shape[3] == 1 && seq_len > 1 {
+                Some(seq_len)
+            } else {
+                None
+            }
+        })
+        .max()
+}
+
+#[derive(Debug)]
+struct DecoderStepOutputs {
+    logits: Tensor,
+    kv_cache: Option<DecoderKvCache>,
+}
+
+#[derive(Debug, Clone)]
+struct DecoderKvCache {
+    values: HashMap<String, Tensor>,
+}
+
+impl DecoderKvCache {
+    fn from_present_outputs(
+        mut outputs: HashMap<String, Tensor>,
+        num_layers: usize,
+    ) -> Result<Self> {
+        let mut values = HashMap::new();
+        let mut present_count = 0usize;
+        for layer in 0..num_layers {
+            let present_names = [
+                format!("present.{layer}.decoder.key"),
+                format!("present.{layer}.decoder.value"),
+                format!("present.{layer}.encoder.key"),
+                format!("present.{layer}.encoder.value"),
+            ];
+            for name in present_names {
+                let tensor = outputs
+                    .remove(&name)
+                    .ok_or_else(|| anyhow::anyhow!("Missing decoder KV output '{}'", name))?;
+                let past_name = format!("past_key_values.{}", &name["present.".len()..]);
+                values.insert(past_name, tensor);
+                present_count += 1;
+            }
+        }
+
+        if present_count != num_layers * 4 {
+            anyhow::bail!(
+                "Expected {} KV cache tensors, found {}",
+                num_layers * 4,
+                present_count
+            );
+        }
+
+        Ok(Self { values })
+    }
+
+    fn as_inputs(&self) -> HashMap<String, Tensor> {
+        self.values
+            .iter()
+            .map(|(name, tensor)| (name.clone(), tensor.clone()))
+            .collect()
+    }
+
+    fn zeros(num_layers: usize, size_map: &HashMap<String, usize>) -> Result<Self> {
+        let mut values = HashMap::new();
+        for name in t5_decoder_kv_input_names(num_layers) {
+            let size = size_map
+                .get(&name)
+                .copied()
+                .ok_or_else(|| anyhow::anyhow!("Missing size metadata for '{}'", name))?;
+            values.insert(name, tensor_from_size(size, 0.0)?);
+        }
+        Ok(Self { values })
+    }
+}
+
+#[derive(Debug, Clone)]
+struct BeamState {
+    tokens: Vec<u32>,
+    score: f32,
+    finished: bool,
+}
+
+impl BeamState {
+    fn new(tokens: Vec<u32>, score: f32) -> Self {
+        Self {
+            tokens,
+            score,
+            finished: false,
+        }
+    }
+}
+
+fn infer_t5_kv_layers(num_outputs: usize) -> Option<usize> {
+    if num_outputs <= 1 {
+        None
+    } else if (num_outputs - 1).is_multiple_of(4) {
+        Some((num_outputs - 1) / 4)
+    } else {
+        None
+    }
+}
+
+fn t5_decoder_output_names(num_layers: usize) -> Vec<String> {
+    let mut names = Vec::with_capacity(1 + num_layers * 4);
+    names.push("logits".to_string());
+    for layer in 0..num_layers {
+        names.push(format!("present.{layer}.decoder.key"));
+        names.push(format!("present.{layer}.decoder.value"));
+        names.push(format!("present.{layer}.encoder.key"));
+        names.push(format!("present.{layer}.encoder.value"));
+    }
+    names
+}
+
+fn t5_decoder_input_names(num_layers: usize) -> Vec<String> {
+    let mut names = Vec::with_capacity(4 + num_layers * 4);
+    names.push("encoder_attention_mask".to_string());
+    names.push("encoder_hidden_states".to_string());
+    names.push("input_ids".to_string());
+    names.push("use_cache_branch".to_string());
+    names.extend(t5_decoder_kv_input_names(num_layers));
+    names
+}
+
+fn t5_decoder_kv_input_names(num_layers: usize) -> Vec<String> {
+    let mut names = Vec::with_capacity(num_layers * 4);
+    for layer in 0..num_layers {
+        names.push(format!("past_key_values.{layer}.decoder.key"));
+        names.push(format!("past_key_values.{layer}.decoder.value"));
+        names.push(format!("past_key_values.{layer}.encoder.key"));
+        names.push(format!("past_key_values.{layer}.encoder.value"));
+    }
+    names
+}
+
+fn build_input_size_map(
+    plan: &hologram::backend::BackendPlan,
+    input_names: &[String],
+) -> Result<HashMap<String, usize>> {
+    if plan.layout_metadata.num_inputs != input_names.len() {
+        anyhow::bail!(
+            "Decoder input count mismatch: plan expects {}, but names list has {}",
+            plan.layout_metadata.num_inputs,
+            input_names.len()
+        );
+    }
+
+    if plan.layout_metadata.input_sizes.len() < input_names.len() {
+        anyhow::bail!(
+            "Decoder input size metadata has {} entries, expected {}",
+            plan.layout_metadata.input_sizes.len(),
+            input_names.len()
+        );
+    }
+
+    let mut names_sorted: Vec<String> = input_names.to_vec();
+    names_sorted.sort();
+
+    let mut sizes = HashMap::with_capacity(input_names.len());
+    for (idx, name) in names_sorted.into_iter().enumerate() {
+        sizes.insert(name, plan.layout_metadata.input_sizes[idx]);
+    }
+
+    Ok(sizes)
+}
+
+fn tensor_from_size(size_bytes: usize, fill: f32) -> Result<Tensor> {
+    if size_bytes == 0 {
+        return Ok(Tensor::new(vec![fill], vec![1]));
+    }
+
+    if !size_bytes.is_multiple_of(std::mem::size_of::<f32>()) {
+        anyhow::bail!("Input size {} is not aligned to f32", size_bytes);
+    }
+
+    let numel = size_bytes / std::mem::size_of::<f32>();
+    Ok(Tensor::new(vec![fill; numel], vec![numel]))
+}
+
+fn extract_decoder_step_outputs(
+    outputs: HashMap<String, Tensor>,
+    kv_layers: Option<usize>,
+    kv_enabled: bool,
+) -> Result<DecoderStepOutputs> {
+    let num_outputs = outputs.len();
+    if num_outputs == 1 {
+        let logits = outputs
+            .get("output")
+            .or_else(|| outputs.values().next())
+            .ok_or_else(|| anyhow::anyhow!("Decoder produced no output"))?
+            .clone();
+        return Ok(DecoderStepOutputs {
+            logits,
+            kv_cache: None,
+        });
+    }
+
+    if kv_enabled {
+        let num_layers = kv_layers.ok_or_else(|| {
+            anyhow::anyhow!("Decoder outputs do not match expected KV-cache layout")
+        })?;
+        let mut output_names = t5_decoder_output_names(num_layers);
+        output_names.sort();
+
+        let mut ordered = Vec::with_capacity(num_outputs);
+        for idx in 0..num_outputs {
+            let key = format!("output_{}", idx);
+            let tensor = outputs
+                .get(&key)
+                .ok_or_else(|| anyhow::anyhow!("Missing decoder output '{}'", key))?
+                .clone();
+            ordered.push(tensor);
+        }
+
+        let mut named_outputs = HashMap::new();
+        for (name, tensor) in output_names.into_iter().zip(ordered.into_iter()) {
+            named_outputs.insert(name, tensor);
+        }
+
+        let logits = named_outputs
+            .remove("logits")
+            .ok_or_else(|| anyhow::anyhow!("Decoder outputs missing logits"))?;
+        let kv_cache = Some(DecoderKvCache::from_present_outputs(
+            named_outputs,
+            num_layers,
+        )?);
+        return Ok(DecoderStepOutputs { logits, kv_cache });
+    }
+
+    let logits = outputs
+        .get("output_0")
+        .or_else(|| outputs.get("output"))
+        .ok_or_else(|| anyhow::anyhow!("Decoder produced no output_0"))?
+        .clone();
+
+    Ok(DecoderStepOutputs {
+        logits,
+        kv_cache: None,
+    })
 }
 
 /// Fallback tokenization when no tokenizer is available.
@@ -2565,6 +3254,8 @@ fn decode_tokens_with_tokenizer(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use hologram::backend::{BackendPlan, BackendType};
+    use std::collections::HashMap;
     use tempfile::TempDir;
 
     #[test]
@@ -2630,5 +3321,117 @@ mod tests {
 
         let result = run_command(&config_path, &[], None);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_infer_sequence_length_from_plan() {
+        let mut plan = BackendPlan::new(BackendType::Cpu);
+        plan.layout_metadata.input_shapes = vec![[1, 128, 1, 1], [1, 128, 1, 1]];
+
+        assert_eq!(infer_sequence_length_from_plan(&plan), Some(128));
+    }
+
+    #[test]
+    fn test_infer_sequence_length_from_plan_missing_seq() {
+        let mut plan = BackendPlan::new(BackendType::Cpu);
+        plan.layout_metadata.input_shapes = vec![[1, 1, 1, 1], [1, 64, 512, 1]];
+
+        assert_eq!(infer_sequence_length_from_plan(&plan), None);
+    }
+
+    #[test]
+    fn test_infer_t5_kv_layers() {
+        assert_eq!(infer_t5_kv_layers(1), None);
+        assert_eq!(infer_t5_kv_layers(5), Some(1));
+        assert_eq!(infer_t5_kv_layers(25), Some(6));
+        assert_eq!(infer_t5_kv_layers(6), None);
+    }
+
+    #[test]
+    fn test_t5_decoder_input_names() {
+        let names = t5_decoder_input_names(1);
+        assert!(names.contains(&"encoder_attention_mask".to_string()));
+        assert!(names.contains(&"encoder_hidden_states".to_string()));
+        assert!(names.contains(&"input_ids".to_string()));
+        assert!(names.contains(&"use_cache_branch".to_string()));
+        assert!(names.contains(&"past_key_values.0.decoder.key".to_string()));
+        assert!(names.contains(&"past_key_values.0.decoder.value".to_string()));
+        assert!(names.contains(&"past_key_values.0.encoder.key".to_string()));
+        assert!(names.contains(&"past_key_values.0.encoder.value".to_string()));
+    }
+
+    #[test]
+    fn test_build_input_size_map() {
+        let mut plan = BackendPlan::new(BackendType::Cpu);
+        plan.layout_metadata.num_inputs = 4;
+        plan.layout_metadata.input_sizes = vec![4, 8, 12, 16];
+
+        let names = vec![
+            "b".to_string(),
+            "a".to_string(),
+            "d".to_string(),
+            "c".to_string(),
+        ];
+
+        let sizes = build_input_size_map(&plan, &names).unwrap();
+        assert_eq!(sizes.get("a"), Some(&4));
+        assert_eq!(sizes.get("b"), Some(&8));
+        assert_eq!(sizes.get("c"), Some(&12));
+        assert_eq!(sizes.get("d"), Some(&16));
+    }
+
+    #[test]
+    fn test_argmax_logits() {
+        let logits = vec![0.1, 0.2, 0.3, 0.4];
+        let token = argmax_logits(&logits);
+        assert_eq!(token, 3);
+    }
+
+    #[test]
+    fn test_select_sample_with_repeat() {
+        let logits = vec![0.1, 2.0, 0.5, 1.5];
+        let mut rng = XorShift64::new(42);
+        let token = select_sample_with_repeat(&logits, 2, 1.0, &[], 0, &mut rng);
+        assert!(token == 1 || token == 3);
+    }
+
+    #[test]
+    fn test_select_argmax_with_repeat() {
+        let logits = vec![0.1, 2.0, 0.5, 1.5];
+        let tokens = vec![1, 2, 1];
+        let token = select_argmax_with_repeat(&logits, &tokens, 2);
+        assert_ne!(token, 2);
+    }
+
+    #[test]
+    fn test_apply_token_filters_masks_specials() {
+        let logits = vec![0.1, 0.9, 0.2, 1.1];
+        let special_ids = vec![3];
+        let filtered = apply_token_filters(&logits, 1, 0, 2, 1, false, &special_ids);
+        assert!(filtered[0].is_infinite() && filtered[0].is_sign_negative());
+        assert!(filtered[1].is_infinite() && filtered[1].is_sign_negative());
+        assert!(filtered[2].is_infinite() && filtered[2].is_sign_negative());
+        assert!(filtered[3].is_infinite() && filtered[3].is_sign_negative());
+    }
+
+    #[test]
+    fn test_extract_decoder_step_outputs_with_kv_cache() {
+        let mut outputs = HashMap::new();
+        outputs.insert("output_0".to_string(), Tensor::new(vec![0.1], vec![1]));
+        outputs.insert("output_1".to_string(), Tensor::new(vec![1.0], vec![1]));
+        outputs.insert("output_2".to_string(), Tensor::new(vec![2.0], vec![1]));
+        outputs.insert("output_3".to_string(), Tensor::new(vec![3.0], vec![1]));
+        outputs.insert("output_4".to_string(), Tensor::new(vec![4.0], vec![1]));
+
+        let step_outputs = extract_decoder_step_outputs(outputs, Some(1), true).unwrap();
+        assert_eq!(step_outputs.logits.to_f32(), &[0.1]);
+
+        let cache = step_outputs.kv_cache.expect("expected kv cache");
+        let inputs = cache.as_inputs();
+        assert_eq!(inputs.len(), 4);
+        assert!(inputs.contains_key("past_key_values.0.decoder.key"));
+        assert!(inputs.contains_key("past_key_values.0.decoder.value"));
+        assert!(inputs.contains_key("past_key_values.0.encoder.key"));
+        assert!(inputs.contains_key("past_key_values.0.encoder.value"));
     }
 }

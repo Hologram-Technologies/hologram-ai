@@ -2,7 +2,7 @@
 
 use crate::proto::NodeProto;
 use crate::translators::{InputRequirement, OnnxAttributes, OnnxTranslator, TranslationError};
-use hologram::ir::{ConstantData, GraphBuilder, NodeIndex, NodeOp};
+use hologram::ir::{ConstantData, Dim, GraphBuilder, NodeIndex, NodeOp, Shape};
 
 /// Translator for ONNX Reshape operation.
 ///
@@ -72,6 +72,17 @@ impl OnnxTranslator for ReshapeTranslator {
                     .map_err(|e| TranslationError::IrBuilder(e.to_string()))?;
                 return Ok(vec![result]);
             }
+        } else if let Some(shape_values) =
+            try_resolve_shape_from_graph(builder, data, shape_input, allow_zero)
+        {
+            tracing::debug!(
+                "Reshape: resolved shape graph, new_shape = {:?}",
+                shape_values
+            );
+            let result = builder
+                .reshape(data, shape_values)
+                .map_err(|e| TranslationError::IrBuilder(e.to_string()))?;
+            return Ok(vec![result]);
         }
 
         // Dynamic reshape path (supports runtime shapes, -1 inference, and allowzero)
@@ -80,6 +91,200 @@ impl OnnxTranslator for ReshapeTranslator {
             .reshape_dynamic(data, shape_input, allow_zero)
             .map_err(|e| TranslationError::IrBuilder(e.to_string()))?;
         Ok(vec![result])
+    }
+}
+
+fn try_resolve_shape_from_graph(
+    builder: &GraphBuilder,
+    data: NodeIndex,
+    shape_input: NodeIndex,
+    allow_zero: bool,
+) -> Option<Vec<i64>> {
+    use std::collections::HashMap;
+
+    let data_node = builder.graph().node(data)?;
+    let input_shape = &data_node.op.shape;
+    let mut cache: HashMap<NodeIndex, Option<Vec<Dim>>> = HashMap::new();
+    let mut stack = Vec::new();
+    let mut dims = eval_shape_tensor(builder, shape_input, input_shape, &mut cache, &mut stack)?;
+
+    if dims.is_empty() {
+        return None;
+    }
+
+    if !allow_zero {
+        for (i, dim) in dims.iter_mut().enumerate() {
+            if matches!(dim, Dim::Static(0)) {
+                let replacement = input_shape.dims.get(i)?;
+                *dim = replacement.clone();
+            }
+        }
+    } else if dims.iter().any(|dim| matches!(dim, Dim::Static(0))) {
+        return None;
+    }
+
+    // If any dimension is symbolic, return None to fall through to
+    // reshape_dynamic path which properly preserves symbolic dimension names
+    // through infer_shape_from_shape_tensor
+    if dims.iter().any(|d| matches!(d, Dim::Symbolic(_))) {
+        return None;
+    }
+
+    let mut dynamic_count = 0usize;
+    let mut result = Vec::with_capacity(dims.len());
+    for dim in dims {
+        match dim {
+            Dim::Static(value) => result.push(value as i64),
+            Dim::Dynamic => {
+                dynamic_count += 1;
+                if dynamic_count > 1 {
+                    return None;
+                }
+                result.push(-1);
+            }
+            Dim::Symbolic(_) => unreachable!(), // Already checked above
+        }
+    }
+
+    Some(result)
+}
+
+fn eval_shape_tensor(
+    builder: &GraphBuilder,
+    idx: NodeIndex,
+    reshape_input_shape: &Shape,
+    cache: &mut std::collections::HashMap<NodeIndex, Option<Vec<Dim>>>,
+    stack: &mut Vec<NodeIndex>,
+) -> Option<Vec<Dim>> {
+    if let Some(cached) = cache.get(&idx) {
+        return cached.clone();
+    }
+    if stack.contains(&idx) {
+        return None;
+    }
+    stack.push(idx);
+
+    let graph = builder.graph();
+    let result = match graph.node(idx)?.op.op.clone() {
+        NodeOp::Constant { data } => const_dims_from_data(&data, reshape_input_shape),
+        NodeOp::Shape { start, end } => {
+            let mut inputs: Vec<NodeIndex> = graph.predecessors(idx).collect();
+            if inputs.len() != 1 {
+                None
+            } else {
+                let input_node = graph.node(inputs.remove(0))?;
+                let rank = input_node.op.shape.rank() as i64;
+                let start_norm = if start < 0 { rank + start } else { start };
+                let end_norm = if end < 0 { rank } else { end };
+                if start_norm < 0 || end_norm < start_norm {
+                    None
+                } else {
+                    let start_idx = start_norm as usize;
+                    let end_idx = end_norm as usize;
+                    if end_idx > input_node.op.shape.rank() {
+                        None
+                    } else {
+                        Some(input_node.op.shape.dims[start_idx..end_idx].to_vec())
+                    }
+                }
+            }
+        }
+        NodeOp::Gather { axis } => {
+            if axis != 0 {
+                None
+            } else {
+                let inputs = graph.predecessors_ordered(idx);
+                if inputs.len() != 2 {
+                    None
+                } else {
+                    let data_dims =
+                        eval_shape_tensor(builder, inputs[0], reshape_input_shape, cache, stack)?;
+                    let indices = try_get_constant_i64_vec(graph, inputs[1])?;
+                    let mut result_dims = Vec::with_capacity(indices.len());
+                    let len = data_dims.len() as i64;
+                    for raw_idx in indices {
+                        let idx_norm = if raw_idx < 0 { len + raw_idx } else { raw_idx };
+                        if idx_norm < 0 || idx_norm as usize >= data_dims.len() {
+                            return None;
+                        }
+                        result_dims.push(data_dims[idx_norm as usize].clone());
+                    }
+                    Some(result_dims)
+                }
+            }
+        }
+        NodeOp::Concat { axis } => {
+            if axis != 0 {
+                None
+            } else {
+                let inputs = graph.predecessors_ordered(idx);
+                if inputs.is_empty() {
+                    None
+                } else {
+                    let mut result_dims = Vec::new();
+                    for input in inputs {
+                        let dims =
+                            eval_shape_tensor(builder, input, reshape_input_shape, cache, stack)?;
+                        result_dims.extend(dims);
+                    }
+                    Some(result_dims)
+                }
+            }
+        }
+        NodeOp::Unsqueeze { .. } | NodeOp::Squeeze { .. } | NodeOp::Cast { .. } => {
+            let mut inputs: Vec<NodeIndex> = graph.predecessors(idx).collect();
+            if inputs.len() != 1 {
+                None
+            } else {
+                eval_shape_tensor(builder, inputs.remove(0), reshape_input_shape, cache, stack)
+            }
+        }
+        _ => None,
+    };
+
+    stack.pop();
+    cache.insert(idx, result.clone());
+    result
+}
+
+fn const_dims_from_data(data: &ConstantData, reshape_input_shape: &Shape) -> Option<Vec<Dim>> {
+    let values: Vec<i64> = match data {
+        ConstantData::I64(v) => v.clone(),
+        ConstantData::I32(v) => v.iter().map(|&x| x as i64).collect(),
+        _ => return None,
+    };
+    let mut dims = Vec::with_capacity(values.len());
+    for (i, val) in values.into_iter().enumerate() {
+        if val == -1 {
+            dims.push(Dim::Dynamic);
+        } else if val == 0 {
+            if let Some(dim) = reshape_input_shape.dims.get(i) {
+                dims.push(dim.clone());
+            } else {
+                return None;
+            }
+        } else if val > 0 {
+            dims.push(Dim::Static(val as usize));
+        } else {
+            return None;
+        }
+    }
+    Some(dims)
+}
+
+fn try_get_constant_i64_vec(
+    graph: &hologram::ir::OperationGraph,
+    idx: NodeIndex,
+) -> Option<Vec<i64>> {
+    let node = graph.node(idx)?;
+    if let NodeOp::Constant { data } = &node.op.op {
+        match data {
+            ConstantData::I64(vals) => Some(vals.clone()),
+            ConstantData::I32(vals) => Some(vals.iter().map(|&v| v as i64).collect()),
+            _ => None,
+        }
+    } else {
+        None
     }
 }
 
@@ -204,6 +409,33 @@ mod tests {
         assert!(result.is_ok());
     }
 
+    #[test]
+    fn test_reshape_shape_graph_static_resolution() {
+        let translator = ReshapeTranslator;
+        let mut builder = GraphBuilder::new();
+
+        let data = builder.input("data", Shape::static_shape(&[1, 7, 8, 64]), DType::F32);
+        let shape = builder.shape(data, 0, -1).unwrap();
+        let indices = builder.constant(ConstantData::I64(vec![0, 1]), Shape::static_shape(&[2]));
+        let gathered = builder.gather(shape, indices, 0).unwrap();
+        let hidden = builder.constant(ConstantData::I64(vec![512]), Shape::static_shape(&[1]));
+        let concat = builder.concat(&[gathered, hidden], 0).unwrap();
+
+        let result = translator.translate(&make_node(), &[data, concat], &mut builder);
+        assert!(result.is_ok());
+
+        let output = result.unwrap()[0];
+        let output_node = builder.graph().node(output).unwrap();
+        let dims: Vec<_> = output_node
+            .op
+            .shape
+            .dims
+            .iter()
+            .filter_map(|d| d.static_value())
+            .collect();
+        assert_eq!(dims, vec![1, 7, 512]);
+    }
+
     // ===== Invalid Input Tests =====
 
     #[test]
@@ -249,5 +481,52 @@ mod tests {
         let req = translator.input_requirement();
         assert!(matches!(req, InputRequirement::Exact(2)));
         assert!(!req.accepts_zero());
+    }
+
+    // ===== Symbolic Dimension Tests =====
+
+    #[test]
+    fn test_reshape_with_symbolic_input_dim() {
+        let translator = ReshapeTranslator;
+        let mut builder = GraphBuilder::new();
+
+        // Input with symbolic batch dimension
+        let shape = Shape::new(vec![
+            Dim::Symbolic("batch".to_string()),
+            Dim::Static(128),
+            Dim::Static(512),
+        ]);
+        let data = builder.input("data", shape, DType::F32);
+        // Reshape to [batch, 128*512] - uses dynamic path to preserve symbolic
+        let new_shape = builder.constant(
+            ConstantData::I64(vec![0, 65536]), // 0 = copy from input
+            Shape::static_shape(&[2]),
+        );
+
+        let result = translator.translate(&make_node(), &[data, new_shape], &mut builder);
+        assert!(result.is_ok());
+        let outputs = result.unwrap();
+        assert_eq!(outputs.len(), 1);
+    }
+
+    #[test]
+    fn test_reshape_shape_from_symbolic_input() {
+        let translator = ReshapeTranslator;
+        let mut builder = GraphBuilder::new();
+
+        // Input tensor with symbolic sequence length
+        let input_shape = Shape::new(vec![
+            Dim::Static(1),
+            Dim::Symbolic("seq_len".to_string()),
+            Dim::Static(512),
+        ]);
+        let data = builder.input("data", input_shape, DType::F32);
+
+        // Shape computed from input (Shape op will include symbolic dim)
+        let shape_op = builder.shape(data, 0, -1).unwrap();
+
+        let result = translator.translate(&make_node(), &[data, shape_op], &mut builder);
+        assert!(result.is_ok());
+        // Falls through to dynamic path which preserves symbolic dims
     }
 }

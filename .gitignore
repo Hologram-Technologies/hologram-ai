@@ -7,3 +7,5 @@
 
 # Local cargo configuration (for path overrides)
 /.cargo/
+working/
+**core**

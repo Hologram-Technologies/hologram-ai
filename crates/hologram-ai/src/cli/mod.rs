@@ -323,6 +323,34 @@ enum Commands {
         /// Maximum number of new tokens to generate
         #[arg(long, default_value = "50")]
         max_tokens: usize,
+
+        /// Minimum number of new tokens to generate before allowing EOS
+        #[arg(long, default_value = "12")]
+        min_tokens: usize,
+
+        /// Top-k sampling (1 = greedy argmax)
+        #[arg(long, default_value = "40")]
+        top_k: usize,
+
+        /// Sampling temperature (1.0 = default)
+        #[arg(long, default_value = "0.9")]
+        temperature: f32,
+
+        /// Beam size (1 = no beam search)
+        #[arg(long, default_value = "1")]
+        beam_size: usize,
+
+        /// Length penalty for beam search (higher favors shorter sequences)
+        #[arg(long, default_value = "1.0")]
+        length_penalty: f32,
+
+        /// No-repeat ngram size (0 disables)
+        #[arg(long, default_value = "3")]
+        no_repeat_ngram: usize,
+
+        /// Minimum EOS probability threshold before allowing EOS
+        #[arg(long, default_value = "0.2")]
+        eos_prob_threshold: f32,
     },
 
     /// Create a pipeline bundle (HOLM format) from HOLB model bundles
@@ -643,8 +671,26 @@ pub fn run() -> anyhow::Result<()> {
             pipeline,
             prompt,
             max_tokens,
+            min_tokens,
+            top_k,
+            temperature,
+            beam_size,
+            length_penalty,
+            no_repeat_ngram,
+            eos_prob_threshold,
         } => {
-            let result = run_pipeline_bundle_command(&pipeline, &prompt, max_tokens)?;
+            let result = run_pipeline_bundle_command(
+                &pipeline,
+                &prompt,
+                max_tokens,
+                min_tokens,
+                top_k,
+                temperature,
+                beam_size,
+                length_penalty,
+                no_repeat_ngram,
+                eos_prob_threshold,
+            )?;
             println!("\n=== Generated Output ===\n{}\n", result);
             Ok(())
         }
