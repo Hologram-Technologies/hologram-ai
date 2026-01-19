@@ -1,5 +1,6 @@
 services:
   app:
+    platform: linux/arm64
     build:
       context: ..
       dockerfile: .devcontainer/Dockerfile
@@ -20,7 +21,7 @@ services:
     tty: true
     environment:
       - RUST_BACKTRACE=1
-    network_mode: "host"
+    # network_mode: "host"  # Disabled: conflicts with port forwarding for OAuth
     # Memory limits for ONNX compiler
     deploy:
       resources:

@@ -145,7 +145,24 @@
       "Bash(HOLOGRAM_TRACE_OUTPUT_LAYOUT=1 cargo run:*)",
       "Bash(HOLOGRAM_T5_MAX_LENGTH=512 cargo run:*)",
       "Bash(HOLOGRAM_TRACE_OPS=1 cargo run:*)",
-      "Bash(timeout 30 HOLOGRAM_TRACE_SCOPE=encoder cargo run:*)"
+      "Bash(timeout 30 HOLOGRAM_TRACE_SCOPE=encoder cargo run:*)",
+      "Bash(timeout 300 bash:*)",
+      "Bash(pkill:*)",
+      "Bash(HOLOGRAM_T5_MAX_TOKENS=1 cargo run:*)",
+      "Bash(RUST_BACKTRACE=1 timeout 30 cargo run:*)",
+      "Bash(HOLOGRAM_TRACE_OPS=1 RUST_BACKTRACE=1 cargo run:*)",
+      "Bash(stdbuf -oL tee:*)",
+      "Bash(HOLOGRAM_TRACE_OPS=1 gdb:*)",
+      "Bash(apt-get install:*)",
+      "Bash(lldb:*)",
+      "Bash(ss:*)",
+      "Bash(netstat:*)",
+      "Bash(lsof:*)",
+      "Bash(sudo lsof:*)",
+      "Bash(rustc --version:*)",
+      "Bash(cargo --list:*)",
+      "Bash(sudo rm:*)",
+      "Bash(cargo install:*)"
     ]
   }
 }

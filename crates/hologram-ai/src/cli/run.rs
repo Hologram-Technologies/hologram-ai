@@ -2277,10 +2277,11 @@ pub fn run_pipeline_bundle_command(
     }
 
     // Create attention mask
-    // T5 ONNX export uses inverted mask: 0 for valid positions, 1 for masked (padding)
-    // The model computes: (1 + inverted_mask) * -inf = -2*inf for valid, -inf for padding
-    // This is wrong - need to use standard mask format
-    // Standard: 1 for valid, 0 for padding - model should compute (1 - mask) * -inf
+    // T5 ONNX from Hugging Face optimum uses standard mask format:
+    //   1 = valid position (not masked), 0 = padding (masked)
+    // The model internally computes: attention_scores + (1 - mask) * LARGE_NEG
+    // So: valid (mask=1) -> (1-1)*neg = 0, unchanged
+    //     padding (mask=0) -> (1-0)*neg = neg, masked out
     let attention_mask: Vec<u32> = (0..max_length)
         .map(|i| if i < actual_len { 1 } else { 0 })
         .collect();
