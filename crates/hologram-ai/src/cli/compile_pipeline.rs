@@ -207,6 +207,7 @@ fn compile_pipeline_from_sources(
                     true,  // bundle = true (create HOLB)
                     &[],   // embed_files (none for pipeline compilation)
                     false, // layer_wise = false (standard compilation)
+                    false, // parallel = false (single model compilation)
                 )
                 .with_context(|| format!("Failed to compile ONNX model '{}'", name))?;
             }

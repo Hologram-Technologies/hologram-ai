@@ -9,6 +9,7 @@
 //! - Graph partitioning for large models
 
 // Core modules
+pub mod activation_fusion;
 pub mod attention_detection;
 mod bundle;
 mod error;
@@ -78,6 +79,9 @@ pub use op_hints::{
     get_composed_view_table_ids, get_parallel_group_id, get_simd_table_id, has_composed_view_hint,
     has_parallel_hint, has_simd_hint,
 };
+
+// Re-export activation fusion
+pub use activation_fusion::{ActivationChain, chain_name, detect_activation_chains};
 
 // Re-export section traits and types
 pub use sections::{

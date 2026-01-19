@@ -445,9 +445,11 @@ pub fn translate_graph_to_ir(graph: &crate::proto::GraphProto) -> Result<IRFunct
 /// }
 /// ```
 pub fn translate_graph_to_ir_with_groups(graph: &crate::proto::GraphProto) -> Result<IRFunction> {
+    use crate::core::activation_fusion::{chain_name, detect_activation_chains};
     use crate::core::attention_detection::{
         assign_execution_groups, detect_attention_patterns, get_group_dependencies,
     };
+    use crate::core::op_hints::add_composed_view_hint;
     use hologram::ir::GraphBuilder;
     use std::collections::HashMap;
     use tracing::{debug, info, trace};
@@ -461,6 +463,18 @@ pub fn translate_graph_to_ir_with_groups(graph: &crate::proto::GraphProto) -> Re
             "Detected {} attention patterns - enabling parallel execution groups",
             attention_patterns.len()
         );
+    }
+
+    // Detect activation chains for fusion
+    let activation_chains = detect_activation_chains(graph);
+    if !activation_chains.is_empty() {
+        info!(
+            "Detected {} activation chains for fusion",
+            activation_chains.len()
+        );
+        for chain in &activation_chains {
+            debug!("  Chain: {}", chain_name(chain));
+        }
     }
 
     // Pre-compute group assignments for each node
@@ -562,6 +576,27 @@ pub fn translate_graph_to_ir_with_groups(graph: &crate::proto::GraphProto) -> Re
         for (output_name, output_idx) in node.output.iter().zip(output_indices.iter()) {
             if !output_name.is_empty() {
                 value_map.insert(output_name.clone(), *output_idx);
+            }
+        }
+    }
+
+    // Step 3b: Apply composed view hints for activation chains
+    if !activation_chains.is_empty() {
+        debug!(
+            "Applying composed view hints for {} activation chains",
+            activation_chains.len()
+        );
+        for chain in &activation_chains {
+            // Find the output node of the chain (last activation in the chain)
+            if let Some(&output_node) = value_map.get(&chain.output_tensor) {
+                let table_ids = chain.table_ids();
+                add_composed_view_hint(builder.graph_mut(), output_node, &table_ids);
+                trace!(
+                    "Added composed view hint for chain '{}' -> node {:?} with tables {:?}",
+                    chain_name(chain),
+                    output_node,
+                    table_ids
+                );
             }
         }
     }

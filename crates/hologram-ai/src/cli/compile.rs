@@ -30,6 +30,7 @@ use tracing::{debug, info};
 /// * `bundle` - Create a unified bundle with embedded weights (HOLB format)
 /// * `embed_files` - Files to embed in the bundle (vocabulary, config, etc.)
 /// * `layer_wise` - Compile transformer model as layer-wise HOLM pipeline
+/// * `parallel` - Enable parallel execution groups and activation fusion
 ///
 /// # Returns
 ///
@@ -49,6 +50,7 @@ pub fn compile_command(
     bundle: bool,
     embed_files: &[EmbeddedFileConfig],
     layer_wise: bool,
+    parallel: bool,
 ) -> Result<()> {
     info!("Compiling ONNX model: {}", input.display());
     debug!("Output path: {}", output.display());
@@ -67,6 +69,7 @@ pub fn compile_command(
     debug!("Decompose Pooling: {}", decompose_pooling);
     debug!("Enable Resize Upscaling: {}", enable_resize_upscaling);
     debug!("Layer-wise compilation: {}", layer_wise);
+    debug!("Parallel execution: {}", parallel);
 
     // Read ONNX model
     info!("Reading ONNX model...");
@@ -103,6 +106,7 @@ pub fn compile_command(
         memory_budget,
         enable_resize_upscaling,
         embedded_files: embed_files.to_vec(),
+        enable_parallel_execution: parallel,
     };
 
     config
@@ -269,6 +273,7 @@ mod tests {
             false, // bundle
             &[],   // embed_files
             false, // layer_wise
+            true,  // parallel
         );
         assert!(result.is_err());
         assert!(

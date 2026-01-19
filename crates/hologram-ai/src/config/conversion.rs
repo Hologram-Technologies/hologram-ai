@@ -53,6 +53,7 @@ impl From<&CompilerConfig> for OnnxConfig {
             memory_budget: config.memory_budget,
             enable_resize_upscaling: config.enable_resize_upscaling,
             embedded_files: Vec::new(),
+            enable_parallel_execution: true, // Default enabled for all configs
         }
     }
 }
@@ -370,6 +371,7 @@ mod tests {
             memory_budget: None,
             enable_resize_upscaling: true,
             embedded_files: Vec::new(),
+            enable_parallel_execution: true,
         };
 
         let compiler_config: CompilerConfig = onnx_config.into();

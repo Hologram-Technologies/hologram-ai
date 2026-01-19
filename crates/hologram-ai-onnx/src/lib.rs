@@ -41,7 +41,8 @@ pub mod translators;
 // Re-export main types at crate root for convenience
 pub use core::{
     Dim, GraphPartition, GraphPartitioner, OnnxConfig, OnnxError, Result, Shape, SymbolicShape,
-    WeightData, extract_opset_version, parse_model, translate_graph_to_ir, validate_model,
+    WeightData, extract_opset_version, parse_model, translate_graph_to_ir,
+    translate_graph_to_ir_with_groups, validate_model,
 };
 
 // Re-export embedded file configuration types
@@ -155,7 +156,11 @@ impl OnnxCompiler {
         // Phase 2: Translate ONNX → IR with symbolic shapes
         let ir_func = {
             let _span = tracing::info_span!("translate_to_ir", nodes = graph.node.len()).entered();
-            translate_graph_to_ir(graph)?
+            if self.config.enable_parallel_execution {
+                translate_graph_to_ir_with_groups(graph)?
+            } else {
+                translate_graph_to_ir(graph)?
+            }
         };
 
         // Phase 3: Compile to BackendPlan using hologram-compiler
@@ -229,7 +234,11 @@ impl OnnxCompiler {
         // Phase 3: Translate to IR
         let ir_func = {
             let _span = tracing::info_span!("translate_to_ir").entered();
-            translate_graph_to_ir(graph)?
+            if self.config.enable_parallel_execution {
+                translate_graph_to_ir_with_groups(graph)?
+            } else {
+                translate_graph_to_ir(graph)?
+            }
         };
 
         // Phase 4: Compile to BackendPlan
@@ -296,7 +305,11 @@ impl OnnxCompiler {
         // Phase 2: Translate ONNX → IR with symbolic shapes
         let ir_func = {
             let _span = tracing::info_span!("translate_to_ir", nodes = graph.node.len()).entered();
-            translate_graph_to_ir(graph)?
+            if self.config.enable_parallel_execution {
+                translate_graph_to_ir_with_groups(graph)?
+            } else {
+                translate_graph_to_ir(graph)?
+            }
         };
 
         // Phase 3: Compile to BackendPlan using hologram-compiler
@@ -405,7 +418,11 @@ impl OnnxCompiler {
 
         // Step 2: Translate ONNX → IR with symbolic shapes
         debug!("Translating ONNX to IR");
-        let ir_func = translate_graph_to_ir(graph)?;
+        let ir_func = if self.config.enable_parallel_execution {
+            translate_graph_to_ir_with_groups(graph)?
+        } else {
+            translate_graph_to_ir(graph)?
+        };
         info!("IR translation complete");
 
         // Step 3: Compile to BackendPlan using hologram-compiler
@@ -554,7 +571,11 @@ impl OnnxCompiler {
                 .ok_or_else(|| OnnxError::LayerWiseError("Layer has no graph".into()))?;
 
             debug!("Translating layer {} to IR", layer_name);
-            let ir_func = translate_graph_to_ir(layer_graph)?;
+            let ir_func = if self.config.enable_parallel_execution {
+                translate_graph_to_ir_with_groups(layer_graph)?
+            } else {
+                translate_graph_to_ir(layer_graph)?
+            };
 
             debug!("Compiling layer {} to BackendPlan", layer_name);
             let backend_type = hologram::BackendType::Cpu;

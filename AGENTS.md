@@ -225,6 +225,119 @@ Any code that contains phrases like "in production you would...", "a real implem
    - No `expect()` unless truly impossible conditions
    - Provide helpful error messages
 
+6. **Function Signatures - Use Structs for Multiple Parameters**
+   - When a function has more than 3-4 parameters, use a struct instead
+   - Implement the **builder pattern** for configuration structs
+   - This improves readability, maintainability, and allows for optional parameters
+   - Example:
+
+     ```rust
+     // ❌ WRONG - Too many parameters
+     fn compile_model(
+         model_path: &Path,
+         output_path: &Path,
+         optimize: bool,
+         target_device: Device,
+         batch_size: usize,
+         precision: Precision,
+     ) -> Result<()> { ... }
+
+     // ✅ CORRECT - Use a config struct with builder pattern
+     pub struct CompileConfig {
+         model_path: PathBuf,
+         output_path: PathBuf,
+         optimize: bool,
+         target_device: Device,
+         batch_size: usize,
+         precision: Precision,
+     }
+
+     impl CompileConfig {
+         pub fn builder() -> CompileConfigBuilder { ... }
+     }
+
+     fn compile_model(config: &CompileConfig) -> Result<()> { ... }
+     ```
+
+7. **Function Length - Keep Functions Under 50 Lines**
+   - No function should exceed 50 lines of code
+   - If a function is too long, break it down:
+     - Extract helper functions for logical sub-tasks
+     - Consider using traits to define composable behavior
+     - Each extracted function should be independently testable
+   - Benefits:
+     - Easier to test individual pieces
+     - Improved readability and maintenance
+     - Better separation of concerns
+   - Example:
+
+     ```rust
+     // ❌ WRONG - Monolithic function
+     fn process_graph(graph: &Graph) -> Result<Output> {
+         // 100+ lines of mixed concerns...
+     }
+
+     // ✅ CORRECT - Trait-based decomposition
+     trait GraphProcessor {
+         fn validate(&self, graph: &Graph) -> Result<()>;
+         fn optimize(&self, graph: &Graph) -> Result<Graph>;
+         fn compile(&self, graph: &Graph) -> Result<Output>;
+     }
+
+     impl GraphProcessor for MyProcessor {
+         fn validate(&self, graph: &Graph) -> Result<()> { ... }  // ~15 lines
+         fn optimize(&self, graph: &Graph) -> Result<Graph> { ... }  // ~20 lines
+         fn compile(&self, graph: &Graph) -> Result<Output> { ... }  // ~25 lines
+     }
+     ```
+
+8. **Documentation in README.md**
+   - Every crate MUST have a README.md documenting:
+     - Purpose and overview of the crate
+     - Public API functions and their usage
+     - Examples for common use cases
+   - Update README.md when adding or modifying public functions
+   - Keep documentation in sync with code changes
+
+9. **Rust Best Practices**
+   - **Prefer `&str` over `String`** in function parameters for flexibility
+   - **Use `impl Trait`** for return types when the concrete type is an implementation detail
+   - **Prefer iterators** over manual loops - use `.iter()`, `.map()`, `.filter()`, `.collect()`
+   - **Use `?` operator** for error propagation instead of manual `match` or `unwrap()`
+   - **Derive common traits** appropriately: `Debug`, `Clone`, `PartialEq`, `Eq`, `Hash`
+   - **Use newtypes** for type safety (e.g., `struct UserId(u64)` instead of raw `u64`)
+   - **Prefer `Cow<str>`** when a function may or may not need to allocate
+   - **Use `#[must_use]`** on functions where ignoring the return value is likely a bug
+   - **Avoid `clone()` unless necessary** - prefer borrowing and lifetimes
+   - **Use `Default` trait** for types with sensible defaults
+   - **Prefer composition over inheritance** - use traits for shared behavior
+   - **Use `From`/`Into` traits** for type conversions instead of custom methods
+   - Example patterns:
+
+     ```rust
+     // ✅ Prefer &str over String in parameters
+     fn process_name(name: &str) -> String { ... }
+
+     // ✅ Use impl Trait for return types
+     fn get_items(&self) -> impl Iterator<Item = &Item> { ... }
+
+     // ✅ Use newtypes for type safety
+     pub struct BatchSize(pub usize);
+     pub struct SequenceLength(pub usize);
+
+     // ✅ Implement From for conversions
+     impl From<OnnxModel> for HoloGraph {
+         fn from(model: OnnxModel) -> Self { ... }
+     }
+
+     // ✅ Use Default for sensible defaults
+     #[derive(Default)]
+     pub struct CompileOptions {
+         optimize: bool,
+         debug_info: bool,
+     }
+     ```
+
 ### Testing Requirements
 
 **Unit Tests**:

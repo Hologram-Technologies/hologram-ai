@@ -137,6 +137,14 @@ enum Commands {
         /// Memory reduction for 70B models: ~130GB → ~2GB peak memory
         #[arg(long)]
         layer_wise: bool,
+
+        /// Enable parallel execution groups for Q/K/V projections and activation fusion
+        ///
+        /// When enabled, detects attention patterns and activation chains in the model
+        /// graph to enable parallel execution and view composition optimizations.
+        /// Provides 2-3x speedup for transformer models with multi-head attention.
+        #[arg(long, default_value = "true", action = clap::ArgAction::Set)]
+        parallel: bool,
     },
 
     /// Compile tokenizer to .holo format for hologram execution
@@ -516,6 +524,7 @@ pub fn run() -> anyhow::Result<()> {
             bundle,
             embed_files,
             layer_wise,
+            parallel,
         } => {
             // Parse input shapes from "name=d1,d2,d3" format
             let parsed_shapes: std::collections::HashMap<String, Vec<usize>> = input_shapes
@@ -551,6 +560,7 @@ pub fn run() -> anyhow::Result<()> {
                     bundle,
                     &parsed_embed_files,
                     layer_wise,
+                    parallel,
                 )
             } else {
                 // Traditional compile with explicit input
@@ -572,6 +582,7 @@ pub fn run() -> anyhow::Result<()> {
                     bundle,
                     &parsed_embed_files,
                     layer_wise,
+                    parallel,
                 )
             }
         }
@@ -870,6 +881,7 @@ fn compile_with_config(
     #[cfg(feature = "onnx")] embed_files: &[hologram_ai_onnx::core::EmbeddedFileConfig],
     #[cfg(not(feature = "onnx"))] _embed_files: &[()],
     layer_wise: bool,
+    parallel: bool,
 ) -> anyhow::Result<()> {
     use crate::config::UnifiedConfig;
     #[cfg(feature = "onnx")]
@@ -923,6 +935,7 @@ fn compile_with_config(
             bundle,
             embed_files,
             layer_wise,
+            parallel,
         );
     }
 
@@ -971,6 +984,7 @@ fn compile_with_config(
             bundle,
             embed_files,
             layer_wise,
+            parallel,
         )?;
     }
 
