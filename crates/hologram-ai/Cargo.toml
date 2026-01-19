@@ -69,3 +69,4 @@ instrumentation = ["hologram/instrumentation"]
 
 [dev-dependencies]
 criterion.workspace = true
+tempfile.workspace = true

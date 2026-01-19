@@ -648,6 +648,102 @@ impl PipelineBundle {
         header.layers.first()
     }
 
+    /// Pin a model's weights in RAM for low-latency access.
+    ///
+    /// This locks the model's memory-mapped weights in RAM using `mlock()`,
+    /// preventing them from being swapped out. This is useful for embedding
+    /// tables and frequently-accessed layers in latency-critical applications.
+    ///
+    /// **Important**: Only use this for small models (<64MB) to avoid
+    /// exhausting system memory. Larger models should use prefetching instead.
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - Name of the model to pin
+    ///
+    /// # Errors
+    ///
+    /// Returns error if:
+    /// - Model name not found
+    /// - Model size exceeds 64MB (safety limit)
+    /// - Insufficient memory lock limit (check `ulimit -l`)
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// let pipeline = load_pipeline_bundle(Path::new("model.holo"))?;
+    ///
+    /// // Pin embedding table for zero-latency lookup
+    /// if pipeline.is_embedding_layer("embedding") {
+    ///     pipeline.pin_model_weights("embedding")?;
+    /// }
+    ///
+    /// // Load and use the model
+    /// let (executor, backend) = pipeline.load_model("embedding")?;
+    /// ```
+    pub fn pin_model_weights(&self, name: &str) -> Result<()> {
+        let (_, model_offset, model_size) = self
+            .model_info
+            .iter()
+            .find(|(n, _, _)| n == name)
+            .ok_or_else(|| anyhow::anyhow!("Model '{}' not found in pipeline", name))?;
+
+        // Safety check: only pin small models (<64MB)
+        const MAX_PIN_SIZE: usize = 64 * 1024 * 1024; // 64MB
+        if *model_size > MAX_PIN_SIZE {
+            return Err(anyhow::anyhow!(
+                "Model '{}' size ({} bytes) exceeds max pinnable size ({} bytes). Use prefetching instead.",
+                name,
+                model_size,
+                MAX_PIN_SIZE
+            ));
+        }
+
+        tracing::info!(
+            "Pinning model '{}' weights in RAM (size: {} bytes)",
+            name,
+            model_size
+        );
+
+        // First hint that we'll need this data
+        advise_willneed_range(&self.mmap, *model_offset, *model_size);
+
+        // Then lock it in RAM
+        lock_memory_range(&self.mmap, *model_offset, *model_size)?;
+
+        tracing::debug!("Successfully pinned model '{}' in RAM", name);
+
+        Ok(())
+    }
+
+    /// Check if a model name suggests it's an embedding layer.
+    ///
+    /// This heuristic checks if the model name contains common embedding
+    /// layer keywords: "embed", "embedding", "token", "vocab".
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - Model name to check
+    ///
+    /// # Returns
+    ///
+    /// `true` if the name suggests an embedding layer.
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// # use hologram_ai::runtime::loader::PipelineBundle;
+    /// // These return true:
+    /// // - "embedding"
+    /// // - "token_embeddings"
+    /// // - "vocab_embed"
+    /// // - "embed_tokens"
+    /// ```
+    pub fn is_embedding_layer(&self, name: &str) -> bool {
+        let lower = name.to_lowercase();
+        lower.contains("embed") || lower.contains("token") || lower.contains("vocab")
+    }
+
     /// Load a model from the pipeline and extract its input order if available.
     ///
     /// This uses the embedded layer header to preserve compiler input ordering
@@ -1261,6 +1357,51 @@ fn advise_dontneed_range(mmap: &MappedInput, offset: usize, size: usize) {
 #[cfg(not(unix))]
 fn advise_dontneed_range(_mmap: &MappedInput, _offset: usize, _size: usize) {}
 
+/// Lock a memory range in RAM to prevent swapping.
+///
+/// Uses `mlock()` to lock pages in physical memory. This ensures zero-latency
+/// access but consumes physical RAM. Only use for small, frequently-accessed
+/// data like embedding tables.
+///
+/// # Safety
+///
+/// Requires sufficient memory lock limit (`ulimit -l`). If the limit is too low,
+/// this will fail with ENOMEM or EPERM.
+#[cfg(unix)]
+fn lock_memory_range(mmap: &MappedInput, offset: usize, size: usize) -> Result<()> {
+    let data = mmap.as_slice();
+    if data.is_empty() || offset >= data.len() {
+        return Ok(());
+    }
+    let end = offset.saturating_add(size).min(data.len());
+    let len = end.saturating_sub(offset);
+    if len == 0 {
+        return Ok(());
+    }
+
+    unsafe {
+        let ptr = data.as_ptr().add(offset) as *mut libc::c_void;
+        let result = libc::mlock(ptr, len);
+        if result != 0 {
+            let errno = *libc::__errno_location();
+            return Err(anyhow::anyhow!(
+                "Failed to lock memory (mlock): errno {} (size: {} bytes). \
+                 Check ulimit -l for memory lock limit.",
+                errno,
+                len
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn lock_memory_range(_mmap: &MappedInput, _offset: usize, _size: usize) -> Result<()> {
+    // Memory locking is Unix-only
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1319,5 +1460,124 @@ mod tests {
 
         // Create a minimal test by checking that the struct fields are accessible
         // The actual functionality is tested in integration tests
+    }
+
+    #[test]
+    fn test_is_embedding_layer() {
+        use std::io::Write;
+        use tempfile::NamedTempFile;
+
+        // Create a temporary file for the PipelineBundle
+        let mut temp_file = NamedTempFile::new().unwrap();
+        temp_file.write_all(&[0u8; 256]).unwrap();
+        temp_file.flush().unwrap();
+
+        let mmap = Arc::new(MappedInput::open(temp_file.path()).unwrap());
+        let pipeline = PipelineBundle {
+            mmap,
+            model_info: vec![],
+        };
+
+        // Test positive cases
+        assert!(pipeline.is_embedding_layer("embedding"));
+        assert!(pipeline.is_embedding_layer("token_embeddings"));
+        assert!(pipeline.is_embedding_layer("embed_tokens"));
+        assert!(pipeline.is_embedding_layer("vocab_embed"));
+        assert!(pipeline.is_embedding_layer("model.embed_tokens"));
+        assert!(pipeline.is_embedding_layer("EMBEDDING")); // Case insensitive
+        assert!(pipeline.is_embedding_layer("token_ids"));
+        assert!(pipeline.is_embedding_layer("vocab_size"));
+
+        // Test negative cases
+        assert!(!pipeline.is_embedding_layer("encoder"));
+        assert!(!pipeline.is_embedding_layer("decoder"));
+        assert!(!pipeline.is_embedding_layer("attention"));
+        assert!(!pipeline.is_embedding_layer("layer_0"));
+        assert!(!pipeline.is_embedding_layer("feedforward"));
+    }
+
+    #[test]
+    fn test_pin_model_weights_not_found() {
+        use std::io::Write;
+        use tempfile::NamedTempFile;
+
+        // Create a temporary file for the PipelineBundle
+        let mut temp_file = NamedTempFile::new().unwrap();
+        temp_file.write_all(&[0u8; 256]).unwrap();
+        temp_file.flush().unwrap();
+
+        let mmap = Arc::new(MappedInput::open(temp_file.path()).unwrap());
+        let pipeline = PipelineBundle {
+            mmap,
+            model_info: vec![],
+        };
+
+        // Test that pinning a non-existent model fails
+        let result = pipeline.pin_model_weights("nonexistent");
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("not found in pipeline")
+        );
+    }
+
+    #[test]
+    fn test_pin_model_weights_size_check() {
+        use std::io::Write;
+        use tempfile::NamedTempFile;
+
+        // Create a large temporary file (128MB)
+        let mut temp_file = NamedTempFile::new().unwrap();
+        let large_data = vec![0u8; 128 * 1024 * 1024];
+        temp_file.write_all(&large_data).unwrap();
+        temp_file.flush().unwrap();
+
+        let mmap = Arc::new(MappedInput::open(temp_file.path()).unwrap());
+        let pipeline = PipelineBundle {
+            mmap,
+            model_info: vec![("large_model".to_string(), 0, 128 * 1024 * 1024)],
+        };
+
+        // Test that pinning a large model fails with size error
+        let result = pipeline.pin_model_weights("large_model");
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("exceeds max pinnable size"),
+            "Expected size error, got: {}",
+            err_msg
+        );
+    }
+
+    #[test]
+    fn test_pin_model_weights_small_model() {
+        use std::io::Write;
+        use tempfile::NamedTempFile;
+
+        // Create a small temporary file (1KB)
+        let mut temp_file = NamedTempFile::new().unwrap();
+        let data = vec![0u8; 1024];
+        temp_file.write_all(&data).unwrap();
+        temp_file.flush().unwrap();
+
+        let mmap = Arc::new(MappedInput::open(temp_file.path()).unwrap());
+        let pipeline = PipelineBundle {
+            mmap,
+            model_info: vec![("small_model".to_string(), 0, 1024)],
+        };
+
+        // Test that pinning a small model succeeds (or fails gracefully on systems with low ulimit)
+        let result = pipeline.pin_model_weights("small_model");
+        // We accept both success and permission errors (due to ulimit)
+        if let Err(e) = result {
+            let err_msg = e.to_string();
+            assert!(
+                err_msg.contains("mlock") || err_msg.contains("ulimit"),
+                "Expected mlock or ulimit error, got: {}",
+                err_msg
+            );
+        }
     }
 }
