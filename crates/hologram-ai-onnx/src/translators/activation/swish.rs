@@ -1,5 +1,6 @@
 //! Swish activation translator.
 
+use crate::core::op_hints::{ActivationType, add_simd_hint};
 use crate::proto::NodeProto;
 use crate::translators::{InputRequirement, OnnxTranslator, TranslationError};
 use hologram::ir::{GraphBuilder, NodeIndex};
@@ -28,6 +29,11 @@ impl OnnxTranslator for SwishTranslator {
         let sig = builder
             .sigmoid(inputs[0])
             .map_err(|e| TranslationError::IrBuilder(e.to_string()))?;
+
+        // Add SIMD lookup hint for the sigmoid component
+        // Note: Swish/SiLU is decomposed as x * sigmoid(x) until hologram IR adds dedicated silu() op
+        add_simd_hint(builder.graph_mut(), sig, ActivationType::Sigmoid);
+
         let result = builder
             .mul(inputs[0], sig)
             .map_err(|e| TranslationError::IrBuilder(e.to_string()))?;

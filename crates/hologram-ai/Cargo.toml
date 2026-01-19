@@ -39,6 +39,7 @@ rkyv.workspace = true
 half.workspace = true
 libc.workspace = true
 unicode-normalization.workspace = true
+rayon.workspace = true
 
 # CLI
 clap.workspace = true

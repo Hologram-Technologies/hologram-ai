@@ -78,6 +78,176 @@ let compiler = OnnxCompiler::new();
 let (holo_bytes, weight_bytes) = compiler.compile(&model_bytes)?;
 ```
 
+## T5 Model Compilation and Execution
+
+hologram-ai provides seamless support for encoder-decoder transformer models like T5, with automatic tokenization and text generation.
+
+### Prerequisites
+
+Download or export your T5 model in ONNX format with encoder and decoder components:
+
+```bash
+# Example directory structure
+models/t5-small/
+├── encoder.onnx          # Encoder model (text → hidden states)
+├── decoder.onnx          # Decoder model (hidden states → logits)
+└── tokenizer.json        # SentencePiece tokenizer
+```
+
+### Compiling T5 Models
+
+Use the `compile-pipeline` command to compile encoder, decoder, and tokenizer into a single optimized bundle:
+
+```bash
+# Compile T5 encoder, decoder, and tokenizer to a single .holo pipeline bundle
+cargo run -p hologram-ai -- compile-pipeline \
+  --encoder models/t5-small/encoder.onnx \
+  --decoder models/t5-small/decoder.onnx \
+  --tokenizer models/t5-small/tokenizer.json \
+  -o models/t5-small/pipeline.holo
+```
+
+This creates a **HOLM pipeline bundle** (`pipeline.holo`) containing:
+- Compiled encoder model (HOLB format)
+- Compiled decoder model (HOLB format)
+- SentencePiece tokenizer with vocabulary
+- Memory-mapped weights for efficient loading
+
+#### Compilation Options
+
+```bash
+# With graph partitioning for large models
+cargo run -p hologram-ai -- compile-pipeline \
+  --encoder encoder.onnx \
+  --decoder decoder.onnx \
+  --tokenizer tokenizer.json \
+  --partition \
+  --partition-size 500 \
+  -o pipeline.holo
+
+# Custom weight threshold (default: 4096 bytes)
+cargo run -p hologram-ai -- compile-pipeline \
+  --encoder encoder.onnx \
+  --decoder decoder.onnx \
+  --tokenizer tokenizer.json \
+  --weight-threshold 8192 \
+  -o pipeline.holo
+
+# Keep intermediate files for debugging
+cargo run -p hologram-ai -- compile-pipeline \
+  --encoder encoder.onnx \
+  --decoder decoder.onnx \
+  --tokenizer tokenizer.json \
+  --keep-intermediates \
+  -o pipeline.holo
+```
+
+### Running T5 Text Generation
+
+Execute the compiled pipeline bundle with a text prompt:
+
+```bash
+# Basic text generation
+cargo run -p hologram-ai -- run-pipeline models/t5-small/pipeline.holo \
+  --prompt "Tell me a joke"
+
+# Translation
+cargo run -p hologram-ai -- run-pipeline models/t5-small/pipeline.holo \
+  --prompt "translate English to French: Hello, how are you?"
+
+# Summarization
+cargo run -p hologram-ai -- run-pipeline models/t5-small/pipeline.holo \
+  --prompt "summarize: The quick brown fox jumps over the lazy dog"
+```
+
+#### Generation Parameters
+
+Control text generation with advanced sampling parameters:
+
+```bash
+cargo run -p hologram-ai -- run-pipeline pipeline.holo \
+  --prompt "Tell me a joke" \
+  --max-tokens 100 \        # Maximum new tokens (default: 50)
+  --min-tokens 12 \         # Minimum tokens before EOS (default: 12)
+  --top-k 40 \              # Top-k sampling (default: 40)
+  --temperature 0.9 \       # Sampling temperature (default: 0.9)
+  --beam-size 1 \           # Beam search width (default: 1)
+  --length-penalty 1.0 \    # Length penalty for beam search (default: 1.0)
+  --no-repeat-ngram 3 \     # Block n-gram repetition (default: 3)
+  --eos-prob-threshold 0.2  # Minimum EOS probability (default: 0.2)
+```
+
+#### Expected Output
+
+```
+=== T5 Pipeline Text Generation ===
+Pipeline: models/t5-small/pipeline.holo
+Prompt: "Tell me a joke"
+Max new tokens: 50
+
+Loading pipeline bundle...
+✓ Encoder model loaded (12.3 MB)
+✓ Decoder model loaded (18.7 MB)
+✓ Tokenizer loaded (vocab size: 32128)
+
+Tokenizing prompt...
+✓ Input tokens: 5 tokens
+
+Running encoder...
+✓ Encoder complete (42.3ms)
+
+Generating text...
+Step 1/50 | Token: Why
+Step 2/50 | Token: did
+Step 3/50 | Token: the
+...
+✓ Generation complete (1.2s, 45 tokens)
+
+=== Generated Output ===
+Why did the chicken cross the road? To get to the other side!
+```
+
+### Categorical Instructions Support
+
+The compiled `.holo` files automatically leverage hologram's **13 categorical instructions** for optimized execution:
+
+| Instruction | Purpose | Performance Benefit |
+|-------------|---------|---------------------|
+| `CharProduct` | Monster group character table lookup | O(1) 194×194 matrix access |
+| `OrbitClassify` | Classify bytes into 32 orbit classes | Parallel reduction optimization |
+| `Lift` | Project to resonance space (mod 96) | Exact arithmetic for activations |
+| `MultInverse` | Multiplicative inverse mod 256 | Fast normalization |
+| `TorusMap` | Map byte to torus coordinates | Efficient embedding lookups |
+
+These instructions are automatically used by the hologram backend when executing:
+
+- Activation functions (sigmoid, tanh, GELU)
+- Attention mechanisms (Q/K/V projections)
+- Embedding table lookups
+- Normalization layers
+
+**No special flags needed** - categorical optimizations are automatically applied during execution based on the operations in your model.
+
+### Alternative: Compile Individual Models
+
+For advanced use cases, you can compile encoder and decoder separately:
+
+```bash
+# Compile encoder
+cargo run -p hologram-ai -- compile models/t5-small/encoder.onnx \
+  -o models/t5-small/encoder.holo
+
+# Compile decoder
+cargo run -p hologram-ai -- compile models/t5-small/decoder.onnx \
+  -o models/t5-small/decoder.holo
+
+# Run encoder with prompt (requires text-output feature)
+cargo run -p hologram-ai --features text-output -- run \
+  models/t5-small/encoder.holo \
+  --prompt "Tell me a joke" \
+  --tokenizer models/t5-small/tokenizer.json
+```
+
 ## Supported Operations
 
 ### Tier 1 (Core)

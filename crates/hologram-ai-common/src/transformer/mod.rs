@@ -45,9 +45,11 @@
 mod attention;
 mod builder;
 mod config;
+mod embedding_cache;
 mod ffn;
 mod norm;
 
 pub use attention::AttentionType;
 pub use builder::GenericTransformerBuilder;
 pub use config::{Activation, FFNType, NormType, RoPEScaling, TransformerConfig};
+pub use embedding_cache::{EmbeddingCacheManager, EmbeddingCacheStats, TableStats};

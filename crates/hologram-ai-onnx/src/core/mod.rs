@@ -15,6 +15,7 @@ mod error;
 mod ir_to_graph;
 pub mod layer_detection;
 pub mod layer_splitter;
+pub mod op_hints;
 mod parser;
 mod partitioning;
 pub mod sections;
@@ -70,6 +71,13 @@ pub use weights_format::{
 
 // Re-export config types
 pub use config::{EmbeddedFileConfig, OnnxConfig, SectionType};
+
+// Re-export operation hints
+pub use op_hints::{
+    ActivationType, add_composed_view_hint, add_parallel_hint, add_simd_hint,
+    get_composed_view_table_ids, get_parallel_group_id, get_simd_table_id, has_composed_view_hint,
+    has_parallel_hint, has_simd_hint,
+};
 
 // Re-export section traits and types
 pub use sections::{

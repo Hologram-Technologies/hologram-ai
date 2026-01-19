@@ -270,3 +270,16 @@ Any code that contains phrases like "in production you would...", "a real implem
    - No unused imports, variables, or dead code without explicit `#[allow(...)]`
    - All warnings must be addressed before marking a task complete
 7. **Update TODO tracker** - Mark items complete in `docs/working/implementation.md`
+
+## Tasks
+
+Updates to every task must be documented with their status before completion of the task. Update the plan document with a table and each task with their completed state between:
+
+- Not started
+- In-Progress
+- Pending implemention (no tests written)
+- Completed
+
+Tasks are only complete if all the workspace tests pass. You can run them with `just test`. A task is not complete until all of the tests pass.
+
+As you're working through tasks, ensure you have a plan in `specs/plans` and keep it up to date throughout the feature build.

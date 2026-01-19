@@ -1,5 +1,6 @@
 //! ReLU activation translator.
 
+use crate::core::op_hints::{ActivationType, add_simd_hint};
 use crate::proto::NodeProto;
 use crate::translators::{InputRequirement, OnnxTranslator, TranslationError};
 use hologram::ir::{GraphBuilder, NodeIndex};
@@ -28,6 +29,10 @@ impl OnnxTranslator for ReluTranslator {
         let result = builder
             .relu(inputs[0])
             .map_err(|e| TranslationError::IrBuilder(e.to_string()))?;
+
+        // Add SIMD lookup hint for backend optimization
+        add_simd_hint(builder.graph_mut(), result, ActivationType::Relu);
+
         Ok(vec![result])
     }
 
