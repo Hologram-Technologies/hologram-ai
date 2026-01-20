@@ -52,6 +52,19 @@ use std::path::Path;
 
 use super::weights_format::{WeightDType, WeightsFileWriter};
 
+// ONNX data type constants
+mod onnx_dtype {
+    pub const FLOAT: i32 = 1;
+    pub const UINT8: i32 = 2;
+    pub const INT8: i32 = 3;
+    pub const UINT16: i32 = 4;
+    pub const INT16: i32 = 5;
+    pub const INT32: i32 = 6;
+    pub const INT64: i32 = 7;
+    pub const FLOAT16: i32 = 10;
+    pub const DOUBLE: i32 = 11;
+}
+
 /// Reference to external weight data.
 ///
 /// This lightweight structure points to a location in the external
@@ -431,90 +444,85 @@ impl WeightData {
     /// # }
     /// ```
     pub fn extract_tensor_data(tensor: &TensorProto) -> Result<Vec<f32>> {
-        // ONNX data type constants
-        const FLOAT: i32 = 1;
-        const UINT8: i32 = 2;
-        const INT8: i32 = 3;
-        const UINT16: i32 = 4;
-        const INT16: i32 = 5;
-        const INT32: i32 = 6;
-        const INT64: i32 = 7;
-        const FLOAT16: i32 = 10;
-        const DOUBLE: i32 = 11;
+        use onnx_dtype::*;
 
         match tensor.data_type {
-            FLOAT => {
-                // Zero-copy conversion for f32
-                if !tensor.raw_data.is_empty() {
-                    // Raw bytes - cast directly (zero-copy)
-                    Ok(bytemuck::cast_slice(&tensor.raw_data).to_vec())
-                } else {
-                    // Float array field
-                    Ok(tensor.float_data.clone())
-                }
-            }
-
-            FLOAT16 => {
-                // f16 → f32 conversion
-                if !tensor.raw_data.is_empty() {
-                    let u16_data: &[u16] = bytemuck::cast_slice(&tensor.raw_data);
-                    Ok(u16_data
-                        .iter()
-                        .map(|&bits| half::f16::from_bits(bits).to_f32())
-                        .collect())
-                } else {
-                    // int32_data contains f16 as uint16
-                    Ok(tensor
-                        .int32_data
-                        .iter()
-                        .map(|&bits| half::f16::from_bits(bits as u16).to_f32())
-                        .collect())
-                }
-            }
-
-            DOUBLE => {
-                // f64 → f32 conversion
-                if !tensor.raw_data.is_empty() {
-                    let f64_data: &[f64] = bytemuck::cast_slice(&tensor.raw_data);
-                    Ok(f64_data.iter().map(|&v| v as f32).collect())
-                } else {
-                    Ok(tensor.double_data.iter().map(|&v| v as f32).collect())
-                }
-            }
-
-            INT32 => {
-                // i32 → f32 conversion
-                if !tensor.raw_data.is_empty() {
-                    let i32_data: &[i32] = bytemuck::cast_slice(&tensor.raw_data);
-                    Ok(i32_data.iter().map(|&v| v as f32).collect())
-                } else {
-                    Ok(tensor.int32_data.iter().map(|&v| v as f32).collect())
-                }
-            }
-
-            INT64 => {
-                // i64 → f32 conversion
-                if !tensor.raw_data.is_empty() {
-                    let i64_data: &[i64] = bytemuck::cast_slice(&tensor.raw_data);
-                    Ok(i64_data.iter().map(|&v| v as f32).collect())
-                } else {
-                    Ok(tensor.int64_data.iter().map(|&v| v as f32).collect())
-                }
-            }
-
-            INT8 | UINT8 | INT16 | UINT16 => {
-                // Small integer types
-                if !tensor.raw_data.is_empty() {
-                    Ok(tensor.raw_data.iter().map(|&v| v as f32).collect())
-                } else {
-                    Ok(tensor.int32_data.iter().map(|&v| v as f32).collect())
-                }
-            }
-
+            FLOAT => Self::extract_f32(tensor),
+            FLOAT16 => Self::extract_f16(tensor),
+            DOUBLE => Self::extract_f64(tensor),
+            INT32 => Self::extract_i32(tensor),
+            INT64 => Self::extract_i64(tensor),
+            INT8 | UINT8 | INT16 | UINT16 => Self::extract_small_int(tensor),
             _ => Err(OnnxError::UnsupportedDataType(format!(
                 "Data type {} not supported",
                 tensor.data_type
             ))),
+        }
+    }
+
+    /// Extract f32 data (zero-copy when possible).
+    fn extract_f32(tensor: &TensorProto) -> Result<Vec<f32>> {
+        if !tensor.raw_data.is_empty() {
+            Ok(bytemuck::cast_slice(&tensor.raw_data).to_vec())
+        } else {
+            Ok(tensor.float_data.clone())
+        }
+    }
+
+    /// Extract f16 data and convert to f32.
+    fn extract_f16(tensor: &TensorProto) -> Result<Vec<f32>> {
+        if !tensor.raw_data.is_empty() {
+            let u16_data: &[u16] = bytemuck::cast_slice(&tensor.raw_data);
+            Ok(u16_data
+                .iter()
+                .map(|&bits| half::f16::from_bits(bits).to_f32())
+                .collect())
+        } else {
+            // int32_data contains f16 as uint16
+            Ok(tensor
+                .int32_data
+                .iter()
+                .map(|&bits| half::f16::from_bits(bits as u16).to_f32())
+                .collect())
+        }
+    }
+
+    /// Extract f64 data and convert to f32.
+    fn extract_f64(tensor: &TensorProto) -> Result<Vec<f32>> {
+        if !tensor.raw_data.is_empty() {
+            let f64_data: &[f64] = bytemuck::cast_slice(&tensor.raw_data);
+            Ok(f64_data.iter().map(|&v| v as f32).collect())
+        } else {
+            Ok(tensor.double_data.iter().map(|&v| v as f32).collect())
+        }
+    }
+
+    /// Extract i32 data and convert to f32.
+    fn extract_i32(tensor: &TensorProto) -> Result<Vec<f32>> {
+        if !tensor.raw_data.is_empty() {
+            let i32_data: &[i32] = bytemuck::cast_slice(&tensor.raw_data);
+            Ok(i32_data.iter().map(|&v| v as f32).collect())
+        } else {
+            Ok(tensor.int32_data.iter().map(|&v| v as f32).collect())
+        }
+    }
+
+    /// Extract i64 data and convert to f32.
+    fn extract_i64(tensor: &TensorProto) -> Result<Vec<f32>> {
+        if !tensor.raw_data.is_empty() {
+            let i64_data: &[i64] = bytemuck::cast_slice(&tensor.raw_data);
+            Ok(i64_data.iter().map(|&v| v as f32).collect())
+        } else {
+            Ok(tensor.int64_data.iter().map(|&v| v as f32).collect())
+        }
+    }
+
+    /// Extract small integer types (i8, u8, i16, u16) and convert to f32.
+    fn extract_small_int(tensor: &TensorProto) -> Result<Vec<f32>> {
+        if !tensor.raw_data.is_empty() {
+            Ok(tensor.raw_data.iter().map(|&v| v as f32).collect())
+        } else {
+            Ok(tensor.int32_data.iter().map(|&v| v as f32).collect())
         }
     }
 

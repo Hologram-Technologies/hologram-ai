@@ -163,7 +163,10 @@
       "Bash(cargo --list:*)",
       "Bash(sudo rm:*)",
       "Bash(cargo install:*)",
-      "Bash(rustc:*)"
+      "Bash(rustc:*)",
+      "Bash(cargo bench:*)",
+      "Bash(target/release/deps/optimization_benchmark-97e81e1f618e00bc:*)",
+      "Bash(stat:*)"
     ]
   }
 }

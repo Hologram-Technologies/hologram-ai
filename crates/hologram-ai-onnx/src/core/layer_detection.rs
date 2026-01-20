@@ -248,105 +248,148 @@ fn are_consecutive(indices: &[usize]) -> bool {
     true
 }
 
-/// Analyze and fill in input/output tensor boundaries for each layer.
-fn analyze_layer_boundaries(graph: &GraphProto, mut layers: Vec<LayerInfo>) -> Vec<LayerInfo> {
-    // Build tensor producer map: tensor_name -> layer_index (or -1 for external)
-    let mut tensor_producer: AHashMap<&str, isize> = AHashMap::new();
+/// Pre-computed tensor dependency graph for efficient boundary analysis.
+struct TensorGraph<'a> {
+    /// tensor_name -> producing layer index (-1 for external inputs/initializers)
+    producer: AHashMap<&'a str, isize>,
+    /// tensor_name -> list of consuming layer indices
+    consumers: AHashMap<&'a str, Vec<usize>>,
+    /// Tensors that are graph outputs
+    graph_outputs: AHashSet<&'a str>,
+}
 
-    // Mark graph inputs as external (-1)
-    for input in &graph.input {
-        tensor_producer.insert(&input.name, -1);
-    }
+impl<'a> TensorGraph<'a> {
+    /// Build tensor dependency graph from ONNX graph and detected layers.
+    fn build(graph: &'a GraphProto, layers: &[LayerInfo]) -> Self {
+        let mut producer: AHashMap<&str, isize> = AHashMap::new();
+        let mut consumers: AHashMap<&str, Vec<usize>> = AHashMap::new();
 
-    // Mark initializers as external (-1)
-    for init in &graph.initializer {
-        tensor_producer.insert(&init.name, -1);
-    }
-
-    // Map tensors to their producing layer
-    for (layer_idx, layer) in layers.iter().enumerate() {
-        for node_idx in &layer.node_indices {
-            let node = &graph.node[*node_idx];
-            for output in &node.output {
-                tensor_producer.insert(output, layer_idx as isize);
-            }
+        // Mark graph inputs and initializers as external (-1)
+        for input in &graph.input {
+            producer.insert(&input.name, -1);
         }
-    }
-
-    // Build set of tensors produced by each layer for cross-layer output detection
-    let layer_tensor_sets: Vec<AHashSet<&str>> = layers
-        .iter()
-        .map(|layer| {
-            layer
-                .node_indices
-                .iter()
-                .flat_map(|idx| graph.node[*idx].output.iter().map(|s| s.as_str()))
-                .collect()
-        })
-        .collect();
-
-    // Collect node indices per layer (needed for output detection)
-    let layer_node_indices: Vec<Vec<usize>> =
-        layers.iter().map(|l| l.node_indices.clone()).collect();
-
-    // Now analyze each layer's inputs and outputs
-    for layer_idx in 0..layers.len() {
-        let mut layer_inputs: AHashSet<String> = AHashSet::new();
-        let mut layer_outputs: AHashSet<String> = AHashSet::new();
-
-        // Find inputs: tensors consumed by this layer but produced elsewhere
-        for node_idx in &layers[layer_idx].node_indices {
-            let node = &graph.node[*node_idx];
-            for input in &node.input {
-                if input.is_empty() {
-                    continue;
-                }
-                if let Some(&producer) = tensor_producer.get(input.as_str())
-                    && producer != layer_idx as isize
-                {
-                    layer_inputs.insert(input.clone());
-                }
-            }
+        for init in &graph.initializer {
+            producer.insert(&init.name, -1);
         }
 
-        // Find outputs: tensors produced by this layer and consumed by other layers
-        let layer_tensors = &layer_tensor_sets[layer_idx];
-
-        for (other_idx, other_node_indices) in layer_node_indices.iter().enumerate() {
-            if other_idx == layer_idx {
-                continue;
-            }
-            for node_idx in other_node_indices {
+        // Map tensors to producing layers and build consumer list
+        for (layer_idx, layer) in layers.iter().enumerate() {
+            for node_idx in &layer.node_indices {
                 let node = &graph.node[*node_idx];
+
+                // Record this layer as producer of its outputs
+                for output in &node.output {
+                    producer.insert(output.as_str(), layer_idx as isize);
+                }
+
+                // Record this layer as consumer of its inputs
                 for input in &node.input {
-                    if layer_tensors.contains(input.as_str()) {
-                        layer_outputs.insert(input.clone());
+                    if !input.is_empty() {
+                        consumers.entry(input.as_str()).or_default().push(layer_idx);
                     }
                 }
             }
         }
 
-        // Also check graph outputs
-        for output in &graph.output {
-            if layer_tensors.contains(output.name.as_str()) {
-                layer_outputs.insert(output.name.clone());
+        // Collect graph outputs
+        let graph_outputs: AHashSet<&str> = graph.output.iter().map(|o| o.name.as_str()).collect();
+
+        Self {
+            producer,
+            consumers,
+            graph_outputs,
+        }
+    }
+
+    /// Get layer inputs: tensors consumed by layer but produced elsewhere.
+    fn layer_inputs(&self, layer_idx: usize, layer: &LayerInfo, graph: &GraphProto) -> Vec<String> {
+        let mut inputs: AHashSet<String> = AHashSet::new();
+
+        for node_idx in &layer.node_indices {
+            let node = &graph.node[*node_idx];
+            for input in &node.input {
+                if input.is_empty() {
+                    continue;
+                }
+                let is_external_input = self
+                    .producer
+                    .get(input.as_str())
+                    .is_some_and(|&prod| prod != layer_idx as isize);
+
+                if is_external_input {
+                    inputs.insert(input.clone());
+                }
             }
         }
 
-        let layer = &mut layers[layer_idx];
-        layer.inputs = layer_inputs.into_iter().collect();
-        layer.outputs = layer_outputs.into_iter().collect();
+        let mut result: Vec<_> = inputs.into_iter().collect();
+        result.sort();
+        result
+    }
 
-        // Sort for deterministic output
-        layer.inputs.sort();
-        layer.outputs.sort();
+    /// Get layer outputs: tensors produced by layer and consumed by other layers or graph outputs.
+    fn layer_outputs(
+        &self,
+        layer_idx: usize,
+        layer: &LayerInfo,
+        graph: &GraphProto,
+    ) -> Vec<String> {
+        let mut outputs: AHashSet<String> = AHashSet::new();
 
+        for node_idx in &layer.node_indices {
+            let node = &graph.node[*node_idx];
+            for output in &node.output {
+                // Check if consumed by other layers
+                let consumed_by_other = self
+                    .consumers
+                    .get(output.as_str())
+                    .is_some_and(|consumers| consumers.iter().any(|&idx| idx != layer_idx));
+
+                if consumed_by_other {
+                    outputs.insert(output.clone());
+                    continue;
+                }
+                // Check if it's a graph output
+                if self.graph_outputs.contains(output.as_str()) {
+                    outputs.insert(output.clone());
+                }
+            }
+        }
+
+        let mut result: Vec<_> = outputs.into_iter().collect();
+        result.sort();
+        result
+    }
+}
+
+/// Analyze and fill in input/output tensor boundaries for each layer.
+///
+/// Uses a pre-built tensor dependency graph for O(n) complexity instead of O(n²).
+fn analyze_layer_boundaries(graph: &GraphProto, mut layers: Vec<LayerInfo>) -> Vec<LayerInfo> {
+    // Build tensor graph once (O(n) where n = total nodes)
+    let tensor_graph = TensorGraph::build(graph, &layers);
+
+    // Collect all boundary data first (avoids borrow conflicts)
+    let boundaries: Vec<_> = layers
+        .iter()
+        .enumerate()
+        .map(|(idx, layer)| {
+            let inputs = tensor_graph.layer_inputs(idx, layer, graph);
+            let outputs = tensor_graph.layer_outputs(idx, layer, graph);
+            (inputs, outputs)
+        })
+        .collect();
+
+    // Apply boundaries to layers
+    for (layer, (inputs, outputs)) in layers.iter_mut().zip(boundaries) {
         trace!(
             "Layer {}: {} inputs, {} outputs",
             layer.full_name(),
-            layer.inputs.len(),
-            layer.outputs.len()
+            inputs.len(),
+            outputs.len()
         );
+        layer.inputs = inputs;
+        layer.outputs = outputs;
     }
 
     layers

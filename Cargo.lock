@@ -1206,6 +1206,7 @@ dependencies = [
  "flate2",
  "hologram-backend",
  "hologram-common",
+ "hologram-compiler-derive",
  "hologram-core",
  "hologram-graph",
  "hologram-ir",
@@ -1223,6 +1224,15 @@ dependencies = [
  "tree-sitter",
  "tree-sitter-python",
  "tree-sitter-typescript",
+]
+
+[[package]]
+name = "hologram-compiler-derive"
+version = "0.1.0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
 ]
 
 [[package]]

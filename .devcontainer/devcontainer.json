@@ -5,7 +5,9 @@
   "workspaceFolder": "/workspace",
   "shutdownAction": "stopCompose",
   "remoteUser": "vscode",
-  "forwardPorts": [1455],
+  "forwardPorts": [
+    1455
+  ],
   "postCreateCommand": "bash .devcontainer/post-create.sh",
   "mounts": [
     "source=${localWorkspaceFolder}/../simple-lookup,target=/hologram,type=bind,consistency=cached"

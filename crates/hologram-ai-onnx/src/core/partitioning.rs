@@ -200,71 +200,118 @@ impl GraphPartitioner {
         partition_idx: usize,
     ) -> Result<GraphPartition> {
         let nodes_in_partition: AHashSet<usize> = node_indices.iter().copied().collect();
-
-        // Collect all tensors produced within this partition
-        let mut internal_tensors: AHashSet<String> = AHashSet::new();
-        for &idx in node_indices {
-            let node = &graph.node[idx];
-            for output in &node.output {
-                internal_tensors.insert(output.to_string());
-            }
-        }
-
-        // Identify boundary inputs (tensors from other partitions or graph inputs)
-        let mut boundary_inputs: AHashMap<String, String> = AHashMap::new();
-        let mut boundary_input_counter = 0;
-
-        for &idx in node_indices {
-            let node = &graph.node[idx];
-            for input in &node.input {
-                if !internal_tensors.contains(input.as_str())
-                    && !boundary_inputs.contains_key(input.as_str())
-                {
-                    // This is an external tensor - create virtual input
-                    let virtual_name = format!(
-                        "partition_{}_input_{}",
-                        partition_idx, boundary_input_counter
-                    );
-                    boundary_inputs.insert(input.to_string(), virtual_name);
-                    boundary_input_counter += 1;
-                }
-            }
-        }
-
-        // Identify boundary outputs (tensors needed by other partitions or graph outputs)
-        let mut boundary_outputs: AHashSet<String> = AHashSet::new();
-
-        // Check which internal tensors are consumed outside this partition
-        for (idx, node) in graph.node.iter().enumerate() {
-            if !nodes_in_partition.contains(&idx) {
-                for input in &node.input {
-                    if internal_tensors.contains(input.as_str()) {
-                        boundary_outputs.insert(input.to_string());
-                    }
-                }
-            }
-        }
-
-        // Also include graph outputs
-        for output_info in &graph.output {
-            if internal_tensors.contains(&output_info.name) {
-                boundary_outputs.insert(output_info.name.clone());
-            }
-        }
-
-        // Clone nodes for subgraph
-        let partition_nodes: Vec<NodeProto> = node_indices
-            .iter()
-            .map(|&idx| graph.node[idx].clone())
-            .collect();
+        let internal_tensors = Self::collect_internal_tensors(graph, node_indices);
+        let boundary_inputs =
+            Self::collect_boundary_inputs(graph, node_indices, &internal_tensors, partition_idx);
+        let boundary_outputs =
+            Self::collect_boundary_outputs(graph, &nodes_in_partition, &internal_tensors);
+        let partition_nodes = Self::clone_partition_nodes(graph, node_indices);
 
         Ok(GraphPartition {
             partition_idx,
             nodes: partition_nodes,
             boundary_inputs,
-            boundary_outputs: boundary_outputs.into_iter().collect(),
+            boundary_outputs,
             original_node_indices: node_indices.to_vec(),
         })
+    }
+
+    /// Collect all tensors produced within a partition.
+    fn collect_internal_tensors(graph: &GraphProto, node_indices: &[usize]) -> AHashSet<String> {
+        node_indices
+            .iter()
+            .flat_map(|&idx| graph.node[idx].output.iter().cloned())
+            .collect()
+    }
+
+    /// Identify boundary inputs (tensors from other partitions or graph inputs).
+    ///
+    /// Creates virtual input names for external tensors.
+    fn collect_boundary_inputs(
+        graph: &GraphProto,
+        node_indices: &[usize],
+        internal_tensors: &AHashSet<String>,
+        partition_idx: usize,
+    ) -> AHashMap<String, String> {
+        let mut boundary_inputs: AHashMap<String, String> = AHashMap::new();
+        let mut counter = 0;
+
+        for &idx in node_indices {
+            for input in &graph.node[idx].input {
+                let is_external =
+                    !internal_tensors.contains(input) && !boundary_inputs.contains_key(input);
+
+                if is_external {
+                    let virtual_name = format!("partition_{}_input_{}", partition_idx, counter);
+                    boundary_inputs.insert(input.clone(), virtual_name);
+                    counter += 1;
+                }
+            }
+        }
+
+        boundary_inputs
+    }
+
+    /// Identify boundary outputs (tensors consumed by other partitions or graph outputs).
+    fn collect_boundary_outputs(
+        graph: &GraphProto,
+        nodes_in_partition: &AHashSet<usize>,
+        internal_tensors: &AHashSet<String>,
+    ) -> Vec<String> {
+        let mut boundary_outputs: AHashSet<String> = AHashSet::new();
+
+        // Find internal tensors consumed by external nodes
+        Self::find_cross_partition_consumers(
+            graph,
+            nodes_in_partition,
+            internal_tensors,
+            &mut boundary_outputs,
+        );
+
+        // Include graph outputs that are internal to this partition
+        Self::add_graph_output_boundaries(graph, internal_tensors, &mut boundary_outputs);
+
+        boundary_outputs.into_iter().collect()
+    }
+
+    /// Find tensors consumed by nodes outside the partition.
+    fn find_cross_partition_consumers(
+        graph: &GraphProto,
+        nodes_in_partition: &AHashSet<usize>,
+        internal_tensors: &AHashSet<String>,
+        boundary_outputs: &mut AHashSet<String>,
+    ) {
+        for (idx, node) in graph.node.iter().enumerate() {
+            if nodes_in_partition.contains(&idx) {
+                continue;
+            }
+            for input in &node.input {
+                if internal_tensors.contains(input) {
+                    boundary_outputs.insert(input.clone());
+                }
+            }
+        }
+    }
+
+    /// Add internal tensors that are graph outputs to boundary outputs.
+    fn add_graph_output_boundaries(
+        graph: &GraphProto,
+        internal_tensors: &AHashSet<String>,
+        boundary_outputs: &mut AHashSet<String>,
+    ) {
+        for output_info in &graph.output {
+            if internal_tensors.contains(&output_info.name) {
+                boundary_outputs.insert(output_info.name.clone());
+            }
+        }
+    }
+
+    /// Clone nodes for the partition subgraph.
+    fn clone_partition_nodes(graph: &GraphProto, node_indices: &[usize]) -> Vec<NodeProto> {
+        node_indices
+            .iter()
+            .map(|&idx| graph.node[idx].clone())
+            .collect()
     }
 }
 

@@ -100,18 +100,17 @@ fn try_resolve_shape_from_graph(
     shape_input: NodeIndex,
     allow_zero: bool,
 ) -> Option<Vec<i64>> {
-    use std::collections::HashMap;
-
     let data_node = builder.graph().node(data)?;
     let input_shape = &data_node.op.shape;
-    let mut cache: HashMap<NodeIndex, Option<Vec<Dim>>> = HashMap::new();
-    let mut stack = Vec::new();
-    let mut dims = eval_shape_tensor(builder, shape_input, input_shape, &mut cache, &mut stack)?;
+
+    let mut evaluator = ShapeEvaluator::new(builder, input_shape);
+    let mut dims = evaluator.eval(shape_input)?;
 
     if dims.is_empty() {
         return None;
     }
 
+    // Handle zero dimensions based on allow_zero flag
     if !allow_zero {
         for (i, dim) in dims.iter_mut().enumerate() {
             if matches!(dim, Dim::Static(0)) {
@@ -123,15 +122,19 @@ fn try_resolve_shape_from_graph(
         return None;
     }
 
-    // If any dimension is symbolic, return None to fall through to
-    // reshape_dynamic path which properly preserves symbolic dimension names
-    // through infer_shape_from_shape_tensor
+    // If any dimension is symbolic, fall through to reshape_dynamic
     if dims.iter().any(|d| matches!(d, Dim::Symbolic(_))) {
         return None;
     }
 
+    convert_dims_to_shape_values(dims)
+}
+
+/// Convert evaluated dims to shape values for reshape.
+fn convert_dims_to_shape_values(dims: Vec<Dim>) -> Option<Vec<i64>> {
     let mut dynamic_count = 0usize;
     let mut result = Vec::with_capacity(dims.len());
+
     for dim in dims {
         match dim {
             Dim::Static(value) => result.push(value as i64),
@@ -142,109 +145,162 @@ fn try_resolve_shape_from_graph(
                 }
                 result.push(-1);
             }
-            Dim::Symbolic(_) => unreachable!(), // Already checked above
+            Dim::Symbolic(_) => unreachable!(), // Already checked in caller
         }
     }
 
     Some(result)
 }
 
-fn eval_shape_tensor(
-    builder: &GraphBuilder,
-    idx: NodeIndex,
-    reshape_input_shape: &Shape,
-    cache: &mut std::collections::HashMap<NodeIndex, Option<Vec<Dim>>>,
-    stack: &mut Vec<NodeIndex>,
-) -> Option<Vec<Dim>> {
-    if let Some(cached) = cache.get(&idx) {
-        return cached.clone();
-    }
-    if stack.contains(&idx) {
-        return None;
-    }
-    stack.push(idx);
+/// Evaluates shape tensors by walking the computation graph.
+///
+/// Handles common shape computation patterns like Shape → Gather → Concat
+/// that appear in models with dynamic shapes.
+struct ShapeEvaluator<'a> {
+    builder: &'a GraphBuilder,
+    reshape_input_shape: &'a Shape,
+    cache: std::collections::HashMap<NodeIndex, Option<Vec<Dim>>>,
+    stack: Vec<NodeIndex>,
+}
 
-    let graph = builder.graph();
-    let result = match graph.node(idx)?.op.op.clone() {
-        NodeOp::Constant { data } => const_dims_from_data(&data, reshape_input_shape),
-        NodeOp::Shape { start, end } => {
-            let mut inputs: Vec<NodeIndex> = graph.predecessors(idx).collect();
-            if inputs.len() != 1 {
-                None
-            } else {
-                let input_node = graph.node(inputs.remove(0))?;
-                let rank = input_node.op.shape.rank() as i64;
-                let start_norm = if start < 0 { rank + start } else { start };
-                let end_norm = if end < 0 { rank } else { end };
-                if start_norm < 0 || end_norm < start_norm {
-                    None
-                } else {
-                    let start_idx = start_norm as usize;
-                    let end_idx = end_norm as usize;
-                    if end_idx > input_node.op.shape.rank() {
-                        None
-                    } else {
-                        Some(input_node.op.shape.dims[start_idx..end_idx].to_vec())
-                    }
-                }
-            }
+impl<'a> ShapeEvaluator<'a> {
+    fn new(builder: &'a GraphBuilder, reshape_input_shape: &'a Shape) -> Self {
+        Self {
+            builder,
+            reshape_input_shape,
+            cache: std::collections::HashMap::new(),
+            stack: Vec::new(),
         }
-        NodeOp::Gather { axis } => {
-            if axis != 0 {
-                None
-            } else {
-                let inputs = graph.predecessors_ordered(idx);
-                if inputs.len() != 2 {
-                    None
-                } else {
-                    let data_dims =
-                        eval_shape_tensor(builder, inputs[0], reshape_input_shape, cache, stack)?;
-                    let indices = try_get_constant_i64_vec(graph, inputs[1])?;
-                    let mut result_dims = Vec::with_capacity(indices.len());
-                    let len = data_dims.len() as i64;
-                    for raw_idx in indices {
-                        let idx_norm = if raw_idx < 0 { len + raw_idx } else { raw_idx };
-                        if idx_norm < 0 || idx_norm as usize >= data_dims.len() {
-                            return None;
-                        }
-                        result_dims.push(data_dims[idx_norm as usize].clone());
-                    }
-                    Some(result_dims)
-                }
-            }
-        }
-        NodeOp::Concat { axis } => {
-            if axis != 0 {
-                None
-            } else {
-                let inputs = graph.predecessors_ordered(idx);
-                if inputs.is_empty() {
-                    None
-                } else {
-                    let mut result_dims = Vec::new();
-                    for input in inputs {
-                        let dims =
-                            eval_shape_tensor(builder, input, reshape_input_shape, cache, stack)?;
-                        result_dims.extend(dims);
-                    }
-                    Some(result_dims)
-                }
-            }
-        }
-        NodeOp::Unsqueeze { .. } | NodeOp::Squeeze { .. } | NodeOp::Cast { .. } => {
-            let mut inputs: Vec<NodeIndex> = graph.predecessors(idx).collect();
-            if inputs.len() != 1 {
-                None
-            } else {
-                eval_shape_tensor(builder, inputs.remove(0), reshape_input_shape, cache, stack)
-            }
-        }
-        _ => None,
-    };
+    }
 
-    stack.pop();
-    cache.insert(idx, result.clone());
-    result
+    /// Evaluate a shape tensor node and return its dimension values.
+    fn eval(&mut self, idx: NodeIndex) -> Option<Vec<Dim>> {
+        // Check cache first
+        if let Some(cached) = self.cache.get(&idx) {
+            return cached.clone();
+        }
+
+        // Detect cycles
+        if self.stack.contains(&idx) {
+            return None;
+        }
+        self.stack.push(idx);
+
+        let result = self.eval_node(idx);
+
+        self.stack.pop();
+        self.cache.insert(idx, result.clone());
+        result
+    }
+
+    /// Dispatch evaluation based on node operation type.
+    fn eval_node(&mut self, idx: NodeIndex) -> Option<Vec<Dim>> {
+        let graph = self.builder.graph();
+        let op = graph.node(idx)?.op.op.clone();
+
+        match op {
+            NodeOp::Constant { data } => self.eval_constant(&data),
+            NodeOp::Shape { start, end } => self.eval_shape(idx, start, end),
+            NodeOp::Gather { axis } => self.eval_gather(idx, axis),
+            NodeOp::Concat { axis } => self.eval_concat(idx, axis),
+            NodeOp::Unsqueeze { .. } | NodeOp::Squeeze { .. } | NodeOp::Cast { .. } => {
+                self.eval_passthrough(idx)
+            }
+            _ => None,
+        }
+    }
+
+    /// Evaluate a constant node.
+    fn eval_constant(&self, data: &ConstantData) -> Option<Vec<Dim>> {
+        const_dims_from_data(data, self.reshape_input_shape)
+    }
+
+    /// Evaluate a Shape operation.
+    fn eval_shape(&self, idx: NodeIndex, start: i64, end: i64) -> Option<Vec<Dim>> {
+        let graph = self.builder.graph();
+        let mut inputs: Vec<NodeIndex> = graph.predecessors(idx).collect();
+
+        if inputs.len() != 1 {
+            return None;
+        }
+
+        let input_node = graph.node(inputs.remove(0))?;
+        let rank = input_node.op.shape.rank() as i64;
+
+        // Normalize start/end indices
+        let start_norm = if start < 0 { rank + start } else { start };
+        let end_norm = if end < 0 { rank } else { end };
+
+        if start_norm < 0 || end_norm < start_norm {
+            return None;
+        }
+
+        let start_idx = start_norm as usize;
+        let end_idx = end_norm as usize;
+
+        if end_idx > input_node.op.shape.rank() {
+            return None;
+        }
+
+        Some(input_node.op.shape.dims[start_idx..end_idx].to_vec())
+    }
+
+    /// Evaluate a Gather operation (axis=0 only).
+    fn eval_gather(&mut self, idx: NodeIndex, axis: i32) -> Option<Vec<Dim>> {
+        if axis != 0 {
+            return None;
+        }
+
+        let inputs = self.builder.graph().predecessors_ordered(idx);
+        if inputs.len() != 2 {
+            return None;
+        }
+
+        let data_dims = self.eval(inputs[0])?;
+        let indices = try_get_constant_i64_vec(self.builder.graph(), inputs[1])?;
+
+        let mut result_dims = Vec::with_capacity(indices.len());
+        let len = data_dims.len() as i64;
+
+        for raw_idx in indices {
+            let idx_norm = if raw_idx < 0 { len + raw_idx } else { raw_idx };
+            if idx_norm < 0 || idx_norm as usize >= data_dims.len() {
+                return None;
+            }
+            result_dims.push(data_dims[idx_norm as usize].clone());
+        }
+
+        Some(result_dims)
+    }
+
+    /// Evaluate a Concat operation (axis=0 only).
+    fn eval_concat(&mut self, idx: NodeIndex, axis: i32) -> Option<Vec<Dim>> {
+        if axis != 0 {
+            return None;
+        }
+
+        let inputs = self.builder.graph().predecessors_ordered(idx);
+        if inputs.is_empty() {
+            return None;
+        }
+
+        let mut result_dims = Vec::new();
+        for input in inputs {
+            let dims = self.eval(input)?;
+            result_dims.extend(dims);
+        }
+
+        Some(result_dims)
+    }
+
+    /// Evaluate pass-through operations (Unsqueeze, Squeeze, Cast).
+    fn eval_passthrough(&mut self, idx: NodeIndex) -> Option<Vec<Dim>> {
+        let mut inputs: Vec<NodeIndex> = self.builder.graph().predecessors(idx).collect();
+        if inputs.len() != 1 {
+            return None;
+        }
+        self.eval(inputs.remove(0))
+    }
 }
 
 fn const_dims_from_data(data: &ConstantData, reshape_input_shape: &Shape) -> Option<Vec<Dim>> {

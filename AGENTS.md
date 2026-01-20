@@ -312,6 +312,16 @@ Any code that contains phrases like "in production you would...", "a real implem
    - **Use `Default` trait** for types with sensible defaults
    - **Prefer composition over inheritance** - use traits for shared behavior
    - **Use `From`/`Into` traits** for type conversions instead of custom methods
+   - **Prefer trait implementations over large match statements** - when a match has many arms handling different types/variants, use traits instead:
+     - Each variant implements the trait
+     - Logic is co-located with the type
+     - Easier to add new variants without modifying existing code
+     - Each implementation is independently testable
+   - **Avoid `MIN_*` constants** - do not use hardcoded minimum values (e.g., `MIN_BATCH_SIZE`, `MIN_SEQUENCE_LENGTH`, `MIN_THREADS`) in a dynamic runtime:
+     - The runtime handles dynamic shapes and should accept any valid input
+     - Arbitrary minimums create unnecessary restrictions
+     - Use `MAX_*` constants only when there are genuine resource limits
+     - Validate inputs are non-negative or non-empty where appropriate, but don't enforce arbitrary floors
    - Example patterns:
 
      ```rust

@@ -4,6 +4,19 @@ use crate::proto::NodeProto;
 use crate::translators::{InputRequirement, OnnxAttributes, OnnxTranslator, TranslationError};
 use hologram::ir::{ConstantData, DType, GraphBuilder, NodeIndex, NodeOp};
 
+/// ONNX type to DType lookup table.
+/// Index is ONNX type enum, value is Option<DType>.
+/// None means unsupported/unknown type (defaults to F32).
+const ONNX_TYPE_TO_DTYPE: [(i64, DType); 7] = [
+    (1, DType::F32),  // FLOAT
+    (2, DType::U8),   // UINT8
+    (3, DType::I8),   // INT8
+    (6, DType::I32),  // INT32
+    (7, DType::I64),  // INT64
+    (10, DType::F16), // FLOAT16
+    (11, DType::F64), // DOUBLE
+];
+
 /// Translator for ONNX Cast operation.
 ///
 /// Cast(input, to) converts the input tensor to the specified data type.
@@ -76,60 +89,65 @@ impl OnnxTranslator for CastTranslator {
 }
 
 impl CastTranslator {
-    /// Convert ONNX type enum to hologram DType.
+    /// Convert ONNX type enum to hologram DType using lookup table.
     fn onnx_type_to_dtype(onnx_type: i64) -> DType {
-        match onnx_type {
-            1 => DType::F32,
-            2 => DType::U8,
-            3 => DType::I8,
-            6 => DType::I32,
-            7 => DType::I64,
-            10 => DType::F16,
-            11 => DType::F64,
-            _ => DType::F32, // Default to F32 for unknown types
-        }
+        ONNX_TYPE_TO_DTYPE
+            .iter()
+            .find(|(t, _)| *t == onnx_type)
+            .map(|(_, dtype)| *dtype)
+            .unwrap_or(DType::F32) // Default to F32 for unknown types
     }
 
     /// Attempt constant folding for common type conversions.
+    ///
+    /// Supports conversions between I32, I64, and F32 types.
     fn constant_fold_cast(data: &ConstantData, dtype: DType) -> Option<ConstantData> {
-        match (data, dtype) {
-            // I64 -> I64 (no-op)
-            (ConstantData::I64(values), DType::I64) => Some(ConstantData::I64(values.clone())),
+        match data {
+            ConstantData::I64(values) => Self::cast_i64(values, dtype),
+            ConstantData::I32(values) => Self::cast_i32(values, dtype),
+            ConstantData::F32(values) => Self::cast_f32(values, dtype),
+            _ => None, // Unsupported source types
+        }
+    }
 
-            // I32 -> I64
-            (ConstantData::I32(values), DType::I64) => Some(ConstantData::I64(
-                values.iter().map(|&v| v as i64).collect(),
-            )),
-
-            // I64 -> I32
-            (ConstantData::I64(values), DType::I32) => Some(ConstantData::I32(
+    /// Cast I64 values to target dtype.
+    fn cast_i64(values: &[i64], dtype: DType) -> Option<ConstantData> {
+        match dtype {
+            DType::I64 => Some(ConstantData::I64(values.to_vec())),
+            DType::I32 => Some(ConstantData::I32(
                 values.iter().map(|&v| v as i32).collect(),
             )),
-
-            // F32 -> F32 (no-op)
-            (ConstantData::F32(values), DType::F32) => Some(ConstantData::F32(values.clone())),
-
-            // I64 -> F32
-            (ConstantData::I64(values), DType::F32) => Some(ConstantData::F32(
+            DType::F32 => Some(ConstantData::F32(
                 values.iter().map(|&v| v as f32).collect(),
             )),
+            _ => None,
+        }
+    }
 
-            // I32 -> F32
-            (ConstantData::I32(values), DType::F32) => Some(ConstantData::F32(
-                values.iter().map(|&v| v as f32).collect(),
-            )),
-
-            // F32 -> I64
-            (ConstantData::F32(values), DType::I64) => Some(ConstantData::I64(
+    /// Cast I32 values to target dtype.
+    fn cast_i32(values: &[i32], dtype: DType) -> Option<ConstantData> {
+        match dtype {
+            DType::I32 => Some(ConstantData::I32(values.to_vec())),
+            DType::I64 => Some(ConstantData::I64(
                 values.iter().map(|&v| v as i64).collect(),
             )),
+            DType::F32 => Some(ConstantData::F32(
+                values.iter().map(|&v| v as f32).collect(),
+            )),
+            _ => None,
+        }
+    }
 
-            // F32 -> I32
-            (ConstantData::F32(values), DType::I32) => Some(ConstantData::I32(
+    /// Cast F32 values to target dtype.
+    fn cast_f32(values: &[f32], dtype: DType) -> Option<ConstantData> {
+        match dtype {
+            DType::F32 => Some(ConstantData::F32(values.to_vec())),
+            DType::I64 => Some(ConstantData::I64(
+                values.iter().map(|&v| v as i64).collect(),
+            )),
+            DType::I32 => Some(ConstantData::I32(
                 values.iter().map(|&v| v as i32).collect(),
             )),
-
-            // Unsupported conversions fall through
             _ => None,
         }
     }
