@@ -15,8 +15,30 @@ set -e
 echo "Running pre-commit checks..."
 
 # Format code
-echo "Formatting code with cargo fmt..."
-cargo fmt --all
+echo "Auto-formatting code..."
+if ! cargo fmt --all; then
+    echo "Formatting failed!"
+    exit 1
+fi
+
+# Stage any formatting changes automatically
+if ! git diff --quiet --exit-code; then
+    echo "Auto-staging formatted files..."
+    git add -u
+fi
+echo "Code formatting applied and staged"
+echo ""
+
+# Run clippy check (zero warnings required)
+# Note: Use 'cargo clippy --fix' manually if you want auto-fixes
+echo "Running clippy check (zero warnings required)..."
+if ! cargo clippy --workspace --all-targets -- -D warnings; then
+    echo "Clippy check failed!"
+    echo "   Run 'cargo clippy --workspace --all-targets --fix --allow-dirty' to auto-fix"
+    exit 1
+fi
+echo "Clippy passed"
+echo ""
 
 # Check if formatting changed any files
 if ! git diff --quiet; then
@@ -37,10 +59,6 @@ cargo clippy --all-targets -- -D warnings
 
 # Run tests (prefer nextest for speed, fallback to cargo test)
 echo "Running tests..."
-if command -v cargo-nextest &> /dev/null; then
-    cargo nextest run --workspace --lib --no-fail-fast
-else
-    cargo test --workspace --lib
-fi
+cargo test --workspace --lib
 
 echo "All pre-commit checks passed!"
