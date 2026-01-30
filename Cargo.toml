@@ -1,10 +1,10 @@
 [workspace]
 resolver = "2"
 members = [
-    "crates/hologram-ai",
+    #"crates/hologram-ai",
     "crates/hologram-ai-onnx",
-    "crates/hologram-ai-gguf",
-    "crates/hologram-ai-safetensors",
+    #"crates/hologram-ai-gguf",
+    #"crates/hologram-ai-safetensors",
     "crates/hologram-ai-common",
 ]
 
