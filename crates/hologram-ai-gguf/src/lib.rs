@@ -39,12 +39,28 @@ use hologram_ai_common::{TransformerConfig, WeightMap};
 pub struct GgufCompiler {
     /// Whether to dequantize weights to F32.
     pub dequantize: bool,
+
+    /// Weight storage strategy (auto-selected if None).
+    pub weight_strategy: Option<hologram_ai_common::WeightStrategy>,
 }
 
 impl GgufCompiler {
     /// Create a new GGUF compiler with default settings.
+    ///
+    /// Weight strategy is auto-selected based on model size.
     pub fn new() -> Self {
-        Self { dequantize: true }
+        Self {
+            dequantize: true,
+            weight_strategy: None,
+        }
+    }
+
+    /// Create a compiler with explicit weight strategy.
+    pub fn with_strategy(strategy: hologram_ai_common::WeightStrategy) -> Self {
+        Self {
+            dequantize: true,
+            weight_strategy: Some(strategy),
+        }
     }
 
     /// Compile a GGUF file to hologram format.
@@ -83,14 +99,20 @@ impl GgufCompiler {
 
         // Compile to backend plan
         let backend_type = hologram::BackendType::Cpu;
-        let (mut plan, header) = hologram::compiler::compile_ir_with_header(&graph, backend_type)
+        let (plan, header) = hologram::compiler::compile_ir_with_header(&graph, backend_type)
             .map_err(|e| GgufError::CompilationError(format!("{:?}", e)))?;
 
-        // Extract weights for external storage
-        let weight_bytes = std::mem::take(&mut plan.constant_data);
+        // Select weight strategy (auto-select if not specified)
+        let strategy = self.weight_strategy.unwrap_or_else(|| {
+            // Auto-select based on constant_data size
+            let weight_size = plan.constant_data.len();
+            hologram_ai_common::WeightStrategy::auto_select(weight_size)
+        });
 
-        // Serialize the plan with layer header
-        let holo_bytes = serialize_backend_plan_with_header(&plan, &header)?;
+        // Serialize the plan with selected weight strategy
+        let (holo_bytes, weight_bytes) =
+            hologram_ai_common::serialize_backend_plan_with_header(&plan, &header, strategy)
+                .map_err(|e| GgufError::SerializationError(e.to_string()))?;
 
         Ok((holo_bytes, weight_bytes))
     }
@@ -100,28 +122,4 @@ impl Default for GgufCompiler {
     fn default() -> Self {
         Self::new()
     }
-}
-
-fn serialize_backend_plan_with_header(
-    plan: &hologram::backend::BackendPlan,
-    header: &hologram::compiler::format::LayerHeaderData,
-) -> Result<Vec<u8>> {
-    let serializable = plan.to_serializable();
-    let plan_bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&serializable)
-        .map(|b| b.to_vec())
-        .map_err(|e| GgufError::SerializationError(e.to_string()))?;
-    let header_bytes = rkyv::to_bytes::<rkyv::rancor::Error>(header)
-        .map(|b| b.to_vec())
-        .map_err(|e| GgufError::SerializationError(e.to_string()))?;
-    let header_len = u32::try_from(header_bytes.len())
-        .map_err(|_| GgufError::SerializationError("LayerHeader too large".to_string()))?;
-
-    let mut holo_bytes = Vec::with_capacity(12 + header_bytes.len() + plan_bytes.len());
-    holo_bytes.extend_from_slice(&hologram::compiler::HOLO_MAGIC);
-    holo_bytes.extend_from_slice(&hologram::backend::plan::PLAN_FORMAT_VERSION.to_le_bytes());
-    holo_bytes.extend_from_slice(&header_len.to_le_bytes());
-    holo_bytes.extend_from_slice(&header_bytes);
-    holo_bytes.extend_from_slice(&plan_bytes);
-
-    Ok(holo_bytes)
 }

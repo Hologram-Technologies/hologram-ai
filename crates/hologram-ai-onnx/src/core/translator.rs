@@ -305,6 +305,19 @@ pub fn translate_graph_to_ir(graph: &crate::proto::GraphProto) -> Result<IRFunct
     let mut builder = GraphBuilder::new();
     let mut value_map: HashMap<String, hologram::NodeIndex> = HashMap::new();
 
+    // Step 0.5: Build value_info lookup map for intermediate tensor shapes
+    let mut value_info_shapes: HashMap<String, crate::core::SymbolicShape> = HashMap::new();
+    for value_info in &graph.value_info {
+        if let Ok(shape) = crate::core::SymbolicShape::from_value_info(value_info) {
+            trace!("Registered shape for '{}': {:?}", value_info.name, &shape);
+            value_info_shapes.insert(value_info.name.clone(), shape);
+        }
+    }
+    debug!(
+        "Loaded {} value_info shape entries",
+        value_info_shapes.len()
+    );
+
     // Step 1: Process inputs with symbolic shapes
     // Use preserve_symbolic to maintain symbolic dimensions for DimExpr resolution
     debug!("Processing {} graph inputs", graph.input.len());
@@ -378,10 +391,27 @@ pub fn translate_graph_to_ir(graph: &crate::proto::GraphProto) -> Result<IRFunct
             translate_node_via_registry(node, &mut builder, &value_map)?
         };
 
-        // Map outputs to their node indices
+        // Map outputs to their node indices and validate shapes
         for (output_name, output_idx) in node.output.iter().zip(output_indices.iter()) {
             if !output_name.is_empty() {
                 value_map.insert(output_name.clone(), *output_idx);
+
+                // Log shape information from value_info for debugging
+                if let (Some(expected_shape), Some(ir_node)) = (
+                    value_info_shapes.get(output_name),
+                    builder.graph().node(*output_idx),
+                ) {
+                    let ir_shape = &ir_node.op.shape;
+                    // Only log if ranks differ
+                    if ir_shape.rank() != expected_shape.rank() {
+                        debug!(
+                            "Rank mismatch for '{}': IR rank={}, value_info rank={}",
+                            output_name,
+                            ir_shape.rank(),
+                            expected_shape.rank()
+                        );
+                    }
+                }
             }
         }
     }

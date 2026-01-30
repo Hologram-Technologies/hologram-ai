@@ -1,17 +1,14 @@
-# T5 Text Generation Pipeline
+# T5 Text Generation Configuration
 #
-# Full encoder-decoder pipeline with auto-regressive generation
-#
-# Usage:
-#   cargo run --release -- run --config configs/t5-generate.toml
+# This config is used to run text generation with precompiled T5 models.
+# Usage: hologram-ai run --config configs/t5-generate.toml
 
 name = "T5 Text Generation"
-description = "End-to-end text generation with T5"
+description = "Generate text using T5-small encoder-decoder model"
 
-# Input
+# Input prompt
 [inputs]
-# Prompt for text generation
-prompt = "Tell me a joke in English"
+prompt = "translate English to French: Hello, how are you?"
 
 # Tokenizer configuration
 [tokenizer]
@@ -22,14 +19,21 @@ pad_token_id = 0
 eos_token_id = 1
 unk_token_id = 2
 
-# Models
+# Precompiled models (output from t5-compile.toml)
 [models.encoder]
-path = "/workspace/models/t5-small/encoder_model.onnx"
 precompiled = "/workspace/models/t5-small/compiled/encoder.holo"
 
 [models.decoder]
-path = "/workspace/models/t5-small/decoder_model.onnx"
 precompiled = "/workspace/models/t5-small/compiled/decoder.holo"
+
+# Generation parameters
+[generation]
+max_new_tokens = 50
+start_token_id = 0
+temperature = 1.0
+top_k = 50
+top_p = 0.9
+do_sample = false  # Greedy decoding by default
 
 # Pipeline stages
 [[stages]]
@@ -58,9 +62,8 @@ model = "decoder"
 encoder_hidden_states = "encoder_hidden_states"
 encoder_attention_mask = "attention_mask"
 max_new_tokens = 50
-start_token_id = 0  # PAD token
+start_token_id = 0
 
-# Decode generated tokens to text
 [[stages]]
 type = "builtin"
 builtin = "decode"
@@ -69,8 +72,8 @@ outputs = ["generated_text"]
 [stages.args]
 tokens = "generated_ids"
 
-# Output
+# Output configuration
 [outputs.result]
 tensor = "generated_text"
-handler = "json"
-description = "Generated text (detokenized)"
+handler = "text"
+description = "Generated text"

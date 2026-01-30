@@ -15,8 +15,8 @@ license = "MIT OR Apache-2.0"
 repository = "https://github.com/uor-framework/hologram-ai"
 
 [workspace.dependencies]
-# Hologram - fetched from git for CI, patched locally via .cargo/config.toml for development
-hologram = { git = "https://github.com/UOR-Foundation/hologram", branch = "main" }
+# Hologram - using local categorical-x workspace at /workspace
+hologram = { path = "/hologram" }
 
 # Internal crates
 hologram-ai-common = { path = "crates/hologram-ai-common" }
@@ -42,7 +42,7 @@ toml = "0.8"
 petgraph = "0.6"
 rayon = "1.10"
 half = "2.3"
-rkyv = "0.8"
+rkyv = { version = "0.8", features = ["pointer_width_64"] }
 libc = "0.2"
 unicode-normalization = "0.1"
 

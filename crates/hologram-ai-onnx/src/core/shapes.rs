@@ -53,19 +53,9 @@ pub use hologram::ir::{Dim, Shape};
 /// - `batch_size`, `batch`, `N` → Dim::Static(1) (batch is always 1 for inference)
 /// - Other symbolic dimensions → Dim::Symbolic (preserved for runtime resolution)
 fn resolve_symbolic_dimension(name: &str, position: usize) -> Dim {
-    let lower = name.to_lowercase();
-
-    // Batch dimensions can be resolved to 1 for inference
-    if lower.contains("batch") || lower == "n" {
-        tracing::debug!(
-            "Resolved symbolic dimension '{}' to Static(1) (batch)",
-            name
-        );
-        return Dim::Static(1);
-    }
-
-    // Preserve all other symbolic dimensions for proper shape propagation
-    // This allows the compiler to create DimExpr::InputRef for runtime resolution
+    // Always preserve symbolic dimensions for proper shape propagation.
+    // This enables dynamic workspace allocation at runtime based on actual tensor sizes.
+    // Never resolve to Static(1) - that would defeat dynamic sizing.
     tracing::debug!(
         "Preserving symbolic dimension '{}' at position {} as Symbolic",
         name,

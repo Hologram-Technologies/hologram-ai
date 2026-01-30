@@ -732,7 +732,6 @@ impl PipelineBundle {
     /// # Example
     ///
     /// ```rust
-    /// # use hologram_ai::runtime::loader::PipelineBundle;
     /// // These return true:
     /// // - "embedding"
     /// // - "token_embeddings"

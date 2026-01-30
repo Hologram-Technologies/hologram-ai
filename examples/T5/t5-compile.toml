@@ -1,0 +1,42 @@
+# T5 Model Compilation Configuration
+#
+# Compile models using this config:
+#
+# Option 1: Compile as pipeline bundle (uses output paths from config)
+#   hologram-ai compile-pipeline --config configs/t5-compile.toml --output t5.holom
+#
+# Option 2: Compile individually (output paths from config used as reference)
+#   hologram-ai compile $(grep -A1 "models.encoder" configs/t5-compile.toml | grep path | cut -d'"' -f2) \
+#     --output /workspace/models/t5-small/compiled/encoder.holo
+#   hologram-ai compile $(grep -A2 "models.decoder" configs/t5-compile.toml | grep path | cut -d'"' -f2) \
+#     --output /workspace/models/t5-small/compiled/decoder.holo
+#
+# Or simply:
+#   hologram-ai compile /workspace/models/t5-small/encoder_model.onnx --output /workspace/models/t5-small/compiled/encoder.holo
+#   hologram-ai compile /workspace/models/t5-small/decoder_model.onnx --output /workspace/models/t5-small/compiled/decoder.holo
+
+name = "T5 Small Compilation"
+description = "Compile T5-small encoder and decoder from ONNX to .holo format"
+
+# Input ONNX models
+[models.encoder]
+path = "/workspace/models/t5-small/encoder_model.onnx"
+output = "/workspace/models/t5-small/compiled/encoder.holo"
+
+[models.decoder]
+path = "/workspace/models/t5-small/decoder_model.onnx"
+output = "/workspace/models/t5-small/compiled/decoder.holo"
+
+# Tokenizer (for bundling with compiled models)
+[tokenizer]
+type = "sentencepiece"
+path = "/workspace/models/t5-small/tokenizer.json"
+max_length = 512
+pad_token_id = 0
+eos_token_id = 1
+unk_token_id = 2
+
+# Note: Compilation automatically:
+# - Auto-selects weight strategy based on model size
+# - Enables ONNX shape inference (critical for T5)
+# - Applies Hologram optimizations (SIMD, fusion, parallel execution)

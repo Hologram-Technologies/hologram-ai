@@ -218,7 +218,11 @@ pub fn compile_tokenizer_to_holo(config: &TokenizerConfig, output_path: &Path) -
             .map_err(|e| anyhow::anyhow!("Failed to compile tokenizer IR: {:?}", e))?;
 
     // Step 4: Serialize to .holo format
-    let holo_bytes = serialize_backend_plan_with_header(&backend_plan, &header)?;
+    let (holo_bytes, _) = hologram_ai_common::serialize_backend_plan_with_header(
+        &backend_plan,
+        &header,
+        hologram_ai_common::WeightStrategy::EmbeddedInPlan,
+    )?;
 
     // Step 5: Write to file
     fs::write(output_path, holo_bytes)
@@ -279,7 +283,11 @@ pub fn compile_tokenizer_to_bundle(config: &TokenizerConfig, output_path: &Path)
             .map_err(|e| anyhow::anyhow!("Failed to compile tokenizer IR: {:?}", e))?;
 
     // Step 4: Serialize to bytes
-    let graph_bytes = serialize_backend_plan_with_header(&backend_plan, &header)?;
+    let (graph_bytes, _) = hologram_ai_common::serialize_backend_plan_with_header(
+        &backend_plan,
+        &header,
+        hologram_ai_common::WeightStrategy::EmbeddedInPlan,
+    )?;
 
     // Step 5: Create HOLB bundle with empty weights
     let mut writer = UnifiedBundleWriter::new();
@@ -298,30 +306,6 @@ pub fn compile_tokenizer_to_bundle(config: &TokenizerConfig, output_path: &Path)
         output_path.display()
     );
     Ok(())
-}
-
-fn serialize_backend_plan_with_header(
-    plan: &hologram::backend::BackendPlan,
-    header: &hologram::compiler::format::LayerHeaderData,
-) -> Result<Vec<u8>> {
-    let serializable = plan.to_serializable();
-    let plan_bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&serializable)
-        .map(|bytes| bytes.to_vec())
-        .map_err(|e| anyhow::anyhow!("Failed to serialize BackendPlan: {}", e))?;
-    let header_bytes = rkyv::to_bytes::<rkyv::rancor::Error>(header)
-        .map(|bytes| bytes.to_vec())
-        .map_err(|e| anyhow::anyhow!("Failed to serialize LayerHeader: {}", e))?;
-    let header_len = u32::try_from(header_bytes.len())
-        .map_err(|_| anyhow::anyhow!("LayerHeader too large to serialize"))?;
-
-    let mut holo_bytes = Vec::with_capacity(12 + header_bytes.len() + plan_bytes.len());
-    holo_bytes.extend_from_slice(&hologram::compiler::HOLO_MAGIC);
-    holo_bytes.extend_from_slice(&hologram::backend::plan::PLAN_FORMAT_VERSION.to_le_bytes());
-    holo_bytes.extend_from_slice(&header_len.to_le_bytes());
-    holo_bytes.extend_from_slice(&header_bytes);
-    holo_bytes.extend_from_slice(&plan_bytes);
-
-    Ok(holo_bytes)
 }
 
 #[cfg(test)]

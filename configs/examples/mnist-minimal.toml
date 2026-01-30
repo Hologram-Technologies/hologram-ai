@@ -1,9 +1,0 @@
-# MNIST Classifier - Minimal Config
-#
-# This demonstrates the simplest possible unified config.
-# Just specify the model path - everything else is inferred.
-#
-# Usage:
-#   hologram-onnx run --config mnist-minimal.toml --input digit.png
-
-model = "mnist.onnx"

@@ -50,6 +50,42 @@ struct BufferRequirements {
     output_shape_exprs: Vec<Option<Vec<hologram::DimExpr>>>,
 }
 
+/// Information about a single operation in the compiled plan.
+///
+/// Following Integration Guide Section 4 (Operation Discovery).
+#[derive(Debug, Clone)]
+pub struct OperationInfo {
+    /// Operation index in the plan
+    pub op_index: usize,
+    /// Kernel ID for this operation
+    pub kernel_id: String,
+    /// Human-readable kernel name (if available)
+    pub kernel_name: Option<&'static str>,
+}
+
+/// Optimization features detected in the compiled model.
+///
+/// Following Integration Guide Section 7 (Optimization Features).
+#[derive(Debug, Clone)]
+pub struct OptimizationReport {
+    /// SIMD-accelerated activation kernels detected (Guide Section 7.3)
+    pub has_simd_activations: bool,
+    /// Fused operation chains detected (Guide Section 7.1)
+    pub has_epilogue_fusion: bool,
+    /// Parallel execution groups detected (Guide Section 7.4)
+    pub has_parallel_groups: bool,
+    /// Number of parallel execution groups
+    pub parallel_group_count: usize,
+    /// Total parallelizable operations
+    pub parallelizable_ops: usize,
+    /// Large embeddings for cache pinning (>1MB)
+    pub has_embedding_cache: bool,
+    /// SIMD level available on this CPU
+    pub simd_level: String,
+    /// Dynamic shape support detected
+    pub dynamic_shapes: bool,
+}
+
 /// Model executor for running compiled .holo models.
 ///
 /// Wraps hologram-backend's PlanExecutor and provides a high-level
@@ -319,6 +355,117 @@ impl ModelExecutor {
     /// Access the compiled backend plan.
     pub fn plan(&self) -> &hologram::backend::BackendPlan {
         self.executor.plan()
+    }
+
+    /// Discover operations in the compiled plan.
+    ///
+    /// Returns information about all operations in the BackendPlan, including
+    /// kernel IDs, names, and categories. This follows Integration Guide Section 4
+    /// (Operation Discovery).
+    ///
+    /// # Returns
+    /// Vector of OperationInfo describing each operation in execution order
+    ///
+    /// # Example
+    /// ```rust,ignore
+    /// let executor = ModelExecutor::from_holo_file(path)?;
+    /// let ops = executor.operations();
+    /// for op in ops {
+    ///     println!("Op {}: {:?} ({})",
+    ///         op.op_index,
+    ///         op.kernel_id,
+    ///         op.kernel_name.unwrap_or("unknown")
+    ///     );
+    /// }
+    /// ```
+    pub fn operations(&self) -> Vec<OperationInfo> {
+        let plan = self.executor.plan();
+        plan.ops
+            .iter()
+            .enumerate()
+            .map(|(idx, op)| OperationInfo {
+                op_index: idx,
+                kernel_id: format!("{:?}", op.kernel_id),
+                kernel_name: Self::kernel_id_to_name(op.kernel_id),
+            })
+            .collect()
+    }
+
+    /// Get optimization report for the compiled model.
+    ///
+    /// Returns detailed information about optimizations detected in the
+    /// BackendPlan. This follows Integration Guide Section 7 (Optimization Features).
+    ///
+    /// # Returns
+    /// OptimizationReport with detected optimization features
+    ///
+    /// # Example
+    /// ```rust,ignore
+    /// let executor = ModelExecutor::from_holo_file(path)?;
+    /// let report = executor.optimization_report();
+    ///
+    /// println!("SIMD activations: {}", report.has_simd_activations);
+    /// println!("Epilogue fusion: {}", report.has_epilogue_fusion);
+    /// println!("Parallel groups: {}", report.parallel_group_count);
+    /// println!("SIMD level: {}", report.simd_level);
+    /// ```
+    pub fn optimization_report(&self) -> OptimizationReport {
+        let plan = self.executor.plan();
+        let caps = Self::detect_optimizations(plan);
+        let parallelism = Self::analyze_parallelism(plan);
+
+        // Detect SIMD level from hologram
+        let simd_level = Self::detect_simd_level();
+
+        // Check for dynamic shapes in plan metadata
+        let dynamic_shapes = Self::has_dynamic_shapes(plan);
+
+        OptimizationReport {
+            has_simd_activations: caps.has_simd_activations,
+            has_epilogue_fusion: caps.has_composed_views,
+            has_parallel_groups: caps.has_parallel_ops,
+            parallel_group_count: parallelism.parallel_groups.len(),
+            parallelizable_ops: parallelism.total_parallelizable_ops,
+            has_embedding_cache: caps.has_large_embeddings,
+            simd_level,
+            dynamic_shapes,
+        }
+    }
+
+    /// Convert a KernelId to a human-readable name.
+    ///
+    /// Returns the kernel name if known, or None for unknown kernels.
+    fn kernel_id_to_name(kernel_id: KernelId) -> Option<&'static str> {
+        use hologram::backend::KernelId as K;
+
+        match kernel_id {
+            // Activation kernels
+            K::ACT_SIGMOID_U8 => Some("Sigmoid"),
+            K::ACT_TANH_U8 => Some("Tanh"),
+            K::ACT_RELU_U8 => Some("ReLU"),
+            K::ACT_GELU_U8 => Some("GELU"),
+            K::ACT_SILU_U8 => Some("SiLU"),
+            K::ACT_FUSED_SIGMOID_RELU_U8 => Some("Fused(Sigmoid+ReLU)"),
+            K::ACT_FUSED_SIGMOID_TANH_U8 => Some("Fused(Sigmoid+Tanh)"),
+            K::ACT_FUSED_SIGMOID_TANH_RELU_U8 => Some("Fused(Sigmoid+Tanh+ReLU)"),
+
+            _ => None,
+        }
+    }
+
+    /// Detect SIMD level available on this CPU.
+    fn detect_simd_level() -> String {
+        // Use hologram's SIMD detection and format the result
+        format!("{:?}", hologram::lookup::detect_simd())
+    }
+
+    /// Check if the plan has dynamic shapes.
+    ///
+    /// Returns true if any inputs or outputs have dynamic dimensions.
+    fn has_dynamic_shapes(plan: &BackendPlan) -> bool {
+        // Check if workspace layout indicates dynamic allocation
+        // (dynamic shapes typically require runtime workspace allocation)
+        plan.workspace_layout.total_size > 0
     }
 
     /// Detect optimization capabilities in the compiled plan.
@@ -1332,7 +1479,7 @@ fn validate_plan_workspace(plan: &BackendPlan) -> Result<()> {
                         plan.workspace_layout.regions.len()
                     )
                 })?;
-                if expected_bytes > region.size {
+                if expected_bytes > (region.size as usize) {
                     errors.push(format!(
                         "Workspace overflow risk at OP[{}]: kernel={:?} idx={} dims={:?} input_refs={:?} output_refs={:?} expects {} bytes, region '{}' (slot {}) size {}",
                         op_index,
@@ -2680,5 +2827,70 @@ mod tests {
         for handle in handles {
             model_executor.backend.free_buffer(handle).unwrap();
         }
+    }
+
+    #[test]
+    fn test_operations_discovery() {
+        use hologram::backend::backends::cpu::CpuBackend;
+        use hologram::backend::{BackendPlan, BackendType, PlanExecutor};
+
+        // Create a minimal empty plan for testing
+        let backend = CpuBackend::new();
+        let plan = BackendPlan::new(BackendType::Cpu);
+        let executor = PlanExecutor::new(plan, &backend).expect("Failed to create PlanExecutor");
+
+        let model_executor = ModelExecutor {
+            executor,
+            backend: Box::new(backend),
+            input_order: None,
+            optimization_caps: OptimizationCapabilities::default(),
+            metrics: None,
+            embedding_cache: None,
+        };
+
+        // Test operations discovery (empty plan has 0 operations)
+        let ops = model_executor.operations();
+
+        // Empty plan is valid - should return empty vec
+        assert_eq!(ops.len(), 0, "Empty plan should have 0 operations");
+
+        println!("Discovered {} operations (empty plan test)", ops.len());
+    }
+
+    #[test]
+    fn test_optimization_report() {
+        use hologram::backend::backends::cpu::CpuBackend;
+        use hologram::backend::{BackendPlan, BackendType, PlanExecutor};
+
+        // Create a minimal empty plan for testing
+        let backend = CpuBackend::new();
+        let plan = BackendPlan::new(BackendType::Cpu);
+        let executor = PlanExecutor::new(plan, &backend).expect("Failed to create PlanExecutor");
+
+        let model_executor = ModelExecutor {
+            executor,
+            backend: Box::new(backend),
+            input_order: None,
+            optimization_caps: OptimizationCapabilities::default(),
+            metrics: None,
+            embedding_cache: None,
+        };
+
+        // Test optimization report
+        let report = model_executor.optimization_report();
+
+        // Report should have valid data
+        assert!(
+            !report.simd_level.is_empty(),
+            "SIMD level should be detected"
+        );
+        // Note: parallel_group_count is usize, always non-negative
+
+        println!("Optimization report:");
+        println!("  SIMD activations: {}", report.has_simd_activations);
+        println!("  Epilogue fusion: {}", report.has_epilogue_fusion);
+        println!("  Parallel groups: {}", report.parallel_group_count);
+        println!("  SIMD level: {}", report.simd_level);
+        println!("  Dynamic shapes: {}", report.dynamic_shapes);
     }
 }

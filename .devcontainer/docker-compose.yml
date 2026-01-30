@@ -1,17 +1,14 @@
 services:
   app:
-    platform: linux/arm64
     build:
       context: ..
       dockerfile: .devcontainer/Dockerfile
-      target: dev
     volumes:
-      - ${PWD}:/workspace:cached
-      - /var/run/docker.sock:/var/run/docker.sock
-      - cargo-cache:/home/vscode/.cargo/registry
-      - cargo-git-cache:/home/vscode/.cargo/git
+      - ..:/workspace:cached
+      - cargo-cache:/usr/local/cargo/registry
+      - cargo-git-cache:/usr/local/cargo/git
       # Mount host SSH directory (read-only)
-      - ${HOME}/.ssh:/tmp/.ssh-host:ro
+      - ${HOME}/.ssh:/home/vscode/.ssh-host:ro
     working_dir: /workspace
     command: sleep infinity
     privileged: true
@@ -21,7 +18,8 @@ services:
     tty: true
     environment:
       - RUST_BACKTRACE=1
-    # network_mode: "host"  # Disabled: conflicts with port forwarding for OAuth
+      - CARGO_TERM_COLOR=always
+      - RUST_LOG=info
     # Memory limits for ONNX compiler
     deploy:
       resources:

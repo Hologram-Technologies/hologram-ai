@@ -167,7 +167,19 @@
       "Bash(cargo bench:*)",
       "Bash(target/release/deps/optimization_benchmark-97e81e1f618e00bc:*)",
       "Bash(stat:*)",
-      "Bash(RUST_LOG=error,hologram_backend::core::executor=debug cargo run:*)"
+      "Bash(RUST_LOG=error,hologram_backend::core::executor=debug cargo run:*)",
+      "Bash(RUST_LOG=warn,hologram_ai::cli::run=info cargo run:*)",
+      "Bash(RUST_LOG=hologram_ai_onnx=info,hologram_compiler=info cargo run:*)",
+      "Bash(/workspace/target/release/hologram-ai compile:*)",
+      "Bash(/workspace/target/release/hologram-ai run:*)",
+      "Bash(git restore:*)",
+      "Bash(RUST_LOG=hologram_compiler=info ./target/release/hologram-ai compile:*)",
+      "Bash(RUST_LOG=hologram_backend=info ./target/release/hologram-ai:*)",
+      "Bash(hologram-ai compile:*)",
+      "Bash(chmod:*)",
+      "Bash(bash:*)",
+      "Bash(export RUST_LOG=hologram_backend::core::executor=warn:*)",
+      "Bash(devcontainer build:*)"
     ]
   }
 }

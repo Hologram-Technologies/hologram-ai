@@ -31,12 +31,14 @@
 #![warn(clippy::all)]
 
 pub mod error;
-pub mod transformer;
+// TEMPORARILY DISABLED during hologram API migration:
+// pub mod metadata;  // depends on hologram-bundle traits not in categorical-x
+pub mod serialization; // Minimal stub for serialize_backend_plan_with_header
+// pub mod transformer;  // uses old hologram::ir API (Shape, Dim, GraphBuilder, etc.)
 pub mod weights;
 
 pub use error::{CommonError, Result};
-pub use transformer::{
-    Activation, AttentionType, FFNType, GenericTransformerBuilder, NormType, RoPEScaling,
-    TransformerConfig,
+pub use serialization::{
+    LayerHeaderData, LayerInfo, WeightStrategy, serialize_backend_plan_with_header,
 };
 pub use weights::{WeightDtype, WeightMap, WeightTensor};

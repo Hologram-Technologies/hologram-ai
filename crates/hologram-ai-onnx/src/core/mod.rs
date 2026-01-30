@@ -16,6 +16,7 @@ mod error;
 mod ir_to_graph;
 pub mod layer_detection;
 pub mod layer_splitter;
+mod onnx_shape_inference;
 pub mod op_hints;
 mod parser;
 mod partitioning;
@@ -92,3 +93,4 @@ pub use sections::{
 
 // Re-export hologram IR types for convenience
 pub use hologram::ir::{GraphBuilder, NodeIndex, OperationGraph};
+pub use onnx_shape_inference::{is_shape_inference_available, run_onnx_shape_inference};

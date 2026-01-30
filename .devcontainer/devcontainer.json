@@ -10,7 +10,7 @@
   ],
   "postCreateCommand": "bash .devcontainer/post-create.sh",
   "mounts": [
-    "source=${localWorkspaceFolder}/../simple-lookup,target=/hologram,type=bind,consistency=cached"
+    "source=${localWorkspaceFolder}/../categorical-x,target=/hologram,type=bind,consistency=cached"
   ],
   "containerEnv": {
     "CARGO_TERM_COLOR": "always",
@@ -63,13 +63,6 @@
         "anthropic.claude-code",
         "vadimcn.vscode-lldb"
       ]
-    }
-  },
-  "features": {
-    "ghcr.io/devcontainers/features/common-utils:2": {
-      "installZsh": true,
-      "installOhMyZsh": true,
-      "upgradePackages": true
     }
   }
 }
