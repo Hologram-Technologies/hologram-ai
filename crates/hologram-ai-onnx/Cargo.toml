@@ -27,7 +27,8 @@ serde_json.workspace = true
 petgraph.workspace = true
 rayon.workspace = true
 half.workspace = true
-rkyv.workspace = true
+# Use rkyv 0.7 to match hologram's version (workspace uses 0.8)
+rkyv = { version = "0.7", features = ["validation"] }
 
 # Shape inference (pure Rust, no Python dependency)
 rten-shape-inference = "0.24"
@@ -36,12 +37,4 @@ rten-shape-inference = "0.24"
 prost-build = "0.13"
 
 [dev-dependencies]
-criterion.workspace = true
 tempfile.workspace = true
-tracing-subscriber.workspace = true
-# hologram-ai = { path = "../hologram-ai" }
-serial_test = "3.0"
-
-[[bench]]
-name = "simd_activation_bench"
-harness = false
