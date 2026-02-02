@@ -53,10 +53,31 @@ pub fn compile_onnx(onnx_bytes: &[u8]) -> Result<Vec<u8>> {
     // Convert to OperationGraph
     let graph = builder::build_graph(&model)?;
 
+    // Debug: Print all nodes if HOLOGRAM_DEBUG_NODES is set
+    if std::env::var("HOLOGRAM_DEBUG_NODES").is_ok() {
+        eprintln!("\n{}", "=".repeat(80));
+        eprintln!("DEBUG: OperationGraph nodes (total: {})", graph.nodes.len());
+        eprintln!("{}\n", "=".repeat(80));
+        for (i, node) in graph.nodes.iter().enumerate() {
+            eprintln!("Node {}: {:?}", i, node.op);
+            eprintln!("  Shape: {:?}", node.shape);
+            eprintln!("  Dtype: {:?}", node.dtype);
+            eprintln!("  Name: {:?}", node.name);
+            eprintln!();
+        }
+        eprintln!("{}\n", "=".repeat(80));
+    }
+
     // Compile to BackendPlan
     let config = CompilerConfig::default();
-    let plan =
-        compile(&graph, &config).map_err(|e| anyhow::anyhow!("Compilation failed: {:?}", e))?;
+    let plan = compile(&graph, &config).map_err(|e| {
+        // Enhanced error reporting
+        eprintln!("\n❌ Hologram compilation failed!");
+        eprintln!("Error: {:?}", e);
+        eprintln!("\nGraph had {} nodes", graph.nodes.len());
+        eprintln!("To see all nodes, run with: HOLOGRAM_DEBUG_NODES=1");
+        anyhow::anyhow!("Compilation failed: {:?}", e)
+    })?;
 
     // Serialize BackendPlan using rkyv 0.7 (matching hologram's version)
     let plan_bytes = rkyv::to_bytes::<_, 1024>(&plan)

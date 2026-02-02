@@ -3,6 +3,7 @@
 use std::collections::HashMap;
 
 use anyhow::{Context, Result, bail};
+use hologram::compiler::shape::broadcast_shapes;
 use hologram::compiler::{DType, OpKind, OperationGraph};
 
 use crate::proto;
@@ -35,6 +36,12 @@ pub fn translate_node(
         // Linear algebra
         "MatMul" | "Gemm" => translate_matmul(node, value_to_node, graph),
 
+        // Convolutional operations
+        "Conv" => translate_conv(node, value_to_node, graph),
+        "BatchNormalization" => translate_batchnorm(node, value_to_node, graph),
+        "MaxPool" => translate_maxpool(node, value_to_node, graph),
+        "GlobalAveragePool" => translate_global_avg_pool(node, value_to_node, graph),
+
         // Reduction operations
         "ReduceSum" => translate_reduce_sum(node, value_to_node, graph),
         "ReduceMean" => translate_reduce_mean(node, value_to_node, graph),
@@ -50,6 +57,7 @@ pub fn translate_node(
         "Squeeze" => translate_squeeze(node, value_to_node, graph),
         "Slice" => translate_slice(node, value_to_node, graph),
         "Cast" => translate_cast(node, value_to_node, graph),
+        "Flatten" => translate_flatten(node, value_to_node, graph),
 
         _ => bail!("Unsupported ONNX operation: {}", op_type),
     }
@@ -72,11 +80,25 @@ fn translate_add(
     value_to_node: &HashMap<String, u32>,
     graph: &OperationGraph,
 ) -> Result<(OpKind, Vec<usize>, DType)> {
-    let input_name = node.input.first().context("Add has no input")?;
-    let input_id = value_to_node.get(input_name).context("Input not found")?;
-    let input_node = &graph.nodes[*input_id as usize];
+    // Fetch BOTH inputs
+    let input_a_name = node.input.first().context("Add has no first input")?;
+    let input_b_name = node.input.get(1).context("Add has no second input")?;
 
-    Ok((OpKind::Add, input_node.shape.clone(), input_node.dtype))
+    let a_id = value_to_node
+        .get(input_a_name)
+        .context("First input not found")?;
+    let b_id = value_to_node
+        .get(input_b_name)
+        .context("Second input not found")?;
+
+    let a_node = &graph.nodes[*a_id as usize];
+    let b_node = &graph.nodes[*b_id as usize];
+
+    // Compute broadcasted output shape using hologram's shape module
+    let output_shape = broadcast_shapes(&a_node.shape, &b_node.shape)
+        .context("Incompatible shapes for Add operation")?;
+
+    Ok((OpKind::Add, output_shape, a_node.dtype))
 }
 
 fn translate_matmul(
@@ -99,6 +121,7 @@ fn translate_matmul(
     let dtype = graph.nodes[*a_id as usize].dtype;
 
     // For 2D matmul: A[m,k] × B[k,n] = C[m,n]
+    // Note: transB is handled at the builder level by inserting Transpose nodes
     if a_shape.len() == 2 && b_shape.len() == 2 {
         let m = a_shape[0];
         let k = a_shape[1];
@@ -178,11 +201,25 @@ fn translate_sub(
     value_to_node: &HashMap<String, u32>,
     graph: &OperationGraph,
 ) -> Result<(OpKind, Vec<usize>, DType)> {
-    let input_name = node.input.first().context("Sub has no input")?;
-    let input_id = value_to_node.get(input_name).context("Input not found")?;
-    let input_node = &graph.nodes[*input_id as usize];
+    // Fetch BOTH inputs
+    let input_a_name = node.input.first().context("Sub has no first input")?;
+    let input_b_name = node.input.get(1).context("Sub has no second input")?;
 
-    Ok((OpKind::Sub, input_node.shape.clone(), input_node.dtype))
+    let a_id = value_to_node
+        .get(input_a_name)
+        .context("First input not found")?;
+    let b_id = value_to_node
+        .get(input_b_name)
+        .context("Second input not found")?;
+
+    let a_node = &graph.nodes[*a_id as usize];
+    let b_node = &graph.nodes[*b_id as usize];
+
+    // Compute broadcasted output shape using hologram's shape module
+    let output_shape = broadcast_shapes(&a_node.shape, &b_node.shape)
+        .context("Incompatible shapes for Sub operation")?;
+
+    Ok((OpKind::Sub, output_shape, a_node.dtype))
 }
 
 fn translate_mul(
@@ -190,11 +227,25 @@ fn translate_mul(
     value_to_node: &HashMap<String, u32>,
     graph: &OperationGraph,
 ) -> Result<(OpKind, Vec<usize>, DType)> {
-    let input_name = node.input.first().context("Mul has no input")?;
-    let input_id = value_to_node.get(input_name).context("Input not found")?;
-    let input_node = &graph.nodes[*input_id as usize];
+    // Fetch BOTH inputs
+    let input_a_name = node.input.first().context("Mul has no first input")?;
+    let input_b_name = node.input.get(1).context("Mul has no second input")?;
 
-    Ok((OpKind::Mul, input_node.shape.clone(), input_node.dtype))
+    let a_id = value_to_node
+        .get(input_a_name)
+        .context("First input not found")?;
+    let b_id = value_to_node
+        .get(input_b_name)
+        .context("Second input not found")?;
+
+    let a_node = &graph.nodes[*a_id as usize];
+    let b_node = &graph.nodes[*b_id as usize];
+
+    // Compute broadcasted output shape using hologram's shape module
+    let output_shape = broadcast_shapes(&a_node.shape, &b_node.shape)
+        .context("Incompatible shapes for Mul operation")?;
+
+    Ok((OpKind::Mul, output_shape, a_node.dtype))
 }
 
 fn translate_div(
@@ -202,11 +253,25 @@ fn translate_div(
     value_to_node: &HashMap<String, u32>,
     graph: &OperationGraph,
 ) -> Result<(OpKind, Vec<usize>, DType)> {
-    let input_name = node.input.first().context("Div has no input")?;
-    let input_id = value_to_node.get(input_name).context("Input not found")?;
-    let input_node = &graph.nodes[*input_id as usize];
+    // Fetch BOTH inputs
+    let input_a_name = node.input.first().context("Div has no first input")?;
+    let input_b_name = node.input.get(1).context("Div has no second input")?;
 
-    Ok((OpKind::Div, input_node.shape.clone(), input_node.dtype))
+    let a_id = value_to_node
+        .get(input_a_name)
+        .context("First input not found")?;
+    let b_id = value_to_node
+        .get(input_b_name)
+        .context("Second input not found")?;
+
+    let a_node = &graph.nodes[*a_id as usize];
+    let b_node = &graph.nodes[*b_id as usize];
+
+    // Compute broadcasted output shape using hologram's shape module
+    let output_shape = broadcast_shapes(&a_node.shape, &b_node.shape)
+        .context("Incompatible shapes for Div operation")?;
+
+    Ok((OpKind::Div, output_shape, a_node.dtype))
 }
 
 // Reduction operations
@@ -474,6 +539,185 @@ fn get_ints_attr(node: &proto::NodeProto, name: &str) -> Result<Vec<i64>> {
     bail!("Attribute '{}' not found", name)
 }
 
+fn get_float_attr(node: &proto::NodeProto, name: &str) -> Result<f32> {
+    for attr in &node.attribute {
+        if attr.name == name {
+            return Ok(attr.f);
+        }
+    }
+    bail!("Attribute '{}' not found", name)
+}
+
+// CNN operations
+
+fn translate_conv(
+    node: &proto::NodeProto,
+    value_to_node: &HashMap<String, u32>,
+    graph: &OperationGraph,
+) -> Result<(OpKind, Vec<usize>, DType)> {
+    let input_name = node.input.first().context("Conv has no input")?;
+    let input_id = value_to_node.get(input_name).context("Input not found")?;
+    let input_node = &graph.nodes[*input_id as usize];
+
+    // Get weight input for output channels
+    let weight_name = node.input.get(1).context("Conv missing weight input")?;
+    let weight_id = value_to_node.get(weight_name).context("Weight not found")?;
+    let weight_node = &graph.nodes[*weight_id as usize];
+
+    // Extract ONNX attributes
+    let kernel_shape = get_ints_attr(node, "kernel_shape")?;
+    let strides = get_ints_attr(node, "strides").unwrap_or_else(|_| vec![1, 1]);
+    let pads = get_ints_attr(node, "pads").unwrap_or_else(|_| vec![0, 0, 0, 0]);
+    let dilations = get_ints_attr(node, "dilations").unwrap_or_else(|_| vec![1, 1]);
+    let group = get_int_attr(node, "group").unwrap_or(1) as usize;
+
+    // For 2D convolution: assume NCHW format
+    // Input: [N, C_in, H, W]
+    // Weight: [C_out, C_in/group, K_h, K_w]
+    // Output: [N, C_out, H_out, W_out]
+
+    let n = input_node.shape[0];
+    let h = input_node.shape[2];
+    let w = input_node.shape[3];
+    let c_out = weight_node.shape[0];
+
+    let kernel_h = kernel_shape[0] as usize;
+    let kernel_w = kernel_shape[1] as usize;
+    let stride_h = strides[0] as usize;
+    let stride_w = strides[1] as usize;
+    let pad_h = pads[0] as usize; // top padding
+    let pad_w = pads[1] as usize; // left padding
+    let dilation_h = dilations[0] as usize;
+    let dilation_w = dilations[1] as usize;
+
+    // Calculate output spatial dimensions
+    let h_out = (h + 2 * pad_h - dilation_h * (kernel_h - 1) - 1) / stride_h + 1;
+    let w_out = (w + 2 * pad_w - dilation_w * (kernel_w - 1) - 1) / stride_w + 1;
+
+    let output_shape = vec![n, c_out, h_out, w_out];
+
+    let op = OpKind::Conv2d {
+        kernel: (kernel_h, kernel_w),
+        stride: (stride_h, stride_w),
+        padding: (pad_h, pad_w),
+        dilation: (dilation_h, dilation_w),
+        groups: group,
+    };
+
+    Ok((op, output_shape, input_node.dtype))
+}
+
+fn translate_batchnorm(
+    node: &proto::NodeProto,
+    value_to_node: &HashMap<String, u32>,
+    graph: &OperationGraph,
+) -> Result<(OpKind, Vec<usize>, DType)> {
+    let input_name = node
+        .input
+        .first()
+        .context("BatchNormalization has no input")?;
+    let input_id = value_to_node.get(input_name).context("Input not found")?;
+    let input_node = &graph.nodes[*input_id as usize];
+
+    // Extract epsilon attribute (default 1e-5)
+    let epsilon = get_float_attr(node, "epsilon").unwrap_or(1e-5);
+
+    // BatchNorm output has the same shape as input
+    Ok((
+        OpKind::BatchNormalization { epsilon },
+        input_node.shape.clone(),
+        input_node.dtype,
+    ))
+}
+
+fn translate_maxpool(
+    node: &proto::NodeProto,
+    value_to_node: &HashMap<String, u32>,
+    graph: &OperationGraph,
+) -> Result<(OpKind, Vec<usize>, DType)> {
+    let input_name = node.input.first().context("MaxPool has no input")?;
+    let input_id = value_to_node.get(input_name).context("Input not found")?;
+    let input_node = &graph.nodes[*input_id as usize];
+
+    // Extract attributes
+    let kernel_shape = get_ints_attr(node, "kernel_shape")?;
+    let strides = get_ints_attr(node, "strides").unwrap_or_else(|_| vec![1, 1]);
+    let pads = get_ints_attr(node, "pads").unwrap_or_else(|_| vec![0, 0, 0, 0]);
+
+    // Input: [N, C, H, W]
+    let n = input_node.shape[0];
+    let c = input_node.shape[1];
+    let h = input_node.shape[2];
+    let w = input_node.shape[3];
+
+    let kernel_h = kernel_shape[0] as usize;
+    let kernel_w = kernel_shape[1] as usize;
+    let stride_h = strides[0] as usize;
+    let stride_w = strides[1] as usize;
+    let pad_h = pads[0] as usize;
+    let pad_w = pads[1] as usize;
+
+    // Calculate output spatial dimensions
+    let h_out = (h + 2 * pad_h - kernel_h) / stride_h + 1;
+    let w_out = (w + 2 * pad_w - kernel_w) / stride_w + 1;
+
+    let output_shape = vec![n, c, h_out, w_out];
+
+    let op = OpKind::MaxPool {
+        kernel: (kernel_h, kernel_w),
+        stride: (stride_h, stride_w),
+        padding: (pad_h, pad_w),
+    };
+
+    Ok((op, output_shape, input_node.dtype))
+}
+
+fn translate_global_avg_pool(
+    node: &proto::NodeProto,
+    value_to_node: &HashMap<String, u32>,
+    graph: &OperationGraph,
+) -> Result<(OpKind, Vec<usize>, DType)> {
+    let input_name = node
+        .input
+        .first()
+        .context("GlobalAveragePool has no input")?;
+    let input_id = value_to_node.get(input_name).context("Input not found")?;
+    let input_node = &graph.nodes[*input_id as usize];
+
+    // GlobalAveragePool: Input [N, C, H, W] -> Output [N, C, 1, 1]
+    let n = input_node.shape[0];
+    let c = input_node.shape[1];
+    let output_shape = vec![n, c, 1, 1];
+
+    Ok((OpKind::GlobalAveragePool, output_shape, input_node.dtype))
+}
+
+fn translate_flatten(
+    node: &proto::NodeProto,
+    value_to_node: &HashMap<String, u32>,
+    graph: &OperationGraph,
+) -> Result<(OpKind, Vec<usize>, DType)> {
+    let input_name = node.input.first().context("Flatten has no input")?;
+    let input_id = value_to_node.get(input_name).context("Input not found")?;
+    let input_node = &graph.nodes[*input_id as usize];
+
+    // Extract axis attribute (default 1)
+    let axis = get_int_attr(node, "axis").unwrap_or(1) as usize;
+
+    // Calculate flattened dimensions
+    // Everything before axis stays separate, everything from axis onwards is flattened
+    let dim0: usize = input_node.shape[..axis].iter().product();
+    let dim1: usize = input_node.shape[axis..].iter().product();
+
+    let output_shape = vec![dim0, dim1];
+
+    Ok((
+        OpKind::Flatten { start_dim: axis },
+        output_shape,
+        input_node.dtype,
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -640,10 +884,19 @@ mod tests {
 
     #[test]
     fn test_add_translation() {
-        let (graph, value_to_node) = create_test_graph_with_input(vec![10, 20], DType::F32);
+        let mut graph = OperationGraph::default();
+        let mut value_to_node = HashMap::new();
+
+        // Create two inputs with same shape
+        let input_a = OpNode::new(0, OpKind::Input, vec![10, 20], DType::F32);
+        let input_b = OpNode::new(1, OpKind::Input, vec![10, 20], DType::F32);
+        graph.nodes.push(input_a);
+        graph.nodes.push(input_b);
+        value_to_node.insert("input_a".to_string(), 0);
+        value_to_node.insert("input_b".to_string(), 1);
 
         let node = proto::NodeProto {
-            input: vec!["input".to_string()],
+            input: vec!["input_a".to_string(), "input_b".to_string()],
             output: vec!["output".to_string()],
             op_type: "Add".to_string(),
             ..Default::default()
@@ -657,10 +910,19 @@ mod tests {
 
     #[test]
     fn test_sub_translation() {
-        let (graph, value_to_node) = create_test_graph_with_input(vec![8, 16], DType::F32);
+        let mut graph = OperationGraph::default();
+        let mut value_to_node = HashMap::new();
+
+        // Create two inputs with same shape
+        let input_a = OpNode::new(0, OpKind::Input, vec![8, 16], DType::F32);
+        let input_b = OpNode::new(1, OpKind::Input, vec![8, 16], DType::F32);
+        graph.nodes.push(input_a);
+        graph.nodes.push(input_b);
+        value_to_node.insert("input_a".to_string(), 0);
+        value_to_node.insert("input_b".to_string(), 1);
 
         let node = proto::NodeProto {
-            input: vec!["input".to_string()],
+            input: vec!["input_a".to_string(), "input_b".to_string()],
             output: vec!["output".to_string()],
             op_type: "Sub".to_string(),
             ..Default::default()
@@ -674,10 +936,19 @@ mod tests {
 
     #[test]
     fn test_mul_translation() {
-        let (graph, value_to_node) = create_test_graph_with_input(vec![5, 5], DType::F32);
+        let mut graph = OperationGraph::default();
+        let mut value_to_node = HashMap::new();
+
+        // Create two inputs with same shape
+        let input_a = OpNode::new(0, OpKind::Input, vec![5, 5], DType::F32);
+        let input_b = OpNode::new(1, OpKind::Input, vec![5, 5], DType::F32);
+        graph.nodes.push(input_a);
+        graph.nodes.push(input_b);
+        value_to_node.insert("input_a".to_string(), 0);
+        value_to_node.insert("input_b".to_string(), 1);
 
         let node = proto::NodeProto {
-            input: vec!["input".to_string()],
+            input: vec!["input_a".to_string(), "input_b".to_string()],
             output: vec!["output".to_string()],
             op_type: "Mul".to_string(),
             ..Default::default()
@@ -691,10 +962,19 @@ mod tests {
 
     #[test]
     fn test_div_translation() {
-        let (graph, value_to_node) = create_test_graph_with_input(vec![3, 7], DType::F32);
+        let mut graph = OperationGraph::default();
+        let mut value_to_node = HashMap::new();
+
+        // Create two inputs with same shape
+        let input_a = OpNode::new(0, OpKind::Input, vec![3, 7], DType::F32);
+        let input_b = OpNode::new(1, OpKind::Input, vec![3, 7], DType::F32);
+        graph.nodes.push(input_a);
+        graph.nodes.push(input_b);
+        value_to_node.insert("input_a".to_string(), 0);
+        value_to_node.insert("input_b".to_string(), 1);
 
         let node = proto::NodeProto {
-            input: vec!["input".to_string()],
+            input: vec!["input_a".to_string(), "input_b".to_string()],
             output: vec!["output".to_string()],
             op_type: "Div".to_string(),
             ..Default::default()
@@ -1005,5 +1285,558 @@ mod tests {
         assert!(matches!(op_kind, OpKind::Slice { .. }));
         assert_eq!(shape, vec![10, 20]);
         assert_eq!(dtype, DType::F32);
+    }
+
+    // CNN operation tests
+
+    #[test]
+    fn test_conv_translation() {
+        let mut graph = OperationGraph::default();
+        let mut value_to_node = HashMap::new();
+
+        // Input: [1, 3, 224, 224] (NCHW format - batch, channels, height, width)
+        let input = OpNode::new(0, OpKind::Input, vec![1, 3, 224, 224], DType::F32);
+        graph.nodes.push(input);
+        value_to_node.insert("input".to_string(), 0);
+
+        // Weight: [64, 3, 7, 7] (out_channels, in_channels, kernel_h, kernel_w)
+        let weight = OpNode::new(1, OpKind::Constant, vec![64, 3, 7, 7], DType::F32);
+        graph.nodes.push(weight);
+        value_to_node.insert("weight".to_string(), 1);
+
+        let node = proto::NodeProto {
+            input: vec!["input".to_string(), "weight".to_string()],
+            output: vec!["output".to_string()],
+            op_type: "Conv".to_string(),
+            attribute: vec![
+                proto::AttributeProto {
+                    name: "kernel_shape".to_string(),
+                    ints: vec![7, 7],
+                    ..Default::default()
+                },
+                proto::AttributeProto {
+                    name: "strides".to_string(),
+                    ints: vec![2, 2],
+                    ..Default::default()
+                },
+                proto::AttributeProto {
+                    name: "pads".to_string(),
+                    ints: vec![3, 3, 3, 3], // top, left, bottom, right
+                    ..Default::default()
+                },
+                proto::AttributeProto {
+                    name: "dilations".to_string(),
+                    ints: vec![1, 1],
+                    ..Default::default()
+                },
+                proto::AttributeProto {
+                    name: "group".to_string(),
+                    i: 1,
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+
+        let (op_kind, shape, dtype) = translate_node(&node, &value_to_node, &graph).unwrap();
+
+        if let OpKind::Conv2d {
+            kernel,
+            stride,
+            padding,
+            dilation,
+            groups,
+        } = op_kind
+        {
+            assert_eq!(kernel, (7, 7));
+            assert_eq!(stride, (2, 2));
+            assert_eq!(padding, (3, 3));
+            assert_eq!(dilation, (1, 1));
+            assert_eq!(groups, 1);
+        } else {
+            panic!("Expected Conv2d op");
+        }
+
+        // Output shape: [1, 64, 112, 112]
+        // H_out = (224 + 2*3 - 1*(7-1) - 1) / 2 + 1 = (224 + 6 - 6 - 1) / 2 + 1 = 223/2 + 1 = 111 + 1 = 112
+        assert_eq!(shape, vec![1, 64, 112, 112]);
+        assert_eq!(dtype, DType::F32);
+    }
+
+    #[test]
+    fn test_conv_translation_no_padding() {
+        let mut graph = OperationGraph::default();
+        let mut value_to_node = HashMap::new();
+
+        // Input: [1, 16, 32, 32]
+        let input = OpNode::new(0, OpKind::Input, vec![1, 16, 32, 32], DType::F32);
+        graph.nodes.push(input);
+        value_to_node.insert("input".to_string(), 0);
+
+        // Weight: [32, 16, 3, 3]
+        let weight = OpNode::new(1, OpKind::Constant, vec![32, 16, 3, 3], DType::F32);
+        graph.nodes.push(weight);
+        value_to_node.insert("weight".to_string(), 1);
+
+        let node = proto::NodeProto {
+            input: vec!["input".to_string(), "weight".to_string()],
+            output: vec!["output".to_string()],
+            op_type: "Conv".to_string(),
+            attribute: vec![proto::AttributeProto {
+                name: "kernel_shape".to_string(),
+                ints: vec![3, 3],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+
+        let (op_kind, shape, dtype) = translate_node(&node, &value_to_node, &graph).unwrap();
+
+        if let OpKind::Conv2d {
+            kernel,
+            stride,
+            padding,
+            dilation,
+            groups,
+        } = op_kind
+        {
+            assert_eq!(kernel, (3, 3));
+            assert_eq!(stride, (1, 1)); // Default stride
+            assert_eq!(padding, (0, 0)); // Default padding
+            assert_eq!(dilation, (1, 1)); // Default dilation
+            assert_eq!(groups, 1); // Default group
+        } else {
+            panic!("Expected Conv2d op");
+        }
+
+        // Output shape: [1, 32, 30, 30]
+        // H_out = (32 + 0 - 1*(3-1) - 1) / 1 + 1 = (32 - 2 - 1) / 1 + 1 = 30
+        assert_eq!(shape, vec![1, 32, 30, 30]);
+        assert_eq!(dtype, DType::F32);
+    }
+
+    #[test]
+    fn test_batchnorm_translation() {
+        let (graph, value_to_node) = create_test_graph_with_input(vec![1, 64, 56, 56], DType::F32);
+
+        let node = proto::NodeProto {
+            input: vec!["input".to_string()],
+            output: vec!["output".to_string()],
+            op_type: "BatchNormalization".to_string(),
+            attribute: vec![proto::AttributeProto {
+                name: "epsilon".to_string(),
+                f: 1e-5,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+
+        let (op_kind, shape, dtype) = translate_node(&node, &value_to_node, &graph).unwrap();
+
+        if let OpKind::BatchNormalization { epsilon } = op_kind {
+            assert!((epsilon - 1e-5).abs() < 1e-10);
+        } else {
+            panic!("Expected BatchNormalization op");
+        }
+
+        // Output shape same as input
+        assert_eq!(shape, vec![1, 64, 56, 56]);
+        assert_eq!(dtype, DType::F32);
+    }
+
+    #[test]
+    fn test_batchnorm_translation_default_epsilon() {
+        let (graph, value_to_node) = create_test_graph_with_input(vec![2, 128, 28, 28], DType::F32);
+
+        let node = proto::NodeProto {
+            input: vec!["input".to_string()],
+            output: vec!["output".to_string()],
+            op_type: "BatchNormalization".to_string(),
+            ..Default::default()
+        };
+
+        let (op_kind, shape, dtype) = translate_node(&node, &value_to_node, &graph).unwrap();
+
+        if let OpKind::BatchNormalization { epsilon } = op_kind {
+            assert!((epsilon - 1e-5).abs() < 1e-10); // Default epsilon
+        } else {
+            panic!("Expected BatchNormalization op");
+        }
+
+        assert_eq!(shape, vec![2, 128, 28, 28]);
+        assert_eq!(dtype, DType::F32);
+    }
+
+    #[test]
+    fn test_maxpool_translation() {
+        let (graph, value_to_node) =
+            create_test_graph_with_input(vec![1, 64, 112, 112], DType::F32);
+
+        let node = proto::NodeProto {
+            input: vec!["input".to_string()],
+            output: vec!["output".to_string()],
+            op_type: "MaxPool".to_string(),
+            attribute: vec![
+                proto::AttributeProto {
+                    name: "kernel_shape".to_string(),
+                    ints: vec![3, 3],
+                    ..Default::default()
+                },
+                proto::AttributeProto {
+                    name: "strides".to_string(),
+                    ints: vec![2, 2],
+                    ..Default::default()
+                },
+                proto::AttributeProto {
+                    name: "pads".to_string(),
+                    ints: vec![1, 1, 1, 1],
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+
+        let (op_kind, shape, dtype) = translate_node(&node, &value_to_node, &graph).unwrap();
+
+        if let OpKind::MaxPool {
+            kernel,
+            stride,
+            padding,
+        } = op_kind
+        {
+            assert_eq!(kernel, (3, 3));
+            assert_eq!(stride, (2, 2));
+            assert_eq!(padding, (1, 1));
+        } else {
+            panic!("Expected MaxPool op");
+        }
+
+        // Output shape: [1, 64, 56, 56]
+        // H_out = (112 + 2*1 - 3) / 2 + 1 = (114 - 3) / 2 + 1 = 111/2 + 1 = 55 + 1 = 56
+        assert_eq!(shape, vec![1, 64, 56, 56]);
+        assert_eq!(dtype, DType::F32);
+    }
+
+    #[test]
+    fn test_maxpool_translation_no_padding() {
+        let (graph, value_to_node) = create_test_graph_with_input(vec![1, 128, 28, 28], DType::F32);
+
+        let node = proto::NodeProto {
+            input: vec!["input".to_string()],
+            output: vec!["output".to_string()],
+            op_type: "MaxPool".to_string(),
+            attribute: vec![
+                proto::AttributeProto {
+                    name: "kernel_shape".to_string(),
+                    ints: vec![2, 2],
+                    ..Default::default()
+                },
+                proto::AttributeProto {
+                    name: "strides".to_string(),
+                    ints: vec![2, 2],
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+
+        let (op_kind, shape, dtype) = translate_node(&node, &value_to_node, &graph).unwrap();
+
+        if let OpKind::MaxPool {
+            kernel,
+            stride,
+            padding,
+        } = op_kind
+        {
+            assert_eq!(kernel, (2, 2));
+            assert_eq!(stride, (2, 2));
+            assert_eq!(padding, (0, 0)); // Default padding
+        } else {
+            panic!("Expected MaxPool op");
+        }
+
+        // Output shape: [1, 128, 14, 14]
+        // H_out = (28 + 0 - 2) / 2 + 1 = 26/2 + 1 = 13 + 1 = 14
+        assert_eq!(shape, vec![1, 128, 14, 14]);
+        assert_eq!(dtype, DType::F32);
+    }
+
+    #[test]
+    fn test_global_avg_pool_translation() {
+        let (graph, value_to_node) = create_test_graph_with_input(vec![1, 512, 7, 7], DType::F32);
+
+        let node = proto::NodeProto {
+            input: vec!["input".to_string()],
+            output: vec!["output".to_string()],
+            op_type: "GlobalAveragePool".to_string(),
+            ..Default::default()
+        };
+
+        let (op_kind, shape, dtype) = translate_node(&node, &value_to_node, &graph).unwrap();
+        assert!(matches!(op_kind, OpKind::GlobalAveragePool));
+
+        // Output shape: [1, 512, 1, 1]
+        assert_eq!(shape, vec![1, 512, 1, 1]);
+        assert_eq!(dtype, DType::F32);
+    }
+
+    #[test]
+    fn test_global_avg_pool_translation_large() {
+        let (graph, value_to_node) =
+            create_test_graph_with_input(vec![4, 2048, 14, 14], DType::F32);
+
+        let node = proto::NodeProto {
+            input: vec!["input".to_string()],
+            output: vec!["output".to_string()],
+            op_type: "GlobalAveragePool".to_string(),
+            ..Default::default()
+        };
+
+        let (op_kind, shape, dtype) = translate_node(&node, &value_to_node, &graph).unwrap();
+        assert!(matches!(op_kind, OpKind::GlobalAveragePool));
+
+        // Output shape: [4, 2048, 1, 1]
+        assert_eq!(shape, vec![4, 2048, 1, 1]);
+        assert_eq!(dtype, DType::F32);
+    }
+
+    #[test]
+    fn test_flatten_translation_default_axis() {
+        let (graph, value_to_node) = create_test_graph_with_input(vec![1, 512, 1, 1], DType::F32);
+
+        let node = proto::NodeProto {
+            input: vec!["input".to_string()],
+            output: vec!["output".to_string()],
+            op_type: "Flatten".to_string(),
+            attribute: vec![proto::AttributeProto {
+                name: "axis".to_string(),
+                i: 1,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+
+        let (op_kind, shape, dtype) = translate_node(&node, &value_to_node, &graph).unwrap();
+
+        if let OpKind::Flatten { start_dim } = op_kind {
+            assert_eq!(start_dim, 1);
+        } else {
+            panic!("Expected Flatten op");
+        }
+
+        // Output shape: [1, 512] (flatten from axis 1 onwards)
+        assert_eq!(shape, vec![1, 512]);
+        assert_eq!(dtype, DType::F32);
+    }
+
+    #[test]
+    fn test_flatten_translation_axis_0() {
+        let (graph, value_to_node) = create_test_graph_with_input(vec![2, 3, 4, 5], DType::F32);
+
+        let node = proto::NodeProto {
+            input: vec!["input".to_string()],
+            output: vec!["output".to_string()],
+            op_type: "Flatten".to_string(),
+            attribute: vec![proto::AttributeProto {
+                name: "axis".to_string(),
+                i: 0,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+
+        let (op_kind, shape, dtype) = translate_node(&node, &value_to_node, &graph).unwrap();
+
+        if let OpKind::Flatten { start_dim } = op_kind {
+            assert_eq!(start_dim, 0);
+        } else {
+            panic!("Expected Flatten op");
+        }
+
+        // Output shape: [1, 120] (flatten everything)
+        assert_eq!(shape, vec![1, 120]);
+        assert_eq!(dtype, DType::F32);
+    }
+
+    #[test]
+    fn test_flatten_translation_axis_2() {
+        let (graph, value_to_node) = create_test_graph_with_input(vec![2, 64, 7, 7], DType::F32);
+
+        let node = proto::NodeProto {
+            input: vec!["input".to_string()],
+            output: vec!["output".to_string()],
+            op_type: "Flatten".to_string(),
+            attribute: vec![proto::AttributeProto {
+                name: "axis".to_string(),
+                i: 2,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+
+        let (op_kind, shape, dtype) = translate_node(&node, &value_to_node, &graph).unwrap();
+
+        if let OpKind::Flatten { start_dim } = op_kind {
+            assert_eq!(start_dim, 2);
+        } else {
+            panic!("Expected Flatten op");
+        }
+
+        // Output shape: [128, 49] (keep first 2 dims, flatten rest)
+        // 2 * 64 = 128, 7 * 7 = 49
+        assert_eq!(shape, vec![128, 49]);
+        assert_eq!(dtype, DType::F32);
+    }
+
+    // Binary operation broadcasting tests
+
+    #[test]
+    fn test_add_with_broadcasting() {
+        let mut graph = OperationGraph::default();
+        let mut value_to_node = HashMap::new();
+
+        // ResNet18 pattern: [1, 1000] + [1000] → [1, 1000]
+        let a_node = OpNode::new(0, OpKind::Input, vec![1, 1000], DType::F32);
+        let b_node = OpNode::new(1, OpKind::Constant, vec![1000], DType::F32);
+        graph.nodes.push(a_node);
+        graph.nodes.push(b_node);
+        value_to_node.insert("A".to_string(), 0);
+        value_to_node.insert("B".to_string(), 1);
+
+        let add_proto = proto::NodeProto {
+            input: vec!["A".to_string(), "B".to_string()],
+            output: vec!["C".to_string()],
+            op_type: "Add".to_string(),
+            ..Default::default()
+        };
+
+        let (op_kind, shape, dtype) = translate_node(&add_proto, &value_to_node, &graph).unwrap();
+
+        assert!(matches!(op_kind, OpKind::Add));
+        assert_eq!(shape, vec![1, 1000]);
+        assert_eq!(dtype, DType::F32);
+    }
+
+    #[test]
+    fn test_add_same_shapes() {
+        // Test exact shape match: [2, 3] + [2, 3] → [2, 3]
+        let mut graph = OperationGraph::default();
+        let mut value_to_node = HashMap::new();
+
+        let a_node = OpNode::new(0, OpKind::Input, vec![2, 3], DType::F32);
+        let b_node = OpNode::new(1, OpKind::Input, vec![2, 3], DType::F32);
+        graph.nodes.push(a_node);
+        graph.nodes.push(b_node);
+        value_to_node.insert("A".to_string(), 0);
+        value_to_node.insert("B".to_string(), 1);
+
+        let add_proto = proto::NodeProto {
+            input: vec!["A".to_string(), "B".to_string()],
+            output: vec!["C".to_string()],
+            op_type: "Add".to_string(),
+            ..Default::default()
+        };
+
+        let (_, shape, _) = translate_node(&add_proto, &value_to_node, &graph).unwrap();
+        assert_eq!(shape, vec![2, 3]);
+    }
+
+    #[test]
+    fn test_mul_with_broadcasting() {
+        // Test Mul with multidim broadcast: [3, 1, 5] * [1, 4, 1] → [3, 4, 5]
+        let mut graph = OperationGraph::default();
+        let mut value_to_node = HashMap::new();
+
+        let a_node = OpNode::new(0, OpKind::Input, vec![3, 1, 5], DType::F32);
+        let b_node = OpNode::new(1, OpKind::Input, vec![1, 4, 1], DType::F32);
+        graph.nodes.push(a_node);
+        graph.nodes.push(b_node);
+        value_to_node.insert("A".to_string(), 0);
+        value_to_node.insert("B".to_string(), 1);
+
+        let mul_proto = proto::NodeProto {
+            input: vec!["A".to_string(), "B".to_string()],
+            output: vec!["C".to_string()],
+            op_type: "Mul".to_string(),
+            ..Default::default()
+        };
+
+        let (op_kind, shape, _) = translate_node(&mul_proto, &value_to_node, &graph).unwrap();
+        assert!(matches!(op_kind, OpKind::Mul));
+        assert_eq!(shape, vec![3, 4, 5]);
+    }
+
+    #[test]
+    fn test_add_incompatible_shapes() {
+        // Test error for incompatible shapes: [3, 4] + [2, 1] → Error
+        let mut graph = OperationGraph::default();
+        let mut value_to_node = HashMap::new();
+
+        let a_node = OpNode::new(0, OpKind::Input, vec![3, 4], DType::F32);
+        let b_node = OpNode::new(1, OpKind::Input, vec![2, 1], DType::F32);
+        graph.nodes.push(a_node);
+        graph.nodes.push(b_node);
+        value_to_node.insert("A".to_string(), 0);
+        value_to_node.insert("B".to_string(), 1);
+
+        let add_proto = proto::NodeProto {
+            input: vec!["A".to_string(), "B".to_string()],
+            output: vec!["C".to_string()],
+            op_type: "Add".to_string(),
+            ..Default::default()
+        };
+
+        let result = translate_node(&add_proto, &value_to_node, &graph);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_sub_with_broadcasting() {
+        // Test Sub: [32, 512] - [512] → [32, 512]
+        let mut graph = OperationGraph::default();
+        let mut value_to_node = HashMap::new();
+
+        let a_node = OpNode::new(0, OpKind::Input, vec![32, 512], DType::F32);
+        let b_node = OpNode::new(1, OpKind::Constant, vec![512], DType::F32);
+        graph.nodes.push(a_node);
+        graph.nodes.push(b_node);
+        value_to_node.insert("A".to_string(), 0);
+        value_to_node.insert("B".to_string(), 1);
+
+        let sub_proto = proto::NodeProto {
+            input: vec!["A".to_string(), "B".to_string()],
+            output: vec!["C".to_string()],
+            op_type: "Sub".to_string(),
+            ..Default::default()
+        };
+
+        let (op_kind, shape, _) = translate_node(&sub_proto, &value_to_node, &graph).unwrap();
+        assert!(matches!(op_kind, OpKind::Sub));
+        assert_eq!(shape, vec![32, 512]);
+    }
+
+    #[test]
+    fn test_div_with_broadcasting() {
+        // Test Div: [1, 64, 64] / [64, 1] → [1, 64, 64]
+        let mut graph = OperationGraph::default();
+        let mut value_to_node = HashMap::new();
+
+        let a_node = OpNode::new(0, OpKind::Input, vec![1, 64, 64], DType::F32);
+        let b_node = OpNode::new(1, OpKind::Input, vec![64, 1], DType::F32);
+        graph.nodes.push(a_node);
+        graph.nodes.push(b_node);
+        value_to_node.insert("A".to_string(), 0);
+        value_to_node.insert("B".to_string(), 1);
+
+        let div_proto = proto::NodeProto {
+            input: vec!["A".to_string(), "B".to_string()],
+            output: vec!["C".to_string()],
+            op_type: "Div".to_string(),
+            ..Default::default()
+        };
+
+        let (op_kind, shape, _) = translate_node(&div_proto, &value_to_node, &graph).unwrap();
+        assert!(matches!(op_kind, OpKind::Div));
+        assert_eq!(shape, vec![1, 64, 64]);
     }
 }

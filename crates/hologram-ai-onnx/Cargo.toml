@@ -24,7 +24,6 @@ rustc-hash.workspace = true
 tracing.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-petgraph.workspace = true
 rayon.workspace = true
 half.workspace = true
 # Use rkyv 0.7 to match hologram's version (workspace uses 0.8)
@@ -38,3 +37,4 @@ prost-build = "0.13"
 
 [dev-dependencies]
 tempfile.workspace = true
+image = "0.25"

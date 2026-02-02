@@ -15,9 +15,22 @@ pub fn build_graph(model: &proto::ModelProto) -> Result<OperationGraph> {
     let mut node_id_counter = 0u32;
     let mut value_to_node: HashMap<String, u32> = HashMap::new();
 
-    // Process inputs
+    // Build set of initializer names to avoid creating Input nodes for them
+    let initializer_names: std::collections::HashSet<_> = graph_proto
+        .initializer
+        .iter()
+        .map(|init| init.name.as_str())
+        .collect();
+
+    // Process inputs (skip those that are initializers)
     for input in &graph_proto.input {
         let name = input.name.clone();
+
+        // Skip if this is an initializer
+        if initializer_names.contains(name.as_str()) {
+            continue;
+        }
+
         let shape = parser::extract_shape(input)?;
         let dtype = parser::extract_dtype(input)?;
 
@@ -53,6 +66,131 @@ pub fn build_graph(model: &proto::ModelProto) -> Result<OperationGraph> {
 
     // Process operations
     for node_proto in &graph_proto.node {
+        // Special handling for Gemm: expand into MatMul + Add (+ Transpose if needed)
+        if node_proto.op_type == "Gemm" {
+            // Gemm has 3 inputs: A (input), B (weight), C (bias)
+            // Y = alpha * A @ B' + beta * C
+            let input_a = node_proto.input.first().context("Gemm missing input")?;
+            let input_b = node_proto.input.get(1).context("Gemm missing weight")?;
+            let input_c = node_proto.input.get(2); // Bias is optional
+
+            // Check transB attribute
+            let trans_b = node_proto
+                .attribute
+                .iter()
+                .any(|attr| attr.name == "transB" && attr.i == 1);
+
+            // Handle transB by inserting Transpose node
+            let matmul_weight_input = if trans_b {
+                let weight_id = value_to_node.get(input_b).context("Weight not found")?;
+                let weight_node = &graph.nodes[*weight_id as usize];
+
+                // For 2D matrix, transpose is [1, 0]
+                let len = weight_node.shape.len();
+                if len != 2 {
+                    bail!(
+                        "Transpose for Gemm only supports 2D matrices, got shape {:?}",
+                        weight_node.shape
+                    );
+                }
+
+                let perm = vec![1, 0];
+                let transposed_shape = vec![weight_node.shape[1], weight_node.shape[0]];
+
+                // Create Transpose node
+                let transpose_name = format!("{}_transposed", input_b);
+                let transpose_node = OpNode::new(
+                    node_id_counter,
+                    OpKind::Transpose { perm },
+                    transposed_shape,
+                    weight_node.dtype,
+                )
+                .with_name(transpose_name.clone());
+
+                graph.edges.push((*weight_id, node_id_counter));
+                value_to_node.insert(transpose_name.clone(), node_id_counter);
+                graph.nodes.push(transpose_node);
+                node_id_counter += 1;
+
+                transpose_name
+            } else {
+                input_b.clone()
+            };
+
+            // Create MatMul node (A @ B')
+            let matmul_proto = proto::NodeProto {
+                input: vec![input_a.clone(), matmul_weight_input.clone()],
+                output: vec![format!("{}_matmul", node_proto.name)],
+                op_type: "MatMul".to_string(),
+                ..Default::default()
+            };
+
+            let (matmul_op, matmul_shape, matmul_dtype) =
+                ops::translate_node(&matmul_proto, &value_to_node, &graph)?;
+
+            let matmul_output_name = matmul_proto.output[0].clone();
+            let matmul_node = OpNode::new(
+                node_id_counter,
+                matmul_op,
+                matmul_shape.clone(),
+                matmul_dtype,
+            )
+            .with_name(matmul_output_name.clone());
+
+            // Add edges for MatMul inputs
+            if let Some(&a_id) = value_to_node.get(input_a) {
+                graph.edges.push((a_id, node_id_counter));
+            }
+            if let Some(&b_id) = value_to_node.get(&matmul_weight_input) {
+                graph.edges.push((b_id, node_id_counter));
+            }
+
+            value_to_node.insert(matmul_output_name.clone(), node_id_counter);
+            graph.nodes.push(matmul_node);
+            node_id_counter += 1;
+
+            // If bias exists, create Add node (MatMul_output + C)
+            let final_output_name = node_proto
+                .output
+                .first()
+                .context("Gemm has no output")?
+                .clone();
+            if let Some(bias_input) = input_c {
+                let add_proto = proto::NodeProto {
+                    input: vec![matmul_output_name.clone(), bias_input.clone()],
+                    output: vec![final_output_name.clone()],
+                    op_type: "Add".to_string(),
+                    ..Default::default()
+                };
+
+                let (add_op, add_shape, add_dtype) =
+                    ops::translate_node(&add_proto, &value_to_node, &graph)?;
+
+                let add_node = OpNode::new(node_id_counter, add_op, add_shape, add_dtype)
+                    .with_name(final_output_name.clone());
+
+                // Add edges for Add inputs
+                if let Some(&matmul_id) = value_to_node.get(&matmul_output_name) {
+                    graph.edges.push((matmul_id, node_id_counter));
+                }
+                if let Some(&bias_id) = value_to_node.get(bias_input) {
+                    graph.edges.push((bias_id, node_id_counter));
+                }
+
+                value_to_node.insert(final_output_name, node_id_counter);
+                graph.nodes.push(add_node);
+                node_id_counter += 1;
+            } else {
+                // No bias, just use MatMul output directly
+                // Update the value_to_node mapping to use the final output name
+                let matmul_id = value_to_node.get(&matmul_output_name).copied().unwrap();
+                value_to_node.insert(final_output_name, matmul_id);
+            }
+
+            continue; // Skip normal processing for Gemm
+        }
+
+        // Normal operation processing
         let (op_kind, output_shape, output_dtype) =
             ops::translate_node(node_proto, &value_to_node, &graph)?;
 

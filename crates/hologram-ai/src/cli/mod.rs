@@ -63,88 +63,14 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Compile ONNX model to .holo format
+    /// Compile ONNX model to .holb format
     Compile {
-        /// Input ONNX model file (required if --config not specified)
-        #[arg(required_unless_present = "config")]
-        input: Option<PathBuf>,
+        /// Input ONNX model file
+        input: PathBuf,
 
-        /// Output path (without extension, .holo and .weights will be added)
+        /// Output path (without extension, .holb will be added)
         #[arg(short, long)]
         output: Option<PathBuf>,
-
-        /// Load compiler settings from a unified config file
-        #[arg(short, long)]
-        config: Option<PathBuf>,
-
-        /// Enable graph partitioning for large models
-        #[arg(long)]
-        partition: bool,
-
-        /// Partition size (number of nodes per partition)
-        #[arg(long, default_value = "500")]
-        partition_size: usize,
-
-        /// Memory budget in MB
-        #[arg(long)]
-        memory_budget: Option<usize>,
-
-        /// Weight threshold for external storage (bytes)
-        #[arg(long, default_value = "4096")]
-        weight_threshold: usize,
-
-        /// Input shapes for dynamic dimensions (e.g., "input_name=1,4,8,8")
-        #[arg(long = "input-shape", value_name = "NAME=DIMS")]
-        input_shapes: Vec<String>,
-
-        /// Create a unified bundle with embedded weights (default: true)
-        ///
-        /// When enabled, produces a single .holo file with page-aligned weights
-        /// section that can be memory-mapped for efficient loading of large models.
-        /// Disable with --no-bundle for separate .holo + .weights files.
-        #[arg(long, default_value = "true", action = clap::ArgAction::Set)]
-        bundle: bool,
-
-        /// Embed files in the bundle (vocabulary, tokenizer config, etc.)
-        ///
-        /// Format: type:path or type:path:custom_id
-        ///
-        /// Types:
-        ///   vocabulary       - Line-based vocabulary (vocab.txt)
-        ///   vocabulary_json  - JSON vocabulary (vocab.json)
-        ///   tokenizer_config - Tokenizer config (tokenizer_config.json)
-        ///   model_config     - Model config (config.json)
-        ///   special_tokens   - Special tokens map (special_tokens_map.json)
-        ///   preprocessor     - Preprocessor config (preprocessor_config.json)
-        ///   sentencepiece    - SentencePiece model (*.model)
-        ///   generation       - Generation config (generation_config.json)
-        ///   raw:content_type - Raw file with custom content type
-        ///
-        /// Examples:
-        ///   --embed vocabulary:vocab.txt
-        ///   --embed tokenizer_config:tokenizer_config.json
-        ///   --embed raw:application/octet-stream:data.bin:my_data
-        #[arg(long = "embed", value_name = "TYPE:PATH[:ID]")]
-        embed_files: Vec<String>,
-
-        /// Compile transformer model as layer-wise HOLM pipeline
-        ///
-        /// Detects transformer layer structure and compiles each layer as a separate
-        /// HOLB model, packaged into a HOLM pipeline bundle. This enables layer-by-layer
-        /// execution with madvise-based prefetching for large models on memory-constrained
-        /// systems.
-        ///
-        /// Memory reduction for 70B models: ~130GB → ~2GB peak memory
-        #[arg(long)]
-        layer_wise: bool,
-
-        /// Enable parallel execution groups for Q/K/V projections and activation fusion
-        ///
-        /// When enabled, detects attention patterns and activation chains in the model
-        /// graph to enable parallel execution and view composition optimizations.
-        /// Provides 2-3x speedup for transformer models with multi-head attention.
-        #[arg(long, default_value = "true", action = clap::ArgAction::Set)]
-        parallel: bool,
     },
 
     /// Compile tokenizer to .holo format for hologram execution
@@ -512,79 +438,9 @@ pub fn run() -> anyhow::Result<()> {
     }
 
     match cli.command {
-        Commands::Compile {
-            input,
-            output,
-            config,
-            partition,
-            partition_size,
-            memory_budget,
-            weight_threshold,
-            input_shapes,
-            bundle,
-            embed_files,
-            layer_wise,
-            parallel,
-        } => {
-            // Parse input shapes from "name=d1,d2,d3" format
-            let parsed_shapes: std::collections::HashMap<String, Vec<usize>> = input_shapes
-                .iter()
-                .filter_map(|s| {
-                    let parts: Vec<&str> = s.splitn(2, '=').collect();
-                    if parts.len() == 2 {
-                        let name = parts[0].to_string();
-                        let dims: Result<Vec<usize>, _> = parts[1]
-                            .split(',')
-                            .map(|d| d.trim().parse::<usize>())
-                            .collect();
-                        dims.ok().map(|d| (name, d))
-                    } else {
-                        None
-                    }
-                })
-                .collect();
-
-            // Parse embedded files
-            let parsed_embed_files = parse_embed_files(&embed_files)?;
-
-            // If a config file is provided, use it for compiler settings
-            if let Some(config_path) = config {
-                compile_with_config(
-                    &config_path,
-                    input.as_deref(),
-                    output.as_deref(),
-                    partition,
-                    partition_size,
-                    memory_budget,
-                    weight_threshold,
-                    bundle,
-                    &parsed_embed_files,
-                    layer_wise,
-                    parallel,
-                )
-            } else {
-                // Traditional compile with explicit input
-                let input = input.ok_or_else(|| {
-                    anyhow::anyhow!("Input ONNX file required when --config not specified")
-                })?;
-                let output = output.unwrap_or_else(|| input.with_extension(""));
-                compile_command(
-                    &input,
-                    &output,
-                    partition,
-                    partition_size,
-                    memory_budget,
-                    weight_threshold,
-                    true,
-                    true,
-                    true, // enable_resize_upscaling
-                    &parsed_shapes,
-                    bundle,
-                    &parsed_embed_files,
-                    layer_wise,
-                    parallel,
-                )
-            }
+        Commands::Compile { input, output } => {
+            let output = output.unwrap_or_else(|| input.with_extension(""));
+            compile_command(&input, &output)
         }
 
         Commands::CompileTokenizer {

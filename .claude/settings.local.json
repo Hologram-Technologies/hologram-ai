@@ -179,7 +179,8 @@
       "Bash(chmod:*)",
       "Bash(bash:*)",
       "Bash(export RUST_LOG=hologram_backend::core::executor=warn:*)",
-      "Bash(devcontainer build:*)"
+      "Bash(devcontainer build:*)",
+      "Bash(HOLOGRAM_DEBUG_NODES=1 cargo test:*)"
     ]
   }
 }
