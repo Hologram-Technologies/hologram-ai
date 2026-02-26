@@ -2,6 +2,38 @@
 
 This document describes workflows for AI agents working on the hologram-onnx project.
 
+## Project Goal
+
+**The goal of this crate is to compile and execute ANY ONNX model.** This is the north star for all development.
+
+### Model Progression
+
+We're building ONNX support incrementally, starting with simpler models and working toward more complex ones:
+
+1. **ResNet18** (Image Classification) - WORKING
+   - Basic CNN architecture
+   - Conv2D, BatchNorm, ReLU, MaxPool, GlobalAvgPool, MatMul
+   - Single input (image), single output (class logits)
+
+2. **T5** (Text-to-Text) - CURRENT FOCUS
+   - Encoder-decoder transformer architecture
+   - Attention, LayerNorm, Embedding, Softmax
+   - Multiple inputs (encoder input, decoder input)
+   - Autoregressive generation
+
+3. **Stable Diffusion** (Image Generation) - FUTURE
+   - U-Net architecture with cross-attention
+   - VAE encoder/decoder
+   - CLIP text encoder
+   - Complex multi-model pipeline
+
+### Success Criteria
+
+A model is considered "working" when:
+- ONNX → .holo compilation succeeds
+- Inference produces numerically correct outputs
+- Performance is reasonable (not orders of magnitude slower than reference)
+
 ## Project Context
 
 hologram-onnx is a Rust workspace building an ONNX runtime with Hologram as the execution backend. The architecture separates:
@@ -127,9 +159,11 @@ cargo build 2>&1 | head -1  # Get OUT_DIR path
 ### Before Submitting Changes
 
 1. Build succeeds: `cargo build`
-2. Tests pass: `cargo test`
-3. No clippy warnings: `cargo clippy --all-targets`
+2. Tests pass: `cargo test` or `just test`
+3. **ZERO clippy warnings**: `cargo clippy --all-targets` must report 0 warnings
 4. Docs generate: `cargo doc --no-deps`
+
+**CRITICAL**: Code with clippy warnings will not be accepted. Fix all warnings before considering a task complete.
 
 ### Writing Tests
 
@@ -172,6 +206,15 @@ Type errors in generated code:
 - Example config files go in `/workspace/configs/examples/`
 - Planning documents should reference implementation docs from `docs/working/`
 
+### Temporary Debug Files
+- **ALL temporary debug files (Python scripts, test data, etc.) MUST go in `/tmp/`**
+- Never commit debug scripts to the workspace root
+- Use `/tmp/` for:
+  - Debug Python scripts (e.g., `debug_*.py`, `test_*.py`)
+  - Temporary test data (e.g., `.bin` files, reference outputs)
+  - Compiled test models (e.g., `.holb`, `.onnx` for debugging)
+- Only keep permanent scripts in `/workspace/scripts/`
+
 ### Code Quality Standards
 
 **CRITICAL: These standards are MANDATORY and NON-NEGOTIABLE**
@@ -188,6 +231,61 @@ Type errors in generated code:
 - **NO shortcuts** - Do it right or don't do it.
 
 Any code that contains phrases like "in production you would...", "a real implementation would...", "simplified for demonstration", or similar disclaimers is **UNACCEPTABLE**. If you're writing it, write it properly. If a feature isn't ready, don't include it at all.
+
+#### Exception: Bridge Implementations
+
+**ONLY exception to the NO TODOs rule**: When hologram compiler lacks necessary operations (e.g., Conv2d, BatchNorm, etc.):
+
+1. **NEVER write inline TODO comments** like `// TODO: implement this`
+2. **DO document with BRIDGE comment** explaining the situation:
+   ```rust
+   // BRIDGE IMPLEMENTATION: hologram compiler does not yet support Conv2d operations.
+   // This translator correctly computes output shapes and extracts attributes, but maps
+   // to OpKind::Copy as a temporary bridge. Once hologram gains Conv2d support, this
+   // will be updated to use the proper OpKind::Conv2d variant.
+   //
+   // See hologram team prompt in /workspace/specs/plans/<operation>-support.md
+   ```
+3. **DO create a comprehensive prompt** for the hologram team in `/workspace/specs/plans/` directory
+4. **DO implement everything except the final OpKind mapping** - parse attributes, compute shapes, handle all edge cases
+5. **DO write tests** for the shape calculations and attribute parsing
+6. **DO document the migration path** clearly
+
+**Bridge implementations are ONLY acceptable when**:
+- The limitation is in hologram compiler, not hologram-ai-onnx
+- A prompt has been written for the hologram team
+- All OTHER aspects are fully implemented (parsing, shapes, validation)
+- The code clearly documents what's missing and where to find the solution
+
+#### Writing Specs/Bug Reports for hologram
+
+**CRITICAL: hologram has ZERO knowledge of hologram-ai.** When writing specs or bug reports for the hologram team in `/workspace/specs/plans/`:
+
+1. **NEVER reference hologram-ai** - hologram is a standalone project
+2. **NEVER reference hologram-ai-onnx** - hologram doesn't know about ONNX compilation
+3. **NEVER reference T5, ResNet, or specific model names** - describe in terms of operations
+4. **DO describe the problem in hologram's terms**:
+   - Use operation names: Gather, MatMul, ReduceMean, Add, etc.
+   - Reference hologram files: `dispatch.rs`, `context.rs`, `assemble.rs`
+   - Describe buffer/tensor operations, not model architectures
+5. **DO provide reproduction steps using hologram directly**:
+   - Compile a graph with specific operations
+   - Execute with specific input shapes
+   - Compare output with expected values
+6. **DO use generic terminology**:
+   - "transformer encoder" not "T5 encoder"
+   - "embedding lookup" not "token embedding"
+   - "compiled plan" not "ONNX model"
+
+**Example - WRONG**:
+```markdown
+When running hologram-ai's T5 encoder compilation, the output...
+```
+
+**Example - CORRECT**:
+```markdown
+When executing a compiled transformer encoder model, the output...
+```
 
 1. **NO TODOs, Placeholders, or Stubs**
    - Every function MUST be fully implemented
@@ -387,11 +485,14 @@ Any code that contains phrases like "in production you would...", "a real implem
 3. **Implement fully** - No TODOs or stubs
 4. **Verify with tests** - All tests must pass
 5. **Document public APIs** - Rustdoc for all public items
-6. **Fix all warnings and errors** - Before completing any task:
+6. **ZERO Clippy Errors and Warnings** - This is MANDATORY:
+   - Run `cargo clippy --all-targets` and ensure **ZERO warnings**
    - Run `cargo check --all` to verify no compilation errors
-   - Run `cargo clippy --all-targets` to fix all warnings
+   - A task is NOT complete until clippy reports 0 warnings
    - No unused imports, variables, or dead code without explicit `#[allow(...)]`
-   - All warnings must be addressed before marking a task complete
+   - Use `#[allow(dead_code)]` sparingly and only with a comment explaining why
+   - Fix warnings immediately - do not accumulate technical debt
+   - Run `just test` to verify all tests pass (this also catches clippy issues)
 7. **Update TODO tracker** - Mark items complete in `docs/working/implementation.md`
 
 ## Tasks
@@ -404,5 +505,7 @@ Updates to every task must be documented with their status before completion of 
 - Completed
 
 Tasks are only complete if all the workspace tests pass. You can run them with `just test`. A task is not complete until all of the tests pass.
+
+**Clippy Requirement**: Before marking any task complete, run `cargo clippy --all-targets` and ensure there are **ZERO warnings**. Code with clippy warnings is not acceptable.
 
 As you're working through tasks, ensure you have a plan in `specs/plans` and keep it up to date throughout the feature build.

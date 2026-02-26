@@ -37,7 +37,7 @@
 // Unused imports kept for future API surface expansion
 
 #[cfg(feature = "onnx")]
-use hologram_ai_onnx::core::{OnnxError, Result};
+use hologram_ai_onnx::compat::{OnnxError, Result as OnnxResult};
 use std::collections::HashMap;
 use std::path::Path;
 

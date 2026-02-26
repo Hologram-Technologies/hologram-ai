@@ -41,14 +41,59 @@ pub fn extract_shape(value_info: &proto::ValueInfoProto) -> Result<Vec<usize>> {
             proto::tensor_shape_proto::dimension::Value::DimValue(v) => {
                 shape.push(*v as usize);
             }
-            proto::tensor_shape_proto::dimension::Value::DimParam(_) => {
-                // Dynamic dimension - use 1 for now (batch size)
-                shape.push(1);
+            proto::tensor_shape_proto::dimension::Value::DimParam(param) => {
+                // Dynamic dimension - use sensible defaults based on common patterns
+                let default = if param.contains("batch") {
+                    1 // batch_size defaults to 1
+                } else if param.contains("seq") || param.contains("length") {
+                    // sequence_length - use 512 for transformer models
+                    512
+                } else {
+                    // Unknown dynamic dimension - use 1
+                    1
+                };
+                tracing::debug!("Dynamic dimension '{}' defaulting to {}", param, default);
+                shape.push(default);
             }
         }
     }
 
     Ok(shape)
+}
+
+/// Extract ONNX opset version from ModelProto.
+pub fn extract_opset_version(model: &proto::ModelProto) -> i64 {
+    model
+        .opset_import
+        .iter()
+        .find(|o| o.domain.is_empty() || o.domain == "ai.onnx")
+        .map(|o| o.version)
+        .unwrap_or(1)
+}
+
+/// Validate an ONNX model.
+///
+/// Returns Ok if the model appears valid, Err with details otherwise.
+pub fn validate_model(model: &proto::ModelProto) -> Result<()> {
+    // Check model has a graph
+    let graph = model.graph.as_ref().context("Model has no graph")?;
+
+    // Check graph has at least one input and output
+    if graph.input.is_empty() {
+        anyhow::bail!("Graph has no inputs");
+    }
+    if graph.output.is_empty() {
+        anyhow::bail!("Graph has no outputs");
+    }
+
+    // Check all nodes have op_type
+    for node in &graph.node {
+        if node.op_type.is_empty() {
+            anyhow::bail!("Node '{}' has no op_type", node.name);
+        }
+    }
+
+    Ok(())
 }
 
 /// Extract dtype from ONNX ValueInfoProto.

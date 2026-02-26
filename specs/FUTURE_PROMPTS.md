@@ -480,24 +480,24 @@ is_valid = verify_crc32(data, expected)  # Verify CRC
 
 ### Table IDs Reference
 
-| Name | ID | Inverse ID |
-|------|-----|------------|
-| sigmoid | 0 | 100 |
-| tanh | 1 | 101 |
-| relu | 2 | 102 |
-| gelu | 3 | N/A |
-| silu | 4 | N/A |
-| inverse_sigmoid | 100 | 0 |
-| inverse_tanh | 101 | 1 |
-| inverse_relu | 102 | 2 |
+| Name            | ID  | Inverse ID |
+| --------------- | --- | ---------- |
+| sigmoid         | 0   | 100        |
+| tanh            | 1   | 101        |
+| relu            | 2   | 102        |
+| gelu            | 3   | N/A        |
+| silu            | 4   | N/A        |
+| inverse_sigmoid | 100 | 0          |
+| inverse_tanh    | 101 | 1          |
+| inverse_relu    | 102 | 2          |
 
 ### Name Aliases
 
-| Primary Name | Aliases |
-|--------------|---------|
-| silu | swish |
-| inverse_sigmoid | logit |
-| inverse_tanh | atanh, arctanh |
+| Primary Name    | Aliases        |
+| --------------- | -------------- |
+| silu            | swish          |
+| inverse_sigmoid | logit          |
+| inverse_tanh    | atanh, arctanh |
 
 ---
 

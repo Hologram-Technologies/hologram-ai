@@ -6,6 +6,13 @@ use hologram::backend::{Backend, cpu::CpuBackend};
 use hologram::holo::HolbReader;
 use std::fs;
 
+/// Deserialize BackendPlan from rkyv bytes (rkyv 0.7 API).
+fn deserialize_plan(bytes: &[u8]) -> Result<BackendPlan> {
+    let archived = unsafe { rkyv::archived_root::<BackendPlan>(bytes) };
+    let plan: BackendPlan = rkyv::Deserialize::deserialize(archived, &mut rkyv::Infallible)?;
+    Ok(plan)
+}
+
 fn main() -> Result<()> {
     let onnx_path = std::env::args().nth(1).unwrap_or_else(|| {
         "/tmp/claude-1000/-workspace/d42433ba-a7d4-4e38-bcb7-e07ce8361e75/scratchpad/onnx_models/resnet18.onnx".to_string()
@@ -24,8 +31,7 @@ fn main() -> Result<()> {
 
     // Load the plan
     let reader = HolbReader::from_bytes(&holb_bytes)?;
-    let plan: BackendPlan = rkyv::from_bytes(reader.graph())
-        .map_err(|e| anyhow::anyhow!("Deserialize error: {}", e))?;
+    let plan = deserialize_plan(reader.graph())?;
 
     // Create test input (random pattern)
     let input_data: Vec<f32> = (0..3 * 224 * 224)

@@ -68,12 +68,12 @@ fn main() -> anyhow::Result<()> {
     println!("   Constants: {} bytes", plan.constants.len());
 
     // Create input: all 1.0 for easy verification
-    let input_size = 1 * 3 * 224 * 224;
+    let input_size = 3 * 224 * 224;
     let input_data: Vec<f32> = vec![1.0; input_size];
     let input_bytes: Vec<u8> = bytemuck::cast_slice(&input_data).to_vec();
 
     // Create output buffer
-    let output_size = 1 * 64 * 112 * 112;
+    let output_size = 64 * 112 * 112;
     let mut output_data: Vec<f32> = vec![0.0; output_size];
     let output_bytes: &mut [u8] = bytemuck::cast_slice_mut(&mut output_data);
 

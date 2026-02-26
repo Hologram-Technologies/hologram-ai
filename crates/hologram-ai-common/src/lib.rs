@@ -34,8 +34,15 @@ pub mod error;
 // TEMPORARILY DISABLED during hologram API migration:
 // pub mod metadata;  // depends on hologram-bundle traits not in categorical-x
 pub mod serialization; // Minimal stub for serialize_backend_plan_with_header
-// pub mod transformer;  // uses old hologram::ir API (Shape, Dim, GraphBuilder, etc.)
 pub mod weights;
+
+// Transformer config types (pure data structures, no hologram dependencies)
+mod transformer_config;
+pub use transformer_config::{Activation, FFNType, NormType, RoPEScaling, TransformerConfig};
+
+// TEMPORARILY DISABLED: GenericTransformerBuilder uses old hologram::ir API
+// (Shape, Dim, GraphBuilder, etc.) which needs refactoring for new API
+// pub mod transformer;
 
 pub use error::{CommonError, Result};
 pub use serialization::{

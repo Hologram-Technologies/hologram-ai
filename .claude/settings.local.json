@@ -180,7 +180,25 @@
       "Bash(bash:*)",
       "Bash(export RUST_LOG=hologram_backend::core::executor=warn:*)",
       "Bash(devcontainer build:*)",
-      "Bash(HOLOGRAM_DEBUG_NODES=1 cargo test:*)"
+      "Bash(HOLOGRAM_DEBUG_NODES=1 cargo test:*)",
+      "Bash(rustfmt:*)",
+      "Bash(cargo tree:*)",
+      "Bash(./target/release/hologram-ai compile:*)",
+      "Bash(./target/release/hologram-ai inspect:*)",
+      "Bash(./target/release/hologram-ai bundle-pipeline:*)",
+      "Bash(./target/release/hologram-ai compile-pipeline:*)",
+      "Bash(./target/debug/hologram-ai:*)",
+      "Bash(./target/debug/hologram-ai run:*)",
+      "Bash(./target/debug/hologram-ai compile:*)",
+      "Bash(just test:*)",
+      "Bash(HOLOGRAM_DEBUG_GATHER=1 cargo run:*)",
+      "Bash(HOLOGRAM_DEBUG_BUFFERS=1 cargo run:*)",
+      "Bash(git pull:*)",
+      "Bash(HOLOGRAM_DEBUG_BUFFERS=1 cargo test:*)",
+      "Bash(HOLOGRAM_DEBUG_BUFFERS=1 timeout 120 cargo run:*)",
+      "Bash(HOLOGRAM_TRACE_LAYERS=1 cargo test:*)",
+      "Bash(RUST_LOG=hologram_ai_onnx::ops::comparison=debug ./target/release/hologram-ai:*)",
+      "Bash(./target/release/hologram-ai info:*)"
     ]
   }
 }

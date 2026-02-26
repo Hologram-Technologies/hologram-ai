@@ -28,7 +28,112 @@ mod parser;
 pub use builder::build_graph;
 pub use dtypes::from_onnx as dtype_from_onnx;
 pub use ops::translate_node;
-pub use parser::{extract_dtype, extract_shape, parse_model};
+pub use parser::{
+    extract_dtype, extract_opset_version, extract_shape, parse_model, validate_model,
+};
+
+pub mod compat {
+    //! Compatibility module for hologram-ai CLI.
+    //!
+    //! Re-exported error types and utilities for compatibility.
+    //! These types provide API compatibility for the hologram-ai CLI while
+    //! the underlying implementation has been simplified.
+
+    use std::path::PathBuf;
+    use thiserror::Error;
+
+    /// ONNX-related errors.
+    #[derive(Error, Debug)]
+    pub enum OnnxError {
+        /// Parse error
+        #[error("Parse error: {0}")]
+        ParseError(String),
+        /// Validation error
+        #[error("Validation error: {0}")]
+        ValidationError(String),
+        /// Compilation error
+        #[error("Compilation error: {0}")]
+        CompilationError(String),
+        /// IO error
+        #[error("IO error: {0}")]
+        IoError(#[from] std::io::Error),
+        /// Other error
+        #[error("{0}")]
+        Other(#[from] anyhow::Error),
+    }
+
+    /// ONNX result type.
+    pub type Result<T> = std::result::Result<T, OnnxError>;
+
+    /// ONNX configuration.
+    #[derive(Debug, Clone, Default)]
+    pub struct OnnxConfig {
+        /// Target opset version
+        pub opset_version: Option<i64>,
+        /// Enable optimizations
+        pub optimize: bool,
+        /// Enable graph partitioning
+        pub enable_partitioning: bool,
+        /// Partition size threshold
+        pub partition_size: usize,
+    }
+
+    /// Section type for embedded files.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub enum SectionType {
+        /// Tokenizer vocabulary
+        Tokenizer,
+        /// Tokenizer config JSON
+        TokenizerConfig,
+        /// Vocabulary data (plain text or JSON)
+        Vocabulary,
+        /// Vocabulary JSON
+        VocabularyJson,
+        /// Model configuration
+        ModelConfig,
+        /// Special tokens mapping
+        SpecialTokensMap,
+        /// Preprocessor configuration
+        PreprocessorConfig,
+        /// SentencePiece model file
+        SentencePiece,
+        /// Generation configuration
+        GenerationConfig,
+        /// Image preprocessor config
+        ImagePreprocessor,
+        /// Audio preprocessor config
+        AudioPreprocessor,
+        /// Custom raw section
+        Raw {
+            /// Content type
+            content_type: String,
+            /// Custom ID
+            custom_id: Option<String>,
+        },
+    }
+
+    /// Configuration for an embedded file.
+    #[derive(Debug, Clone)]
+    pub struct EmbeddedFileConfig {
+        /// Section type
+        pub section_type: SectionType,
+        /// Path to the file
+        pub path: PathBuf,
+        /// Optional custom ID
+        pub custom_id: Option<String>,
+    }
+
+    impl EmbeddedFileConfig {
+        /// Create a new embedded file config.
+        pub fn new(path: impl Into<PathBuf>, section_type: SectionType) -> Self {
+            Self {
+                section_type,
+                path: path.into(),
+                custom_id: None,
+            }
+        }
+    }
+}
 
 /// Compile an ONNX model to .holb format.
 ///
@@ -65,6 +170,26 @@ pub fn compile_onnx(onnx_bytes: &[u8]) -> Result<Vec<u8>> {
             eprintln!("  Name: {:?}", node.name);
             eprintln!();
         }
+
+        // Debug: Print edges
+        eprintln!("\n{}", "=".repeat(80));
+        eprintln!("DEBUG: OperationGraph edges (total: {})", graph.edges.len());
+        eprintln!("{}\n", "=".repeat(80));
+        for (src, dst) in &graph.edges {
+            let src_name = graph
+                .nodes
+                .get(*src as usize)
+                .and_then(|n| n.name.as_ref())
+                .map(|s| s.as_str())
+                .unwrap_or("?");
+            let dst_name = graph
+                .nodes
+                .get(*dst as usize)
+                .and_then(|n| n.name.as_ref())
+                .map(|s| s.as_str())
+                .unwrap_or("?");
+            eprintln!("Edge: {} -> {} ({} -> {})", src, dst, src_name, dst_name);
+        }
         eprintln!("{}\n", "=".repeat(80));
     }
 
@@ -79,13 +204,102 @@ pub fn compile_onnx(onnx_bytes: &[u8]) -> Result<Vec<u8>> {
         anyhow::anyhow!("Compilation failed: {:?}", e)
     })?;
 
+    // Debug: Print compiled plan instructions if HOLOGRAM_DEBUG_NODES is set
+    if std::env::var("HOLOGRAM_DEBUG_NODES").is_ok() {
+        eprintln!("\n{}", "=".repeat(80));
+        eprintln!(
+            "DEBUG: BackendPlan (buffers={}, instructions={})",
+            plan.buffers.len(),
+            plan.instructions.len()
+        );
+        eprintln!("{}\n", "=".repeat(80));
+        for (i, buf) in plan.buffers.iter().enumerate() {
+            eprintln!(
+                "Buffer[{}]: size={}, type={:?}",
+                i, buf.size, buf.buffer_type
+            );
+        }
+        eprintln!();
+
+        // Print node to buffer mapping
+        eprintln!("=== Node to Buffer Map ===");
+        for (node_id, buffer_idx) in plan.node_buffer_map.iter().enumerate() {
+            if let Some(buf_idx) = buffer_idx {
+                let node_name = graph
+                    .nodes
+                    .get(node_id)
+                    .and_then(|n| n.name.as_ref())
+                    .map(|s| s.as_str())
+                    .unwrap_or("?");
+                eprintln!("Node {} ({}) -> Buffer {}", node_id, node_name, buf_idx);
+            }
+        }
+        eprintln!();
+
+        // Print constant_node_ids order
+        eprintln!("=== Constant Node IDs (insertion order) ===");
+        for (i, &node_id) in graph.constant_node_ids.iter().enumerate() {
+            let node_name = graph
+                .nodes
+                .get(node_id as usize)
+                .and_then(|n| n.name.as_ref())
+                .map(|s| s.as_str())
+                .unwrap_or("?");
+            eprintln!("constants[{}] = node {} ({})", i, node_id, node_name);
+        }
+        eprintln!();
+
+        // Print constants blob analysis
+        eprintln!("=== Constants Blob ({} bytes) ===", plan.constants.len());
+        let mut offset = 0;
+        for (i, buf) in plan.buffers.iter().enumerate() {
+            if buf.buffer_type == hologram::holo::types::BufferType::Constant {
+                let slice_end = (offset + 16).min(plan.constants.len());
+                if offset < plan.constants.len() {
+                    let slice = &plan.constants[offset..slice_end];
+                    let first_f32 = if slice.len() >= 4 {
+                        f32::from_le_bytes([slice[0], slice[1], slice[2], slice[3]])
+                    } else {
+                        0.0
+                    };
+                    eprintln!(
+                        "Buffer[{}] at offset {}: first f32 = {:.8}",
+                        i, offset, first_f32
+                    );
+                }
+                offset += buf.size;
+            }
+        }
+        eprintln!();
+
+        for (i, instr) in plan.instructions.iter().enumerate() {
+            eprintln!("Instruction[{}]: {:?}", i, instr);
+        }
+        eprintln!("{}\n", "=".repeat(80));
+    }
+
     // Serialize BackendPlan using rkyv 0.7 (matching hologram's version)
     let plan_bytes = rkyv::to_bytes::<_, 1024>(&plan)
         .map_err(|e| anyhow::anyhow!("Failed to serialize BackendPlan: {}", e))?;
 
-    // Create .holb file with serialized plan
+    // Create .holb file with serialized plan and constants
     let mut writer = HolbWriter::new();
     writer.set_graph(&plan_bytes);
+
+    // Set constants/weights - these are read separately from the graph by the loader
+    if !plan.constants.is_empty() {
+        writer.set_weights(&plan.constants);
+    }
+
+    // Embed input order section - this preserves ONNX input ordering for correct execution.
+    // Without this, the executor would sort inputs alphabetically which breaks models
+    // with multiple inputs of the same size (e.g., matmul with Q and K_T both [1,8,64,64]).
+    if !graph.inputs.is_empty() {
+        let input_names: Vec<&str> = graph.inputs.iter().map(|(name, _)| name.as_str()).collect();
+        let input_order_json = serde_json::to_vec(&input_names)
+            .map_err(|e| anyhow::anyhow!("Failed to serialize input order: {}", e))?;
+        writer.add_raw_section("input_order", "application/json", &input_order_json);
+    }
 
     let holb_bytes = writer.build().context("Failed to build .holb file")?;
 

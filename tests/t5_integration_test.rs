@@ -10,33 +10,30 @@
 use std::fs;
 use std::path::PathBuf;
 
-use hologram_onnx::{
-    SymbolicShape, parse_model, validate_model,
-};
-use hologram_onnx::core::{HOLB_MAGIC, HOLP_MAGIC, extract_opset_version};
-use hologram::Dim;
+use hologram_ai_onnx::{parse_model, validate_model, extract_opset_version};
+use hologram_holo::{HOLB_MAGIC, HOLM_MAGIC};
 use tempfile::TempDir;
 
-fn hologram_onnx_bin() -> std::path::PathBuf {
+fn hologram_ai_bin() -> std::path::PathBuf {
     // Try env var first (set by cargo test for binary crates)
-    if let Ok(path) = std::env::var("CARGO_BIN_EXE_hologram-onnx") {
+    if let Ok(path) = std::env::var("CARGO_BIN_EXE_hologram-ai") {
         return std::path::PathBuf::from(path);
     }
 
     // Fall back to target directory relative to manifest
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let debug_bin = manifest_dir.join("target/debug/hologram-onnx");
+    let debug_bin = manifest_dir.join("target/debug/hologram-ai");
     if debug_bin.exists() {
         return debug_bin;
     }
 
-    let release_bin = manifest_dir.join("target/release/hologram-onnx");
+    let release_bin = manifest_dir.join("target/release/hologram-ai");
     if release_bin.exists() {
         return release_bin;
     }
 
     panic!(
-        "hologram-onnx binary not found. Run `cargo build` first.\n\
+        "hologram-ai binary not found. Run `cargo build` first.\n\
          Searched:\n  - {:?}\n  - {:?}",
         debug_bin, release_bin
     );
@@ -186,17 +183,28 @@ fn test_t5_encoder_symbolic_shapes() {
             continue;
         }
 
-        if let Ok(shape) = SymbolicShape::from_value_info(input) {
-            let dims = shape.dims();
-            eprintln!("T5 encoder input '{}': {:?}", input.name, dims);
+        // Extract shape from value_info using the proto type_info
+        if let Some(ref type_proto) = input.r#type {
+            if let Some(ref value) = type_proto.value {
+                if let hologram_ai_onnx::proto::type_proto::Value::TensorType(ref tensor_type) = value {
+                    if let Some(ref shape_proto) = tensor_type.shape {
+                        let dims: Vec<_> = shape_proto.dim.iter().map(|d| {
+                            match &d.value {
+                                Some(hologram_ai_onnx::proto::tensor_shape_proto::dimension::Value::DimValue(v)) => format!("{}", v),
+                                Some(hologram_ai_onnx::proto::tensor_shape_proto::dimension::Value::DimParam(s)) => s.clone(),
+                                None => "?".to_string(),
+                            }
+                        }).collect();
+                        eprintln!("T5 encoder input '{}': {:?}", input.name, dims);
 
-            // Check for symbolic dimensions
-            let has_symbolic = dims.iter().any(|dim| matches!(dim, Dim::Symbolic(_)));
-            if input.name.contains("input") {
-                assert!(
-                    has_symbolic || dims.len() == 2,
-                    "T5 encoder input should have 2D shape [batch, seq_len]"
-                );
+                        if input.name.contains("input") {
+                            assert!(
+                                dims.len() == 2,
+                                "T5 encoder input should have 2D shape [batch, seq_len]"
+                            );
+                        }
+                    }
+                }
             }
         }
     }
@@ -321,7 +329,7 @@ fn test_t5_encoder_compilation() {
 
     use std::process::Command;
 
-    let status = Command::new(hologram_onnx_bin())
+    let status = Command::new(hologram_ai_bin())
         .args([
             "compile",
             encoder_path.to_str().unwrap(),
@@ -346,7 +354,7 @@ fn test_t5_encoder_compilation() {
     assert!(!holo_content.is_empty(), ".holo file should not be empty");
     let magic = &holo_content[0..4];
     assert!(
-        magic == HOLB_MAGIC || magic == HOLP_MAGIC,
+        magic == HOLB_MAGIC || magic == HOLM_MAGIC,
         "Should have HOLB or HOLP magic header"
     );
 
@@ -505,7 +513,7 @@ fn test_t5_decoder_compilation() {
 
     use std::process::Command;
 
-    let status = Command::new(hologram_onnx_bin())
+    let status = Command::new(hologram_ai_bin())
         .args([
             "compile",
             decoder_path.to_str().unwrap(),
@@ -530,7 +538,7 @@ fn test_t5_decoder_compilation() {
     assert!(!holo_content.is_empty(), ".holo file should not be empty");
     let magic = &holo_content[0..4];
     assert!(
-        magic == HOLB_MAGIC || magic == HOLP_MAGIC,
+        magic == HOLB_MAGIC || magic == HOLM_MAGIC,
         "Should have HOLB or HOLP magic header"
     );
 

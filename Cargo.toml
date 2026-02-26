@@ -42,7 +42,7 @@ toml = "0.8"
 petgraph = "0.6"
 rayon = "1.10"
 half = "2.3"
-rkyv = { version = "0.8", features = ["pointer_width_64"] }
+rkyv = { version = "0.7", features = ["validation"] }
 libc = "0.2"
 unicode-normalization = "0.1"
 

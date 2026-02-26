@@ -7,6 +7,13 @@ use hologram::holo::IsaInstruction;
 use hologram::holo::types::BufferType;
 use std::fs;
 
+/// Deserialize BackendPlan from rkyv bytes (rkyv 0.7 API).
+fn deserialize_plan(bytes: &[u8]) -> Result<BackendPlan> {
+    let archived = unsafe { rkyv::archived_root::<BackendPlan>(bytes) };
+    let plan: BackendPlan = rkyv::Deserialize::deserialize(archived, &mut rkyv::Infallible)?;
+    Ok(plan)
+}
+
 fn main() -> Result<()> {
     let onnx_path = "/tmp/claude-1000/-workspace/d42433ba-a7d4-4e38-bcb7-e07ce8361e75/scratchpad/onnx_models/resnet18.onnx";
 
@@ -15,8 +22,7 @@ fn main() -> Result<()> {
     let holb_bytes = hologram_ai_onnx::compile_onnx(&onnx_bytes)?;
 
     let reader = HolbReader::from_bytes(&holb_bytes)?;
-    let plan: BackendPlan = rkyv::from_bytes(reader.graph())
-        .map_err(|e| anyhow::anyhow!("Deserialize error: {}", e))?;
+    let plan = deserialize_plan(reader.graph())?;
 
     println!(
         "   Constants: {} bytes ({:.1} MB)",

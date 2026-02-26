@@ -647,10 +647,11 @@ pub fn run() -> anyhow::Result<()> {
 /// Format: type:path or type:path:custom_id
 /// For raw type: raw:content_type:path or raw:content_type:path:custom_id
 #[cfg(feature = "onnx")]
+#[allow(dead_code)] // Infrastructure for future CLI compile command
 fn parse_embed_files(
     specs: &[String],
-) -> anyhow::Result<Vec<hologram_ai_onnx::core::EmbeddedFileConfig>> {
-    use hologram_ai_onnx::core::{EmbeddedFileConfig, SectionType};
+) -> anyhow::Result<Vec<hologram_ai_onnx::compat::EmbeddedFileConfig>> {
+    use hologram_ai_onnx::compat::{EmbeddedFileConfig, SectionType};
 
     let mut result = Vec::new();
 
@@ -679,7 +680,14 @@ fn parse_embed_files(
             } else {
                 None
             };
-            (SectionType::Raw { content_type }, path, custom_id)
+            (
+                SectionType::Raw {
+                    content_type,
+                    custom_id: custom_id.clone(),
+                },
+                path,
+                custom_id,
+            )
         } else {
             // type:path[:custom_id]
             let path = parts[1];
@@ -719,29 +727,31 @@ fn parse_embed_files(
 }
 
 #[cfg(not(feature = "onnx"))]
+#[allow(dead_code)] // Infrastructure for future CLI compile command
 fn parse_embed_files(_specs: &[String]) -> anyhow::Result<Vec<()>> {
     Ok(Vec::new())
 }
 
 /// Compile models using settings from a unified config file.
 #[allow(clippy::too_many_arguments)] // CLI override helper mirrors flag surface.
+#[allow(dead_code)] // Infrastructure for future CLI compile command
 fn compile_with_config(
     config_path: &std::path::Path,
     input_override: Option<&std::path::Path>,
     output_override: Option<&std::path::Path>,
     partition_override: bool,
-    partition_size_override: usize,
-    memory_budget_override: Option<usize>,
-    weight_threshold_override: usize,
-    bundle: bool,
-    #[cfg(feature = "onnx")] embed_files: &[hologram_ai_onnx::core::EmbeddedFileConfig],
+    _partition_size_override: usize,
+    _memory_budget_override: Option<usize>,
+    _weight_threshold_override: usize,
+    _bundle: bool,
+    #[cfg(feature = "onnx")] embed_files: &[hologram_ai_onnx::compat::EmbeddedFileConfig],
     #[cfg(not(feature = "onnx"))] _embed_files: &[()],
     layer_wise: bool,
-    parallel: bool,
+    _parallel: bool,
 ) -> anyhow::Result<()> {
     use crate::config::UnifiedConfig;
     #[cfg(feature = "onnx")]
-    use hologram_ai_onnx::core::OnnxConfig;
+    use hologram_ai_onnx::compat::OnnxConfig;
     use tracing::info;
 
     info!("Loading config from: {}", config_path.display());
@@ -752,19 +762,19 @@ fn compile_with_config(
     // Get compiler settings from config
     let compiler_config: OnnxConfig = (&config.compiler).into();
 
-    // Apply CLI overrides (CLI takes precedence)
-    let partition = partition_override || compiler_config.enable_partitioning;
-    let partition_size = if partition_size_override != 500 {
-        partition_size_override
-    } else {
-        compiler_config.partition_size
-    };
-    let memory_budget = memory_budget_override.or(compiler_config.memory_budget);
-    let weight_threshold = if weight_threshold_override != 4096 {
-        weight_threshold_override
-    } else {
-        compiler_config.weight_threshold
-    };
+    // Note: Many compile options not available in new simplified API
+    // Partition, memory_budget, weight_threshold, decompose, etc. are ignored
+    if partition_override || compiler_config.enable_partitioning {
+        tracing::warn!("Partitioning not available in new API, ignoring --partition flag");
+    }
+    if !embed_files.is_empty() {
+        tracing::warn!("Embedded files not available in new API, ignoring --embed flags");
+    }
+    if layer_wise {
+        tracing::warn!(
+            "Layer-wise compilation not available in new API, ignoring --layer-wise flag"
+        );
+    }
 
     // Get config directory for resolving relative paths
     let config_dir = config_path
@@ -777,22 +787,7 @@ fn compile_with_config(
             .map(|p| p.to_path_buf())
             .unwrap_or_else(|| input.with_extension(""));
 
-        return compile_command(
-            input,
-            &output,
-            partition,
-            partition_size,
-            memory_budget,
-            weight_threshold,
-            compiler_config.decompose_conv2d,
-            compiler_config.decompose_pooling,
-            compiler_config.enable_resize_upscaling,
-            &std::collections::HashMap::new(), // No input shapes from config yet
-            bundle,
-            embed_files,
-            layer_wise,
-            parallel,
-        );
+        return compile_command(input, &output);
     }
 
     // Otherwise, compile all models in the config
@@ -826,22 +821,7 @@ fn compile_with_config(
 
         info!("Compiling model '{}': {}", name, onnx_path.display());
 
-        compile_command(
-            &onnx_path,
-            &output,
-            partition,
-            partition_size,
-            memory_budget,
-            weight_threshold,
-            compiler_config.decompose_conv2d,
-            compiler_config.decompose_pooling,
-            compiler_config.enable_resize_upscaling,
-            &std::collections::HashMap::new(), // No input shapes from config yet
-            bundle,
-            embed_files,
-            layer_wise,
-            parallel,
-        )?;
+        compile_command(&onnx_path, &output)?;
     }
 
     Ok(())
@@ -857,25 +837,16 @@ mod tests {
         let cli = Cli::try_parse_from(args).unwrap();
         match cli.command {
             Commands::Compile { input, output, .. } => {
-                assert_eq!(input, Some(PathBuf::from("input.onnx")));
+                assert_eq!(input, PathBuf::from("input.onnx"));
                 assert_eq!(output, Some(PathBuf::from("output")));
             }
             _ => panic!("Expected Compile command"),
         }
     }
 
-    #[test]
-    fn test_cli_parse_compile_with_config() {
-        let args = vec!["hologram-onnx", "compile", "--config", "pipeline.toml"];
-        let cli = Cli::try_parse_from(args).unwrap();
-        match cli.command {
-            Commands::Compile { config, input, .. } => {
-                assert_eq!(config, Some(PathBuf::from("pipeline.toml")));
-                assert_eq!(input, None);
-            }
-            _ => panic!("Expected Compile command"),
-        }
-    }
+    // DISABLED: Compile command now requires an input file
+    // #[test]
+    // fn test_cli_parse_compile_with_config() { ... }
 
     #[test]
     fn test_cli_parse_run() {

@@ -267,6 +267,77 @@ fn strip_accents(text: &str) -> String {
         .collect()
 }
 
+/// Tokenizer vocabulary data parsed from tokenizer.json.
+struct TokenizerVocab {
+    /// Token string to ID mapping
+    token_to_id: HashMap<String, u32>,
+    /// ID to token string mapping
+    id_to_token: HashMap<u32, String>,
+}
+
+/// Parse tokenizer vocabulary from a tokenizer.json file.
+fn parse_tokenizer_vocab(vocab_path: &Path) -> Result<TokenizerVocab> {
+    let content = std::fs::read_to_string(vocab_path)
+        .with_context(|| format!("Failed to read tokenizer file: {}", vocab_path.display()))?;
+
+    let json: serde_json::Value =
+        serde_json::from_str(&content).with_context(|| "Failed to parse tokenizer.json")?;
+
+    // Extract vocab from model.vocab
+    let vocab = json
+        .get("model")
+        .and_then(|m| m.get("vocab"))
+        .ok_or_else(|| anyhow::anyhow!("No model.vocab found in tokenizer.json"))?;
+
+    let mut token_to_id = HashMap::new();
+    let mut id_to_token = HashMap::new();
+
+    if let Some(vocab_obj) = vocab.as_object() {
+        // Object format: {"token": id}
+        for (token, id_val) in vocab_obj {
+            if let Some(id) = id_val.as_u64() {
+                let id = id as u32;
+                token_to_id.insert(token.clone(), id);
+                id_to_token.insert(id, token.clone());
+            }
+        }
+    } else if let Some(vocab_arr) = vocab.as_array() {
+        // Array format: [[token, score], ...] where index is ID
+        for (id, entry) in vocab_arr.iter().enumerate() {
+            if let Some(pair) = entry.as_array()
+                && let Some(token) = pair.first().and_then(|t| t.as_str())
+            {
+                let id = id as u32;
+                token_to_id.insert(token.to_string(), id);
+                id_to_token.insert(id, token.to_string());
+            }
+        }
+    } else {
+        anyhow::bail!("model.vocab must be an object or array");
+    }
+
+    // Also check for added_tokens
+    if let Some(added_tokens) = json.get("added_tokens").and_then(|v| v.as_array()) {
+        for token_obj in added_tokens {
+            if let (Some(id), Some(content)) = (
+                token_obj.get("id").and_then(|v| v.as_u64()),
+                token_obj.get("content").and_then(|v| v.as_str()),
+            ) {
+                let id = id as u32;
+                token_to_id.insert(content.to_string(), id);
+                id_to_token.insert(id, content.to_string());
+            }
+        }
+    }
+
+    tracing::info!("Loaded vocabulary: {} tokens", token_to_id.len());
+
+    Ok(TokenizerVocab {
+        token_to_id,
+        id_to_token,
+    })
+}
+
 impl SentencePieceTokenizer {
     /// Load SentencePiece tokenizer from tokenizer.json file.
     ///
@@ -274,7 +345,7 @@ impl SentencePieceTokenizer {
     /// and builds internal data structures for efficient tokenization.
     pub fn from_file(path: &Path) -> Result<Self> {
         // Parse vocabulary with scores
-        let vocab_data = super::compiler::parse_tokenizer_vocab(path)?;
+        let vocab_data = parse_tokenizer_vocab(path)?;
 
         // Load scores from tokenizer.json
         let content = std::fs::read_to_string(path)
@@ -493,22 +564,27 @@ impl Tokenizer for SentencePieceTokenizer {
 
     fn decode(&self, token_ids: &[u32]) -> Result<String> {
         let mut text = String::new();
+        let mut started = false;
 
         for &token_id in token_ids {
-            // Skip padding tokens
-            if token_id == self.pad_token_id {
-                continue;
-            }
-
-            // Stop at EOS tokens
+            // Stop at EOS token
             if token_id == self.eos_token_id {
                 break;
             }
 
-            if token_id == self.unk_token_id || self.special_token_ids.contains(&token_id) {
+            // Skip leading pad tokens only (T5 uses pad token 0 as decoder start)
+            if !started && token_id == self.pad_token_id {
+                continue;
+            }
+            started = true;
+
+            // Skip trailing/middle pad tokens (for batched outputs)
+            if token_id == self.pad_token_id {
                 continue;
             }
 
+            // Decode ALL tokens including special tokens like <extra_id_X>
+            // This preserves meaningful model output
             if let Some(token) = self.id_to_token.get(&token_id) {
                 // Remove SentencePiece underscore prefix (▁ = space)
                 let decoded = token.replace('▁', " ");
@@ -532,6 +608,18 @@ impl Tokenizer for SentencePieceTokenizer {
 
     fn pad_token_id(&self) -> u32 {
         self.pad_token_id
+    }
+
+    fn eos_token_id(&self) -> u32 {
+        self.eos_token_id
+    }
+
+    fn unk_token_id(&self) -> u32 {
+        self.unk_token_id
+    }
+
+    fn special_token_ids(&self) -> &[u32] {
+        &self.special_token_ids
     }
 }
 
@@ -583,7 +671,7 @@ mod tests {
     }
 
     #[test]
-    fn test_special_tokens_parsed_and_skipped() {
+    fn test_special_tokens_parsed() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("tokenizer.json");
         let tokenizer_json = r#"{
@@ -608,12 +696,75 @@ mod tests {
         let tokenizer = SentencePieceTokenizer::from_file(&path).unwrap();
         assert_eq!(tokenizer.special_token_ids(), &[5]);
 
+        // Tokens: [0=pad, 3=hello, 5=extra_id_0, 4=world, 1=eos]
+        // Token 5 is in added_tokens, so it IS in id_to_token and gets decoded.
+        // Special tokens like <extra_id_X> are preserved in output for T5 models.
         let tokens = vec![0, 3, 5, 4, 1];
         let decoded = tokenizer.decode(&tokens).unwrap();
-        assert_eq!(decoded, "hello world");
+        assert_eq!(decoded, "hello<extra_id_0> world");
 
         let encoded = tokenizer.encode("hello world", 6).unwrap();
         assert_eq!(encoded[2], tokenizer.eos_token_id());
+    }
+
+    #[test]
+    fn test_decode_skips_only_leading_pad_tokens() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("tokenizer.json");
+        let tokenizer_json = r#"{
+  "model": {
+    "vocab": [
+      ["<pad>", 0.0],
+      ["</s>", 0.0],
+      ["<unk>", 0.0],
+      ["▁hello", 0.0],
+      ["▁world", 0.0]
+    ]
+  },
+  "added_tokens": []
+}"#;
+        fs::write(&path, tokenizer_json).unwrap();
+
+        let tokenizer = SentencePieceTokenizer::from_file(&path).unwrap();
+
+        // Leading pad tokens should be skipped
+        // Tokens: [0=pad, 0=pad, 3=hello, 4=world, 1=eos]
+        let tokens = vec![0, 0, 3, 4, 1];
+        let decoded = tokenizer.decode(&tokens).unwrap();
+        assert_eq!(decoded, "hello world");
+
+        // Middle pad tokens should also be skipped (batched output padding)
+        // Tokens: [3=hello, 0=pad, 4=world, 1=eos]
+        let tokens = vec![3, 0, 4, 1];
+        let decoded = tokenizer.decode(&tokens).unwrap();
+        assert_eq!(decoded, "hello world");
+    }
+
+    #[test]
+    fn test_decode_stops_at_eos() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("tokenizer.json");
+        let tokenizer_json = r#"{
+  "model": {
+    "vocab": [
+      ["<pad>", 0.0],
+      ["</s>", 0.0],
+      ["<unk>", 0.0],
+      ["▁hello", 0.0],
+      ["▁world", 0.0]
+    ]
+  },
+  "added_tokens": []
+}"#;
+        fs::write(&path, tokenizer_json).unwrap();
+
+        let tokenizer = SentencePieceTokenizer::from_file(&path).unwrap();
+
+        // Decode should stop at EOS token (id=1)
+        // Tokens: [3=hello, 1=eos, 4=world] - "world" should not be included
+        let tokens = vec![3, 1, 4];
+        let decoded = tokenizer.decode(&tokens).unwrap();
+        assert_eq!(decoded, "hello");
     }
 
     #[test]

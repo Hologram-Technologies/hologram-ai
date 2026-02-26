@@ -31,7 +31,8 @@ pub use error::{GgufError, Result};
 pub use metadata::GgufMetadata;
 pub use parser::GgufParser;
 
-use hologram_ai_common::{TransformerConfig, WeightMap};
+// TEMPORARILY DISABLED: transformer module is disabled in hologram-ai-common
+// use hologram_ai_common::{TransformerConfig, WeightMap};
 
 /// GGUF model compiler.
 ///
@@ -63,59 +64,15 @@ impl GgufCompiler {
         }
     }
 
-    /// Compile a GGUF file to hologram format.
-    ///
-    /// # Arguments
-    /// * `path` - Path to the GGUF file
-    ///
-    /// # Returns
-    /// Tuple of (holo_bytes, weight_bytes)
-    pub fn compile_file(&self, path: &str) -> Result<(Vec<u8>, Vec<u8>)> {
-        // Parse the GGUF file
-        let mut parser = GgufParser::open(path)?;
-        let metadata = parser.metadata()?;
-        let weights = parser.load_weights(self.dequantize)?;
-
-        // Convert metadata to TransformerConfig
-        let config = metadata.to_transformer_config()?;
-
-        // Build the IR graph
-        self.compile_with_config(&config, &weights)
-    }
-
-    /// Compile with explicit config and weights.
-    pub fn compile_with_config(
-        &self,
-        config: &TransformerConfig,
-        weights: &WeightMap,
-    ) -> Result<(Vec<u8>, Vec<u8>)> {
-        use hologram_ai_common::GenericTransformerBuilder;
-
-        // Build the transformer graph
-        let builder = GenericTransformerBuilder::new();
-        let graph = builder
-            .build(config, weights)
-            .map_err(|e| GgufError::GraphBuildError(e.to_string()))?;
-
-        // Compile to backend plan
-        let backend_type = hologram::BackendType::Cpu;
-        let (plan, header) = hologram::compiler::compile_ir_with_header(&graph, backend_type)
-            .map_err(|e| GgufError::CompilationError(format!("{:?}", e)))?;
-
-        // Select weight strategy (auto-select if not specified)
-        let strategy = self.weight_strategy.unwrap_or_else(|| {
-            // Auto-select based on constant_data size
-            let weight_size = plan.constant_data.len();
-            hologram_ai_common::WeightStrategy::auto_select(weight_size)
-        });
-
-        // Serialize the plan with selected weight strategy
-        let (holo_bytes, weight_bytes) =
-            hologram_ai_common::serialize_backend_plan_with_header(&plan, &header, strategy)
-                .map_err(|e| GgufError::SerializationError(e.to_string()))?;
-
-        Ok((holo_bytes, weight_bytes))
-    }
+    // TEMPORARILY DISABLED: transformer module is disabled in hologram-ai-common
+    // The compile_file and compile_with_config methods require TransformerConfig
+    // and GenericTransformerBuilder which are not currently available.
+    //
+    // /// Compile a GGUF file to hologram format.
+    // pub fn compile_file(&self, path: &str) -> Result<(Vec<u8>, Vec<u8>)> { ... }
+    //
+    // /// Compile with explicit config and weights.
+    // pub fn compile_with_config(&self, config: &TransformerConfig, weights: &WeightMap) -> Result<(Vec<u8>, Vec<u8>)> { ... }
 }
 
 impl Default for GgufCompiler {

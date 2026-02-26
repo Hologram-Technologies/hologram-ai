@@ -28,7 +28,7 @@ description = "Unified T5-small configuration for compilation and execution"
 type = "sentencepiece"
 path = "/workspace/models/t5-small/tokenizer.json"
 vocab_path = "/workspace/models/t5-small/tokenizer.json"  # Alias for execution
-max_length = 512
+max_length = 512  # Must match the compiled model's sequence length
 pad_token_id = 0
 eos_token_id = 1
 unk_token_id = 2
@@ -42,8 +42,8 @@ path = "/workspace/models/t5-small/encoder_model.onnx"
 onnx_path = "/workspace/models/t5-small/encoder_model.onnx"  # Explicit alias
 
 # Compiled output (for execution)
-output = "/workspace/models/t5-small/compiled/encoder.holo"
-precompiled = "/workspace/models/t5-small/compiled/encoder.holo"  # Alias for execution
+output = "/workspace/models/t5-small/encoder_new.holb"
+precompiled = "/workspace/models/t5-small/encoder_new.holb"  # Alias for execution
 
 [models.decoder]
 # Source ONNX file (for compilation)
@@ -51,8 +51,8 @@ path = "/workspace/models/t5-small/decoder_model.onnx"
 onnx_path = "/workspace/models/t5-small/decoder_model.onnx"  # Explicit alias
 
 # Compiled output (for execution)
-output = "/workspace/models/t5-small/compiled/decoder.holo"
-precompiled = "/workspace/models/t5-small/compiled/decoder.holo"  # Alias for execution
+output = "/workspace/models/t5-small/decoder_new.holb"
+precompiled = "/workspace/models/t5-small/decoder_new.holb"  # Alias for execution
 
 # ============================================================================
 # Compilation Settings
@@ -95,7 +95,7 @@ outputs = ["input_ids", "attention_mask"]
 
 [stages.args]
 text = "prompt"
-max_length = 512
+max_length = 512  # Must match the compiled model's sequence length
 tokenizer_path = "/workspace/models/t5-small/tokenizer.json"
 
 # Stage 2: Run encoder
@@ -103,7 +103,7 @@ tokenizer_path = "/workspace/models/t5-small/tokenizer.json"
 type = "model"
 model = "encoder"
 inputs = { input_ids = "input_ids", attention_mask = "attention_mask" }
-outputs = ["encoder_hidden_states"]
+outputs = ["output_0"]
 
 # Stage 3: Generate tokens autoregressively
 [[stages]]
@@ -113,7 +113,7 @@ outputs = ["generated_ids"]
 
 [stages.args]
 model = "decoder"
-encoder_hidden_states = "encoder_hidden_states"
+encoder_hidden_states = "output_0"
 encoder_attention_mask = "attention_mask"
 max_new_tokens = 50
 start_token_id = 0

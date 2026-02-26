@@ -30,7 +30,8 @@ pub use config::HfConfig;
 pub use error::{Result, SafeTensorsError};
 pub use parser::SafeTensorsParser;
 
-use hologram_ai_common::{TransformerConfig, WeightMap};
+// TEMPORARILY DISABLED: transformer module is disabled in hologram-ai-common
+// use hologram_ai_common::{TransformerConfig, WeightMap};
 
 /// SafeTensors model compiler.
 ///
@@ -62,67 +63,15 @@ impl SafeTensorsCompiler {
         }
     }
 
-    /// Compile a SafeTensors model directory to hologram format.
-    ///
-    /// # Arguments
-    /// * `path` - Path to the model directory containing config.json and *.safetensors files
-    ///
-    /// # Returns
-    /// Tuple of (holo_bytes, weight_bytes)
-    pub fn compile_dir(&self, path: &str) -> Result<(Vec<u8>, Vec<u8>)> {
-        use std::path::Path;
-
-        let dir = Path::new(path);
-        if !dir.is_dir() {
-            return Err(SafeTensorsError::NotADirectory(path.to_string()));
-        }
-
-        // Load config.json
-        let config_path = dir.join("config.json");
-        let hf_config = HfConfig::load(&config_path)?;
-        let config = hf_config.to_transformer_config()?;
-
-        // Load weights from SafeTensors files
-        let mut parser = SafeTensorsParser::open_dir(dir)?;
-        let weights = parser.load_all_weights(self.convert_to_f32)?;
-
-        // Build the IR graph
-        self.compile_with_config(&config, &weights)
-    }
-
-    /// Compile with explicit config and weights.
-    pub fn compile_with_config(
-        &self,
-        config: &TransformerConfig,
-        weights: &WeightMap,
-    ) -> Result<(Vec<u8>, Vec<u8>)> {
-        use hologram_ai_common::GenericTransformerBuilder;
-
-        // Build the transformer graph
-        let builder = GenericTransformerBuilder::new();
-        let graph = builder
-            .build(config, weights)
-            .map_err(|e| SafeTensorsError::GraphBuildError(e.to_string()))?;
-
-        // Compile to backend plan
-        let backend_type = hologram::BackendType::Cpu;
-        let (plan, header) = hologram::compiler::compile_ir_with_header(&graph, backend_type)
-            .map_err(|e| SafeTensorsError::CompilationError(format!("{:?}", e)))?;
-
-        // Select weight strategy (auto-select if not specified)
-        let strategy = self.weight_strategy.unwrap_or_else(|| {
-            // Auto-select based on constant_data size
-            let weight_size = plan.constant_data.len();
-            hologram_ai_common::WeightStrategy::auto_select(weight_size)
-        });
-
-        // Serialize the plan with selected weight strategy
-        let (holo_bytes, weight_bytes) =
-            hologram_ai_common::serialize_backend_plan_with_header(&plan, &header, strategy)
-                .map_err(|e| SafeTensorsError::SerializationError(e.to_string()))?;
-
-        Ok((holo_bytes, weight_bytes))
-    }
+    // TEMPORARILY DISABLED: transformer module is disabled in hologram-ai-common
+    // The compile_dir and compile_with_config methods require TransformerConfig
+    // and GenericTransformerBuilder which are not currently available.
+    //
+    // /// Compile a SafeTensors model directory to hologram format.
+    // pub fn compile_dir(&self, path: &str) -> Result<(Vec<u8>, Vec<u8>)> { ... }
+    //
+    // /// Compile with explicit config and weights.
+    // pub fn compile_with_config(&self, config: &TransformerConfig, weights: &WeightMap) -> Result<(Vec<u8>, Vec<u8>)> { ... }
 }
 
 impl Default for SafeTensorsCompiler {

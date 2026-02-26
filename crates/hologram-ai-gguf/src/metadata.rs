@@ -1,6 +1,6 @@
 //! GGUF metadata extraction and conversion.
 
-use crate::error::{GgufError, Result};
+use crate::error::Result;
 use hologram_ai_common::{Activation, FFNType, NormType, TransformerConfig};
 
 /// Supported model architectures.
@@ -68,60 +68,25 @@ pub struct GgufMetadata {
 impl GgufMetadata {
     /// Convert to TransformerConfig for the generic builder.
     pub fn to_transformer_config(&self) -> Result<TransformerConfig> {
-        // Determine norm type based on architecture
-        let norm_type = match self.architecture {
-            Architecture::Llama
-            | Architecture::Mistral
-            | Architecture::Qwen
-            | Architecture::Qwen2
-            | Architecture::DeepSeek
-            | Architecture::Gemma => NormType::RMSNorm,
-            Architecture::Phi => NormType::LayerNorm,
-            Architecture::Unknown(_) => NormType::RMSNorm, // Default to RMSNorm
+        // Determine norm type and activation based on architecture
+        let (norm_type, hidden_act, ffn_type) = match &self.architecture {
+            Architecture::Phi => (NormType::LayerNorm, Activation::GELU, FFNType::Standard),
+            Architecture::Gemma => (NormType::RMSNorm, Activation::GELU, FFNType::Gated),
+            _ => (NormType::RMSNorm, Activation::SiLU, FFNType::Gated),
         };
 
-        // Determine activation based on architecture
-        let hidden_act = match self.architecture {
-            Architecture::Llama
-            | Architecture::Mistral
-            | Architecture::Qwen
-            | Architecture::Qwen2
-            | Architecture::DeepSeek
-            | Architecture::Gemma => Activation::SiLU,
-            Architecture::Phi => Activation::GELU,
-            Architecture::Unknown(_) => Activation::SiLU,
+        // Determine num_kv_heads (GQA if different from attention heads)
+        let num_kv_heads = if self.attention_head_count_kv != self.attention_head_count {
+            Some(self.attention_head_count_kv)
+        } else {
+            None
         };
 
-        // Determine FFN type based on architecture
-        let ffn_type = match self.architecture {
-            Architecture::Llama
-            | Architecture::Mistral
-            | Architecture::Qwen
-            | Architecture::Qwen2
-            | Architecture::DeepSeek
-            | Architecture::Gemma => FFNType::Gated,
-            Architecture::Phi => FFNType::Standard,
-            Architecture::Unknown(_) => FFNType::Gated,
-        };
-
-        // Check for unsupported architectures
-        if let Architecture::Unknown(ref name) = self.architecture {
-            // Allow unknown architectures but log a warning
-            tracing::warn!(
-                "Unknown architecture '{}', using default transformer config",
-                name
-            );
-        }
-
-        let config = TransformerConfig {
+        Ok(TransformerConfig {
             num_layers: self.block_count,
             hidden_size: self.embedding_length,
             num_attention_heads: self.attention_head_count,
-            num_kv_heads: if self.attention_head_count_kv != self.attention_head_count {
-                Some(self.attention_head_count_kv)
-            } else {
-                None
-            },
+            num_kv_heads,
             intermediate_size: self.feed_forward_length,
             vocab_size: self.vocab_size,
             max_position_embeddings: self.context_length,
@@ -131,19 +96,11 @@ impl GgufMetadata {
             rope_theta: Some(self.rope_freq_base),
             rope_scaling: None,
             ffn_type,
-            tie_word_embeddings: false, // GGUF models typically don't tie embeddings
+            tie_word_embeddings: false,
             head_dim: None,
             attention_bias: false,
             mlp_bias: false,
-        };
-
-        // Validate the config
-        config.validate().map_err(|e| GgufError::InvalidMetadata {
-            key: "config".to_string(),
-            message: e,
-        })?;
-
-        Ok(config)
+        })
     }
 }
 
@@ -168,6 +125,7 @@ impl Default for GgufMetadata {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use hologram_ai_common::{Activation, FFNType, NormType};
 
     #[test]
     fn test_architecture_parsing() {

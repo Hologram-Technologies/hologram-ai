@@ -12,8 +12,10 @@ mod metrics;
 mod tensors;
 
 pub use executor::ModelExecutor;
-pub use loader::{ExecutionMode, LayerStreamingExecutor, LoadOptions};
-pub use loader::{PipelineBundle, is_pipeline_bundle, load_pipeline_bundle};
-pub use loader::{load_and_compile_holo, load_holo_file, load_with_external_weights};
+pub use loader::{HoloFormat, PipelineBundle, load_pipeline_bundle};
+pub use loader::{
+    load_and_compile_holo, load_holo_auto, load_holo_auto_with_inputs, load_holo_file,
+    load_with_external_weights,
+};
 pub use metrics::{MetricsBuilder, PerformanceMetrics};
 pub use tensors::{Tensor, infer_tensor_dtype, infer_tensor_shape};

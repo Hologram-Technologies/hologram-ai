@@ -3,8 +3,14 @@ use anyhow::{Context, Result};
 use hologram::BackendPlan;
 use hologram::holo::HolbReader;
 use hologram::holo::IsaInstruction;
-use hologram::holo::types::BufferType;
 use std::fs;
+
+/// Deserialize BackendPlan from rkyv bytes (rkyv 0.7 API).
+fn deserialize_plan(bytes: &[u8]) -> Result<BackendPlan> {
+    let archived = unsafe { rkyv::archived_root::<BackendPlan>(bytes) };
+    let plan: BackendPlan = rkyv::Deserialize::deserialize(archived, &mut rkyv::Infallible)?;
+    Ok(plan)
+}
 
 fn main() -> Result<()> {
     let onnx_path = std::env::args().nth(1).unwrap_or_else(|| {
@@ -16,8 +22,7 @@ fn main() -> Result<()> {
     let holb_bytes = hologram_ai_onnx::compile_onnx(&onnx_bytes)?;
 
     let reader = HolbReader::from_bytes(&holb_bytes)?;
-    let plan: BackendPlan = rkyv::from_bytes(reader.graph())
-        .map_err(|e| anyhow::anyhow!("Deserialize error: {}", e))?;
+    let plan = deserialize_plan(reader.graph())?;
 
     // Find Transpose instructions
     println!("\n[TRANSPOSE] Looking for Transpose instructions:");
@@ -73,10 +78,10 @@ fn main() -> Result<()> {
     // Find which nodes use buffer 103
     println!("\n[NODE BUFFER MAP] Entries mapping to buffer 103:");
     for (node_id, buf_opt) in plan.node_buffer_map.iter().enumerate() {
-        if let Some(buf_idx) = buf_opt {
-            if *buf_idx == 103 {
-                println!("  Node {} -> Buffer {}", node_id, buf_idx);
-            }
+        if let Some(buf_idx) = buf_opt
+            && *buf_idx == 103
+        {
+            println!("  Node {} -> Buffer {}", node_id, buf_idx);
         }
     }
 

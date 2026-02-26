@@ -5,7 +5,7 @@
 
 use anyhow::{Context, Result};
 #[cfg(feature = "onnx")]
-use hologram_ai_onnx::core::{extract_opset_version, parse_model};
+use hologram_ai_onnx::{extract_opset_version, parse_model};
 use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
@@ -206,7 +206,8 @@ fn get_tensor_type_string(value_info: &hologram_ai_onnx::proto::ValueInfoProto) 
 /// Display information about a compiled .holo model.
 #[cfg(feature = "onnx")]
 fn info_holo_command(model_path: &Path) -> Result<()> {
-    use hologram_ai_onnx::core::{HoloFormat, PipelineBundleReader, UnifiedBundleReader};
+    use crate::runtime::{HoloFormat, load_pipeline_bundle};
+    use hologram::holo::HolbReader;
 
     info!("Reading HOLO model: {}", model_path.display());
 
@@ -219,13 +220,14 @@ fn info_holo_command(model_path: &Path) -> Result<()> {
     }
 
     // Detect format from magic bytes
-    let format = HoloFormat::detect(&holo_bytes[0..4]);
+    let magic: [u8; 4] = [holo_bytes[0], holo_bytes[1], holo_bytes[2], holo_bytes[3]];
+    let format = HoloFormat::detect(&magic);
 
     println!("\n╔════════════════════════════════════════════════════════════╗");
     println!("║              HOLO Model Information                        ║");
     println!("╚════════════════════════════════════════════════════════════╝");
 
-    println!("\n📄 File Information:");
+    println!("\n File Information:");
     println!("  Path: {}", model_path.display());
     println!(
         "  Size: {} bytes ({:.2} MB)",
@@ -234,18 +236,22 @@ fn info_holo_command(model_path: &Path) -> Result<()> {
     );
 
     match format {
-        HoloFormat::Bundle => {
-            println!("  Format: HOLB (Unified Bundle with embedded weights)");
+        HoloFormat::Bundle | HoloFormat::Plan => {
+            let format_name = if format == HoloFormat::Bundle {
+                "HOLB (Unified Bundle with embedded weights)"
+            } else {
+                "HOLP (Plan format)"
+            };
+            println!("  Format: {}", format_name);
 
-            // Parse unified bundle
-            let reader = UnifiedBundleReader::from_bytes(&holo_bytes)
+            // Parse bundle using HolbReader
+            let reader = HolbReader::from_bytes(&holo_bytes)
                 .with_context(|| "Failed to parse HOLB bundle")?;
 
-            let header = reader.header();
-            let graph_size = header.graph_size;
-            let weights_size = header.weights_size;
+            let graph_size = reader.graph().len();
+            let weights_size = reader.weights().len();
 
-            println!("\n📊 Bundle Contents:");
+            println!("\n Bundle Contents:");
             println!(
                 "  Graph section: {} bytes ({:.2} KB)",
                 graph_size,
@@ -257,36 +263,38 @@ fn info_holo_command(model_path: &Path) -> Result<()> {
                 weights_size as f64 / 1_048_576.0
             );
 
-            if reader.verify_checksums() {
+            let graph_ok = reader.verify_graph_checksum();
+            let weights_ok = reader.verify_weights_checksum();
+            if graph_ok && weights_ok {
                 println!("  Checksum: VALID");
             } else {
                 println!("  Checksum: INVALID (data may be corrupted)");
+            }
+
+            if reader.has_sections() {
+                println!("\n Sections:");
+                for entry in reader.sections() {
+                    println!("    - {}: {} bytes", entry.id, entry.size);
+                }
             }
         }
         HoloFormat::Pipeline => {
             println!("  Format: HOLM (Pipeline Bundle with multiple models)");
 
             // Parse pipeline bundle
-            let reader = PipelineBundleReader::from_bytes(&holo_bytes)
+            let reader = load_pipeline_bundle(model_path)
                 .with_context(|| "Failed to parse HOLM pipeline bundle")?;
 
-            println!("\n📊 Pipeline Contents:");
+            println!("\n Pipeline Contents:");
             println!("  Model count: {}", reader.model_count());
             println!("  Models:");
             for name in reader.model_names() {
-                if let Some(entry) = reader.get_entry(name) {
-                    println!(
-                        "    - {}: {} bytes ({:.2} MB)",
-                        name,
-                        entry.size,
-                        entry.size as f64 / 1_048_576.0
-                    );
-                }
+                println!("    - {}", name);
             }
         }
-        HoloFormat::Plan => {
-            println!("  Format: HOLP (Legacy Plan format)");
-            println!("\n📊 Plan Contents:");
+        HoloFormat::Legacy => {
+            println!("  Format: HOLO (Legacy format)");
+            println!("\n Contents:");
             println!("  Data size: {} bytes", holo_bytes.len() - 4);
 
             // Check for accompanying .weights file
@@ -302,11 +310,6 @@ fn info_holo_command(model_path: &Path) -> Result<()> {
             } else {
                 println!("  External weights: None (embedded in plan)");
             }
-        }
-        HoloFormat::Legacy => {
-            println!("  Format: HOLO (Legacy format)");
-            println!("\n📊 Contents:");
-            println!("  Data size: {} bytes", holo_bytes.len() - 4);
         }
         HoloFormat::Unknown => {
             let magic = &holo_bytes[0..4];

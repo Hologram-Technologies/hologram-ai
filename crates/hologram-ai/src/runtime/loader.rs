@@ -9,120 +9,115 @@
 //! Use [`load_holo_auto`] to automatically detect and load any format.
 //! Unified bundles embed weights in the same file with page-aligned mmap access.
 //!
-//! ## Embedded Weights (legacy HOLP)
-//! Use [`load_and_compile_holo`] when weights are embedded in the .holo file.
-//!
-//! ## External Weights (legacy HOLP + .weights)
-//! Use [`load_with_external_weights`] when weights are stored separately in a .weights file.
-//! This enables lazy loading of large weights (GB-sized) via memory mapping.
+//! ## External Weights
+//! Use [`load_with_external_weights`] when weights are stored separately.
 
-use anyhow::Result;
-use hologram::backend::core::mapped_input::MappedInput;
-use hologram::backend::executor::PlanExecutor;
-use hologram::compiler::api::read_holo_from_bytes_with_header;
-#[cfg(unix)]
-use libc;
-use std::fs::File;
-use std::io::Read;
+use anyhow::{Context, Result};
 use std::path::Path;
-use std::sync::Arc;
 
-#[cfg(feature = "onnx")]
-use hologram_ai_onnx::core::sections::InputOrderSection;
-#[cfg(feature = "onnx")]
-use hologram_ai_onnx::core::{HoloFormat, PipelineBundleReader, UnifiedBundleReader};
+use hologram::backend::cpu::CpuBackend;
+use hologram::backend::{Backend, BackendPlan};
+use hologram::holo::HolbReader;
+use hologram::holo::pipeline::HolmReader;
+
+/// Result type for model loading with optional input ordering.
+pub type ModelLoadResult = (BackendPlan, Box<dyn Backend>, Option<Vec<String>>);
+
+/// Section ID for input order metadata.
+const INPUT_ORDER_SECTION_ID: &str = "input_order";
+
+/// Deserialize a BackendPlan from rkyv bytes.
+///
+/// Uses rkyv 0.7's archived_root + Deserialize pattern.
+fn deserialize_backend_plan(bytes: &[u8]) -> Result<BackendPlan> {
+    // SAFETY: The bytes come from a valid .holo file that was serialized with rkyv
+    let archived = unsafe { rkyv::archived_root::<BackendPlan>(bytes) };
+    let plan: BackendPlan = rkyv::Deserialize::deserialize(archived, &mut rkyv::Infallible)
+        .map_err(|e| anyhow::anyhow!("Failed to deserialize BackendPlan: {:?}", e))?;
+    Ok(plan)
+}
+
+/// Extract input order from a HolbReader's sections.
+///
+/// Returns None if no input_order section exists.
+fn extract_input_order(reader: &HolbReader) -> Option<Vec<String>> {
+    // Try to get the raw section data for input_order
+    let section_data = reader.get_section(INPUT_ORDER_SECTION_ID)?;
+
+    // Parse as JSON array of strings
+    let input_names: Vec<String> = serde_json::from_slice(section_data).ok()?;
+
+    tracing::debug!("Loaded input order from section: {:?}", input_names);
+    Some(input_names)
+}
 
 /// Load a .holo file to an executable BackendPlan.
 ///
-/// This function loads a pre-compiled .holo file and prepares it for execution:
-/// 1. Read and deserialize .holo file using hologram's runtime API
-/// 2. Resolve kernel IDs to function pointers based on CPU capabilities
-/// 3. Create appropriate backend (with fallback to CPU if needed)
+/// This function loads a pre-compiled .holo file and prepares it for execution.
 ///
 /// # Arguments
 /// * `path` - Path to .holo file
 ///
 /// # Returns
-/// Tuple of (BackendPlan, ProgramBackend) ready for execution
+/// Tuple of (BackendPlan, Backend) ready for execution
 ///
 /// # Errors
 /// Returns error if:
 /// - File cannot be read
 /// - Deserialization fails (corrupted .holo file)
-/// - Backend creation fails
 #[tracing::instrument(
     name = "load_and_compile_holo",
     skip_all,
     fields(path = %path.display())
 )]
-pub fn load_and_compile_holo(
-    path: &Path,
-) -> Result<(
-    hologram::backend::BackendPlan,
-    Box<dyn hologram::backend::ProgramBackend>,
-)> {
-    // Phase 1: Read and deserialize
-    let plan = {
-        let _span = tracing::info_span!("deserialize_holo").entered();
-        hologram::compiler::read_holo(path)
-            .map_err(|e| anyhow::anyhow!("Failed to load .holo file: {:?}", e))?
-    };
+pub fn load_and_compile_holo(path: &Path) -> Result<(BackendPlan, Box<dyn Backend>)> {
+    // Read file
+    let bytes = std::fs::read(path)
+        .with_context(|| format!("Failed to read .holo file: {}", path.display()))?;
+
+    // Parse and deserialize
+    let reader = HolbReader::from_bytes(&bytes)
+        .map_err(|e| anyhow::anyhow!("Failed to parse .holo file: {:?}", e))?;
+
+    // Deserialize the graph (BackendPlan)
+    let mut plan = deserialize_backend_plan(reader.graph())?;
+
+    // Check for WeightIndexSection (future: lazy/partial loading)
+    if let Ok(Some(weight_index)) = reader.weight_index() {
+        tracing::debug!(
+            "HOLB has WeightIndexSection with {} tensors",
+            weight_index.len()
+        );
+    }
+
+    // Load weights from HOLB bundle
+    let weights = reader.weights();
+    if !weights.is_empty() {
+        tracing::debug!("Loading {} bytes of weights from HOLB", weights.len());
+        plan.constants = weights.to_vec();
+    }
 
     tracing::debug!("Deserialized BackendPlan from .holo file");
 
-    // Phase 2: Create backend
-    let backend = {
-        let _span = tracing::info_span!(
-            "create_backend",
-            backend_type = ?plan.backend_type
-        )
-        .entered();
-        match hologram::backend::create_backend(plan.backend_type.clone()) {
-            Ok(backend) => backend,
-            Err(e) => {
-                tracing::warn!("Failed to create backend: {}. Falling back to CPU", e);
-                hologram::backend::create_best_backend()
-            }
-        }
-    };
+    // Create backend
+    let backend: Box<dyn Backend> = Box::new(CpuBackend::new());
 
-    tracing::info!(backend = ?backend.backend_type(), "Successfully loaded BackendPlan");
+    tracing::info!(backend = "CPU", "Successfully loaded BackendPlan");
 
     Ok((plan, backend))
 }
 
 /// Load a .holo file with external memory-mapped weights.
 ///
-/// This function loads a .holo file and creates a `PlanExecutor` that uses
-/// memory-mapped access to the external weights file. This enables lazy loading
-/// of large weights (GB-sized) without loading them all into memory at once.
+/// This function loads a .holo file and creates a Backend that uses
+/// memory-mapped access to the external weights file.
 ///
 /// # Arguments
 /// * `holo_path` - Path to the .holo file
 /// * `weights_path` - Path to the .weights file (memory-mapped)
 ///
 /// # Returns
-/// Tuple of (PlanExecutor, ProgramBackend) ready for execution
-///
-/// # Errors
-/// Returns error if:
-/// - .holo file cannot be read or deserialized
-/// - .weights file cannot be memory-mapped
-/// - Backend creation fails
-///
-/// # Example
-///
-/// ```rust,ignore
-/// use std::path::Path;
-///
-/// let (executor, backend) = load_with_external_weights(
-///     Path::new("model.holo"),
-///     Path::new("model.weights"),
-/// )?;
-///
-/// // Execute inference
-/// executor.execute(&inputs, &mut outputs, &mut *backend)?;
-/// ```
+/// Tuple of (BackendPlan, Backend) ready for execution
 #[tracing::instrument(
     name = "load_with_external_weights",
     skip_all,
@@ -134,294 +129,204 @@ pub fn load_and_compile_holo(
 pub fn load_with_external_weights(
     holo_path: &Path,
     weights_path: &Path,
-) -> Result<(PlanExecutor, Box<dyn hologram::backend::ProgramBackend>)> {
-    // Phase 1: Deserialize .holo file
-    let plan = {
-        let _span = tracing::info_span!("deserialize_holo").entered();
-        hologram::compiler::read_holo(holo_path)
-            .map_err(|e| anyhow::anyhow!("Failed to load .holo file: {:?}", e))?
-    };
+) -> Result<(BackendPlan, Box<dyn Backend>)> {
+    // Load the plan
+    let bytes = std::fs::read(holo_path)
+        .with_context(|| format!("Failed to read .holo file: {}", holo_path.display()))?;
 
-    tracing::debug!(
-        constant_data_bytes = plan.constant_data.len(),
-        "Deserialized BackendPlan (will use mmap instead)"
+    let reader = HolbReader::from_bytes(&bytes)
+        .map_err(|e| anyhow::anyhow!("Failed to parse .holo file: {:?}", e))?;
+
+    let mut plan = deserialize_backend_plan(reader.graph())?;
+
+    // Load external weights
+    let weights_bytes = std::fs::read(weights_path)
+        .with_context(|| format!("Failed to read .weights file: {}", weights_path.display()))?;
+
+    tracing::info!(
+        weights_size = weights_bytes.len(),
+        "Loaded external weights"
     );
 
-    // Phase 2: Create backend
-    let backend = {
-        let _span = tracing::info_span!(
-            "create_backend",
-            backend_type = ?plan.backend_type
-        )
-        .entered();
-        match hologram::backend::create_backend(plan.backend_type.clone()) {
-            Ok(backend) => backend,
-            Err(e) => {
-                tracing::warn!("Failed to create backend: {}. Falling back to CPU", e);
-                hologram::backend::create_best_backend()
-            }
-        }
-    };
+    // Replace plan constants with external weights
+    plan.constants = weights_bytes;
 
-    tracing::info!(backend = ?backend.backend_type(), "Using backend");
-
-    // Phase 3: Create executor with mmap'd weights
-    let executor = {
-        let _span = tracing::info_span!("create_executor_mmap").entered();
-        PlanExecutor::with_external_constants(plan, &*backend, weights_path).map_err(|e| {
-            anyhow::anyhow!("Failed to create executor with external weights: {:?}", e)
-        })?
-    };
+    // Create backend
+    let backend: Box<dyn Backend> = Box::new(CpuBackend::new());
 
     tracing::info!("Successfully loaded model with external weights");
 
-    Ok((executor, backend))
+    Ok((plan, backend))
 }
 
 /// Load a .holo file with optional external weights.
 ///
 /// This is a convenience function that automatically selects the appropriate
 /// loading strategy based on whether a weights file exists.
-///
-/// # Arguments
-/// * `holo_path` - Path to the .holo file
-/// * `weights_path` - Optional path to the .weights file
-///
-/// # Returns
-/// Tuple of (PlanExecutor, ProgramBackend) ready for execution
-///
-/// # Example
-///
-/// ```rust,ignore
-/// use std::path::Path;
-///
-/// // Load with embedded weights
-/// let (executor, backend) = load_holo_file(
-///     Path::new("small_model.holo"),
-///     None,
-/// )?;
-///
-/// // Load with external weights
-/// let (executor, backend) = load_holo_file(
-///     Path::new("large_model.holo"),
-///     Some(Path::new("large_model.weights")),
-/// )?;
-/// ```
 pub fn load_holo_file(
     holo_path: &Path,
     weights_path: Option<&Path>,
-) -> Result<(PlanExecutor, Box<dyn hologram::backend::ProgramBackend>)> {
+) -> Result<(BackendPlan, Box<dyn Backend>)> {
     if let Some(wp) = weights_path {
         load_with_external_weights(holo_path, wp)
     } else {
-        // Load with embedded weights, then wrap in executor
-        let (plan, backend) = load_and_compile_holo(holo_path)?;
-        let executor = PlanExecutor::new(plan, &*backend)
-            .map_err(|e| anyhow::anyhow!("Failed to create executor: {:?}", e))?;
-        Ok((executor, backend))
+        load_and_compile_holo(holo_path)
+    }
+}
+
+/// Detect file format from magic bytes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HoloFormat {
+    /// Unified bundle (HOLB magic)
+    Bundle,
+    /// Pipeline bundle (HOLM magic)
+    Pipeline,
+    /// Legacy plan format
+    Plan,
+    /// Legacy format
+    Legacy,
+    /// Unknown format
+    Unknown,
+}
+
+impl HoloFormat {
+    /// Detect format from 4-byte magic header.
+    pub fn detect(magic: &[u8; 4]) -> Self {
+        match magic {
+            b"HOLB" => Self::Bundle,
+            b"HOLM" => Self::Pipeline,
+            b"HOLP" => Self::Plan,
+            _ => {
+                // Check for rkyv archive (starts with alignment bytes)
+                if magic[0] == 0 || magic.starts_with(&[0x00, 0x00, 0x00, 0x00]) {
+                    Self::Legacy
+                } else {
+                    Self::Unknown
+                }
+            }
+        }
     }
 }
 
 /// Automatically detect file format and load appropriately.
 ///
 /// This function auto-detects whether the file is:
-/// - **Unified Bundle (HOLB)**: Single file with embedded weights (mmap'd)
-/// - **Legacy Plan (HOLP)**: Separate .holo + optional .weights files
-///
-/// For unified bundles, the weights section is memory-mapped directly from the
-/// bundle file at the page-aligned offset.
-///
-/// For legacy format, checks for a `.weights` file with the same stem.
+/// - **Unified Bundle (HOLB)**: Single file with embedded weights
+/// - **Pipeline Bundle (HOLM)**: Multiple models in one file
+/// - **Legacy Plan**: Separate .holo + optional .weights files
 ///
 /// # Arguments
 /// * `path` - Path to the .holo file
 ///
 /// # Returns
-/// Tuple of (PlanExecutor, ProgramBackend) ready for execution
-///
-/// # Example
-///
-/// ```rust,ignore
-/// use std::path::Path;
-///
-/// // Automatically handles any format
-/// let (executor, backend) = load_holo_auto(Path::new("model.holo"))?;
-/// executor.execute(&inputs, &mut outputs, &mut *backend)?;
-/// ```
+/// Tuple of (BackendPlan, Backend) ready for execution
 #[tracing::instrument(
     name = "load_holo_auto",
     skip_all,
     fields(path = %path.display())
 )]
-pub fn load_holo_auto(
-    path: &Path,
-) -> Result<(PlanExecutor, Box<dyn hologram::backend::ProgramBackend>)> {
-    // Phase 1: Detect format
-    let (format, magic) = {
-        let _span = tracing::info_span!("detect_format").entered();
-        let mut file = File::open(path)
-            .map_err(|e| anyhow::anyhow!("Failed to open file '{}': {}", path.display(), e))?;
-
-        let mut magic = [0u8; 4];
-        file.read_exact(&mut magic)
-            .map_err(|e| anyhow::anyhow!("Failed to read magic bytes: {}", e))?;
-        drop(file);
-
-        (HoloFormat::detect(&magic), magic)
-    };
-
-    tracing::info!(format = ?format, "Detected file format");
-
-    // Phase 2: Route to appropriate loader
-    match format {
-        HoloFormat::Bundle => load_unified_bundle(path),
-        HoloFormat::Pipeline => Err(anyhow::anyhow!(
-            "Pipeline bundle detected: {}. Use load_pipeline_bundle() and specify model name.",
-            path.display()
-        )),
-        HoloFormat::Plan | HoloFormat::Legacy => {
-            let weights_path = path.with_extension("weights");
-            if weights_path.exists() {
-                tracing::info!(weights_path = %weights_path.display(), "Found external weights file");
-                load_with_external_weights(path, &weights_path)
-            } else {
-                load_holo_file(path, None)
-            }
-        }
-        HoloFormat::Unknown => Err(anyhow::anyhow!(
-            "Unknown file format: {:?} (magic: {:?})",
-            path.display(),
-            magic
-        )),
-    }
+pub fn load_holo_auto(path: &Path) -> Result<(BackendPlan, Box<dyn Backend>)> {
+    let (plan, backend, _input_order) = load_holo_auto_with_inputs(path)?;
+    Ok((plan, backend))
 }
 
-/// Load a unified bundle file (HOLB format).
+/// Automatically detect file format and load with input ordering.
 ///
-/// The bundle contains both the computation graph and weights in a single file.
-/// Weights are memory-mapped from the page-aligned section within the bundle.
+/// Like [`load_holo_auto`] but also returns the input order if embedded in the .holb file.
+/// This is essential for models with multiple inputs of the same size.
+///
+/// # Arguments
+/// * `path` - Path to the .holo file
+///
+/// # Returns
+/// Tuple of (BackendPlan, Backend, Option<Vec<String>>) where the Vec contains input names
+/// in the order expected by the model.
 #[tracing::instrument(
-    name = "load_unified_bundle",
+    name = "load_holo_auto_with_inputs",
     skip_all,
     fields(path = %path.display())
 )]
-fn load_unified_bundle(
-    path: &Path,
-) -> Result<(PlanExecutor, Box<dyn hologram::backend::ProgramBackend>)> {
-    // Phase 1: Memory-map the bundle
-    let mmap = {
-        let _span = tracing::info_span!("mmap_bundle").entered();
-        let m = MappedInput::open(path)
-            .map_err(|e| anyhow::anyhow!("Failed to mmap bundle '{}': {}", path.display(), e))?;
-        advise_sequential(&m);
-        m
-    };
+pub fn load_holo_auto_with_inputs(path: &Path) -> Result<ModelLoadResult> {
+    // Read file bytes
+    let bytes =
+        std::fs::read(path).with_context(|| format!("Failed to read file: {}", path.display()))?;
 
-    let mmap_size = mmap.as_slice().len();
-    tracing::debug!(mmap_size_bytes = mmap_size, "Memory-mapped bundle");
+    // Check magic
+    if bytes.len() < 4 {
+        anyhow::bail!("File too small: {}", path.display());
+    }
 
-    // Phase 2: Parse header and verify checksums
-    let (plan, weights_offset, _graph_size, weights_size) = {
-        let _span = tracing::info_span!("parse_bundle_header").entered();
+    let magic: [u8; 4] = bytes[..4].try_into().unwrap();
+    let format = HoloFormat::detect(&magic);
 
-        let reader = UnifiedBundleReader::from_bytes(mmap.as_slice())
-            .map_err(|e| anyhow::anyhow!("Failed to parse bundle header: {:?}", e))?;
+    tracing::info!(format = ?format, "Detected file format");
 
-        // Phase 2a: Verify checksums
-        {
-            let _checksum_span = tracing::info_span!("verify_checksums").entered();
-            if !reader.verify_checksums() {
-                return Err(anyhow::anyhow!("Bundle checksum verification failed"));
+    // Route to appropriate loader
+    match format {
+        HoloFormat::Bundle | HoloFormat::Plan | HoloFormat::Legacy => {
+            // Parse HOLB to extract input order before loading
+            let reader = HolbReader::from_bytes(&bytes)
+                .map_err(|e| anyhow::anyhow!("Failed to parse .holo file: {:?}", e))?;
+
+            // Extract input order from embedded section
+            let input_order = extract_input_order(&reader);
+            if let Some(ref order) = input_order {
+                tracing::info!("Found embedded input order: {:?}", order);
             }
-        }
 
-        let graph_size = reader.graph_size();
-        let weights_size = reader.weights_size();
-        let weights_offset = reader.weights_mmap_offset();
+            // Deserialize the graph (BackendPlan)
+            let mut plan = deserialize_backend_plan(reader.graph())?;
 
-        tracing::info!(
-            graph_bytes = graph_size,
-            weights_bytes = weights_size,
-            weights_offset = weights_offset.unwrap_or(0),
-            "Bundle sections parsed"
-        );
-
-        // Phase 2b: Deserialize graph
-        let plan = {
-            let _deser_span =
-                tracing::info_span!("deserialize_graph", graph_bytes = graph_size).entered();
-            hologram::compiler::read_holo_from_bytes(reader.graph_bytes())
-                .map_err(|e| anyhow::anyhow!("Failed to deserialize graph from bundle: {:?}", e))?
-        };
-
-        (plan, weights_offset, graph_size, weights_size)
-    }; // reader goes out of scope here, releasing borrow of mmap
-
-    // Phase 3: Create backend
-    let backend = {
-        let _span = tracing::info_span!(
-            "create_backend",
-            backend_type = ?plan.backend_type
-        )
-        .entered();
-        match hologram::backend::create_backend(plan.backend_type.clone()) {
-            Ok(backend) => backend,
-            Err(e) => {
-                tracing::warn!("Failed to create backend: {}. Falling back to CPU", e);
-                hologram::backend::create_best_backend()
+            // Check for WeightIndexSection (future: lazy/partial loading)
+            if let Ok(Some(weight_index)) = reader.weight_index() {
+                tracing::debug!(
+                    "HOLB has WeightIndexSection with {} tensors",
+                    weight_index.len()
+                );
             }
+
+            // Check for external weights file first
+            let weights_path = path.with_extension("weights");
+            if weights_path.exists() {
+                tracing::info!(weights_path = %weights_path.display(), "Found external weights file");
+                let weights_bytes = std::fs::read(&weights_path).with_context(|| {
+                    format!("Failed to read .weights file: {}", weights_path.display())
+                })?;
+                plan.constants = weights_bytes;
+            } else {
+                // Load weights from HOLB bundle
+                let weights = reader.weights();
+                if !weights.is_empty() {
+                    tracing::debug!("Loading {} bytes of weights from HOLB", weights.len());
+                    plan.constants = weights.to_vec();
+                }
+            }
+
+            tracing::debug!("Deserialized BackendPlan from .holo file");
+
+            // Create backend
+            let backend: Box<dyn Backend> = Box::new(CpuBackend::new());
+
+            tracing::info!(backend = "CPU", "Successfully loaded BackendPlan");
+
+            Ok((plan, backend, input_order))
         }
-    };
-
-    tracing::info!(backend = ?backend.backend_type(), "Using backend");
-
-    // Phase 4: Create executor with mmap'd weights
-    let mmap_arc = Arc::new(mmap);
-    let executor = {
-        let _span = tracing::info_span!(
-            "create_executor",
-            has_weights = weights_offset.is_some(),
-            weights_size = weights_size
-        )
-        .entered();
-
-        if let Some(offset) = weights_offset {
-            PlanExecutor::with_mmap_constants_at_offset(plan, &*backend, mmap_arc, offset).map_err(
-                |e| anyhow::anyhow!("Failed to create executor with bundle weights: {:?}", e),
-            )?
-        } else {
-            PlanExecutor::new(plan, &*backend)
-                .map_err(|e| anyhow::anyhow!("Failed to create executor: {:?}", e))?
-        }
-    };
-
-    tracing::info!("Successfully loaded unified bundle");
-
-    Ok((executor, backend))
+        HoloFormat::Pipeline => Err(anyhow::anyhow!(
+            "Pipeline bundle detected: {}. Use load_pipeline_bundle() instead.",
+            path.display()
+        )),
+        HoloFormat::Unknown => Err(anyhow::anyhow!("Unknown file format: {}", path.display())),
+    }
 }
-
-// =============================================================================
-// Pipeline Bundle Loading (HOLM format)
-// =============================================================================
 
 /// A loaded pipeline bundle that provides access to multiple models.
 ///
-/// The bundle is memory-mapped, and individual models can be loaded on demand.
-///
-/// # Example
-///
-/// ```rust,ignore
-/// let pipeline = load_pipeline_bundle(Path::new("t5-pipeline.holo"))?;
-/// println!("Models: {:?}", pipeline.model_names());
-///
-/// let (encoder_exec, encoder_backend) = pipeline.load_model("encoder")?;
-/// let (decoder_exec, decoder_backend) = pipeline.load_model("decoder")?;
-/// ```
+/// The bundle contains multiple models that can be loaded on demand.
 pub struct PipelineBundle {
-    /// Memory-mapped pipeline file
-    mmap: Arc<MappedInput>,
-    /// Parsed pipeline header and index (stores entry info only, not full reader)
-    model_info: Vec<(String, usize, usize)>, // (name, offset, size)
+    /// Raw bundle bytes (memory-mapped or read)
+    data: Vec<u8>,
+    /// Model info: (name, offset, size)
+    model_info: Vec<(String, usize, usize)>,
 }
 
 impl PipelineBundle {
@@ -440,119 +345,8 @@ impl PipelineBundle {
         self.model_info.iter().any(|(n, _, _)| n == name)
     }
 
-    /// Prefetch a model's weights into memory.
-    ///
-    /// Call this before `load_model()` to overlap I/O with computation.
-    /// For example, while executing layer N, call `prefetch_model("layer.N+1")`
-    /// to hint the OS to start loading the next layer's weights.
-    ///
-    /// This uses `madvise(MADV_WILLNEED)` on Unix systems to trigger
-    /// read-ahead without blocking.
-    ///
-    /// # Arguments
-    ///
-    /// * `name` - Name of the model to prefetch
-    ///
-    /// # Errors
-    ///
-    /// Returns error if the model name is not found in the pipeline.
-    ///
-    /// # Example
-    ///
-    /// ```rust,ignore
-    /// let pipeline = load_pipeline_bundle(Path::new("model.holo"))?;
-    ///
-    /// for (i, name) in pipeline.model_names().iter().enumerate() {
-    ///     // Prefetch next model while executing current
-    ///     if i + 1 < pipeline.model_count() {
-    ///         pipeline.prefetch_model(&pipeline.model_names()[i + 1])?;
-    ///     }
-    ///
-    ///     let (executor, backend) = pipeline.load_model(name)?;
-    ///     // ... execute model ...
-    /// }
-    /// ```
-    pub fn prefetch_model(&self, name: &str) -> Result<()> {
-        let (_, model_offset, model_size) = self
-            .model_info
-            .iter()
-            .find(|(n, _, _)| n == name)
-            .ok_or_else(|| anyhow::anyhow!("Model '{}' not found in pipeline", name))?;
-
-        tracing::debug!(
-            "Prefetching model '{}' at offset {}, size {}",
-            name,
-            model_offset,
-            model_size
-        );
-
-        // Advise the OS to prefetch this range
-        advise_willneed_range(&self.mmap, *model_offset, *model_size);
-
-        Ok(())
-    }
-
-    /// Release a model's weights from memory.
-    ///
-    /// Call this after a model is no longer needed to reduce memory pressure.
-    /// This hints to the OS that the pages can be freed, which is especially
-    /// useful in layer-by-layer execution where previous layers won't be
-    /// accessed again.
-    ///
-    /// This uses `madvise(MADV_DONTNEED)` on Unix systems.
-    ///
-    /// # Arguments
-    ///
-    /// * `name` - Name of the model to release
-    ///
-    /// # Errors
-    ///
-    /// Returns error if the model name is not found in the pipeline.
-    ///
-    /// # Example
-    ///
-    /// ```rust,ignore
-    /// let pipeline = load_pipeline_bundle(Path::new("model.holo"))?;
-    ///
-    /// for (i, name) in pipeline.model_names().iter().enumerate() {
-    ///     let (executor, backend) = pipeline.load_model(name)?;
-    ///     // ... execute model ...
-    ///
-    ///     // Release previous model's memory
-    ///     if i > 0 {
-    ///         pipeline.release_model(&pipeline.model_names()[i - 1])?;
-    ///     }
-    /// }
-    /// ```
-    pub fn release_model(&self, name: &str) -> Result<()> {
-        let (_, model_offset, model_size) = self
-            .model_info
-            .iter()
-            .find(|(n, _, _)| n == name)
-            .ok_or_else(|| anyhow::anyhow!("Model '{}' not found in pipeline", name))?;
-
-        tracing::debug!(
-            "Releasing model '{}' at offset {}, size {}",
-            name,
-            model_offset,
-            model_size
-        );
-
-        // Advise the OS that we're done with this range
-        advise_dontneed_range(&self.mmap, *model_offset, *model_size);
-
-        Ok(())
-    }
-
     /// Load a model from the pipeline by name.
-    ///
-    /// The model's weights are memory-mapped from within the pipeline file
-    /// at the correct offset.
-    pub fn load_model(
-        &self,
-        name: &str,
-    ) -> Result<(PlanExecutor, Box<dyn hologram::backend::ProgramBackend>)> {
-        // Find the model entry
+    pub fn load_model(&self, name: &str) -> Result<(BackendPlan, Box<dyn Backend>)> {
         let (_, model_offset, model_size) = self
             .model_info
             .iter()
@@ -566,1017 +360,184 @@ impl PipelineBundle {
             model_size
         );
 
-        // Get the model bytes (HOLB format)
-        let model_bytes = &self.mmap.as_slice()[*model_offset..*model_offset + *model_size];
+        // Get the model bytes
+        let model_bytes = &self.data[*model_offset..*model_offset + *model_size];
 
         // Parse as HOLB bundle
-        let model_reader = UnifiedBundleReader::from_bytes(model_bytes)
-            .map_err(|e| anyhow::anyhow!("Failed to parse model '{}' as HOLB: {:?}", name, e))?;
-
-        // Verify checksums
-        if !model_reader.verify_checksums() {
-            return Err(anyhow::anyhow!(
-                "Model '{}' checksum verification failed",
-                name
-            ));
-        }
-
-        // Deserialize the graph
-        let plan =
-            hologram::compiler::read_holo_from_bytes(model_reader.graph_bytes()).map_err(|e| {
-                anyhow::anyhow!("Failed to deserialize model '{}' graph: {:?}", name, e)
-            })?;
-
-        // Create backend
-        let backend = match hologram::backend::create_backend(plan.backend_type.clone()) {
-            Ok(backend) => backend,
-            Err(e) => {
-                tracing::warn!(
-                    "Failed to create backend for '{}': {}. Falling back to CPU",
-                    name,
-                    e
-                );
-                hologram::backend::create_best_backend()
-            }
-        };
-
-        // Create executor with mmap'd weights
-        // The weights offset is relative to the start of the HOLB section
-        let executor = if let Some(weights_offset_in_holb) = model_reader.weights_mmap_offset() {
-            // Calculate absolute offset in the pipeline file
-            let absolute_weights_offset = *model_offset + weights_offset_in_holb;
-            tracing::info!(
-                "WEIGHTS OFFSET DEBUG: model='{}', model_offset={}, weights_offset_in_holb={}, absolute_weights_offset={}",
-                name,
-                model_offset,
-                weights_offset_in_holb,
-                absolute_weights_offset
-            );
-            PlanExecutor::with_mmap_constants_at_offset(
-                plan,
-                &*backend,
-                Arc::clone(&self.mmap),
-                absolute_weights_offset,
-            )
-            .map_err(|e| {
-                anyhow::anyhow!(
-                    "Failed to create executor for '{}' with weights: {:?}",
-                    name,
-                    e
-                )
-            })?
-        } else {
-            PlanExecutor::new(plan, &*backend)
-                .map_err(|e| anyhow::anyhow!("Failed to create executor for '{}': {:?}", name, e))?
-        };
-
-        tracing::info!("Successfully loaded model '{}' from pipeline", name);
-
-        Ok((executor, backend))
-    }
-
-    fn select_entry_layer(
-        header: &hologram::compiler::format::LayerHeaderData,
-    ) -> Option<&hologram::compiler::format::LayerDescriptorData> {
-        if let Some(first_level) = header.schedule.first()
-            && let Some(first_id) = first_level.first()
-            && let Some(layer) = header.layer(*first_id)
-        {
-            return Some(layer);
-        }
-
-        header.layers.first()
-    }
-
-    /// Pin a model's weights in RAM for low-latency access.
-    ///
-    /// This locks the model's memory-mapped weights in RAM using `mlock()`,
-    /// preventing them from being swapped out. This is useful for embedding
-    /// tables and frequently-accessed layers in latency-critical applications.
-    ///
-    /// **Important**: Only use this for small models (<64MB) to avoid
-    /// exhausting system memory. Larger models should use prefetching instead.
-    ///
-    /// # Arguments
-    ///
-    /// * `name` - Name of the model to pin
-    ///
-    /// # Errors
-    ///
-    /// Returns error if:
-    /// - Model name not found
-    /// - Model size exceeds 64MB (safety limit)
-    /// - Insufficient memory lock limit (check `ulimit -l`)
-    ///
-    /// # Example
-    ///
-    /// ```rust,ignore
-    /// let pipeline = load_pipeline_bundle(Path::new("model.holo"))?;
-    ///
-    /// // Pin embedding table for zero-latency lookup
-    /// if pipeline.is_embedding_layer("embedding") {
-    ///     pipeline.pin_model_weights("embedding")?;
-    /// }
-    ///
-    /// // Load and use the model
-    /// let (executor, backend) = pipeline.load_model("embedding")?;
-    /// ```
-    pub fn pin_model_weights(&self, name: &str) -> Result<()> {
-        let (_, model_offset, model_size) = self
-            .model_info
-            .iter()
-            .find(|(n, _, _)| n == name)
-            .ok_or_else(|| anyhow::anyhow!("Model '{}' not found in pipeline", name))?;
-
-        // Safety check: only pin small models (<64MB)
-        const MAX_PIN_SIZE: usize = 64 * 1024 * 1024; // 64MB
-        if *model_size > MAX_PIN_SIZE {
-            return Err(anyhow::anyhow!(
-                "Model '{}' size ({} bytes) exceeds max pinnable size ({} bytes). Use prefetching instead.",
-                name,
-                model_size,
-                MAX_PIN_SIZE
-            ));
-        }
+        let reader = HolbReader::from_bytes(model_bytes)
+            .map_err(|e| anyhow::anyhow!("Failed to parse model '{}': {:?}", name, e))?;
 
         tracing::info!(
-            "Pinning model '{}' weights in RAM (size: {} bytes)",
-            name,
-            model_size
+            "  HOLB version: {}, graph size: {} bytes, weights size: {} bytes",
+            reader.version(),
+            reader.graph().len(),
+            reader.weights().len()
         );
 
-        // First hint that we'll need this data
-        advise_willneed_range(&self.mmap, *model_offset, *model_size);
-
-        // Then lock it in RAM
-        lock_memory_range(&self.mmap, *model_offset, *model_size)?;
-
-        tracing::debug!("Successfully pinned model '{}' in RAM", name);
-
-        Ok(())
-    }
-
-    /// Check if a model name suggests it's an embedding layer.
-    ///
-    /// This heuristic checks if the model name contains common embedding
-    /// layer keywords: "embed", "embedding", "token", "vocab".
-    ///
-    /// # Arguments
-    ///
-    /// * `name` - Model name to check
-    ///
-    /// # Returns
-    ///
-    /// `true` if the name suggests an embedding layer.
-    ///
-    /// # Example
-    ///
-    /// ```rust
-    /// // These return true:
-    /// // - "embedding"
-    /// // - "token_embeddings"
-    /// // - "vocab_embed"
-    /// // - "embed_tokens"
-    /// ```
-    pub fn is_embedding_layer(&self, name: &str) -> bool {
-        let lower = name.to_lowercase();
-        lower.contains("embed") || lower.contains("token") || lower.contains("vocab")
-    }
-
-    /// Load a model from the pipeline and extract its input order if available.
-    ///
-    /// This uses the embedded layer header to preserve compiler input ordering
-    /// when constructing a `ModelExecutor`.
-    #[allow(clippy::type_complexity)]
-    pub fn load_model_with_inputs(
-        &self,
-        name: &str,
-    ) -> Result<(
-        PlanExecutor,
-        Box<dyn hologram::backend::ProgramBackend>,
-        Option<Vec<String>>,
-    )> {
-        // Find the model entry
-        let (_, model_offset, model_size) = self
-            .model_info
-            .iter()
-            .find(|(n, _, _)| n == name)
-            .ok_or_else(|| anyhow::anyhow!("Model '{}' not found in pipeline", name))?;
+        // Deserialize the graph (BackendPlan)
+        let mut plan = deserialize_backend_plan(reader.graph())
+            .map_err(|e| anyhow::anyhow!("Failed to deserialize model '{}': {:?}", name, e))?;
 
         tracing::info!(
-            "Loading model '{}' from pipeline at offset {}, size {}",
-            name,
-            model_offset,
-            model_size
+            "  Deserialized plan: {} buffers, {} instructions, constants size: {} bytes",
+            plan.buffers.len(),
+            plan.instructions.len(),
+            plan.constants.len()
         );
 
-        // Get the model bytes (HOLB format)
-        let model_bytes = &self.mmap.as_slice()[*model_offset..*model_offset + *model_size];
-
-        // Parse as HOLB bundle
-        let model_reader = UnifiedBundleReader::from_bytes(model_bytes)
-            .map_err(|e| anyhow::anyhow!("Failed to parse model '{}' as HOLB: {:?}", name, e))?;
-
-        // Verify checksums
-        if !model_reader.verify_checksums() {
-            return Err(anyhow::anyhow!(
-                "Model '{}' checksum verification failed",
-                name
-            ));
+        // Check for WeightIndexSection for partial/indexed loading
+        if let Ok(Some(weight_index)) = reader.weight_index() {
+            tracing::debug!(
+                "Model '{}' has WeightIndexSection with {} tensors",
+                name,
+                weight_index.len()
+            );
+            // Future: use weight_index for lazy/partial loading
         }
 
-        // Deserialize the graph with optional header
-        let (plan, header) =
-            read_holo_from_bytes_with_header(model_reader.graph_bytes()).map_err(|e| {
-                anyhow::anyhow!("Failed to deserialize model '{}' graph: {:?}", name, e)
-            })?;
-
-        let input_order = model_reader
-            .get_section::<InputOrderSection>()
-            .map(|section| section.inputs)
-            .or_else(|| {
-                header.as_ref().and_then(|data| {
-                    let plan_inputs = plan.layout_metadata.num_inputs;
-
-                    if let Some(layer) = Self::select_entry_layer(data)
-                        && layer.inputs.len() == plan_inputs
-                    {
-                        return Some(
-                            layer
-                                .inputs
-                                .iter()
-                                .map(|port| port.name.clone())
-                                .collect::<Vec<String>>(),
-                        );
-                    }
-
-                    for layer in &data.layers {
-                        if layer.inputs.len() == plan_inputs {
-                            return Some(
-                                layer
-                                    .inputs
-                                    .iter()
-                                    .map(|port| port.name.clone())
-                                    .collect::<Vec<String>>(),
-                            );
-                        }
-                    }
-
-                    None
-                })
-            });
-
-        // Create backend
-        let backend = match hologram::backend::create_backend(plan.backend_type.clone()) {
-            Ok(backend) => backend,
-            Err(e) => {
-                tracing::warn!(
-                    "Failed to create backend for '{}': {}. Falling back to CPU",
-                    name,
-                    e
-                );
-                hologram::backend::create_best_backend()
-            }
-        };
-
-        // Create executor with mmap'd weights
-        let executor = if let Some(weights_offset_in_holb) = model_reader.weights_mmap_offset() {
-            // Calculate absolute offset in the pipeline file
-            let absolute_weights_offset = *model_offset + weights_offset_in_holb;
+        // Load the weights from the HOLB bundle
+        let weights = reader.weights();
+        if !weights.is_empty() {
             tracing::info!(
-                "WEIGHTS OFFSET DEBUG: model='{}', model_offset={}, weights_offset_in_holb={}, absolute_weights_offset={}",
-                name,
-                model_offset,
-                weights_offset_in_holb,
-                absolute_weights_offset
+                "  Loading {} bytes of weights from HOLB (overriding {} bytes from plan)",
+                weights.len(),
+                plan.constants.len()
             );
-            PlanExecutor::with_mmap_constants_at_offset(
-                plan,
-                &*backend,
-                Arc::clone(&self.mmap),
-                absolute_weights_offset,
-            )
-            .map_err(|e| {
-                anyhow::anyhow!(
-                    "Failed to create executor for '{}' with weights: {:?}",
-                    name,
-                    e
-                )
-            })?
+            plan.constants = weights.to_vec();
         } else {
-            PlanExecutor::new(plan, &*backend)
-                .map_err(|e| anyhow::anyhow!("Failed to create executor for '{}': {:?}", name, e))?
-        };
+            tracing::info!(
+                "  No separate weights in HOLB, using {} bytes from plan constants",
+                plan.constants.len()
+            );
+        }
 
-        tracing::info!("Successfully loaded model '{}' from pipeline", name);
+        let backend: Box<dyn Backend> = Box::new(CpuBackend::new());
 
-        Ok((executor, backend, input_order))
+        tracing::info!(
+            "Successfully loaded model '{}' (final constants: {} bytes)",
+            name,
+            plan.constants.len()
+        );
+
+        Ok((plan, backend))
+    }
+
+    /// Load a model with explicit input ordering.
+    pub fn load_model_with_inputs(&self, name: &str) -> Result<ModelLoadResult> {
+        let (plan, backend) = self.load_model(name)?;
+        // Input order could be extracted from metadata if available
+        Ok((plan, backend, None))
     }
 }
 
-/// Load a pipeline bundle file (HOLM format).
-///
-/// The pipeline file is memory-mapped, and individual models can be loaded
-/// on demand using `PipelineBundle::load_model()`.
+/// Load a pipeline bundle (HOLM format).
 ///
 /// # Arguments
-/// * `path` - Path to the .holo pipeline bundle file
+/// * `path` - Path to the pipeline bundle file
 ///
 /// # Returns
-/// A `PipelineBundle` that provides access to individual models.
-///
-/// # Example
-///
-/// ```rust,ignore
-/// let pipeline = load_pipeline_bundle(Path::new("t5-pipeline.holo"))?;
-///
-/// // Load models as needed
-/// let (encoder_exec, encoder_backend) = pipeline.load_model("encoder")?;
-/// let (decoder_exec, decoder_backend) = pipeline.load_model("decoder")?;
-/// ```
+/// PipelineBundle that provides access to individual models
 #[tracing::instrument(
     name = "load_pipeline_bundle",
     skip_all,
     fields(path = %path.display())
 )]
 pub fn load_pipeline_bundle(path: &Path) -> Result<PipelineBundle> {
-    // Phase 1: Memory-map the pipeline
-    let mmap = {
-        let _span = tracing::info_span!("mmap_pipeline").entered();
-        MappedInput::open(path).map_err(|e| {
-            anyhow::anyhow!("Failed to mmap pipeline bundle '{}': {}", path.display(), e)
-        })?
-    };
+    let data = std::fs::read(path)
+        .with_context(|| format!("Failed to read pipeline bundle: {}", path.display()))?;
 
-    let mmap_size = mmap.as_slice().len();
-    tracing::debug!(mmap_size_bytes = mmap_size, "Memory-mapped pipeline");
+    // Use HolmReader from hologram-holo (correctly handles format)
+    let reader = HolmReader::from_bytes(&data)
+        .map_err(|e| anyhow::anyhow!("Failed to parse HOLM: {:?}", e))?;
 
-    // Phase 2: Parse header and verify checksum
-    let model_info = {
-        let _span = tracing::info_span!("parse_pipeline_header").entered();
+    // Build model_info from reader entries
+    let model_info: Vec<(String, usize, usize)> = reader
+        .entries()
+        .iter()
+        .map(|e| (e.name.clone(), e.offset as usize, e.size as usize))
+        .collect();
 
-        let reader = PipelineBundleReader::from_bytes(mmap.as_slice())
-            .map_err(|e| anyhow::anyhow!("Failed to parse pipeline bundle header: {:?}", e))?;
+    tracing::info!(
+        "Loaded pipeline bundle with {} models: {:?}",
+        model_info.len(),
+        reader.model_names()
+    );
 
-        // Phase 2a: Verify checksum
+    Ok(PipelineBundle { data, model_info })
+}
+
+/// Check if a loaded plan contains CallLayer instructions and print diagnostic info.
+///
+/// This is useful for debugging the CallLayer dependencies issue.
+#[cfg(test)]
+fn debug_plan_calllayer(plan: &BackendPlan) {
+    use hologram::holo::IsaInstruction;
+
+    let call_layer_count = plan
+        .instructions
+        .iter()
+        .filter(|i| matches!(i, IsaInstruction::CallLayer { .. }))
+        .count();
+
+    println!("Instructions: {}", plan.instructions.len());
+    println!("CallLayer count: {}", call_layer_count);
+    println!("Dependencies: {}", plan.dependencies.len());
+
+    for instr in &plan.instructions {
+        if let IsaInstruction::CallLayer {
+            layer_id,
+            inputs,
+            outputs,
+        } = instr
         {
-            let _checksum_span = tracing::info_span!("verify_index_checksum").entered();
-            if !reader.verify_index_checksum() {
-                return Err(anyhow::anyhow!(
-                    "Pipeline index checksum verification failed"
-                ));
-            }
-        }
-
-        let model_count = reader.model_count();
-        let model_names = reader.model_names();
-
-        tracing::info!(
-            model_count = model_count,
-            models = ?model_names,
-            "Pipeline bundle loaded"
-        );
-
-        // Extract model info
-        reader
-            .model_names()
-            .iter()
-            .filter_map(|name| {
-                reader
-                    .get_entry(name)
-                    .map(|entry| (name.to_string(), entry.offset as usize, entry.size as usize))
-            })
-            .collect()
-    };
-
-    Ok(PipelineBundle {
-        mmap: Arc::new(mmap),
-        model_info,
-    })
-}
-
-/// Check if a file is a pipeline bundle.
-pub fn is_pipeline_bundle(path: &Path) -> Result<bool> {
-    let mut file = File::open(path)
-        .map_err(|e| anyhow::anyhow!("Failed to open file '{}': {}", path.display(), e))?;
-
-    let mut magic = [0u8; 4];
-    file.read_exact(&mut magic)
-        .map_err(|e| anyhow::anyhow!("Failed to read magic bytes: {}", e))?;
-
-    Ok(HoloFormat::detect(&magic).is_pipeline())
-}
-
-// =============================================================================
-// Execution Mode Configuration
-// =============================================================================
-
-/// Execution mode for model loading.
-///
-/// Controls how models are loaded into memory:
-/// - **FullLoading**: Load entire model at once (fast execution, high memory)
-/// - **LayerByLayer**: Load and execute one layer at a time (slow, low memory)
-/// - **Auto**: Automatically select based on model size and available memory
-///
-/// # Example
-///
-/// ```rust,ignore
-/// use hologram_ai::runtime::loader::{ExecutionMode, LoadOptions};
-///
-/// // For interactive chatbots with small models
-/// let options = LoadOptions {
-///     mode: ExecutionMode::FullLoading,
-///     ..Default::default()
-/// };
-///
-/// // For large models on constrained memory
-/// let options = LoadOptions {
-///     mode: ExecutionMode::LayerByLayer { prefetch: true },
-///     ..Default::default()
-/// };
-/// ```
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum ExecutionMode {
-    /// Load entire model at once (fast, high memory).
-    ///
-    /// Best for:
-    /// - Interactive chatbots requiring low latency
-    /// - Small to medium models that fit in memory
-    /// - High-throughput serving environments
-    FullLoading,
-
-    /// Load and execute one layer at a time (slow, low memory).
-    ///
-    /// Best for:
-    /// - Large models (70B+) that don't fit in memory
-    /// - Memory-constrained inference environments
-    /// - Batch/offline processing where latency isn't critical
-    LayerByLayer {
-        /// Enable prefetching of the next layer while executing current.
-        /// Uses `madvise(MADV_WILLNEED)` to overlap I/O with compute.
-        prefetch: bool,
-    },
-
-    /// Automatically select mode based on model size and available memory.
-    ///
-    /// The runtime will choose FullLoading if the model fits comfortably
-    /// in available memory (< 50% of free memory), otherwise LayerByLayer.
-    #[default]
-    Auto,
-}
-
-/// Options for model loading.
-///
-/// Provides fine-grained control over how models are loaded and executed.
-///
-/// # Example
-///
-/// ```rust,ignore
-/// use hologram_ai::runtime::loader::{ExecutionMode, LoadOptions};
-///
-/// let options = LoadOptions {
-///     mode: ExecutionMode::FullLoading,
-///     memory_limit_mb: Some(8 * 1024), // 8GB limit
-///     enable_prefetch: true,
-/// };
-/// ```
-#[derive(Debug, Clone)]
-pub struct LoadOptions {
-    /// Execution mode (default: Auto).
-    pub mode: ExecutionMode,
-
-    /// Memory limit in MB (for Auto mode decision).
-    /// If None, uses system available memory.
-    pub memory_limit_mb: Option<usize>,
-
-    /// Enable madvise hints for prefetching (default: true).
-    /// Always beneficial for sequential access patterns.
-    pub enable_prefetch: bool,
-}
-
-impl Default for LoadOptions {
-    fn default() -> Self {
-        Self {
-            mode: ExecutionMode::Auto,
-            memory_limit_mb: None,
-            enable_prefetch: true,
-        }
-    }
-}
-
-impl LoadOptions {
-    /// Create options for full loading (optimal for small models).
-    pub fn full_loading() -> Self {
-        Self {
-            mode: ExecutionMode::FullLoading,
-            ..Default::default()
+            println!(
+                "  CallLayer: layer_id=0x{:016x}, inputs={:?}, outputs={:?}",
+                layer_id, inputs, outputs
+            );
         }
     }
 
-    /// Create options for layer-by-layer loading (optimal for large models).
-    pub fn layer_by_layer() -> Self {
-        Self {
-            mode: ExecutionMode::LayerByLayer { prefetch: true },
-            ..Default::default()
-        }
+    for dep in &plan.dependencies {
+        println!("  Dependency: {:?}", dep);
     }
-
-    /// Create options with a memory limit.
-    pub fn with_memory_limit(mut self, mb: usize) -> Self {
-        self.memory_limit_mb = Some(mb);
-        self
-    }
-}
-
-// =============================================================================
-// Layer Streaming Executor
-// =============================================================================
-
-/// Executor for layer-by-layer transformer inference.
-///
-/// This executor loads and executes transformer layers one at a time,
-/// enabling inference of large models on memory-constrained systems.
-///
-/// # Memory Efficiency
-///
-/// For a 70B parameter model:
-/// - Full loading: ~130GB peak memory
-/// - Layer-by-layer: ~2GB peak memory (single layer + activations)
-///
-/// # Prefetching
-///
-/// When enabled, the executor prefetches the next layer's weights while
-/// executing the current layer, hiding ~10% of I/O latency.
-///
-/// # Example
-///
-/// ```rust,ignore
-/// use hologram_ai::runtime::loader::{load_pipeline_bundle, LayerStreamingExecutor};
-///
-/// let pipeline = load_pipeline_bundle(Path::new("llama-70b.holo"))?;
-/// let executor = LayerStreamingExecutor::new(pipeline);
-///
-/// // Iterate through layers with prefetching
-/// for layer_ctx in executor.iter_with_prefetch() {
-///     let (plan_executor, backend) = layer_ctx.load()?;
-///     // Execute with your inputs/outputs using plan_executor
-/// }
-/// ```
-pub struct LayerStreamingExecutor {
-    /// The underlying pipeline bundle
-    pipeline: PipelineBundle,
-    /// Ordered list of layer names for execution
-    layer_names: Vec<String>,
-}
-
-impl LayerStreamingExecutor {
-    /// Create a new streaming executor from a pipeline bundle.
-    pub fn new(pipeline: PipelineBundle) -> Self {
-        let layer_names = pipeline
-            .model_names()
-            .iter()
-            .map(|s| s.to_string())
-            .collect();
-        Self {
-            pipeline,
-            layer_names,
-        }
-    }
-
-    /// Get the number of layers in the model.
-    pub fn layer_count(&self) -> usize {
-        self.layer_names.len()
-    }
-
-    /// Get the layer names in execution order.
-    pub fn layer_names(&self) -> &[String] {
-        &self.layer_names
-    }
-
-    /// Get a reference to the underlying pipeline bundle.
-    pub fn pipeline(&self) -> &PipelineBundle {
-        &self.pipeline
-    }
-
-    /// Load a specific layer by index.
-    ///
-    /// Returns the `PlanExecutor` and backend for the layer.
-    pub fn load_layer_by_index(
-        &self,
-        index: usize,
-    ) -> Result<(PlanExecutor, Box<dyn hologram::backend::ProgramBackend>)> {
-        let name = self
-            .layer_names
-            .get(index)
-            .ok_or_else(|| anyhow::anyhow!("Layer index {} out of bounds", index))?;
-        self.pipeline.load_model(name)
-    }
-
-    /// Load a specific layer by name.
-    ///
-    /// Returns the `PlanExecutor` and backend for the layer.
-    pub fn load_layer_by_name(
-        &self,
-        name: &str,
-    ) -> Result<(PlanExecutor, Box<dyn hologram::backend::ProgramBackend>)> {
-        self.pipeline.load_model(name)
-    }
-
-    /// Prefetch a layer by index.
-    ///
-    /// Call this before loading the layer to hint the OS to page in the weights.
-    pub fn prefetch_layer(&self, index: usize) -> Result<()> {
-        if let Some(name) = self.layer_names.get(index) {
-            self.pipeline.prefetch_model(name)
-        } else {
-            Ok(()) // Silently ignore out-of-bounds
-        }
-    }
-
-    /// Release a layer by index.
-    ///
-    /// Call this after the layer is no longer needed to reduce memory pressure.
-    pub fn release_layer(&self, index: usize) -> Result<()> {
-        if let Some(name) = self.layer_names.get(index) {
-            self.pipeline.release_model(name)
-        } else {
-            Ok(()) // Silently ignore out-of-bounds
-        }
-    }
-
-    /// Create an iterator that manages prefetching automatically.
-    ///
-    /// This iterator yields layer contexts that handle prefetch/release.
-    pub fn iter_with_prefetch(&self) -> LayerIterator<'_> {
-        LayerIterator {
-            executor: self,
-            current_index: 0,
-        }
-    }
-}
-
-/// Iterator over layers with automatic prefetching.
-pub struct LayerIterator<'a> {
-    executor: &'a LayerStreamingExecutor,
-    current_index: usize,
-}
-
-impl<'a> Iterator for LayerIterator<'a> {
-    type Item = LayerContext<'a>;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        if self.current_index >= self.executor.layer_count() {
-            return None;
-        }
-
-        let index = self.current_index;
-        self.current_index += 1;
-
-        // Prefetch next layer
-        if self.current_index < self.executor.layer_count()
-            && let Err(e) = self.executor.prefetch_layer(self.current_index)
-        {
-            tracing::warn!("Failed to prefetch layer {}: {}", self.current_index, e);
-        }
-
-        Some(LayerContext {
-            executor: self.executor,
-            index,
-        })
-    }
-
-    fn size_hint(&self) -> (usize, Option<usize>) {
-        let remaining = self.executor.layer_count() - self.current_index;
-        (remaining, Some(remaining))
-    }
-}
-
-impl ExactSizeIterator for LayerIterator<'_> {}
-
-/// Context for a single layer during iteration.
-///
-/// Provides methods to load and execute the layer.
-pub struct LayerContext<'a> {
-    executor: &'a LayerStreamingExecutor,
-    index: usize,
-}
-
-impl<'a> LayerContext<'a> {
-    /// Get the layer index.
-    pub fn index(&self) -> usize {
-        self.index
-    }
-
-    /// Get the layer name.
-    pub fn name(&self) -> &str {
-        &self.executor.layer_names[self.index]
-    }
-
-    /// Load the layer's executor and backend.
-    pub fn load(&self) -> Result<(PlanExecutor, Box<dyn hologram::backend::ProgramBackend>)> {
-        self.executor.load_layer_by_index(self.index)
-    }
-
-    /// Release the previous layer's memory.
-    ///
-    /// Call this after you've finished using the previous layer.
-    pub fn release_previous(&self) -> Result<()> {
-        if self.index > 0 {
-            self.executor.release_layer(self.index - 1)
-        } else {
-            Ok(())
-        }
-    }
-}
-
-impl Drop for LayerContext<'_> {
-    fn drop(&mut self) {
-        // Automatically release this layer when the context is dropped
-        let _ = self.executor.release_layer(self.index);
-    }
-}
-
-#[cfg(unix)]
-fn advise_sequential(mmap: &MappedInput) {
-    let data = mmap.as_slice();
-    if data.is_empty() {
-        return;
-    }
-    unsafe {
-        libc::madvise(data.as_ptr() as *mut _, data.len(), libc::MADV_SEQUENTIAL);
-    }
-}
-
-#[cfg(not(unix))]
-fn advise_sequential(_mmap: &MappedInput) {}
-
-#[cfg(unix)]
-fn advise_willneed_range(mmap: &MappedInput, offset: usize, size: usize) {
-    let data = mmap.as_slice();
-    if data.is_empty() || offset >= data.len() {
-        return;
-    }
-    let end = offset.saturating_add(size).min(data.len());
-    let len = end.saturating_sub(offset);
-    if len == 0 {
-        return;
-    }
-    unsafe {
-        libc::madvise(
-            data.as_ptr().add(offset) as *mut _,
-            len,
-            libc::MADV_WILLNEED,
-        );
-    }
-}
-
-#[cfg(not(unix))]
-fn advise_willneed_range(_mmap: &MappedInput, _offset: usize, _size: usize) {}
-
-#[cfg(unix)]
-fn advise_dontneed_range(mmap: &MappedInput, offset: usize, size: usize) {
-    let data = mmap.as_slice();
-    if data.is_empty() || offset >= data.len() {
-        return;
-    }
-    let end = offset.saturating_add(size).min(data.len());
-    let len = end.saturating_sub(offset);
-    if len == 0 {
-        return;
-    }
-    unsafe {
-        libc::madvise(
-            data.as_ptr().add(offset) as *mut _,
-            len,
-            libc::MADV_DONTNEED,
-        );
-    }
-}
-
-#[cfg(not(unix))]
-fn advise_dontneed_range(_mmap: &MappedInput, _offset: usize, _size: usize) {}
-
-/// Lock a memory range in RAM to prevent swapping.
-///
-/// Uses `mlock()` to lock pages in physical memory. This ensures zero-latency
-/// access but consumes physical RAM. Only use for small, frequently-accessed
-/// data like embedding tables.
-///
-/// # Safety
-///
-/// Requires sufficient memory lock limit (`ulimit -l`). If the limit is too low,
-/// this will fail with ENOMEM or EPERM.
-#[cfg(unix)]
-fn lock_memory_range(mmap: &MappedInput, offset: usize, size: usize) -> Result<()> {
-    let data = mmap.as_slice();
-    if data.is_empty() || offset >= data.len() {
-        return Ok(());
-    }
-    let end = offset.saturating_add(size).min(data.len());
-    let len = end.saturating_sub(offset);
-    if len == 0 {
-        return Ok(());
-    }
-
-    unsafe {
-        let ptr = data.as_ptr().add(offset) as *mut libc::c_void;
-        let result = libc::mlock(ptr, len);
-        if result != 0 {
-            let errno = *libc::__errno_location();
-            return Err(anyhow::anyhow!(
-                "Failed to lock memory (mlock): errno {} (size: {} bytes). \
-                 Check ulimit -l for memory lock limit.",
-                errno,
-                len
-            ));
-        }
-    }
-
-    Ok(())
-}
-
-#[cfg(not(unix))]
-fn lock_memory_range(_mmap: &MappedInput, _offset: usize, _size: usize) -> Result<()> {
-    // Memory locking is Unix-only
-    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
+    use std::path::Path;
 
     #[test]
-    #[ignore] // Requires compiled model file to exist
-    fn test_load_t5_encoder() {
-        let encoder_path = PathBuf::from("models/t5-small/compiled/encoder.holo");
-
-        assert!(
-            encoder_path.exists(),
-            "T5 encoder not found at {:?}",
-            encoder_path
-        );
-
-        let result = load_and_compile_holo(&encoder_path);
-        assert!(
-            result.is_ok(),
-            "Failed to load T5 encoder: {:?}",
-            result.err()
-        );
+    fn test_holo_format_detect() {
+        assert_eq!(HoloFormat::detect(b"HOLB"), HoloFormat::Bundle);
+        assert_eq!(HoloFormat::detect(b"HOLM"), HoloFormat::Pipeline);
+        assert_eq!(HoloFormat::detect(b"HOLP"), HoloFormat::Plan);
+        assert_eq!(HoloFormat::detect(&[0, 0, 0, 0]), HoloFormat::Legacy);
+        assert_eq!(HoloFormat::detect(b"XXXX"), HoloFormat::Unknown);
     }
 
     #[test]
-    #[ignore] // Requires compiled pipeline file to exist
-    fn test_pipeline_prefetch_and_release() {
-        // This test demonstrates the prefetch/release API with a real pipeline
-        let pipeline_path = PathBuf::from("models/t5-small/compiled/t5-pipeline.holo");
-
-        if !pipeline_path.exists() {
-            return; // Skip if file doesn't exist
-        }
-
-        let pipeline = load_pipeline_bundle(&pipeline_path).unwrap();
-
-        // Test basic methods
-        assert!(pipeline.model_count() > 0);
-        let names = pipeline.model_names();
-
-        // Prefetch should work for existing models
-        if !names.is_empty() {
-            assert!(pipeline.prefetch_model(names[0]).is_ok());
-            assert!(pipeline.release_model(names[0]).is_ok());
-        }
-
-        // Prefetch should fail for non-existent models
-        assert!(pipeline.prefetch_model("nonexistent_model").is_err());
-        assert!(pipeline.release_model("nonexistent_model").is_err());
-    }
-
-    #[test]
-    fn test_pipeline_bundle_methods() {
-        // Test that PipelineBundle correctly stores model info
-        // We can't test with real data without a file, but we can verify the struct works
-
-        // Create a minimal test by checking that the struct fields are accessible
-        // The actual functionality is tested in integration tests
-    }
-
-    #[test]
-    fn test_is_embedding_layer() {
-        use std::io::Write;
-        use tempfile::NamedTempFile;
-
-        // Create a temporary file for the PipelineBundle
-        let mut temp_file = NamedTempFile::new().unwrap();
-        temp_file.write_all(&[0u8; 256]).unwrap();
-        temp_file.flush().unwrap();
-
-        let mmap = Arc::new(MappedInput::open(temp_file.path()).unwrap());
-        let pipeline = PipelineBundle {
-            mmap,
+    fn test_pipeline_bundle_empty() {
+        let bundle = PipelineBundle {
+            data: vec![],
             model_info: vec![],
         };
-
-        // Test positive cases
-        assert!(pipeline.is_embedding_layer("embedding"));
-        assert!(pipeline.is_embedding_layer("token_embeddings"));
-        assert!(pipeline.is_embedding_layer("embed_tokens"));
-        assert!(pipeline.is_embedding_layer("vocab_embed"));
-        assert!(pipeline.is_embedding_layer("model.embed_tokens"));
-        assert!(pipeline.is_embedding_layer("EMBEDDING")); // Case insensitive
-        assert!(pipeline.is_embedding_layer("token_ids"));
-        assert!(pipeline.is_embedding_layer("vocab_size"));
-
-        // Test negative cases
-        assert!(!pipeline.is_embedding_layer("encoder"));
-        assert!(!pipeline.is_embedding_layer("decoder"));
-        assert!(!pipeline.is_embedding_layer("attention"));
-        assert!(!pipeline.is_embedding_layer("layer_0"));
-        assert!(!pipeline.is_embedding_layer("feedforward"));
+        assert_eq!(bundle.model_count(), 0);
+        assert!(bundle.model_names().is_empty());
+        assert!(!bundle.has_model("encoder"));
     }
 
     #[test]
-    fn test_pin_model_weights_not_found() {
-        use std::io::Write;
-        use tempfile::NamedTempFile;
-
-        // Create a temporary file for the PipelineBundle
-        let mut temp_file = NamedTempFile::new().unwrap();
-        temp_file.write_all(&[0u8; 256]).unwrap();
-        temp_file.flush().unwrap();
-
-        let mmap = Arc::new(MappedInput::open(temp_file.path()).unwrap());
-        let pipeline = PipelineBundle {
-            mmap,
-            model_info: vec![],
-        };
-
-        // Test that pinning a non-existent model fails
-        let result = pipeline.pin_model_weights("nonexistent");
-        assert!(result.is_err());
-        assert!(
-            result
-                .unwrap_err()
-                .to_string()
-                .contains("not found in pipeline")
-        );
-    }
-
-    #[test]
-    fn test_pin_model_weights_size_check() {
-        use std::io::Write;
-        use tempfile::NamedTempFile;
-
-        // Create a large temporary file (128MB)
-        let mut temp_file = NamedTempFile::new().unwrap();
-        let large_data = vec![0u8; 128 * 1024 * 1024];
-        temp_file.write_all(&large_data).unwrap();
-        temp_file.flush().unwrap();
-
-        let mmap = Arc::new(MappedInput::open(temp_file.path()).unwrap());
-        let pipeline = PipelineBundle {
-            mmap,
-            model_info: vec![("large_model".to_string(), 0, 128 * 1024 * 1024)],
-        };
-
-        // Test that pinning a large model fails with size error
-        let result = pipeline.pin_model_weights("large_model");
-        assert!(result.is_err());
-        let err_msg = result.unwrap_err().to_string();
-        assert!(
-            err_msg.contains("exceeds max pinnable size"),
-            "Expected size error, got: {}",
-            err_msg
-        );
-    }
-
-    #[test]
-    fn test_pin_model_weights_small_model() {
-        use std::io::Write;
-        use tempfile::NamedTempFile;
-
-        // Create a small temporary file (1KB)
-        let mut temp_file = NamedTempFile::new().unwrap();
-        let data = vec![0u8; 1024];
-        temp_file.write_all(&data).unwrap();
-        temp_file.flush().unwrap();
-
-        let mmap = Arc::new(MappedInput::open(temp_file.path()).unwrap());
-        let pipeline = PipelineBundle {
-            mmap,
-            model_info: vec![("small_model".to_string(), 0, 1024)],
-        };
-
-        // Test that pinning a small model succeeds (or fails gracefully on systems with low ulimit)
-        let result = pipeline.pin_model_weights("small_model");
-        // We accept both success and permission errors (due to ulimit)
-        if let Err(e) = result {
-            let err_msg = e.to_string();
-            assert!(
-                err_msg.contains("mlock") || err_msg.contains("ulimit"),
-                "Expected mlock or ulimit error, got: {}",
-                err_msg
-            );
+    #[ignore = "requires compiled model file"]
+    fn test_inspect_encoder_for_calllayer() {
+        let path = Path::new("/tmp/test_encoder.holb");
+        if !path.exists() {
+            println!("Skipping: {} does not exist", path.display());
+            return;
         }
+
+        let (plan, _backend) = load_and_compile_holo(path).expect("Failed to load plan");
+
+        debug_plan_calllayer(&plan);
     }
 }

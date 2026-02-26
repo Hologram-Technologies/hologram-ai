@@ -1,7 +1,7 @@
 //! HuggingFace config.json parsing and conversion.
 
 use crate::error::{Result, SafeTensorsError};
-use hologram_ai_common::{Activation, FFNType, NormType, TransformerConfig};
+use hologram_ai_common::{Activation, FFNType, NormType, RoPEScaling, TransformerConfig};
 use serde::Deserialize;
 use std::fs::File;
 use std::io::BufReader;
@@ -109,39 +109,6 @@ impl HfConfig {
 
     /// Convert to TransformerConfig for the generic builder.
     pub fn to_transformer_config(&self) -> Result<TransformerConfig> {
-        let model_type = self
-            .get_model_type()
-            .ok_or_else(|| SafeTensorsError::MissingConfigField("model_type".to_string()))?
-            .to_lowercase();
-
-        // Determine norm type based on architecture
-        let norm_type = match model_type.as_str() {
-            "llama" | "mistral" | "qwen" | "qwen2" | "gemma" | "deepseek" => NormType::RMSNorm,
-            "gpt2" | "gpt_neox" | "phi" => NormType::LayerNorm,
-            _ => NormType::RMSNorm, // Default
-        };
-
-        // Determine activation
-        let hidden_act = self
-            .hidden_act
-            .as_deref()
-            .map(|act| match act.to_lowercase().as_str() {
-                "silu" | "swiglu" => Activation::SiLU,
-                "gelu" => Activation::GELU,
-                "gelu_new" | "gelu_fast" => Activation::GELUTanh,
-                "relu" => Activation::ReLU,
-                _ => Activation::SiLU,
-            })
-            .unwrap_or(Activation::SiLU);
-
-        // Determine FFN type based on architecture
-        let ffn_type = match model_type.as_str() {
-            "llama" | "mistral" | "qwen" | "qwen2" | "gemma" | "deepseek" => FFNType::Gated,
-            "gpt2" | "phi" => FFNType::Standard,
-            _ => FFNType::Gated,
-        };
-
-        // Get required fields
         let num_layers = self
             .num_hidden_layers
             .ok_or_else(|| SafeTensorsError::MissingConfigField("num_hidden_layers".to_string()))?;
@@ -158,56 +125,65 @@ impl HfConfig {
             .vocab_size
             .ok_or_else(|| SafeTensorsError::MissingConfigField("vocab_size".to_string()))?;
 
-        // Get optional fields with defaults
-        let max_position_embeddings = self.max_position_embeddings.unwrap_or(4096);
+        // Parse activation function
+        let hidden_act = self
+            .hidden_act
+            .as_ref()
+            .map(|s| parse_activation(s))
+            .unwrap_or(Activation::SiLU);
+
+        // RMS norm is default for modern models
+        let norm_type = NormType::RMSNorm;
+
+        // Norm epsilon: prefer rms_norm_eps, fall back to layer_norm_eps
         let norm_eps = self.rms_norm_eps.or(self.layer_norm_eps).unwrap_or(1e-6);
 
-        // Handle GQA
-        let num_kv_heads = self
-            .num_key_value_heads
-            .filter(|&kv| kv != num_attention_heads);
-
-        // Handle RoPE scaling
+        // RoPE scaling conversion
         let rope_scaling = self.rope_scaling.as_ref().and_then(|rs| {
-            Some(hologram_ai_common::RoPEScaling {
+            Some(RoPEScaling {
                 scaling_type: rs.scaling_type.clone()?,
                 factor: rs.factor?,
                 original_max_position_embeddings: rs.original_max_position_embeddings,
             })
         });
 
-        let config = TransformerConfig {
+        Ok(TransformerConfig {
             num_layers,
             hidden_size,
             num_attention_heads,
-            num_kv_heads,
+            num_kv_heads: self.num_key_value_heads,
             intermediate_size,
             vocab_size,
-            max_position_embeddings,
+            max_position_embeddings: self.max_position_embeddings.unwrap_or(4096),
             norm_type,
             norm_eps,
             hidden_act,
             rope_theta: self.rope_theta,
             rope_scaling,
-            ffn_type,
+            ffn_type: FFNType::Gated, // Most modern models use gated FFN
             tie_word_embeddings: self.tie_word_embeddings.unwrap_or(false),
             head_dim: self.head_dim,
             attention_bias: self.attention_bias.unwrap_or(false),
             mlp_bias: self.mlp_bias.unwrap_or(false),
-        };
+        })
+    }
+}
 
-        // Validate
-        config
-            .validate()
-            .map_err(SafeTensorsError::MissingConfigField)?;
-
-        Ok(config)
+/// Parse activation function string to enum.
+fn parse_activation(s: &str) -> Activation {
+    match s.to_lowercase().as_str() {
+        "silu" | "swish" => Activation::SiLU,
+        "gelu" | "gelu_new" => Activation::GELU,
+        "gelu_pytorch_tanh" | "gelu_tanh" => Activation::GELUTanh,
+        "relu" => Activation::ReLU,
+        _ => Activation::SiLU, // Default to SiLU for unknown
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use hologram_ai_common::{Activation, FFNType, NormType};
 
     fn sample_llama_config() -> HfConfig {
         HfConfig {

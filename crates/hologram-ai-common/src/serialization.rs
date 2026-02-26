@@ -1,23 +1,34 @@
 //! Shared .holo file serialization for all format compilers.
 //!
-//! TEMPORARILY STUBBED during hologram API migration.
-//! This module needs to be updated to use the new hologram::holo API
-//! (HolbWriter, HolmWriter, etc.)
+//! This module provides serialization of BackendPlan to .holb format using
+//! hologram's HolbWriter and rkyv serialization.
 
 use anyhow::Result;
 use hologram::backend::BackendPlan;
+use hologram::holo::HolbWriter;
 
 /// Alignment boundary for page-aligned weight sections (4KB)
 pub const HOLO_ALIGN: usize = 4096;
 
-/// Temporary stub of LayerHeaderData during API migration
+/// Layer header data for serialization.
+///
+/// This contains metadata about the layer(s) being serialized.
 #[derive(Debug, Clone)]
 pub struct LayerHeaderData {
-    /// Layer information (stubbed)
+    /// Layer information
     pub layers: Vec<LayerInfo>,
 }
 
-/// Temporary stub of layer info
+impl LayerHeaderData {
+    /// Create a new header with a single layer.
+    pub fn single(name: impl Into<String>) -> Self {
+        Self {
+            layers: vec![LayerInfo { name: name.into() }],
+        }
+    }
+}
+
+/// Information about a single layer.
 #[derive(Debug, Clone)]
 pub struct LayerInfo {
     /// Layer name
@@ -27,7 +38,7 @@ pub struct LayerInfo {
 /// Weight management strategy for serialization
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WeightStrategy {
-    /// Embed weights in BackendPlan.constant_data (< 100MB)
+    /// Embed weights in BackendPlan.constants (< 100MB)
     EmbeddedInPlan,
     /// Separate page-aligned section in same .holo file (100MB - 1GB)
     PageAlignedInBundle,
@@ -51,45 +62,71 @@ impl WeightStrategy {
 
 /// Serialize a BackendPlan to .holb format.
 ///
-/// This function uses hologram::holo::HolbWriter to create a proper .holb file.
+/// This function uses hologram's HolbWriter to create a proper .holb file.
 ///
 /// # Arguments
 ///
 /// * `plan` - The compiled BackendPlan to serialize
-/// * `header` - Layer header data (currently unused, reserved for future use)
-/// * `strategy` - Weight management strategy (currently unused, always embedded)
+/// * `header` - Layer header data (used for validation)
+/// * `strategy` - Weight management strategy
 ///
 /// # Returns
 ///
-/// Returns `Ok((holo_bytes, weights_bytes))`
-/// Currently always returns empty weights_bytes as all data is embedded in the .holb file.
+/// Returns `Ok((holo_bytes, weights_bytes))`:
+/// - For `EmbeddedInPlan` and `PageAlignedInBundle`: weights are in holo_bytes, weights_bytes is empty
+/// - For `ExternalFile`: weights are in weights_bytes, must be saved separately
+///
+/// # Errors
+///
+/// Returns error if:
+/// - LayerHeader has no layers
+/// - Serialization fails
 pub fn serialize_backend_plan_with_header(
-    _plan: &BackendPlan,
+    plan: &BackendPlan,
     header: &LayerHeaderData,
-    _strategy: WeightStrategy,
+    strategy: WeightStrategy,
 ) -> Result<(Vec<u8>, Vec<u8>)> {
     if header.layers.is_empty() {
         anyhow::bail!("LayerHeader must contain at least one layer");
     }
 
-    // TEMPORARY STUB: This function needs proper implementation using hologram's serialization API
-    // For now, return a minimal placeholder that won't cause rkyv version conflicts
+    // Serialize the BackendPlan using rkyv 0.7
+    let plan_bytes = rkyv::to_bytes::<_, 1024>(plan)
+        .map_err(|e| anyhow::anyhow!("Failed to serialize BackendPlan: {:?}", e))?
+        .to_vec();
 
-    // Create a minimal HOLB header with magic bytes
-    let mut holb_bytes = Vec::with_capacity(1024);
-    holb_bytes.extend_from_slice(hologram::holo::HOLB_MAGIC);
-    holb_bytes.extend_from_slice(&[0, 0, 0, 2]); // version 2
+    // Build the .holb file using HolbWriter
+    let mut writer = HolbWriter::new();
+    writer.set_graph(&plan_bytes);
 
-    // Add some placeholder data so the result isn't completely empty
-    // This is just a stub until proper serialization is implemented
-    holb_bytes.extend_from_slice(&[0u8; 64]); // placeholder header
-
-    // Note: In a real implementation, this would use HolbWriter with properly serialized plan data
-    // However, due to rkyv version mismatches between workspace (0.8) and hologram (0.7),
-    // we cannot call rkyv::to_bytes directly on BackendPlan here.
-    // The proper fix is to align rkyv versions or use hologram's internal serialization helpers.
-
-    Ok((holb_bytes, Vec::new()))
+    // Handle weight strategy
+    match strategy {
+        WeightStrategy::EmbeddedInPlan => {
+            // Weights are already in plan.constants, no separate data needed
+            let bundle = writer
+                .build()
+                .map_err(|e| anyhow::anyhow!("Failed to build HOLB bundle: {:?}", e))?;
+            Ok((bundle, Vec::new()))
+        }
+        WeightStrategy::PageAlignedInBundle => {
+            // Extract weights from plan and store page-aligned in the same file
+            // The weights are in plan.constants
+            if !plan.constants.is_empty() {
+                writer.set_weights(&plan.constants);
+            }
+            let bundle = writer
+                .build()
+                .map_err(|e| anyhow::anyhow!("Failed to build HOLB bundle: {:?}", e))?;
+            Ok((bundle, Vec::new()))
+        }
+        WeightStrategy::ExternalFile => {
+            // Weights go to separate file
+            let bundle = writer
+                .build()
+                .map_err(|e| anyhow::anyhow!("Failed to build HOLB bundle: {:?}", e))?;
+            Ok((bundle, plan.constants.clone()))
+        }
+    }
 }
 
 #[cfg(test)]

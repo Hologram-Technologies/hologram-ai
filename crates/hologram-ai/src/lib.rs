@@ -37,10 +37,7 @@ pub mod runtime;
 pub mod tokenizers;
 
 // Re-export common types
-pub use hologram_ai_common::{
-    Activation, CommonError, FFNType, GenericTransformerBuilder, NormType, RoPEScaling,
-    TransformerConfig, WeightDtype, WeightMap, WeightTensor,
-};
+pub use hologram_ai_common::{CommonError, WeightDtype, WeightMap, WeightTensor};
 
 // Conditionally re-export format-specific crates
 #[cfg(feature = "onnx")]
@@ -126,18 +123,21 @@ pub fn compile_model(
         #[cfg(feature = "onnx")]
         ModelFormat::Onnx => {
             let bytes = std::fs::read(path)?;
-            let compiler = hologram_ai_onnx::OnnxCompiler::new();
-            Ok(compiler.compile(&bytes)?)
+            let holb_bytes = hologram_ai_onnx::compile_onnx(&bytes)?;
+            // ONNX compilation produces a single .holb file with embedded weights
+            Ok((holb_bytes, Vec::new()))
         }
         #[cfg(feature = "gguf")]
         ModelFormat::Gguf => {
-            let compiler = hologram_ai_gguf::GgufCompiler::new();
-            Ok(compiler.compile_file(path)?)
+            // TEMPORARILY DISABLED: transformer module is disabled in hologram-ai-common
+            let _ = hologram_ai_gguf::GgufCompiler::new();
+            Err("GGUF compilation is temporarily disabled".into())
         }
         #[cfg(feature = "safetensors")]
         ModelFormat::SafeTensors => {
-            let compiler = hologram_ai_safetensors::SafeTensorsCompiler::new();
-            Ok(compiler.compile_dir(path)?)
+            // TEMPORARILY DISABLED: transformer module is disabled in hologram-ai-common
+            let _ = hologram_ai_safetensors::SafeTensorsCompiler::new();
+            Err("SafeTensors compilation is temporarily disabled".into())
         }
     }
 }

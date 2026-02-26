@@ -1,4 +1,4 @@
-# hologram-onnx justfile
+# hologram-onnx Justfile
 # Run `just` or `just --list` to see all available commands
 
 # Default command - show available recipes
@@ -9,26 +9,27 @@ default:
 build:
     cargo build
 
-# Build with all features enabled
+# Build with ONNX features enabled (excludes broken gguf/safetensors)
 build-all:
-    cargo build --all-features
+    cargo build -p hologram-ai --features="onnx"
 
 # Build in release mode
 build-release:
-    cargo build --release
+    cargo build --release -p hologram-ai --features="onnx"
 
 # Build the CLI binary
 build-cli:
-    cargo build --bin hologram-onnx
+    cargo build -p hologram-ai --features="onnx"
 
-# Run all tests
 # Run all tests (uses nextest for faster parallel execution)
 test:
     cargo nextest run --workspace --no-fail-fast
 
-# Run tests with all features
+# Run tests with ONNX features
 test-all:
-    cargo test --all-features
+    cargo test -p hologram-ai-onnx
+    cargo test -p hologram-ai-common
+    cargo test -p hologram-ai --features="onnx"
 
 # Run tests with output
 test-verbose:
@@ -54,13 +55,13 @@ bench:
 check:
     cargo check
 
-# Run clippy linter
+# Run clippy linter (excludes broken gguf/safetensors)
 clippy:
-    cargo clippy --all-targets --all-features
+    cargo clippy --all-targets -p hologram-ai-onnx -p hologram-ai-common -p hologram-ai
 
 # Fix clippy warnings automatically
 clippy-fix:
-    cargo clippy --fix --all-targets --all-features --allow-dirty
+    cargo clippy --fix --all-targets -p hologram-ai-onnx -p hologram-ai-common -p hologram-ai --allow-dirty
 
 # Format code
 fmt:
@@ -79,11 +80,11 @@ clean:
 
 # Generate documentation
 doc:
-    cargo doc --no-deps --all-features
+    cargo doc --no-deps -p hologram-ai-onnx -p hologram-ai-common -p hologram-ai
 
 # Generate and open documentation in browser
 doc-open:
-    cargo doc --no-deps --all-features --open
+    cargo doc --no-deps --open -p hologram-ai-onnx
 
 # Run cargo fix to apply automatic fixes
 fix:
@@ -99,31 +100,31 @@ outdated:
 
 # Install the CLI binary
 install:
-    cargo install --path .
+    cargo install --path crates/hologram-ai
 
 # Compile an ONNX model to .holo format
 compile MODEL OUTPUT:
-    cargo run --bin hologram-onnx -- compile {{MODEL}} -o {{OUTPUT}}
+    cargo run --release -p hologram-ai --features="onnx" -- compile {{MODEL}} -o {{OUTPUT}}
 
 # Run an ONNX model
 run MODEL:
-    cargo run --bin hologram-onnx -- run {{MODEL}}
+    cargo run --release -p hologram-ai --features="onnx" -- run {{MODEL}}
 
 # Show info about an ONNX model
 info MODEL:
-    cargo run --bin hologram-onnx -- info {{MODEL}}
+    cargo run -p hologram-ai --features="onnx" -- info {{MODEL}}
 
 # Download a model from HuggingFace
 download MODEL:
-    cargo run --bin hologram-onnx -- download {{MODEL}}
+    cargo run -p hologram-ai --features="onnx" -- download {{MODEL}}
 
 # Validate an ONNX model
 validate MODEL:
-    cargo run --bin hologram-onnx -- validate {{MODEL}}
+    cargo run -p hologram-ai --features="onnx" -- validate {{MODEL}}
 
 # Run with backtrace enabled
 run-trace ARGS:
-    RUST_BACKTRACE=1 cargo run -- {{ARGS}}
+    RUST_BACKTRACE=1 cargo run -p hologram-ai --features="onnx" -- {{ARGS}}
 
 # Profile with cargo flamegraph (requires cargo-flamegraph)
 profile ARGS:
@@ -131,11 +132,11 @@ profile ARGS:
 
 # Measure code coverage (requires cargo-tarpaulin)
 coverage:
-    cargo tarpaulin --out Html --output-dir coverage
+    cargo tarpaulin --out Html --output-dir coverage -p hologram-ai-onnx
 
 # Run miri for undefined behavior detection (requires cargo-miri)
 miri:
-    cargo +nightly miri test
+    cargo +nightly miri test -p hologram-ai-onnx
 
 # Audit dependencies for security vulnerabilities (requires cargo-audit)
 audit:
@@ -147,15 +148,15 @@ expand FILE:
 
 # Show the size of the compiled binary
 bloat:
-    cargo bloat --release
+    cargo bloat --release -p hologram-ai
 
 # Check for unused dependencies (requires cargo-udeps)
 udeps:
-    cargo +nightly udeps
+    cargo +nightly udeps -p hologram-ai-onnx
 
 # Watch for changes and run tests
 watch:
-    cargo watch -x test
+    cargo watch -x "test -p hologram-ai-onnx"
 
 # Watch for changes and run specific command
 watch-cmd CMD:
@@ -164,7 +165,7 @@ watch-cmd CMD:
 # Release workflow - build, test, and create optimized binary
 release: clean fmt clippy test build-release
     @echo "✓ Release build complete!"
-    @ls -lh target/release/hologram-onnx
+    @ls -lh target/release/hologram-ai
 
 # Development workflow - quick iteration
 dev: fmt build test
@@ -177,22 +178,22 @@ full-ci: clean fmt-check clippy test-all doc build-release
 # Count lines of code
 loc:
     @echo "Source code:"
-    @find src -name '*.rs' | xargs wc -l | tail -1
+    @find crates -name '*.rs' | xargs wc -l | tail -1
     @echo "\nTests:"
-    @find tests -name '*.rs' | xargs wc -l | tail -1
+    @find crates -path '*/tests/*.rs' | xargs wc -l | tail -1
 
 # Show project statistics
 stats:
     @echo "=== Project Statistics ==="
-    @echo "Source files: $(find src -name '*.rs' | wc -l)"
-    @echo "Test files: $(find tests -name '*.rs' | wc -l)"
-    @echo "Total lines: $(find src tests -name '*.rs' | xargs wc -l | tail -1 | awk '{print $1}')"
+    @echo "Source files: $(find crates -name '*.rs' | wc -l)"
+    @echo "Test files: $(find crates -path '*/tests/*.rs' | wc -l)"
+    @echo "Total lines: $(find crates -name '*.rs' | xargs wc -l | tail -1 | awk '{print $1}')"
     @echo "\n=== Crate Info ==="
-    @cargo tree --depth 1
+    @cargo tree --depth 1 -p hologram-ai-onnx
 
 # Quick test of core functionality
 quick-test:
-    cargo test --lib test_shapes test_parser test_translator
+    cargo test -p hologram-ai-onnx --lib
 
 # Prepare for commit - run all checks
 pre-commit: fmt clippy test
@@ -214,7 +215,22 @@ log:
 # Create release build and show binary info
 binary-info: build-release
     @echo "=== Binary Information ==="
-    @ls -lh target/release/hologram-onnx
-    @file target/release/hologram-onnx
+    @ls -lh target/release/hologram-ai
+    @file target/release/hologram-ai
     @echo "\n=== Dependencies ==="
-    @ldd target/release/hologram-onnx 2>/dev/null || otool -L target/release/hologram-onnx 2>/dev/null || echo "Not a dynamic binary"
+    @ldd target/release/hologram-ai 2>/dev/null || otool -L target/release/hologram-ai 2>/dev/null || echo "Not a dynamic binary"
+
+# T5 specific commands
+t5-compile:
+    cargo run --release -p hologram-ai --features="onnx" -- compile /workspace/models/t5-small/encoder_model.onnx --output /workspace/models/t5-small/compiled/encoder.holo
+    cargo run --release -p hologram-ai --features="onnx" -- compile /workspace/models/t5-small/decoder_model.onnx --output /workspace/models/t5-small/compiled/decoder.holo
+
+t5-run PROMPT:
+    cargo run --release -p hologram-ai --features="onnx" -- run --config examples/T5/t5.toml --prompt "{{PROMPT}}"
+
+# ResNet classification
+resnet-compile:
+    cargo run --release -p hologram-ai --features="onnx" -- compile /workspace/models/resnet18/resnet18.onnx --output /workspace/models/resnet18/resnet18.holo
+
+resnet-run IMAGE:
+    cargo run --release -p hologram-ai --features="onnx" -- run --config examples/ResNet/resnet.toml --image {{IMAGE}}

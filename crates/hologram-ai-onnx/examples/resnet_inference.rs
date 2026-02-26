@@ -10,6 +10,13 @@ use std::fs;
 const IMAGENET_MEAN: [f32; 3] = [0.485, 0.456, 0.406];
 const IMAGENET_STD: [f32; 3] = [0.229, 0.224, 0.225];
 
+/// Deserialize BackendPlan from rkyv bytes (rkyv 0.7 API).
+fn deserialize_plan(bytes: &[u8]) -> Result<BackendPlan> {
+    let archived = unsafe { rkyv::archived_root::<BackendPlan>(bytes) };
+    let plan: BackendPlan = rkyv::Deserialize::deserialize(archived, &mut rkyv::Infallible)?;
+    Ok(plan)
+}
+
 fn main() -> Result<()> {
     let onnx_path = "/tmp/claude-1000/-workspace/d42433ba-a7d4-4e38-bcb7-e07ce8361e75/scratchpad/onnx_models/resnet18.onnx";
 
@@ -21,8 +28,7 @@ fn main() -> Result<()> {
 
     // Load plan
     let reader = HolbReader::from_bytes(&holb_bytes)?;
-    let plan: BackendPlan = rkyv::from_bytes(reader.graph())
-        .map_err(|e| anyhow::anyhow!("Deserialize error: {}", e))?;
+    let plan = deserialize_plan(reader.graph())?;
 
     println!("   Constants: {} bytes", plan.constants.len());
     println!("   Instructions: {}", plan.instructions.len());

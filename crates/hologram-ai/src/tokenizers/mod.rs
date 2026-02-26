@@ -76,6 +76,15 @@ pub trait Tokenizer: Send + Sync {
 
     /// Get the padding token ID.
     fn pad_token_id(&self) -> u32;
+
+    /// Get the end-of-sequence token ID.
+    fn eos_token_id(&self) -> u32;
+
+    /// Get the unknown token ID.
+    fn unk_token_id(&self) -> u32;
+
+    /// Get the list of special token IDs (e.g., <extra_id_0> through <extra_id_99> for T5).
+    fn special_token_ids(&self) -> &[u32];
 }
 
 /// Load a tokenizer from configuration.

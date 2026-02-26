@@ -8,7 +8,7 @@
 
 use anyhow::{Context, Result};
 #[cfg(feature = "onnx")]
-use hologram_ai_onnx::core::{extract_opset_version, parse_model, validate_model};
+use hologram_ai_onnx::{extract_opset_version, parse_model, validate_model};
 use std::collections::HashSet;
 use std::fs;
 use std::path::Path;

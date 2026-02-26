@@ -7,11 +7,19 @@ use hologram::holo::HolbReader;
 use image::GenericImageView;
 use std::fs;
 
+/// Deserialize BackendPlan from rkyv bytes (rkyv 0.7 API).
+fn deserialize_plan(bytes: &[u8]) -> Result<BackendPlan> {
+    let archived = unsafe { rkyv::archived_root::<BackendPlan>(bytes) };
+    let plan: BackendPlan = rkyv::Deserialize::deserialize(archived, &mut rkyv::Infallible)?;
+    Ok(plan)
+}
+
 // ImageNet normalization constants
 const MEAN: [f32; 3] = [0.485, 0.456, 0.406];
 const STD: [f32; 3] = [0.229, 0.224, 0.225];
 
 // Top ImageNet class names (subset for common predictions)
+#[allow(dead_code)] // Reference data for future expansion
 const IMAGENET_CLASSES: &[&str] = &[
     "tench",
     "goldfish",
@@ -132,8 +140,7 @@ fn main() -> Result<()> {
     let holb_bytes = hologram_ai_onnx::compile_onnx(&onnx_bytes)?;
 
     let reader = HolbReader::from_bytes(&holb_bytes)?;
-    let plan: BackendPlan = rkyv::from_bytes(reader.graph())
-        .map_err(|e| anyhow::anyhow!("Deserialize error: {}", e))?;
+    let plan = deserialize_plan(reader.graph())?;
     println!(
         "  Compiled: {} instructions, {} buffers",
         plan.instructions.len(),
