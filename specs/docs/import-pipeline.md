@@ -121,6 +121,18 @@ pub struct GgufMetadata {
     pub attention_head_count_kv: Option<u64>,
     pub rope_freq_base: Option<f32>,
     pub vocab_size: Option<u64>,
+    // tokenizer data (see ADR-0012)
+    pub tokenizer_model: Option<String>,      // "llama", "gpt2", etc.
+    pub tokens: Option<Vec<String>>,          // vocabulary tokens
+    pub scores: Option<Vec<f32>>,             // unigram scores
+    pub token_type: Option<Vec<u32>>,         // token type flags
+    pub merges: Option<Vec<String>>,          // BPE merge pairs
+    pub bos_token_id: Option<u32>,
+    pub eos_token_id: Option<u32>,
+    pub padding_token_id: Option<u32>,
+    pub unknown_token_id: Option<u32>,
+    pub add_bos_token: Option<bool>,
+    pub add_eos_token: Option<bool>,
     // ... all arch-specific fields
     pub raw: HashMap<String, GgufValue>,
 }
@@ -190,10 +202,33 @@ Built-in recognizers and the architectures they support:
 | `QwenArch` | qwen, qwen2, qwen2_5 |
 | `GemmaArch` | gemma, gemma2 |
 
-### Stage 4: `AiGraph` assembly
+### Stage 4: Tokenizer data extraction
+
+GGUF metadata contains tokenizer data under `tokenizer.ggml.*` keys. This data
+is extracted and stored in `AiGraph::metadata` under the `tokenizer.*` namespace
+for downstream use by `hologram-ai-tokenizer` (see ADR-0012).
+
+| GGUF key | AiGraph metadata key |
+|----------|---------------------|
+| `tokenizer.ggml.model` | `tokenizer.model` |
+| `tokenizer.ggml.tokens` | `tokenizer.tokens` |
+| `tokenizer.ggml.scores` | `tokenizer.scores` |
+| `tokenizer.ggml.token_type` | `tokenizer.token_type` |
+| `tokenizer.ggml.merges` | `tokenizer.merges` |
+| `tokenizer.ggml.bos_token_id` | `tokenizer.bos_token_id` |
+| `tokenizer.ggml.eos_token_id` | `tokenizer.eos_token_id` |
+| `tokenizer.ggml.padding_token_id` | `tokenizer.padding_token_id` |
+| `tokenizer.ggml.unknown_token_id` | `tokenizer.unknown_token_id` |
+| `tokenizer.ggml.add_bos_token` | `tokenizer.add_bos_token` |
+| `tokenizer.ggml.add_eos_token` | `tokenizer.add_eos_token` |
+
+If tokenizer metadata is missing (rare for modern GGUF files), no tokenizer
+entries are added. The downstream `ModelCompiler` handles the absence gracefully.
+
+### Stage 5: `AiGraph` assembly
 
 - Params from `TensorIndex` bound to graph nodes via name conventions
-- Metadata stored in `AiGraph::metadata` for downstream use (context_length, rope config, etc.)
+- Metadata stored in `AiGraph::metadata` for downstream use (context_length, rope config, tokenizer data, etc.)
 - `AiOp::RotaryEmbedding`, `AiOp::RmsNorm`, `AiOp::GroupedQueryAttention` used for LLaMA-family
 
 ---
@@ -248,6 +283,8 @@ After `import_*()` returns, the `AiGraph` must be:
 3. **Shape-partial OK** — some shapes may be `Dim::Dynamic` if not inferrable
 4. **Quant-complete** — every quantized param has a `QuantDescriptor`
 5. **Format-clean** — no format-specific type leaks into the graph
+6. **Tokenizer-portable** — if the source format contains tokenizer data,
+   it must be stored in `AiGraph::metadata` under the `tokenizer.*` namespace
 
 The importer is responsible for these invariants. Downstream passes may
 strengthen them (e.g. shape propagation fills in `Dim::Dynamic` where possible)

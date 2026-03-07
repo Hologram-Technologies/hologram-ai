@@ -44,7 +44,8 @@ ModelSource
   → mem_planner.plan_kv_cache(&graph)       → KvCacheLayout  (KV-cache sizing only)
   → lower(&graph, &kv_layout, &opts)        → LoweringOutput { graph, registry }
   → hologram::compile(lower.graph)          → CompilationOutput { archive, schedule, stats }
-  → CompiledModel { archive, schedule, registry, kv_layout } → ready for sessions
+  → extract tokenizer data from metadata   → NativeTokenizer (packed into ConstantStore + .holo section)
+  → CompiledModel { archive, schedule, registry, kv_layout, tokenizer } → ready for sessions
 ```
 
 The two optimization phases are complementary (see ADR-0008):
@@ -79,11 +80,17 @@ pub struct CompiledModel {
     input_metadata: Vec<TensorMeta>,
     output_metadata: Vec<TensorMeta>,
     metadata: ModelMetadata,    // arch info, context len, vocab size, etc.
+    // tokenizer (see ADR-0012)
+    tokenizer: Option<Arc<dyn Tokenizer>>,       // embedded native tokenizer from .holo
 }
 
 impl CompiledModel {
     pub fn session(&self, opts: SessionOptions) -> Result<InferenceSession>
     pub fn metadata(&self) -> &ModelMetadata
+    /// Returns the embedded tokenizer, if available.
+    /// Auto-constructed from ConstantStore when loading .holo archives
+    /// that contain SECTION_TOKENIZER (0x1001).
+    pub fn tokenizer(&self) -> Option<&dyn Tokenizer>
 }
 ```
 
@@ -233,7 +240,7 @@ impl InferenceSession {
 ```rust
 pub fn stream_tokens(
     session: InferenceSession,
-    tokenizer: Box<dyn Tokenizer>,
+    tokenizer: Option<Box<dyn Tokenizer>>,  // None → use model's embedded tokenizer
     prompt: &str,
     opts: GenerateOptions,
 ) -> TokenStream
@@ -285,10 +292,13 @@ CompiledModel::session(opts)          → InferenceSession (fresh, empty cache)
   ├── generate(prompt_tokens, opts)   → blocking full generation
   │
   ├── stream_tokens(...)              → async Token stream
+  │                                     (uses compiled.tokenizer() by default)
   │
   ├── reset_cache()                   → clear KV-cache, reuse session
   │
   └── drop                           → buffers released
+
+CompiledModel::tokenizer()            → Option<&dyn Tokenizer> (embedded, from .holo)
 ```
 
 Multiple concurrent sessions from the same `CompiledModel`:

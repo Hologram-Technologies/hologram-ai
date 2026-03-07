@@ -52,5 +52,14 @@ holoarch pull        # pull latest docs + refresh managed sections
 holoarch doc <name>  # generate a new doc template in specs/docs/
 ```
 
+## Cross-Repository Isolation
+
+Do NOT modify `hologram-architecture` or any sibling repository from this project.
+Architecture flows one way: from the architecture repo into subprojects via
+`holoarch pull`. Files under `specs/docs/` are read-only and will be overwritten.
+
+If you need changes in another repository, write a prompt or spec describing the
+required change and save it to `specs/plans/`. Never make the change directly.
+
 _This section is managed by `holoarch pull`. Repo: hologram-ai_
 <!-- HOLOARCH:MANAGED:END -->

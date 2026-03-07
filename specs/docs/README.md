@@ -69,6 +69,7 @@ hologram-ai specific boundary.
 | Crate layout | [crate-layout.md](crate-layout.md) |
 | Import pipeline | [import-pipeline.md](import-pipeline.md) |
 | Lowering design | [lowering.md](lowering.md) |
+| Tokenizer architecture | [tokenizer.md](tokenizer.md) |
 | Runtime model | [runtime-model.md](runtime-model.md) |
 | Testing strategy | [testing-strategy.md](testing-strategy.md) |
 | Roadmap | [roadmap.md](roadmap.md) |
@@ -90,3 +91,4 @@ hologram-ai specific boundary.
 | [0008](../../adrs/0008-hologram-compiler-invoked-after-lowering.md) | hologram-compiler invoked after lowering |
 | [0009](../../adrs/0009-cli-compile-delegates-to-hologram.md) | CLI compile delegates to hologram binary |
 | [0010](../../adrs/0010-huggingface-download-onnx-conversion.md) | HuggingFace download and ONNX conversion |
+| [0012](../../adrs/0012-hologram-native-tokenizer.md) | Hologram-native tokenizer via ConstantStore and .holo archives |

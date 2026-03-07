@@ -72,12 +72,18 @@ Foreign model artifact
 - `ConstantStore` / `ConstantId` — weight storage and lazy loading
 - `HoloLoader` / `HoloWriter` — archive format for serialized models
 
+### hologram-ai owns (continued)
+
+- Tokenizer implementations: native BPE/SentencePiece/WordPiece via
+  `hologram-ai-tokenizer` crate, using `ConstantStore` for vocab data and
+  `.holo` custom sections for archive embedding (see ADR-0012).
+  External implementations still accepted via `Box<dyn Tokenizer>`.
+
 ### hologram-ai does NOT own
 
 - Actual kernel implementations (GEMM, attention, etc.)
 - Process/WASM/microVM sandbox isolation
 - Network transport
-- Tokenizer implementations (accepted as `Box<dyn Tokenizer>`)
 
 ---
 
@@ -155,9 +161,22 @@ Manages:
 - KV-cache `BufferArena` (per-session)
 - Single-pass `run()` and multi-step `generate()` APIs
 
+### Layer 6.5: Tokenizer (`hologram-ai-tokenizer`)
+
+Native tokenizer operating at the session boundary (text ↔ token IDs).
+Not part of the computation graph — tokenization does not benefit from LUT
+dispatch, CSE, or graph scheduling (see ADR-0012).
+
+- `NativeTokenizer` implements BPE (Phase 2), SentencePiece, WordPiece (Phase 3)
+- Vocab tables and merge rules stored in `hologram::ConstantStore`
+- Tokenizer metadata serialized in `.holo` archives via `SECTION_TOKENIZER` (0x1001)
+- `CompiledModel::tokenizer()` returns the embedded tokenizer if available
+- External `Box<dyn Tokenizer>` still accepted for custom implementations
+
 ### Layer 7: Streaming Decoder (`hologram-ai`)
 
 Wraps `InferenceSession` in an autoregressive loop. Implements `Stream<Item = Token>`.
+Uses `CompiledModel::tokenizer()` by default for text ↔ token conversion.
 
 ---
 
@@ -288,7 +307,7 @@ no separate per-backend crate (`hologram-cpu`, `hologram-metal`, etc.).
                    ┌──────────▼──────────┐
                    │  Format Importer    │  hologram-ai-{onnx,gguf,ggml}
                    └──────────┬──────────┘
-                              │ AiGraph
+                              │ AiGraph (+ tokenizer data in metadata)
                    ┌──────────▼──────────┐
                    │  Optimization       │  hologram-ai-common
                    │  Passes             │  (fusion, folding, shape prop)
@@ -312,8 +331,19 @@ no separate per-backend crate (`hologram-cpu`, `hologram-metal`, etc.).
                    └──────────┬──────────┘
                               │ ExecutionSchedule
                    ┌──────────▼──────────┐
+                   │  .holo Archive      │  model weights + tokenizer
+                   │  (SECTION_TOKENIZER │  vocab/merges in ConstantStore
+                   │   = 0x1001)         │
+                   └──────────┬──────────┘
+                              │
+                   ┌──────────▼──────────┐
                    │  Inference Session  │  hologram-ai
                    │  + KV-Cache         │
+                   └──────────┬──────────┘
+                              │
+                   ┌──────────▼──────────┐
+                   │  NativeTokenizer    │  hologram-ai-tokenizer
+                   │  (text ↔ token IDs) │  loaded from ConstantStore
                    └──────────┬──────────┘
                               │
                    ┌──────────▼──────────┐
@@ -339,6 +369,7 @@ hologram-ai/
 ├── crates/
 │   ├── hologram-ai-quant/         # quantization schemes, block layouts, dequant
 │   ├── hologram-ai-common/        # IR types, opt passes, mem planner, lowering
+│   ├── hologram-ai-tokenizer/      # native tokenizer (BPE, SentencePiece, WordPiece)
 │   ├── hologram-ai-onnx/          # ONNX importer
 │   ├── hologram-ai-gguf/          # GGUF importer
 │   ├── hologram-ai-ggml/          # GGML checkpoint importer
@@ -399,6 +430,25 @@ pub fn lower(
 ```
 
 **Depends on** `hologram-ai-quant`, `hologram` (root crate, no `compiler` feature).
+
+---
+
+#### `hologram-ai-tokenizer`
+
+Native tokenizer implementations using hologram primitives. See [tokenizer.md](tokenizer.md)
+and [ADR-0012](../../adrs/0012-hologram-native-tokenizer.md).
+
+Defines:
+- `Tokenizer` trait (expanded: `encode`, `decode`, `eos_token_id`, `bos_token_id`, `vocab_size`, `id_to_token`, `token_to_id`)
+- `NativeTokenizer` — BPE, SentencePiece, WordPiece implementations
+- `VocabTable`, `MergeRules`, `UnigramModel` — tokenizer data model
+- `TokenizerSectionData` — `.holo` section `SECTION_TOKENIZER` (0x1001) serialization
+- `ConstantStore` pack/unpack helpers for vocab/merges/scores
+
+Vocab and merge data stored in `hologram::ConstantStore`. Tokenizer metadata
+serialized in `.holo` archive custom sections. No external C dependencies.
+
+**Depends on** `hologram-ai-common`, `hologram` (root crate).
 
 ---
 
@@ -473,14 +523,16 @@ hologram = { path = "../../hologram", features = ["compiler"] }
 ### Crate Dependency Matrix
 
 ```
-hologram-ai-quant    → (no internal deps)
-hologram-ai-common   → hologram-ai-quant, hologram (root crate)
-hologram-ai-onnx     → hologram-ai-common
-hologram-ai-gguf     → hologram-ai-common, hologram-ai-quant
-hologram-ai-ggml     → hologram-ai-common, hologram-ai-quant
-hologram-ai          → hologram-ai-common, hologram-ai-quant,
-                       hologram-ai-onnx, hologram-ai-gguf, hologram-ai-ggml,
-                       hologram (root crate)
+hologram-ai-quant      → (no internal deps)
+hologram-ai-common     → hologram-ai-quant, hologram (root crate)
+hologram-ai-tokenizer  → hologram-ai-common, hologram (root crate)
+hologram-ai-onnx       → hologram-ai-common
+hologram-ai-gguf       → hologram-ai-common, hologram-ai-quant
+hologram-ai-ggml       → hologram-ai-common, hologram-ai-quant
+hologram-ai            → hologram-ai-common, hologram-ai-quant,
+                         hologram-ai-tokenizer,
+                         hologram-ai-onnx, hologram-ai-gguf, hologram-ai-ggml,
+                         hologram (root crate)
 ```
 
 No crate in the hologram-ai workspace imports hologram subcrates directly
@@ -491,8 +543,9 @@ are accessed via the root `hologram` crate.
 
 ### Naming Rationale
 
-Six crates instead of fourteen. `hologram-ai-quant` is the foundational primitive
-layer (no IR dependency). `hologram-ai-common` is the compiler core. Neither is
-published as a stable API — only `hologram-ai` (the facade) is the stable public
-surface. Format importers are separate crates so consumers can opt in to only
-the formats they need.
+Seven crates. `hologram-ai-quant` is the foundational primitive layer (no IR
+dependency). `hologram-ai-common` is the compiler core. `hologram-ai-tokenizer`
+provides native tokenization using hologram primitives (see ADR-0012). None of
+these are published as a stable API — only `hologram-ai` (the facade) is the
+stable public surface. Format importers are separate crates so consumers can opt
+in to only the formats they need.

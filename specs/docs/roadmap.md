@@ -68,6 +68,10 @@
 | M2.7 | CLI: `hologram-ai download` works for GGUF models from HuggingFace |
 | M2.8 | CLI: `hologram-ai download --format onnx` triggers Python virtualenv conversion |
 | M2.9 | CLI: `--stats` flag shows tokens/s, TTFT, and peak memory on `generate` |
+| M2.10 | Tokenizer: `NativeTokenizer` BPE encode/decode passes golden tests for LLaMA |
+| M2.11 | Tokenizer: GGUF importer extracts vocab/merges into `ConstantStore` |
+| M2.12 | Tokenizer: `.holo` archives include embedded tokenizer section (0x1001) |
+| M2.13 | Tokenizer: `hologram-ai generate` works with embedded tokenizer (no `--tokenizer` flag) |
 
 ---
 
@@ -90,6 +94,8 @@
 
 | Milestone | Deliverable |
 |-----------|------------|
+| M3.0a | Tokenizer: SentencePiece (unigram) support in `NativeTokenizer` |
+| M3.0b | Tokenizer: WordPiece support in `NativeTokenizer` (BERT-class models) |
 | M3.1 | Metal backend: TinyLlama runs on Apple Silicon GPU |
 | M3.2 | Quantized GEMM: 2x throughput improvement vs eager dequant |
 | M3.3 | 7B model: Mistral 7B Q4_K_M generates 10+ tokens/sec on M2 |
@@ -130,6 +136,8 @@
 | T5 | KV-cache pointer arithmetic correct for 100+ turns | Phase 2 |
 | T6 | ONNX opset 13–17 coverage >90% of ops in test model set | Phase 2 |
 | T7 | f32 numerical error < 1e-5 vs ORT on all ONNX test models | Phase 2 |
+| T10 | BPE encode/decode round-trip matches HuggingFace tokenizers for LLaMA vocab | Phase 2 |
+| T11 | `.holo` archives with embedded tokenizer load and function correctly | Phase 2 |
 | T8 | Metal backend passes same golden tests as CPU | Phase 3 |
 | T9 | 7B model generates at ≥10 tokens/sec on M2 Pro | Phase 3 |
 
@@ -252,12 +260,20 @@ Do not over-specialize in MVP. Review op set every 6 months.
 
 ---
 
-### R-07: Tokenizer Integration
+### R-07: Native Tokenizer Implementation
 
-**Impact:** Low | **Likelihood:** Low | **Phase:** Phase 2
+**Impact:** Medium | **Likelihood:** Low | **Phase:** Phase 2
 
-**Mitigation:** `Tokenizer` trait is a thin `Box<dyn Tokenizer>` — no bundled
-implementation. Provide example integration with `tokenizers` crate.
+Native BPE/SentencePiece/WordPiece tokenizer implementation using hologram
+primitives (see ADR-0012). Risks include: BPE correctness (merge ordering,
+byte-fallback edge cases), Unicode normalization (NFC/NFKC, combining
+characters, zero-width joiners), pre-tokenization regex compatibility
+across LLaMA/GPT/Mistral tokenizer variants, and special token handling
+differences between model families.
+
+**Mitigation:** Golden test suite validated against HuggingFace `tokenizers`
+crate as reference (test-only dependency, not runtime). Start with LLaMA BPE
+(best documented, widest coverage). Expand incrementally by model family.
 
 ---
 
@@ -306,7 +322,7 @@ Document the minimal hologram API surface in section 2 of `architecture.md`.
 | R-04 | Memory planning bugs | High | Medium | MVP+ |
 | R-05 | Dynamic shape complexity | Medium | Medium | Phase 2 |
 | R-06 | LLM semantics drift | Medium | Medium | Phase 3+ |
-| R-07 | Tokenizer integration | Low | Low | Phase 2 |
+| R-07 | Native tokenizer impl | Medium | Low | Phase 2 |
 | R-08 | Portability (WASM/Win) | Medium | Medium | Phase 2–3 |
 | R-09 | Performance validation | Medium | Medium | Phase 2–3 |
 | R-10 | hologram API instability | High | Medium | MVP+ |

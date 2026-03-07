@@ -102,13 +102,33 @@ fn main() -> anyhow::Result<()> {
 // ── Run sub-commands ─────────────────────────────────────────────────────────
 
 /// Run a compiled `.holo` archive — delegates to `hologram run`.
+///
+/// Input values that aren't valid hex are treated as UTF-8 text and
+/// encoded to hex automatically (e.g. `0:"hello world"` → `0:68656c6c6f20776f726c64`).
 fn run_holo(file: PathBuf, inputs: Vec<String>) -> anyhow::Result<()> {
     use hologram::hologram_cli::commands::run_cmd::{RunArgs, execute};
+    let inputs = inputs.into_iter().map(encode_input_if_text).collect();
     let args = RunArgs { file, inputs };
     tokio::runtime::Builder::new_current_thread()
         .build()?
         .block_on(execute(args))
         .map_err(|e| anyhow::anyhow!("{e}"))
+}
+
+/// If the value portion of an `INDEX:VALUE` string isn't valid hex,
+/// re-encode it as UTF-8 hex bytes.
+fn encode_input_if_text(s: String) -> String {
+    let Some((idx, value)) = s.split_once(':') else { return s };
+    if is_valid_hex(value) {
+        return s;
+    }
+    let hex: String = value.bytes().map(|b| format!("{b:02x}")).collect();
+    format!("{idx}:{hex}")
+}
+
+/// Check if a string is valid hex (even length, all hex digits).
+fn is_valid_hex(s: &str) -> bool {
+    s.len() % 2 == 0 && !s.is_empty() && s.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
 // ── Info sub-commands ────────────────────────────────────────────────────────
