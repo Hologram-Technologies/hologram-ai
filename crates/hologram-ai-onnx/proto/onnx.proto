@@ -1,0 +1,138 @@
+// Minimal ONNX protobuf schema for hologram-ai-onnx.
+// Covers all types needed for LLM model import.
+// Field numbers match the official onnx/onnx.proto (github.com/onnx/onnx).
+
+syntax = "proto3";
+package onnx;
+
+message ModelProto {
+  int64  ir_version    = 1;
+  string domain        = 2;
+  int64  model_version = 5;
+  string doc_string    = 6;
+  GraphProto graph     = 7;
+  repeated OperatorSetIdProto opset_import = 8;
+}
+
+message GraphProto {
+  repeated NodeProto      node       = 1;
+  string                  name       = 2;
+  repeated TensorProto    initializer = 5;
+  repeated ValueInfoProto input      = 11;
+  repeated ValueInfoProto output     = 12;
+  repeated ValueInfoProto value_info = 13;
+}
+
+message NodeProto {
+  repeated string        input     = 1;
+  repeated string        output    = 2;
+  string                 name      = 3;
+  string                 op_type   = 4;
+  string                 domain    = 7;
+  repeated AttributeProto attribute = 5;
+  string                 doc_string = 6;
+}
+
+message AttributeProto {
+  string name  = 1;
+  float  f     = 4;
+  int64  i     = 3;
+  bytes  s     = 8;
+
+  repeated float floats = 6;
+  repeated int64 ints   = 7;
+
+  TensorProto t = 5;
+  repeated TensorProto tensors = 9;
+
+  enum AttributeType {
+    UNDEFINED = 0;
+    FLOAT     = 1;
+    INT       = 2;
+    STRING    = 3;
+    TENSOR    = 4;
+    GRAPH     = 5;
+    FLOATS    = 6;
+    INTS      = 7;
+    STRINGS   = 8;
+    TENSORS   = 9;
+    GRAPHS    = 10;
+  }
+  AttributeType type = 20;
+}
+
+message TensorProto {
+  repeated int64 dims      = 1;
+  int32          data_type = 2;
+  string         name      = 8;
+  bytes          raw_data  = 9;
+
+  repeated float  float_data  = 4;
+  repeated int32  int32_data  = 5;
+  repeated int64  int64_data  = 7;
+  repeated double double_data = 10;
+  repeated uint64 uint64_data = 11;
+
+  // Segment for large raw tensors (unused in Sprint 001).
+  message Segment {
+    int64 begin = 1;
+    int64 end   = 2;
+  }
+  Segment segment = 3;
+
+  enum DataType {
+    UNDEFINED  = 0;
+    FLOAT      = 1;
+    UINT8      = 2;
+    INT8       = 3;
+    UINT16     = 4;
+    INT16      = 5;
+    INT32      = 6;
+    INT64      = 7;
+    STRING     = 8;
+    BOOL       = 9;
+    FLOAT16    = 10;
+    DOUBLE     = 11;
+    UINT32     = 12;
+    UINT64     = 13;
+    COMPLEX64  = 14;
+    COMPLEX128 = 15;
+    BFLOAT16   = 16;
+    FLOAT8E4M3FN   = 17;
+    FLOAT8E4M3FNUZ = 18;
+    FLOAT8E5M2     = 19;
+    FLOAT8E5M2FNUZ = 20;
+    UINT4  = 21;
+    INT4   = 22;
+  }
+}
+
+message ValueInfoProto {
+  string    name = 1;
+  TypeProto type = 2;
+}
+
+message TypeProto {
+  message Tensor {
+    int32            elem_type = 1;
+    TensorShapeProto shape     = 2;
+  }
+  oneof value {
+    Tensor tensor_type = 1;
+  }
+}
+
+message TensorShapeProto {
+  message Dimension {
+    oneof value {
+      int64  dim_value = 1;
+      string dim_param = 2;
+    }
+  }
+  repeated Dimension dim = 1;
+}
+
+message OperatorSetIdProto {
+  string domain  = 1;
+  int64  version = 2;
+}

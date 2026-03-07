@@ -1,0 +1,19 @@
+[package]
+name    = "hologram-ai-onnx"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+build   = "build.rs"
+
+[dependencies]
+hologram-ai-common.workspace = true
+hologram-ai-quant.workspace  = true
+prost.workspace    = true
+bytes.workspace    = true
+half.workspace     = true
+anyhow.workspace   = true
+thiserror.workspace = true
+tracing.workspace  = true
+
+[build-dependencies]
+prost-build = "0.13"

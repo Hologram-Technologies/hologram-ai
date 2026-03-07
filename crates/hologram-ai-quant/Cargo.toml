@@ -1,0 +1,11 @@
+[package]
+name    = "hologram-ai-quant"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+half.workspace     = true
+smallvec.workspace = true
+bytemuck.workspace = true
+thiserror.workspace = true

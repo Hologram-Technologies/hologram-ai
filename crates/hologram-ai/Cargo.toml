@@ -1,0 +1,30 @@
+[package]
+name    = "hologram-ai"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "hologram-ai"
+path = "src/cli.rs"
+
+[dependencies]
+hologram-ai-common.workspace = true
+hologram-ai-quant.workspace  = true
+hologram-ai-onnx.workspace   = true
+hologram-ai-gguf.workspace   = true
+hologram-ai-ggml.workspace   = true
+# hologram with compiler feature — needed for hologram::compile()
+# default features already include compiler; workspace dep points to local path
+hologram.workspace = true
+
+bytemuck.workspace     = true
+anyhow.workspace       = true
+thiserror.workspace    = true
+futures.workspace      = true
+async-stream.workspace = true
+clap.workspace         = true
+tracing.workspace      = true
+serde.workspace        = true
+serde_json.workspace   = true
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }

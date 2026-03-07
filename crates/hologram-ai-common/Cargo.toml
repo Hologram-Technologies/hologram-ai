@@ -1,0 +1,19 @@
+[package]
+name    = "hologram-ai-common"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+hologram-ai-quant.workspace = true
+# hologram root crate — no compiler feature (lowering only produces Graph)
+hologram.workspace = true
+
+half.workspace      = true
+smallvec.workspace  = true
+bytemuck.workspace  = true
+indexmap.workspace  = true
+serde.workspace     = true
+thiserror.workspace = true
+anyhow.workspace    = true
+tracing.workspace   = true
