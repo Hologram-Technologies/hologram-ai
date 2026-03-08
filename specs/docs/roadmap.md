@@ -4,74 +4,84 @@
 
 ## MVP (Weeks 1–4)
 
-**Goal:** End-to-end single forward pass for a small GGUF decoder-only LLM on CPU.
+**Goal:** Compile a GGUF decoder-only LLM to a `.holo` archive with named
+`lm.prefill` and `lm.decode` entrypoints. Execute via `KvExecutor` directly.
 
 ### Scope
 
 - GGUF importer for LLaMA-family models (Q4_0 quantization)
 - `AiGraph` IR with core ops and quant descriptors
 - Optimization: constant folding, shape propagation, attention fusion
-- Memory planner: tensor liveness + KV-cache layout
-- Lowering to `hologram::Graph + ExecutionSchedule` (via `KvExecutor`)
-- `InferenceSession::run()` — single forward pass (no streaming)
-- Validation: golden tensor test against committed fixture
+- Memory planner: KV-cache layout computation → `KvCacheLayout`
+- Multi-graph lowering: prefill graph + decode graph (separate, same weights)
+- `hologram::compile()` produces `ExecutionSchedule` for each graph
+- Archive writer populates `LayerHeader` (0x0002) and `SECTION_LLM_META` (0x0011)
+- Validation: single-pass logits golden test via `KvExecutor` against committed fixture
+- CLI: `hologram-ai compile tinyllama.gguf -o tinyllama.holo`
 - CI: unit tests + integration smoke test
 
 ### Exit criteria
 
-- `hologram-ai-gguf` imports TinyLlama 1.1B Q4_0 without error
-- Single forward pass produces logits tensor of correct shape and dtype
-- Top-1 logit matches llama.cpp reference (greedy, no sampling) on golden prompt
+- `hologram-ai compile tinyllama.gguf` produces a valid `.holo` archive
+- Archive `LayerHeader` declares `lm.prefill` and `lm.decode` with correct tensor ports
+- `SECTION_LLM_META` reports correct `KvCacheLayout` for TinyLlama 1.1B
+- Calling `KvExecutor::execute_layer("lm.prefill", ...)` yields logits of correct shape
+- Top-1 logit matches llama.cpp reference (greedy) on golden prompt
 - All unit tests pass on `aarch64-apple-darwin` and `x86_64-unknown-linux-gnu`
 
 ### Explicitly deferred from MVP
 
 - ONNX importer
 - GGML importer
-- Streaming token generation
-- KV-cache (single-pass only)
 - Metal backend
-- Multi-turn conversation
 - Tokenizer integration
+- Bucketed (multi-variant) compilation
 
 ---
 
 ## Phase 2 (Weeks 5–10)
 
-**Goal:** Full LLM inference path with streaming, KV-cache, and ONNX support.
+**Goal:** Full compiler coverage — ONNX + GGML importers, extended arch recognizers,
+symbolic shapes, bucketed multi-entrypoint archives, tokenizer embedding, and validation
+harness. (ADR-0016: hologram-ai is a compiler; session management is caller-side.)
 
 ### Scope
 
-- KV-cache implementation and multi-turn session management
-- Streaming token generation via `TokenStream`
-- `hologram-ai-stream` with all sampling strategies
-- ONNX importer (opset 13–17, covering BERT + GPT-2 class models)
-- GGML importer (migration path for legacy weights)
-- Shape propagation for dynamic `seq_len` dimension
-- Validation harness: ONNX Runtime and llama.cpp reference comparisons
-- CLI: `hologram-ai run`, `hologram-ai generate`, `hologram-ai validate`
-- CLI: `hologram-ai compile`, `hologram-ai inspect` — `.holo` archive support
+- ONNX importer (opset 13–21, covering BERT + GPT-2 + encoder-decoder models)
+- GGML importer (full topology, migration path for legacy weights)
+- Extended GGUF arch recognizers: Mistral, Phi, Phi-3, Qwen, Qwen2, Gemma, Gemma2,
+  Mixtral, DeepSeek
+- Symbolic shape system: `DimExpr` algebra, `DimVarTable` with bounds, `ShapePropagation`
+  pass, constraint validation, bucketed `LayerHeader` emission (ADR-0015)
+- Bucketed archives: `ShapeStrategy::Bucketed` emits N named `lm.decode.*` layers in
+  `LayerHeader`; `SECTION_LLM_META` records bucket sizes for caller-side selection
+- Tokenizer embedding: `SECTION_TOKENIZER` (0x1001) in output archive (ADR-0012)
+- Validation harness: compile model + call `KvExecutor` directly + compare to ORT/llama.cpp
+- CLI: `hologram-ai compile`, `hologram-ai inspect`, `hologram-ai validate`
 - CLI: `hologram-ai download` — HuggingFace model acquisition + ONNX conversion
-- `--stats` benchmarking: tokens/s, time-to-first-token, peak memory
-- Expanded architecture recognizers: Mistral, Phi, Qwen, Gemma
+- CLI: `hologram-ai generate` — inline generation loop (caller-side, ≤50 CLI lines)
+- `--stats`: compile time, archive size; BF16 dtype support
 
 ### Milestones
 
 | Milestone | Deliverable |
 |-----------|------------|
-| M2.1 | KV-cache: multi-turn TinyLlama conversation works |
-| M2.2 | Streaming: `TokenStream` produces tokens with correct stop logic |
-| M2.3 | ONNX: BERT base classification passes numerical validation vs ORT |
-| M2.4 | ONNX: GPT-2 small text generation matches ORT outputs |
-| M2.5 | CLI: `hologram-ai generate` works from command line |
-| M2.6 | CLI: `hologram-ai compile` produces `.holo` archives via hologram CLI delegation |
-| M2.7 | CLI: `hologram-ai download` works for GGUF models from HuggingFace |
+| M2.1 | Archive: `lm.prefill` + `lm.decode` layers properly declared in `LayerHeader` |
+| M2.2 | Archive: `SECTION_LLM_META` (0x0011) records `KvCacheLayout` + entrypoint IDs |
+| M2.3 | ONNX: BERT base classification archive passes numerical validation vs ORT |
+| M2.4 | ONNX: GPT-2 small archive produces logits matching ORT reference |
+| M2.5 | CLI: `hologram-ai compile model.gguf -o model.holo` produces valid archive |
+| M2.6 | CLI: `hologram-ai inspect model.holo` reports layer names, tensor ports, KV layout |
+| M2.7 | CLI: `hologram-ai download` acquires GGUF models from HuggingFace |
 | M2.8 | CLI: `hologram-ai download --format onnx` triggers Python virtualenv conversion |
-| M2.9 | CLI: `--stats` flag shows tokens/s, TTFT, and peak memory on `generate` |
+| M2.9 | CLI: `hologram-ai generate model.holo "prompt"` runs inline decode loop, prints tokens |
 | M2.10 | Tokenizer: `NativeTokenizer` BPE encode/decode passes golden tests for LLaMA |
 | M2.11 | Tokenizer: GGUF importer extracts vocab/merges into `ConstantStore` |
 | M2.12 | Tokenizer: `.holo` archives include embedded tokenizer section (0x1001) |
-| M2.13 | Tokenizer: `hologram-ai generate` works with embedded tokenizer (no `--tokenizer` flag) |
+| M2.13 | Tokenizer: `hologram-ai generate` decodes token IDs to text via embedded tokenizer |
+| M2.14 | Shapes: `DimExpr` + `DimVarTable` types replace `Dim` enum (Phase 0, no behavior change) |
+| M2.15 | Shapes: `ShapePropagation` pass fills output shapes symbolically for TinyLlama graph |
+| M2.16 | Shapes: Bucketed archive emits N `lm.decode.*` layers; caller selects by seq_len |
 
 ---
 
@@ -133,11 +143,13 @@
 | T2 | `AiGraph` validation passes for all committed fixtures | MVP |
 | T3 | Lowering table covers all ops in LLaMA graph | MVP |
 | T4 | Memory planner deterministic across runs | MVP |
-| T5 | KV-cache pointer arithmetic correct for 100+ turns | Phase 2 |
+| T5 | `LayerHeader` declares correct tensor ports for `lm.prefill` + `lm.decode`; KV-cache offset math in KvSlotWrite/Read nodes correct | Phase 2 |
 | T6 | ONNX opset 13–17 coverage >90% of ops in test model set | Phase 2 |
 | T7 | f32 numerical error < 1e-5 vs ORT on all ONNX test models | Phase 2 |
 | T10 | BPE encode/decode round-trip matches HuggingFace tokenizers for LLaMA vocab | Phase 2 |
 | T11 | `.holo` archives with embedded tokenizer load and function correctly | Phase 2 |
+| T12 | `ShapePropagation` fills all output shapes for TinyLlama GGUF graph with symbolic dims | Phase 2 |
+| T13 | Shape constraints (MatMul inner dim, broadcast compat) collected and validated at concretization | Phase 2 |
 | T8 | Metal backend passes same golden tests as CPU | Phase 3 |
 | T9 | 7B model generates at ≥10 tokens/sec on M2 Pro | Phase 3 |
 
@@ -145,8 +157,8 @@
 
 | ID | Description | Phase |
 |----|-------------|-------|
-| D1 | `hologram-ai generate tinyllama.gguf "Hello"` produces coherent output | MVP |
-| D2 | Multi-turn conversation: 10-turn chat with consistent context | Phase 2 |
+| D1 | `hologram-ai compile tinyllama.gguf -o t.holo && hologram-ai generate t.holo "Hello"` produces coherent output | MVP |
+| D2 | Multi-turn conversation via `hologram-ai generate` CLI (inline generation loop, embedded tokenizer) | Phase 2 |
 | D3 | BERT sentiment classification demo via ONNX | Phase 2 |
 | D4 | 7B model chat demo on Apple Silicon | Phase 3 |
 | D5 | Side-by-side perf comparison with llama.cpp on same hardware | Phase 3 |
@@ -168,10 +180,13 @@
 - Metal backend depends on hologram-metal being ready
 - Architecture is designed to be backend-agnostic from day one
 
-**KV-cache after single-pass** because:
-- KV-cache introduces stateful session complexity
-- Single-pass validates the complete lowering pipeline first
-- Easier to debug correctness issues without cache state
+**Two graphs (prefill + decode) rather than one** because:
+- Prefill processes variable-length prompts; decode processes one token at a time
+- They have different graph shapes and different KV-cache write/read patterns
+- Emitting them as separate named layers in `LayerHeader` lets the caller
+  (or hologram-network executor) dispatch each independently
+- Shared weights are stored once in the `ConstantStore` (both graphs reference
+  the same `ConstantId`s)
 
 ---
 
@@ -183,6 +198,8 @@
 - Model compression utilities (post-training quantization, pruning)
 - Safetensors format import
 - PyTorch TorchScript import
+- Inference session management library (callers use `HoloLoader` + `KvExecutor` directly
+  per ADR-0016; session convenience wrappers are application-scope, not hologram-ai scope)
 
 ---
 
@@ -242,9 +259,16 @@ flag, default true). Introduce aliasing incrementally with explicit tests.
 
 `seq_len` is dynamic; `hologram::Graph` needs concrete shapes.
 
-**Resolution (MVP):** Fix `seq_len = max_seq_len` at lowering time; rebuild graph
-if a different concrete seq_len is required. Phase 2: cache compiled graphs per
-seq_len bucket.
+**Resolution:** Symbolic shape system (ADR-0015) with phased lowering strategies:
+- **MVP (FixToMax):** Fix `seq_len = max_seq_len` at lowering time; rebuild graph
+  when different concrete seq_len is required.
+- **Phase 2 (Bucketed):** Compile N variants for `seq_len` bucket sizes (e.g.,
+  128, 512, 1024, 2048). Runtime selects smallest bucket ≥ actual value.
+- **Phase 3 (Profiles/PaddedMax):** Multi-variable specialization or fixed-max
+  with attention masking for actual length.
+
+See [symbolic-shapes.md](specs/projects/hologram-ai/symbolic-shapes.md) for the
+full strategy taxonomy and `DimExpr`/`DimVarTable` type design.
 
 ---
 
@@ -320,7 +344,7 @@ Document the minimal hologram API surface in section 2 of `architecture.md`.
 | R-02 | Quantization complexity | High | High | MVP+ |
 | R-03 | Backend kernel mismatch | Medium | Medium | Phase 2–3 |
 | R-04 | Memory planning bugs | High | Medium | MVP+ |
-| R-05 | Dynamic shape complexity | Medium | Medium | Phase 2 |
+| R-05 | Dynamic shape complexity (ADR-0015) | Medium | Medium | Phase 2 |
 | R-06 | LLM semantics drift | Medium | Medium | Phase 3+ |
 | R-07 | Native tokenizer impl | Medium | Low | Phase 2 |
 | R-08 | Portability (WASM/Win) | Medium | Medium | Phase 2–3 |

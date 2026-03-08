@@ -19,7 +19,8 @@ hologram-ai-quant  = { path = "crates/hologram-ai-quant" }
 hologram-ai-common = { path = "crates/hologram-ai-common" }
 hologram-ai-onnx   = { path = "crates/hologram-ai-onnx" }
 hologram-ai-gguf   = { path = "crates/hologram-ai-gguf" }
-hologram-ai-ggml   = { path = "crates/hologram-ai-ggml" }
+hologram-ai-ggml      = { path = "crates/hologram-ai-ggml" }
+hologram-ai-tokenizer = { path = "crates/hologram-ai-tokenizer" }
 
 # third-party
 anyhow        = "1"

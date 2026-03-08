@@ -621,6 +621,7 @@ dependencies = [
  "hologram-ai-gguf",
  "hologram-ai-onnx",
  "hologram-ai-quant",
+ "hologram-ai-tokenizer",
  "indicatif",
  "reqwest",
  "serde",
@@ -697,6 +698,15 @@ dependencies = [
  "half",
  "smallvec",
  "thiserror 2.0.18",
+]
+
+[[package]]
+name = "hologram-ai-tokenizer"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

@@ -10,16 +10,20 @@ use crate::ir::{AiGraph, AiOp, Dim, TensorId, TensorInfo};
 use crate::mem::KvCacheLayout;
 use super::dispatch::{dispatch, DispatchTarget};
 use super::custom_ops::{
-    and_handler, attention_handler, cast_handler, ceil_handler, clip_handler,
-    concat_handler, dequant_handler, div_handler, embed_handler, equal_handler,
-    erf_handler, flatten_handler, floor_handler, gather_handler, gather_nd_handler,
-    greater_handler, greater_or_equal_handler, isnan_handler, layer_norm_handler,
-    less_handler, less_or_equal_handler, log_softmax_handler, matmul_handler,
-    max_handler, min_handler, mod_handler, not_handler, or_handler, pow_handler,
-    range_handler, reciprocal_handler, reduce_max_handler, reduce_mean_handler,
-    reduce_min_handler, reduce_sum_handler, reshape_handler, rms_norm_handler,
-    rope_handler, round_handler, shape_handler, sign_handler, softmax_handler,
-    swiglu_handler, where_handler, xor_handler,
+    abs_handler, add_handler, and_handler, attention_handler, cast_handler,
+    ceil_handler, clip_handler, concat_handler, cos_handler, dequant_handler,
+    div_handler, embed_handler, equal_handler, erf_handler, exp_handler,
+    flatten_handler, floor_handler, gather_handler, gather_nd_handler,
+    gelu_handler, greater_handler, greater_or_equal_handler, isnan_handler,
+    layer_norm_handler, less_handler, less_or_equal_handler, log_handler,
+    log_softmax_handler, matmul_handler, max_handler, min_handler,
+    mod_handler, mul_handler, neg_handler, not_handler, or_handler,
+    pow_handler, range_handler, reciprocal_handler, reduce_max_handler,
+    reduce_mean_handler, reduce_min_handler, reduce_sum_handler,
+    relu_handler, reshape_handler, rms_norm_handler, rope_handler,
+    round_handler, shape_handler, sigmoid_handler, sign_handler,
+    silu_handler, sin_handler, softmax_handler, sqrt_handler, sub_handler,
+    swiglu_handler, tanh_handler, where_handler, xor_handler,
 };
 
 // ── Public types ──────────────────────────────────────────────────────────────
@@ -100,6 +104,12 @@ pub fn lower(
     let topo = ai_graph.topo_order();
     let node_map: HashMap<u32, &_> = ai_graph.nodes.iter().map(|n| (n.id, n)).collect();
 
+    // Counter for allocating unique CustomOpIds for shape-dependent ops.
+    // Shape-dependent ops (MatMul, Gather, Attention) bake tensor dimensions into
+    // their handlers, so each node instance needs its own handler and ID.
+    // Start above the fixed IDs in dispatch.rs (currently up to 46).
+    let mut next_unique_id: u32 = 1000;
+
     for nid in topo {
         let node = node_map[&nid];
 
@@ -116,9 +126,18 @@ pub fn lower(
                 }
             }
             DispatchTarget::Custom { id, arity } => {
-                register_handler(&mut registry, id, arity, &node.op,
+                // Shape-dependent ops need unique IDs per node instance,
+                // since different nodes have different baked-in dimensions.
+                let effective_id = if is_shape_dependent(&node.op) {
+                    let uid = CustomOpId(next_unique_id);
+                    next_unique_id += 1;
+                    uid
+                } else {
+                    id
+                };
+                register_handler(&mut registry, effective_id, arity, &node.op,
                                  &node.inputs, &ai_graph.tensor_info)?;
-                builder = builder.custom_op(id, arity, &input_idxs);
+                builder = builder.custom_op(effective_id, arity, &input_idxs);
                 if let Some(&tid) = node.outputs.first() {
                     tid_to_idx.insert(tid, builder.len() - 1);
                 }
@@ -243,10 +262,39 @@ fn register_handler(
         AiOp::ReduceMax { .. }                 => reduce_max_handler(),
         AiOp::ReduceMin { .. }                 => reduce_min_handler(),
         AiOp::LogSoftmax { .. }                => log_softmax_handler(),
+        AiOp::Add                              => add_handler(),
+        AiOp::Sub                              => sub_handler(),
+        AiOp::Mul                              => mul_handler(),
+        AiOp::Neg                              => neg_handler(),
+        AiOp::Relu                             => relu_handler(),
+        AiOp::Gelu | AiOp::GeluApprox         => gelu_handler(),
+        AiOp::Silu                             => silu_handler(),
+        AiOp::Tanh                             => tanh_handler(),
+        AiOp::Sigmoid                          => sigmoid_handler(),
+        AiOp::Exp                              => exp_handler(),
+        AiOp::Log                              => log_handler(),
+        AiOp::Sqrt                             => sqrt_handler(),
+        AiOp::Abs                              => abs_handler(),
+        AiOp::Cos                              => cos_handler(),
+        AiOp::Sin                              => sin_handler(),
         _ => anyhow::bail!("no custom handler registered for op {:?}", op),
     };
     registry.register(id, arity, handler);
     Ok(())
+}
+
+/// Whether this op bakes tensor dimensions into its custom handler.
+///
+/// Shape-dependent ops need unique `CustomOpId`s per node so each instance
+/// gets its own handler with the correct dimensions.
+fn is_shape_dependent(op: &AiOp) -> bool {
+    matches!(op,
+        AiOp::MatMul | AiOp::BatchMatMul | AiOp::Gemm { .. }
+        | AiOp::Gather { .. } | AiOp::GatherElements { .. }
+        | AiOp::MultiHeadAttention { .. }
+        | AiOp::GroupedQueryAttention { .. }
+        | AiOp::FlashAttentionHint
+    )
 }
 
 /// Extract the concrete value from a `Dim`, returning `None` for symbolic/dynamic dims.

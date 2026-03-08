@@ -1,6 +1,6 @@
 //! Op dispatch: `AiOp` → hologram `GraphOp` or custom op ID.
 
-use hologram::{CustomOpId, GraphOp, LutOp, PrimOp};
+use hologram::{CustomOpId, GraphOp};
 use hologram_ai_quant::QuantScheme;
 use crate::ir::AiOp;
 
@@ -53,6 +53,21 @@ pub const FLOOR_OP_ID:      CustomOpId = CustomOpId(43);
 pub const CEIL_OP_ID:       CustomOpId = CustomOpId(44);
 pub const ROUND_OP_ID:      CustomOpId = CustomOpId(45);
 pub const LOG_SOFTMAX_OP_ID:CustomOpId = CustomOpId(46);
+pub const ADD_OP_ID:        CustomOpId = CustomOpId(47);
+pub const SUB_OP_ID:        CustomOpId = CustomOpId(48);
+pub const MUL_OP_ID:        CustomOpId = CustomOpId(49);
+pub const NEG_OP_ID:        CustomOpId = CustomOpId(50);
+pub const RELU_OP_ID:       CustomOpId = CustomOpId(51);
+pub const GELU_OP_ID:       CustomOpId = CustomOpId(52);
+pub const SILU_OP_ID:       CustomOpId = CustomOpId(53);
+pub const TANH_OP_ID:       CustomOpId = CustomOpId(54);
+pub const SIGMOID_OP_ID:    CustomOpId = CustomOpId(55);
+pub const EXP_OP_ID:        CustomOpId = CustomOpId(56);
+pub const LOG_OP_ID:        CustomOpId = CustomOpId(57);
+pub const SQRT_OP_ID:       CustomOpId = CustomOpId(58);
+pub const ABS_OP_ID:        CustomOpId = CustomOpId(59);
+pub const COS_OP_ID:        CustomOpId = CustomOpId(60);
+pub const SIN_OP_ID:        CustomOpId = CustomOpId(61);
 
 /// Categorised dispatch target for a single `AiOp`.
 ///
@@ -77,28 +92,31 @@ pub fn dispatch(op: &AiOp) -> DispatchTarget {
     use DispatchTarget as D;
 
     match op {
-        // ── Activations → LUT ─────────────────────────────────────────────
-        Relu       => D::GraphOp(GraphOp::Lut(LutOp::Relu)),
-        Gelu       => D::GraphOp(GraphOp::Lut(LutOp::Gelu)),
-        GeluApprox => D::GraphOp(GraphOp::Lut(LutOp::Gelu)),
-        Silu       => D::GraphOp(GraphOp::Lut(LutOp::Silu)),
-        Tanh       => D::GraphOp(GraphOp::Lut(LutOp::Tanh)),
-        Sigmoid    => D::GraphOp(GraphOp::Lut(LutOp::Sigmoid)),
+        // ── Activations (f32 custom handlers) ─────────────────────────────
+        // Route through f32 handlers instead of byte-level LUT tables.
+        Relu       => D::Custom { id: RELU_OP_ID,    arity: 1 },
+        Gelu       => D::Custom { id: GELU_OP_ID,    arity: 1 },
+        GeluApprox => D::Custom { id: GELU_OP_ID,    arity: 1 },
+        Silu       => D::Custom { id: SILU_OP_ID,    arity: 1 },
+        Tanh       => D::Custom { id: TANH_OP_ID,    arity: 1 },
+        Sigmoid    => D::Custom { id: SIGMOID_OP_ID, arity: 1 },
 
-        // ── Unary math → LUT ────────────────────────────────────────────
-        Exp  => D::GraphOp(GraphOp::Lut(LutOp::Exp)),
-        Log  => D::GraphOp(GraphOp::Lut(LutOp::Log)),
-        Sqrt => D::GraphOp(GraphOp::Lut(LutOp::Sqrt)),
-        Abs  => D::GraphOp(GraphOp::Lut(LutOp::Abs)),
-        Cos  => D::GraphOp(GraphOp::Lut(LutOp::Cos)),
-        Sin  => D::GraphOp(GraphOp::Lut(LutOp::Sin)),
+        // ── Unary math (f32 custom handlers) ─────────────────────────────
+        Exp  => D::Custom { id: EXP_OP_ID,  arity: 1 },
+        Log  => D::Custom { id: LOG_OP_ID,  arity: 1 },
+        Sqrt => D::Custom { id: SQRT_OP_ID, arity: 1 },
+        Abs  => D::Custom { id: ABS_OP_ID,  arity: 1 },
+        Cos  => D::Custom { id: COS_OP_ID,  arity: 1 },
+        Sin  => D::Custom { id: SIN_OP_ID,  arity: 1 },
 
-        // ── Binary elementwise → Prim ──────────────────────────────────────
-        Add => D::GraphOp(GraphOp::Prim(PrimOp::Add)),
-        Sub => D::GraphOp(GraphOp::Prim(PrimOp::Sub)),
-        Mul => D::GraphOp(GraphOp::Prim(PrimOp::Mul)),
+        // ── Binary elementwise ────────────────────────────────────────────
+        // Route through custom f32 handlers instead of native PrimOp
+        // (byte-level Z/256Z ring) so we get float arithmetic + broadcasting.
+        Add => D::Custom { id: ADD_OP_ID,  arity: 2 },
+        Sub => D::Custom { id: SUB_OP_ID,  arity: 2 },
+        Mul => D::Custom { id: MUL_OP_ID,  arity: 2 },
         Div => D::Custom { id: DIV_OP_ID,  arity: 2 },
-        Neg => D::GraphOp(GraphOp::Prim(PrimOp::Neg)),
+        Neg => D::Custom { id: NEG_OP_ID,  arity: 1 },
         Pow => D::Custom { id: POW_OP_ID,  arity: 2 },
         Mod => D::Custom { id: MOD_OP_ID,  arity: 2 },
         Min => D::Custom { id: MIN_OP_ID,  arity: 2 },

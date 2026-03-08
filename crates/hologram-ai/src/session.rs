@@ -79,6 +79,11 @@ impl InferenceSession {
         Self { model }
     }
 
+    /// Access the underlying compiled model.
+    pub fn model(&self) -> &CompiledModel {
+        &self.model
+    }
+
     /// Run a single forward pass and return logits.
     ///
     /// `token_ids` — input token IDs for this batch.
@@ -87,8 +92,20 @@ impl InferenceSession {
         let plan = hologram::load_from_bytes(&self.model.archive)
             .context("loading compiled archive")?;
 
+        // Encode token IDs as INT64 little-endian (ONNX convention).
+        let input_ids_bytes: Vec<u8> = token_ids
+            .iter()
+            .flat_map(|&id| (id as i64).to_le_bytes())
+            .collect();
+
+        // Attention mask: all ones, same length as token_ids.
+        let attention_mask_bytes: Vec<u8> = (0..token_ids.len())
+            .flat_map(|_| 1i64.to_le_bytes())
+            .collect();
+
         let mut inputs = hologram::GraphInputs::new();
-        inputs.set(0, bytemuck::cast_slice(token_ids).to_vec());
+        inputs.set(0, input_ids_bytes);
+        inputs.set(1, attention_mask_bytes);
 
         let outputs = hologram::KvExecutor::execute_with_weights(
             plan.graph(),

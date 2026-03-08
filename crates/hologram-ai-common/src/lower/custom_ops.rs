@@ -6,6 +6,151 @@
 use std::sync::Arc;
 use hologram::CustomHandler;
 
+// ── f32 arithmetic with broadcasting ──────────────────────────────────────
+//
+// These replace native PrimOps (which do byte-level Z/256Z ring arithmetic)
+// with proper f32 arithmetic and broadcasting support for AI inference.
+
+/// Inputs: [a (f32), b (f32)]  Output: [a + b (f32)] with broadcasting.
+pub fn add_handler() -> CustomHandler {
+    Arc::new(|inputs, _| {
+        let a = bytemuck::cast_slice::<u8, f32>(inputs[0]);
+        let b = bytemuck::cast_slice::<u8, f32>(inputs[1]);
+        let out: Vec<f32> = a.iter().zip(b.iter().cycle())
+            .map(|(&x, &y)| x + y)
+            .collect();
+        Ok(bytemuck::cast_slice(&out).to_vec())
+    })
+}
+
+/// Inputs: [a (f32), b (f32)]  Output: [a - b (f32)] with broadcasting.
+pub fn sub_handler() -> CustomHandler {
+    Arc::new(|inputs, _| {
+        let a = bytemuck::cast_slice::<u8, f32>(inputs[0]);
+        let b = bytemuck::cast_slice::<u8, f32>(inputs[1]);
+        let out: Vec<f32> = a.iter().zip(b.iter().cycle())
+            .map(|(&x, &y)| x - y)
+            .collect();
+        Ok(bytemuck::cast_slice(&out).to_vec())
+    })
+}
+
+/// Inputs: [a (f32), b (f32)]  Output: [a * b (f32)] with broadcasting.
+pub fn mul_handler() -> CustomHandler {
+    Arc::new(|inputs, _| {
+        let a = bytemuck::cast_slice::<u8, f32>(inputs[0]);
+        let b = bytemuck::cast_slice::<u8, f32>(inputs[1]);
+        let out: Vec<f32> = a.iter().zip(b.iter().cycle())
+            .map(|(&x, &y)| x * y)
+            .collect();
+        Ok(bytemuck::cast_slice(&out).to_vec())
+    })
+}
+
+/// Inputs: [x (f32)]  Output: [-x (f32)]
+pub fn neg_handler() -> CustomHandler {
+    Arc::new(|inputs, _| {
+        let x = bytemuck::cast_slice::<u8, f32>(inputs[0]);
+        let out: Vec<f32> = x.iter().map(|v| -v).collect();
+        Ok(bytemuck::cast_slice(&out).to_vec())
+    })
+}
+
+// ── f32 activations ──────────────────────────────────────────────────────
+//
+// These replace native LutOps (byte-level LUT tables) with proper f32
+// implementations for AI inference.
+
+pub fn relu_handler() -> CustomHandler {
+    Arc::new(|inputs, _| {
+        let x = bytemuck::cast_slice::<u8, f32>(inputs[0]);
+        let out: Vec<f32> = x.iter().map(|&v| v.max(0.0)).collect();
+        Ok(bytemuck::cast_slice(&out).to_vec())
+    })
+}
+
+pub fn gelu_handler() -> CustomHandler {
+    Arc::new(|inputs, _| {
+        let x = bytemuck::cast_slice::<u8, f32>(inputs[0]);
+        let out: Vec<f32> = x.iter().map(|&v| {
+            0.5 * v * (1.0 + (std::f32::consts::FRAC_2_SQRT_PI * (v + 0.044715 * v * v * v) * std::f32::consts::FRAC_1_SQRT_2).tanh())
+        }).collect();
+        Ok(bytemuck::cast_slice(&out).to_vec())
+    })
+}
+
+pub fn silu_handler() -> CustomHandler {
+    Arc::new(|inputs, _| {
+        let x = bytemuck::cast_slice::<u8, f32>(inputs[0]);
+        let out: Vec<f32> = x.iter().map(|&v| v / (1.0 + (-v).exp())).collect();
+        Ok(bytemuck::cast_slice(&out).to_vec())
+    })
+}
+
+pub fn tanh_handler() -> CustomHandler {
+    Arc::new(|inputs, _| {
+        let x = bytemuck::cast_slice::<u8, f32>(inputs[0]);
+        let out: Vec<f32> = x.iter().map(|v| v.tanh()).collect();
+        Ok(bytemuck::cast_slice(&out).to_vec())
+    })
+}
+
+pub fn sigmoid_handler() -> CustomHandler {
+    Arc::new(|inputs, _| {
+        let x = bytemuck::cast_slice::<u8, f32>(inputs[0]);
+        let out: Vec<f32> = x.iter().map(|&v| 1.0 / (1.0 + (-v).exp())).collect();
+        Ok(bytemuck::cast_slice(&out).to_vec())
+    })
+}
+
+pub fn exp_handler() -> CustomHandler {
+    Arc::new(|inputs, _| {
+        let x = bytemuck::cast_slice::<u8, f32>(inputs[0]);
+        let out: Vec<f32> = x.iter().map(|v| v.exp()).collect();
+        Ok(bytemuck::cast_slice(&out).to_vec())
+    })
+}
+
+pub fn log_handler() -> CustomHandler {
+    Arc::new(|inputs, _| {
+        let x = bytemuck::cast_slice::<u8, f32>(inputs[0]);
+        let out: Vec<f32> = x.iter().map(|v| v.ln()).collect();
+        Ok(bytemuck::cast_slice(&out).to_vec())
+    })
+}
+
+pub fn sqrt_handler() -> CustomHandler {
+    Arc::new(|inputs, _| {
+        let x = bytemuck::cast_slice::<u8, f32>(inputs[0]);
+        let out: Vec<f32> = x.iter().map(|v| v.sqrt()).collect();
+        Ok(bytemuck::cast_slice(&out).to_vec())
+    })
+}
+
+pub fn abs_handler() -> CustomHandler {
+    Arc::new(|inputs, _| {
+        let x = bytemuck::cast_slice::<u8, f32>(inputs[0]);
+        let out: Vec<f32> = x.iter().map(|v| v.abs()).collect();
+        Ok(bytemuck::cast_slice(&out).to_vec())
+    })
+}
+
+pub fn cos_handler() -> CustomHandler {
+    Arc::new(|inputs, _| {
+        let x = bytemuck::cast_slice::<u8, f32>(inputs[0]);
+        let out: Vec<f32> = x.iter().map(|v| v.cos()).collect();
+        Ok(bytemuck::cast_slice(&out).to_vec())
+    })
+}
+
+pub fn sin_handler() -> CustomHandler {
+    Arc::new(|inputs, _| {
+        let x = bytemuck::cast_slice::<u8, f32>(inputs[0]);
+        let out: Vec<f32> = x.iter().map(|v| v.sin()).collect();
+        Ok(bytemuck::cast_slice(&out).to_vec())
+    })
+}
+
 // ── RmsNorm ────────────────────────────────────────────────────────────────
 
 /// Inputs: [x (f32), weight (f32)]  Output: [y (f32)]

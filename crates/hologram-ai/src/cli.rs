@@ -58,10 +58,14 @@ fn main() -> anyhow::Result<()> {
             match model.extension().and_then(|e: &std::ffi::OsStr| e.to_str()).unwrap_or("") {
                 "holo" => run_holo(model, inputs)?,
                 _ => {
+                    let t0 = std::time::Instant::now();
                     let source = model_source_from_path(&model)?;
                     let compiled = ModelCompiler::default().compile(source)?;
+                    eprintln!("[compile] {:.2?}", t0.elapsed());
                     let mut sess = InferenceSession::new(Arc::new(compiled));
+                    let t1 = std::time::Instant::now();
                     let logits = sess.run(&tokens)?;
+                    eprintln!("[inference] {:.2?}", t1.elapsed());
                     println!("logits shape: [{}]", logits.len());
                 }
             }
@@ -101,13 +105,22 @@ fn main() -> anyhow::Result<()> {
 
 // ── Run sub-commands ─────────────────────────────────────────────────────────
 
-/// Run a compiled `.holo` archive — delegates to `hologram run`.
+/// Run a compiled `.holo` archive.
 ///
-/// Input values that aren't valid hex are treated as UTF-8 text and
-/// encoded to hex automatically (e.g. `0:"hello world"` → `0:68656c6c6f20776f726c64`).
+/// If any input looks like text (not valid hex), we tokenize it and run
+/// through the AI inference pipeline (which has custom op handlers).
+/// Otherwise we delegate to the generic `hologram run`.
 fn run_holo(file: PathBuf, inputs: Vec<String>) -> anyhow::Result<()> {
+    if has_text_inputs(&inputs) {
+        run_ai_inference(&file, &inputs)
+    } else {
+        run_holo_raw(file, inputs)
+    }
+}
+
+/// Raw `.holo` execution — delegates to generic `hologram run`.
+fn run_holo_raw(file: PathBuf, inputs: Vec<String>) -> anyhow::Result<()> {
     use hologram::hologram_cli::commands::run_cmd::{RunArgs, execute};
-    let inputs = inputs.into_iter().map(encode_input_if_text).collect();
     let args = RunArgs { file, inputs };
     tokio::runtime::Builder::new_current_thread()
         .build()?
@@ -115,15 +128,92 @@ fn run_holo(file: PathBuf, inputs: Vec<String>) -> anyhow::Result<()> {
         .map_err(|e| anyhow::anyhow!("{e}"))
 }
 
-/// If the value portion of an `INDEX:VALUE` string isn't valid hex,
-/// re-encode it as UTF-8 hex bytes.
-fn encode_input_if_text(s: String) -> String {
-    let Some((idx, value)) = s.split_once(':') else { return s };
-    if is_valid_hex(value) {
-        return s;
+/// AI inference with tokenization.
+///
+/// Tokenizes text input, finds the source model (ONNX/GGUF) next to the
+/// `.holo` file, compiles it (to get the custom op registry), and runs
+/// inference via `InferenceSession`.
+fn run_ai_inference(holo_path: &std::path::Path, inputs: &[String]) -> anyhow::Result<()> {
+    use hologram_ai_tokenizer::{NativeTokenizer, Tokenizer};
+
+    let dir = holo_path.parent().unwrap_or(std::path::Path::new("."));
+
+    // Find text to tokenize (first non-hex input value)
+    let text = inputs
+        .iter()
+        .find_map(|s| {
+            let (_, value) = s.split_once(':')?;
+            if is_valid_hex(value) { None } else { Some(value) }
+        })
+        .ok_or_else(|| anyhow::anyhow!("no text input found"))?;
+
+    // Discover and load tokenizer
+    let tok_path = dir.join("tokenizer.json");
+    anyhow::ensure!(tok_path.exists(),
+        "no tokenizer.json found in {}. Use --tokenizer to specify one.", dir.display());
+    let tokenizer = NativeTokenizer::from_tokenizer_json(&tok_path)?;
+    let token_ids = tokenizer.encode(text);
+
+    eprintln!(
+        "tokenized {} tokens (vocab={}, tokenizer={})",
+        token_ids.len(),
+        tokenizer.vocab_size(),
+        tok_path.display()
+    );
+
+    // Find source model to compile (needed for custom op registry)
+    let source_path = find_source_model(dir)?;
+    eprintln!("compiling {} ...", source_path.display());
+
+    let source = model_source_from_path(&source_path)?;
+    let compiled = ModelCompiler::default().compile(source)?;
+    let mut sess = InferenceSession::new(Arc::new(compiled));
+
+    let logits = sess.run(&token_ids)?;
+
+    let vocab_size = sess.model().metadata.vocab_size as usize;
+    let seq_len = token_ids.len();
+    eprintln!("logits: [{seq_len} x {vocab_size}]");
+
+    // Print top-5 predictions for the last token position
+    if vocab_size > 0 && logits.len() >= vocab_size {
+        let last_logits = &logits[logits.len() - vocab_size..];
+        let mut indexed: Vec<(usize, f32)> = last_logits.iter().copied().enumerate().collect();
+        indexed.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+
+        println!("top predictions:");
+        for (id, score) in indexed.iter().take(5) {
+            let token = tokenizer.id_to_token(*id as u32).unwrap_or("?");
+            println!("  {id:>6} {token:>20}  {score:.4}");
+        }
     }
-    let hex: String = value.bytes().map(|b| format!("{b:02x}")).collect();
-    format!("{idx}:{hex}")
+
+    Ok(())
+}
+
+/// Find a source model (ONNX or GGUF) in the given directory.
+fn find_source_model(dir: &std::path::Path) -> anyhow::Result<PathBuf> {
+    for ext in &["onnx", "gguf"] {
+        for entry in std::fs::read_dir(dir)? {
+            let path = entry?.path();
+            if path.extension().and_then(|e| e.to_str()) == Some(ext) {
+                return Ok(path);
+            }
+        }
+    }
+    anyhow::bail!(
+        "no source model (.onnx or .gguf) found in {}. \
+         AI models need the source model for custom op handlers.",
+        dir.display()
+    )
+}
+
+/// Check if any input value looks like text (not valid hex).
+fn has_text_inputs(inputs: &[String]) -> bool {
+    inputs.iter().any(|s| {
+        let Some((_, value)) = s.split_once(':') else { return false };
+        !is_valid_hex(value)
+    })
 }
 
 /// Check if a string is valid hex (even length, all hex digits).

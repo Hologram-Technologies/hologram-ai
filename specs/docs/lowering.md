@@ -40,6 +40,8 @@ pub struct AiGraph {
     pub tensor_info: HashMap<TensorId, TensorInfo>,
     pub metadata: HashMap<String, MetaValue>,  // arch config, rope params, etc.
     pub warnings: Vec<ImportWarning>,
+    pub dim_vars: DimVarTable,              // dimension variable registry (ADR-0015)
+    pub shape_constraints: ConstraintStore,  // collected shape constraints (ADR-0015)
 }
 ```
 
@@ -162,17 +164,37 @@ pub struct TensorInfo {
 }
 ```
 
-### `Shape`
+### `Shape` and `DimExpr`
+
+See [symbolic-shapes.md](symbolic-shapes.md) for the full specification and
+[ADR-0015](../../adrs/0015-hologram-ai-symbolic-shapes.md) for the decision record.
 
 ```rust
-pub type Shape = SmallVec<[Dim; 6]>;
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Ord, PartialOrd)]
+pub struct DimVarId(u32);  // interned index into DimVarTable
 
-pub enum Dim {
-    Concrete(u64),
-    Symbolic(String),    // e.g. "batch", "seq_len", "n_tokens"
-    Dynamic,             // unknown, resolved at runtime
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum DimExpr {
+    Concrete(u64),                         // known constant
+    Var(DimVarId),                         // symbolic variable (batch, seq_len, etc.)
+    Add(Box<DimExpr>, Box<DimExpr>),       // arithmetic
+    Sub(Box<DimExpr>, Box<DimExpr>),
+    Mul(Box<DimExpr>, Box<DimExpr>),
+    Div(Box<DimExpr>, Box<DimExpr>),
+    Mod(Box<DimExpr>, Box<DimExpr>),
+    CeilDiv(Box<DimExpr>, Box<DimExpr>),   // ceil(a/b) — padding/tiling
+    Max(Box<DimExpr>, Box<DimExpr>),       // broadcast
+    Min(Box<DimExpr>, Box<DimExpr>),       // clamp
+    Dynamic,                                // truly unknown (data-dependent)
 }
+
+pub type Shape = SmallVec<[DimExpr; 4]>;
 ```
+
+`DimVarTable` on `AiGraph` tracks all dimension variables with optional bounds.
+Importers intern variables at import time (ONNX `dim_param` → `Var(id)`, GGUF
+metadata → fixed vars with bounds). Canonical names: `batch`, `seq_len`,
+`vocab_size`, `hidden_dim`, `num_heads`, `num_kv_heads`, `head_dim`, `ffn_dim`.
 
 ---
 
@@ -258,9 +280,9 @@ canonical mapping.
 | `Concat` | `Custom { id: CONCAT_OP, arity: N }` | variadic |
 | `Opaque` | **lowering error** | — |
 
-Custom op handlers are registered in `CustomOpRegistry` during lowering in
-`hologram-ai-lower`. Registration happens once per `CompiledModel`; all sessions
-share the same registry via `Arc<CustomOpRegistry>`.
+Custom op handlers are registered in `CustomOpRegistry` during lowering inside
+`lower()` and returned as `LoweringOutput.registry`. The registry is passed to
+`KvExecutor::execute_layer()` on each invocation by the caller.
 
 ---
 
@@ -290,15 +312,46 @@ to auto-detection.
 
 ## Shape Handling in Lowering
 
-**Concrete shapes** → buffer sizes computed at lowering time.
+See [symbolic-shapes.md](symbolic-shapes.md) section 7 (Lowering Strategies) and
+[ADR-0015](../../adrs/0015-hologram-ai-symbolic-shapes.md).
 
-**Symbolic shapes** (e.g. `seq_len = Dim::Symbolic`) → concretized at lowering time
-by fixing to `max_seq_len` (MVP approach). hologram's `Graph` is rebuilt when the
-concrete seq_len changes (e.g., between prefill and decode). This closes the
-previously open question about `ExecutionSchedule` dynamic shape support.
+### Pre-lowering: Shape Concretization
 
-**Dynamic shapes** → lowering emits placeholder nodes with runtime
-size-calculation ops. Higher cost; avoided where possible.
+Before `lower()` is called, all shapes must be fully concrete. The `concretize_shapes()`
+function substitutes all fixed variables from `DimVarTable` and evaluates expressions.
+Lowering fails if any dimension remains symbolic.
+
+### Shape Strategies
+
+```rust
+pub enum ShapeStrategy {
+    FixToMax,                         // fix all dims to upper bound (MVP, default)
+    Bucketed(BucketConfig),           // compile N variants for a key dim
+    Profiles(Vec<ShapeProfile>),      // compile for specific shape assignments
+    PaddedMax,                        // fix to max + actual_len masking
+}
+```
+
+Each strategy concretizes symbolic dims *before* calling `lower()`. The `hologram::Graph`
+always receives fully concrete dimensions. No changes to the hologram API.
+
+**FixToMax** (MVP): Fix all unfixed variables to their upper bound via
+`DimVarTable::concretize_to_upper()`. Rebuild graph when dimensions differ (e.g., between
+prefill and decode).
+
+**Bucketed** (Phase 2): Compile separate graphs for a set of bucket sizes (e.g.,
+`seq_len ∈ [128, 512, 1024, 2048]`). At runtime, select the smallest bucket ≥ actual value.
+
+**Profiles** (Phase 3): Compile for specific named shape assignments (e.g., "prefill_short",
+"decode_single"). Multi-variable specialization.
+
+**PaddedMax** (Phase 3): Same as FixToMax but attention ops receive `actual_seq_len` as a
+runtime input for masking. Single graph, no wasted computation on padding.
+
+### Dynamic shapes
+
+`DimExpr::Dynamic` (truly data-dependent dimensions) → lowering emits placeholder nodes
+with runtime size-calculation ops. Higher cost; avoided where possible.
 
 ---
 
@@ -309,10 +362,13 @@ KV-cache buffers are allocated via `MemoryPlan::kv_cache_layout`.
 At lowering time:
 - A `Custom { id: KV_WRITE_OP }` node is emitted after each attention layer's K/V projections
 - A `Custom { id: KV_READ_OP }` node is emitted at the beginning of each attention computation
-- The cache `BufferArena` is passed into `KvExecutor::execute_with_registry` on each invocation
+- The KV-cache byte buffer is passed as an explicit input/output to each layer invocation
 
-The `InferenceSession` manages the cache offset counter and passes it as an
-input to the plan on each invocation.
+The caller owns the KV-cache buffer and the `present_len` counter. Both are
+passed as named tensor inputs to `KvExecutor::execute_layer()` on each call —
+`kv_cache: [n_bytes] u8` in/out, and `present_len: [] u32` on the decode layer.
+See `hologram::LlmMetaSection.kv_layout.total_bytes` for buffer sizing.
+There is no session type in hologram-ai that manages this state (ADR-0016).
 
 ---
 

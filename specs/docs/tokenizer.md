@@ -13,7 +13,7 @@ Tokenizer data (vocab tables, merge rules, special tokens) is stored in
 section (`SECTION_TOKENIZER = 0x1001`). This makes `.holo` archives
 self-contained: model weights + tokenizer in a single file.
 
-See [ADR-0012](../../adrs/0012-hologram-native-tokenizer.md) for the decision
+See [ADR-0012](../../adrs/0012-hologram-ai-native-tokenizer.md) for the decision
 rationale.
 
 ---
