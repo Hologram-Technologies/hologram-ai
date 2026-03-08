@@ -209,7 +209,7 @@ impl GgmlType {
     /// Total byte size for `n_elements` of this type.
     pub fn byte_size(&self, n_elements: u64) -> u64 {
         let bs = self.block_size() as u64;
-        let n_blocks = (n_elements + bs - 1) / bs;
+        let n_blocks = n_elements.div_ceil(bs);
         n_blocks * self.type_size() as u64
     }
 }
@@ -244,7 +244,7 @@ pub fn parse_gguf(data: &[u8]) -> Result<GgufFile> {
     }
 
     let version = r.u32().context("reading version")?;
-    if version < 2 || version > 3 {
+    if !(2..=3).contains(&version) {
         bail!("unsupported GGUF version: {version} (expected 2 or 3)");
     }
 

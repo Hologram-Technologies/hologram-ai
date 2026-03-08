@@ -3,7 +3,7 @@
 //! Infers output shapes from input shapes for each node in topological order.
 //! Collects `ShapeConstraint` entries into `graph.shape_constraints`.
 
-use crate::ir::{AiGraph, AiOp, TensorInfo, DType, Shape, shape_from_concrete};
+use crate::ir::{AiGraph, AiOp, Shape, shape_from_concrete};
 use crate::ir::shape::DimExpr;
 use super::pipeline::Pass;
 
