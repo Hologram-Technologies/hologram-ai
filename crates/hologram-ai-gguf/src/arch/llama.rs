@@ -414,6 +414,8 @@ impl<'a> GraphAssembler<'a> {
             nodes: self.nodes,
             inputs,
             outputs,
+            input_names: vec!["input_ids".into()],
+            output_names: vec!["logits".into()],
             params: self.ai_params,
             tensor_info: self.tensor_info,
             metadata,

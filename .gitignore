@@ -5,3 +5,5 @@
 models/
 .mypy_cache
 .claude/
+test-output/
+.archon/

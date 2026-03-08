@@ -64,15 +64,17 @@ pub fn build_ai_graph(
         .iter()
         .filter(|vi| !params.contains_key(name_to_tid.get(&vi.name).unwrap_or(&u32::MAX)))
         .collect();
-    let graph_inputs: Vec<TensorId> = input_vis
+    let graph_inputs_with_names: Vec<(TensorId, String)> = input_vis
         .into_iter()
         .map(|vi| {
             let tid = alloc_tid(&vi.name, &mut name_to_tid);
             let info = value_info_to_tensor_info(vi);
             tensor_info.insert(tid, info);
-            tid
+            (tid, vi.name.clone())
         })
         .collect();
+    let graph_inputs: Vec<TensorId> = graph_inputs_with_names.iter().map(|(t, _)| *t).collect();
+    let input_names: Vec<String> = graph_inputs_with_names.into_iter().map(|(_, n)| n).collect();
 
     // ── Intermediate tensor shapes (value_info) ──────────────────────────
     // ONNX stores type/shape info for intermediate tensors here.
@@ -155,7 +157,7 @@ pub fn build_ai_graph(
     }
 
     // Re-resolve graph outputs (tensors may have been allocated during node pass).
-    let graph_outputs: Vec<TensorId> = g
+    let graph_outputs_with_names: Vec<(TensorId, String)> = g
         .output
         .iter()
         .map(|vi| {
@@ -172,15 +174,19 @@ pub fn build_ai_graph(
                     })
                     .or_insert(info);
             }
-            tid
+            (tid, vi.name.clone())
         })
         .collect();
+    let graph_outputs: Vec<TensorId> = graph_outputs_with_names.iter().map(|(t, _)| *t).collect();
+    let output_names: Vec<String> = graph_outputs_with_names.into_iter().map(|(_, n)| n).collect();
 
     Ok(AiGraph {
         name: graph_name.to_owned(),
         nodes,
         inputs: graph_inputs,
         outputs: graph_outputs,
+        input_names,
+        output_names,
         params,
         tensor_info,
         metadata: HashMap::new(),

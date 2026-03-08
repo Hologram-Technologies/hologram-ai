@@ -1,65 +1,48 @@
-# hologram-ai — Claude Code Instructions
+# CLAUDE.md
 
-## Architecture Context
+This file provides context for Claude Code when working in **`hologram-ai`**.
 
-This project is governed by the `hologram-architecture` repository.
-Architecture decisions and planning docs are maintained there and synced
-here via `holoarch`.
+## Project Overview
 
-## Before Starting Work
+- **Name**: hologram-ai
+- **Role**: library
+- **Type**: rust-workspace
+- **Standards Version**: 2026.03
 
-1. Check if architecture docs are current:
-```bash
-holoarch status
-```
-2. Pull the latest if needed:
-```bash
-holoarch pull
-```
-3. Read `specs/docs/` before implementing significant functionality.
+## Architecture
 
-## Key Docs
+This repository follows the ecosystem's architecture standards.
+See `specs/docs/architecture.md` for project-specific architecture details.
 
-| Topic | Path |
-|-------|------|
-| Architecture overview | `specs/docs/README.md` |
-| Crate layout | `specs/docs/crate-layout.md` |
-| Roadmap | `specs/docs/roadmap.md` |
-| ADRs | `specs/docs/adrs/` |
-| Implementation prompts | `specs/docs/prompts/` |
-| Coding rules | `AGENTS.md` (root) |
+## Development
 
-<!-- HOLOARCH:MANAGED:BEGIN -->
-## Relationship to hologram-architecture
+- Run tests: `cargo test`
+- Check lints: `cargo clippy -- -D warnings`
+- Format code: `cargo fmt`
 
-This project is part of the Hologram ecosystem. Architecture decisions,
-ADRs, and planning artifacts are maintained in `hologram-architecture`.
+## Conventions
 
-Before implementing significant functionality:
+- Use a consistent naming prefix for all crate names
+- Follow architecture decisions from the architecture repo
+- Document significant decisions as ADRs in `specs/adrs/`
 
-1. Read `specs/docs/architecture.md` and `specs/docs/upstream-architecture.md`.
-2. Check `specs/docs/development.md` for the local development workflow.
-3. Pull updated architecture docs with:
-```bash
-holoarch pull
-```
+<!-- ARCHON:MANAGED:BEGIN -->
+## Ecosystem Context
 
-## Important Commands
+This repository is part of the **Hologram** ecosystem — a multi-repo project governed by shared architecture decisions.
 
-```bash
-holoarch check       # validate repository conformance
-holoarch pull        # pull latest docs + refresh managed sections
-holoarch doc <name>  # generate a new doc template in specs/docs/
-```
+### Key files
+- `hologram.repo.yaml` — this repo's role, contracts, and standards version
+- `AGENTS.md` — guidance for AI agents (includes ecosystem-wide rules)
+- `specs/docs/architecture.md` — project-specific architecture documentation
 
-## Cross-Repository Isolation
+### Standards
+- Standards version is declared in `hologram.repo.yaml`
+- Run `archon verify` to check conformance
+- Run `archon sync` to pull latest managed content from the architecture repo
 
-Do NOT modify `hologram-architecture` or any sibling repository from this project.
-Architecture flows one way: from the architecture repo into subprojects via
-`holoarch pull`. Files under `specs/docs/` are read-only and will be overwritten.
-
-If you need changes in another repository, write a prompt or spec describing the
-required change and save it to `specs/plans/`. Never make the change directly.
-
-_This section is managed by `holoarch pull`. Repo: hologram-ai_
-<!-- HOLOARCH:MANAGED:END -->
+### Conventions
+- Use `hologram-` prefix for crate names
+- Follow ADR decisions (see `hologram-architecture/specs/adrs/`)
+- Declare inter-repo dependencies as contracts in `hologram.repo.yaml`
+<!-- ARCHON:MANAGED:END -->

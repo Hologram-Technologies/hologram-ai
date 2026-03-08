@@ -119,6 +119,8 @@ mod tests {
             nodes,
             inputs,
             outputs,
+            input_names: vec![],
+            output_names: vec![],
             params,
             tensor_info,
             metadata: HashMap::new(),

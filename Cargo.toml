@@ -12,7 +12,7 @@ repository  = "https://github.com/uor-framework/hologram-ai"
 
 [workspace.dependencies]
 # hologram root crate (path dep — local sibling directory)
-hologram = { path = "../hologram", features = ["cli"] }
+hologram = { path = "../hologram", features = ["cli", "accelerate"] }
 
 # workspace-internal
 hologram-ai-quant  = { path = "crates/hologram-ai-quant" }

@@ -62,6 +62,12 @@ pub struct AiGraph {
     pub nodes: Vec<AiNode>,
     pub inputs: Vec<TensorId>,
     pub outputs: Vec<TensorId>,
+    /// Human-readable names for graph inputs (parallel to `inputs`).
+    /// Falls back to `input_0`, `input_1`, … when empty or shorter.
+    pub input_names: Vec<String>,
+    /// Human-readable names for graph outputs (parallel to `outputs`).
+    /// Falls back to `output_0`, `output_1`, … when empty or shorter.
+    pub output_names: Vec<String>,
     pub params: HashMap<TensorId, AiParam>,
     pub tensor_info: HashMap<TensorId, TensorInfo>,
     pub metadata: HashMap<String, MetaValue>,
@@ -73,6 +79,22 @@ pub struct AiGraph {
 }
 
 impl AiGraph {
+    /// Get the human-readable name for graph input at `index`.
+    pub fn input_name(&self, index: usize) -> String {
+        self.input_names
+            .get(index)
+            .cloned()
+            .unwrap_or_else(|| format!("input_{index}"))
+    }
+
+    /// Get the human-readable name for graph output at `index`.
+    pub fn output_name(&self, index: usize) -> String {
+        self.output_names
+            .get(index)
+            .cloned()
+            .unwrap_or_else(|| format!("output_{index}"))
+    }
+
     /// Validate graph invariants. Returns a (possibly empty) list of errors.
     pub fn validate(&self) -> Vec<ValidationError> {
         let mut errors = Vec::new();
@@ -224,6 +246,8 @@ mod tests {
             nodes: vec![AiNode::new(0, AiOp::Identity, vec![0], vec![1])],
             inputs: vec![0],
             outputs: vec![1],
+            input_names: vec![],
+            output_names: vec![],
             params: HashMap::new(),
             tensor_info: ti,
             metadata: HashMap::new(),

@@ -62,7 +62,8 @@ pub fn lower(
 
     // Register named graph inputs and insert Input nodes.
     for (i, &tid) in ai_graph.inputs.iter().enumerate() {
-        builder = builder.input(format!("input_{i}"));
+        let name = ai_graph.input_name(i);
+        builder = builder.input(name);
         builder = builder.node_from_graph_input(GraphOp::Input, i as u32);
         tid_to_idx.insert(tid, builder.len() - 1);
     }
@@ -153,7 +154,8 @@ pub fn lower(
             .with_context(|| format!("missing builder index for output tensor {tid}"))?;
         builder = builder.node_with_inputs(GraphOp::Output, &[src_idx]);
         let out_node_idx = builder.len() - 1;
-        builder = builder.output(format!("output_{i}"), out_node_idx);
+        let name = ai_graph.output_name(i);
+        builder = builder.output(name, out_node_idx);
     }
 
     let graph = builder.build();

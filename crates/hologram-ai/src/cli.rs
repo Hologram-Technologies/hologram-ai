@@ -85,8 +85,11 @@ fn main() -> anyhow::Result<()> {
             });
 
             // Embed model metadata section.
-            let is_llm = compiled.metadata.arch != "unknown"
-                && compiled.metadata.n_layers > 0;
+            // Detect LLM: either the metadata says so (GGUF sets arch/n_layers)
+            // or we have a tokenizer (strong signal for text models).
+            let is_llm = (compiled.metadata.arch != "unknown"
+                && compiled.metadata.n_layers > 0)
+                || tok_path.is_some();
             let model_meta = hologram::hologram_archive::section::model_meta::ModelMetaSection {
                 kind: if is_llm {
                     hologram::hologram_archive::section::model_meta::ModelKind::TextLlm
@@ -100,7 +103,7 @@ fn main() -> anyhow::Result<()> {
                     model.display()
                 ),
                 max_seq_len: compiled.metadata.context_len,
-                supports_prompt: is_llm && tok_path.is_some(),
+                supports_prompt: tok_path.is_some(),
             };
             let mut final_bytes =
                 hologram_ai::compiler::rebuild_archive_with_section(&compiled.bytes, &model_meta)?;

@@ -343,14 +343,15 @@ pub fn rebuild_archive_with_section(
     let graph_bytes =
         archive[h.graph_offset as usize..(h.graph_offset + h.graph_size) as usize].to_vec();
 
+    let new_kind = section.section_kind();
     let mut writer = hologram::HoloWriter::new()
         .set_graph_bytes(graph_bytes)
         .set_weights(plan.weights().to_vec());
 
-    // Carry forward all existing sections.
-    writer = carry_forward_sections(archive, &plan, writer);
+    // Carry forward existing sections, skipping the kind we're about to add.
+    writer = carry_forward_sections(archive, &plan, writer, Some(new_kind));
 
-    // Add the new section (may replace an existing one of the same kind).
+    // Add the new section.
     writer = writer.add_section(section);
 
     writer
@@ -371,7 +372,7 @@ fn rebuild_archive_with_weights(archive: &[u8], weights: Vec<u8>) -> anyhow::Res
         .set_weights(weights);
 
     // Carry forward all existing sections.
-    writer = carry_forward_sections(archive, &plan, writer);
+    writer = carry_forward_sections(archive, &plan, writer, None);
 
     writer
         .build()
@@ -379,12 +380,19 @@ fn rebuild_archive_with_weights(archive: &[u8], weights: Vec<u8>) -> anyhow::Res
 }
 
 /// Re-add all sections from an existing archive into a new writer.
+///
+/// If `skip_kind` is set, sections of that kind are omitted (to avoid
+/// duplicates when the caller is about to add a replacement).
 fn carry_forward_sections(
     archive: &[u8],
-    plan: &hologram::hologram_archive::loader::plan::LoadedPlan,
+    plan: &hologram::LoadedPlan,
     mut writer: hologram::HoloWriter,
+    skip_kind: Option<u32>,
 ) -> hologram::HoloWriter {
     for entry in &plan.sections().entries {
+        if skip_kind == Some(entry.kind) {
+            continue;
+        }
         let offset = entry.offset as usize;
         let size = entry.size as usize;
         if offset + size <= archive.len() {

@@ -71,6 +71,8 @@ fn make_identity_graph() -> AiGraph {
         nodes: vec![AiNode::new(0, AiOp::Identity, vec![0], vec![1])],
         inputs: vec![0],
         outputs: vec![1],
+        input_names: vec![],
+        output_names: vec![],
         params: HashMap::new(),
         tensor_info,
         metadata: HashMap::new(),

@@ -1,41 +1,62 @@
-# Architecture Governance & Documentation Rules
+# AGENTS.md
 
-This repository participates in a larger architecture ecosystem defined in the `hologram-architecture` project.
-
-AI agents and contributors must treat architectural decisions recorded there as **authoritative design constraints**.
-
-## Architecture Source of Truth
-
-The canonical architecture decisions live in the `hologram-architecture` repository.
-
-In particular:
-
-- `specs/adrs/` contains **Architecture Decision Records (ADRs)** that define system-level decisions.
-- `specs/projects/` contains project architecture plans.
-- `specs/prompts/` contains implementation prompts used to scaffold repositories.
-- `specs/docs/` contains durable documentation referenced by implementation repositories.
-
-If a change in this repository conflicts with an accepted ADR, **the ADR takes precedence** unless it is explicitly updated.
-
-Agents must not silently violate or bypass architecture decisions.
+This document provides guidance for automated agents operating in **`hologram-ai`**.
 
 ---
 
-## Required Documentation Reading
+## Repository Purpose
 
-Before performing significant work, agents MUST read relevant documentation from:
+`hologram-ai` is a **library** repository in the ecosystem.
 
-- `specs/docs/architecture.md` — system architecture overview
-- `specs/docs/upstream-architecture.md` — hologram base crate architecture
-- `specs/docs/development.md` — local development workflow
-- `specs/docs/adrs/` — Architecture Decision Records
+Standards version: `2026.03`
 
 ---
 
-## Code Quality Rules
+## Repository Structure
 
-- **Zero clippy warnings.** Run `cargo clippy --workspace -- -D warnings` before committing. All warnings must be fixed, not suppressed with `#[allow(...)]` unless there is a documented reason.
-- **Zero compiler warnings.** Unused imports, dead code, and similar warnings must be cleaned up.
-- **Format with `cargo fmt --all`** before committing.
-- **All tests must pass.** Run `cargo test --workspace` before committing.
-- Use `just ci` to run the full CI pipeline locally (format check + clippy + tests).
+```
+specs/
+  docs/         — project documentation
+  adrs/         — architecture decision records
+```
+
+---
+
+## Rules for Agents
+
+1. Follow the architecture standards defined in the architecture repo
+2. Do not modify files outside this repository unless explicitly instructed
+3. Run `cargo clippy -- -D warnings` before committing Rust changes
+4. Use a consistent naming prefix for all crate names
+
+---
+
+<!-- ARCHON:MANAGED:BEGIN -->
+## Ecosystem Rules
+
+These rules apply to all repositories in the Hologram ecosystem.
+
+### Naming
+- Use the `hologram-` prefix for all crate names (never `holo-`)
+- Follow kebab-case for crate and repo names
+
+### Code Quality
+- Run `cargo clippy -- -D warnings` before committing Rust changes
+- Run `cargo fmt --check` before committing Rust changes
+- All public APIs must have documentation comments
+- No `unwrap()` in library code — use proper error handling
+- Use traits at API boundaries; use macros to eliminate boilerplate
+- Functions with >3 parameters must use the builder pattern
+- Use `thiserror` for library errors; `anyhow` only in binaries
+- See ADR-0007 for the full set of Rust development standards
+
+### Architecture
+- Follow ADR decisions from `hologram-architecture`
+- Declare contracts in `hologram.repo.yaml`
+- Do not introduce cross-repo dependencies without an ADR
+
+### Documentation
+- Keep `specs/docs/architecture.md` up to date with structural changes
+- Update `AGENTS.md` when adding new conventions or rules
+<!-- ARCHON:MANAGED:END -->
+
