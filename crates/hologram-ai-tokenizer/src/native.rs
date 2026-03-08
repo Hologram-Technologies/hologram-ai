@@ -4,16 +4,34 @@ use crate::bpe::BpeEncoder;
 use crate::config::{
     NormalizationConfig, PreTokenizerConfig, SpecialTokens, TokenizerAlgorithm, TokenizerConfig,
 };
+use crate::unigram::UnigramEncoder;
 use crate::vocab::{MergeRules, VocabTable};
+use crate::wordpiece::WordPieceEncoder;
 use crate::Tokenizer;
 use anyhow::{bail, Context, Result};
 use std::collections::HashMap;
 use std::path::Path;
 
-/// Native BPE tokenizer backed by hologram data structures.
+/// Encoder backend — dispatches to the algorithm-specific encoder.
+enum EncoderBackend {
+    Bpe(BpeEncoder),
+    Unigram {
+        vocab: VocabTable,
+        scores: Vec<f32>,
+    },
+    WordPiece {
+        vocab: VocabTable,
+        continuing_prefix: String,
+        max_input_chars_per_word: usize,
+    },
+}
+
+/// Native tokenizer backed by hologram data structures.
+///
+/// Supports BPE, Unigram (SentencePiece), and WordPiece algorithms.
 pub struct NativeTokenizer {
     config: TokenizerConfig,
-    encoder: BpeEncoder,
+    backend: EncoderBackend,
 }
 
 impl NativeTokenizer {
@@ -31,6 +49,8 @@ impl NativeTokenizer {
 
         match model_type {
             "BPE" => Self::from_bpe_json(&json),
+            "Unigram" => Self::from_unigram_json(&json),
+            "WordPiece" => Self::from_wordpiece_json(&json),
             other => bail!("unsupported tokenizer model type: {other:?}"),
         }
     }
@@ -88,7 +108,142 @@ impl NativeTokenizer {
 
         let encoder = BpeEncoder::new(vocab, merges, byte_fallback, pre_tokenizer);
 
-        Ok(Self { config, encoder })
+        Ok(Self { config, backend: EncoderBackend::Bpe(encoder) })
+    }
+
+    fn from_unigram_json(json: &serde_json::Value) -> Result<Self> {
+        let model = &json["model"];
+        let vocab_arr = model["vocab"]
+            .as_array()
+            .context("missing model.vocab for Unigram")?;
+
+        let mut tokens = Vec::with_capacity(vocab_arr.len());
+        let mut scores = Vec::with_capacity(vocab_arr.len());
+        for entry in vocab_arr {
+            let arr = entry.as_array().context("vocab entry must be [token, score]")?;
+            let token = arr[0].as_str().context("vocab token must be string")?;
+            let score = arr[1].as_f64().unwrap_or(0.0) as f32;
+            tokens.push(token.as_bytes().to_vec());
+            scores.push(score);
+        }
+        let vocab = VocabTable::new(tokens);
+
+        let byte_fallback = model["byte_fallback"].as_bool().unwrap_or(false);
+        let special = parse_special_tokens(json)?;
+        let pre_tokenizer = parse_pre_tokenizer(json);
+        let normalization = parse_normalization(json);
+        let add_bos = json.get("post_processor").is_some();
+
+        let config = TokenizerConfig {
+            algorithm: TokenizerAlgorithm::Unigram {
+                vocab: VocabTable::new(vec![]),
+                scores: vec![],
+            },
+            special_tokens: special,
+            normalization,
+            pre_tokenizer,
+            byte_fallback,
+            add_bos,
+            add_eos: false,
+        };
+
+        Ok(Self {
+            config,
+            backend: EncoderBackend::Unigram { vocab, scores },
+        })
+    }
+
+    fn from_wordpiece_json(json: &serde_json::Value) -> Result<Self> {
+        let model = &json["model"];
+        let vocab_obj = model["vocab"]
+            .as_object()
+            .context("missing model.vocab for WordPiece")?;
+        let vocab_map: HashMap<String, u32> = vocab_obj
+            .iter()
+            .map(|(k, v)| (k.clone(), v.as_u64().unwrap_or(0) as u32))
+            .collect();
+        let vocab = VocabTable::from_vocab_map(&vocab_map);
+
+        let continuing_prefix = model["continuing_subword_prefix"]
+            .as_str()
+            .unwrap_or("##")
+            .to_string();
+        let max_chars = model["max_input_chars_per_word"]
+            .as_u64()
+            .unwrap_or(200) as usize;
+
+        let special = parse_special_tokens(json)?;
+        let pre_tokenizer = parse_pre_tokenizer(json);
+        let normalization = parse_normalization(json);
+
+        let config = TokenizerConfig {
+            algorithm: TokenizerAlgorithm::WordPiece {
+                vocab: VocabTable::new(vec![]),
+                continuing_subword_prefix: String::new(),
+                max_input_chars_per_word: 0,
+            },
+            special_tokens: special,
+            normalization,
+            pre_tokenizer,
+            byte_fallback: false,
+            add_bos: false,
+            add_eos: false,
+        };
+
+        Ok(Self {
+            config,
+            backend: EncoderBackend::WordPiece {
+                vocab,
+                continuing_prefix,
+                max_input_chars_per_word: max_chars,
+            },
+        })
+    }
+}
+
+impl NativeTokenizer {
+    fn vocab_table(&self) -> &VocabTable {
+        match &self.backend {
+            EncoderBackend::Bpe(enc) => enc.vocab(),
+            EncoderBackend::Unigram { vocab, .. } => vocab,
+            EncoderBackend::WordPiece { vocab, .. } => vocab,
+        }
+    }
+
+    fn encode_raw(&self, text: &str) -> Vec<u32> {
+        match &self.backend {
+            EncoderBackend::Bpe(enc) => enc.encode(text),
+            EncoderBackend::Unigram { vocab, scores } => {
+                let enc = UnigramEncoder::new(vocab, scores);
+                enc.encode(text)
+            }
+            EncoderBackend::WordPiece {
+                vocab,
+                continuing_prefix,
+                max_input_chars_per_word,
+            } => {
+                // Simple whitespace split, then encode each word.
+                text.split_whitespace()
+                    .flat_map(|word| {
+                        let enc = WordPieceEncoder::new(vocab, continuing_prefix, *max_input_chars_per_word);
+                        enc.encode_word(word)
+                    })
+                    .collect()
+            }
+        }
+    }
+
+    fn decode_raw(&self, tokens: &[u32]) -> String {
+        match &self.backend {
+            EncoderBackend::Bpe(enc) => enc.decode(tokens),
+            EncoderBackend::Unigram { vocab, .. } | EncoderBackend::WordPiece { vocab, .. } => {
+                tokens
+                    .iter()
+                    .filter_map(|&id| vocab.id_to_str(id))
+                    .collect::<Vec<_>>()
+                    .join("")
+            }
+        }
     }
 }
 
@@ -96,14 +251,13 @@ impl Tokenizer for NativeTokenizer {
     fn encode(&self, text: &str) -> Vec<u32> {
         let mut ids = Vec::new();
 
-        // Prepend BOS if configured
         if self.config.add_bos {
             if let Some(bos) = self.config.special_tokens.bos_id {
                 ids.push(bos);
             }
         }
 
-        ids.extend(self.encoder.encode(text));
+        ids.extend(self.encode_raw(text));
 
         if self.config.add_eos {
             ids.push(self.config.special_tokens.eos_id);
@@ -113,7 +267,6 @@ impl Tokenizer for NativeTokenizer {
     }
 
     fn decode(&self, tokens: &[u32]) -> String {
-        // Filter out special tokens (BOS/EOS)
         let bos = self.config.special_tokens.bos_id;
         let eos = self.config.special_tokens.eos_id;
         let filtered: Vec<u32> = tokens
@@ -121,7 +274,7 @@ impl Tokenizer for NativeTokenizer {
             .copied()
             .filter(|&id| Some(id) != bos && id != eos)
             .collect();
-        self.encoder.decode(&filtered)
+        self.decode_raw(&filtered)
     }
 
     fn eos_token_id(&self) -> u32 {
@@ -133,15 +286,15 @@ impl Tokenizer for NativeTokenizer {
     }
 
     fn vocab_size(&self) -> usize {
-        self.encoder.vocab().len()
+        self.vocab_table().len()
     }
 
     fn id_to_token(&self, id: u32) -> Option<&str> {
-        self.encoder.vocab().id_to_str(id)
+        self.vocab_table().id_to_str(id)
     }
 
     fn token_to_id(&self, token: &str) -> Option<u32> {
-        self.encoder.vocab().str_to_id(token)
+        self.vocab_table().str_to_id(token)
     }
 }
 

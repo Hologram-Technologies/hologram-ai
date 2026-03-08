@@ -16,10 +16,15 @@ impl OptPipeline {
         Self { passes }
     }
 
-    /// Minimal required passes for Sprint 001 (no shape propagation yet).
+    /// Standard optimization pipeline.
     pub fn mvp() -> Self {
-        use super::{constant_fold::ConstantFolding, dead_node::DeadNodeElimination};
+        use super::{
+            constant_fold::ConstantFolding,
+            dead_node::DeadNodeElimination,
+            shape_prop::ShapePropagation,
+        };
         Self::new(vec![
+            Box::new(ShapePropagation),
             Box::new(ConstantFolding),
             Box::new(DeadNodeElimination),
         ])

@@ -6,7 +6,9 @@
 mod bpe;
 mod config;
 mod native;
+mod unigram;
 mod vocab;
+mod wordpiece;
 
 pub use config::{
     NormalizationConfig, NormStep, PreTokenizerConfig, SpecialTokens, TokenizerAlgorithm,

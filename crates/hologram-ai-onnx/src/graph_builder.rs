@@ -144,6 +144,8 @@ pub fn build_ai_graph(g: &GraphProto, graph_name: &str, model_dir: Option<&Path>
         tensor_info,
         metadata: HashMap::new(),
         warnings,
+        dim_vars: Default::default(),
+        shape_constraints: Default::default(),
     })
 }
 
@@ -176,8 +178,9 @@ fn shape_from_shape_proto(s: &TensorShapeProto) -> Shape {
             Some(crate::onnx_pb::tensor_shape_proto::dimension::Value::DimValue(v)) => {
                 Dim::Concrete(*v as u64)
             }
-            Some(crate::onnx_pb::tensor_shape_proto::dimension::Value::DimParam(p)) => {
-                Dim::Symbolic(p.clone())
+            Some(crate::onnx_pb::tensor_shape_proto::dimension::Value::DimParam(_)) => {
+                // TODO: intern dim_param into DimVarTable when threaded through
+                Dim::Dynamic
             }
             None => Dim::Dynamic,
         }

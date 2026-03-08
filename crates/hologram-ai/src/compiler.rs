@@ -1,8 +1,11 @@
-//! Model compilation and inference session.
+//! Model compilation pipeline.
+//!
+//! Compiles AI models (ONNX, GGUF) into `.holo` archives via the hologram
+//! O(1) LUT runtime. This crate is a **compiler** — it does not own inference
+//! sessions or runtime state (see ADR-0016).
 
 use std::io::{Read, Seek, SeekFrom};
 use std::path::PathBuf;
-use std::sync::Arc;
 use anyhow::Context;
 use hologram_ai_common::{
     AiGraph, AiParam, OptPipeline, MemoryPlanner, KvCacheLayout,
@@ -37,98 +40,54 @@ pub struct ModelMetadata {
     pub n_embd: u32,
 }
 
-// ── Compiled model ────────────────────────────────────────────────────────────
+// ── Compilation output ──────────────────────────────────────────────────────
 
-/// A fully compiled model ready for repeated inference.
-///
-/// Thread-safe — wrap in `Arc` to share across sessions.
-pub struct CompiledModel {
-    /// The compiled `.holo` archive bytes.
-    archive: Vec<u8>,
-    schedule: Arc<hologram::ExecutionSchedule>,
-    registry: Arc<hologram::CustomOpRegistry>,
-    /// KV-cache layout (None when KV-cache is disabled, e.g. single-pass inference).
-    pub kv_layout: Option<KvCacheLayout>,
-    pub metadata: ModelMetadata,
+/// Statistics from the compilation pipeline.
+pub struct CompileStats {
+    pub import_warnings: usize,
+    pub validation_errors: usize,
+    pub total_weight_bytes: u64,
+    pub node_count: usize,
 }
 
-impl CompiledModel {
+/// A compiled `.holo` archive ready to be saved or executed.
+pub struct HoloArchive {
+    /// The compiled archive bytes (single archive or pipeline archive).
+    pub bytes: Vec<u8>,
+    pub metadata: ModelMetadata,
+    pub stats: CompileStats,
+}
+
+impl HoloArchive {
     /// Write the compiled `.holo` archive to `path`.
-    pub fn save_archive(&self, path: &std::path::Path) -> anyhow::Result<()> {
+    pub fn save(&self, path: &std::path::Path) -> anyhow::Result<()> {
         if let Some(parent) = path.parent() {
             if !parent.as_os_str().is_empty() {
                 std::fs::create_dir_all(parent)
                     .with_context(|| format!("creating output directory {parent:?}"))?;
             }
         }
-        std::fs::write(path, &self.archive)
+        std::fs::write(path, &self.bytes)
             .with_context(|| format!("writing .holo archive to {path:?}"))
     }
 }
 
-// ── Inference session ─────────────────────────────────────────────────────────
+// Backward-compatible type alias.
+pub type CompiledModel = HoloArchive;
 
-/// Per-session inference state.
-pub struct InferenceSession {
-    model: Arc<CompiledModel>,
-}
-
-impl InferenceSession {
-    /// Create a new session for the given compiled model.
-    pub fn new(model: Arc<CompiledModel>) -> Self {
-        Self { model }
-    }
-
-    /// Access the underlying compiled model.
-    pub fn model(&self) -> &CompiledModel {
-        &self.model
-    }
-
-    /// Run a single forward pass and return logits.
-    ///
-    /// `token_ids` — input token IDs for this batch.
-    /// Returns a flat `Vec<f32>` of shape `[seq_len × vocab_size]`.
-    pub fn run(&mut self, token_ids: &[u32]) -> anyhow::Result<Vec<f32>> {
-        let plan = hologram::load_from_bytes(&self.model.archive)
-            .context("loading compiled archive")?;
-
-        // Encode token IDs as INT64 little-endian (ONNX convention).
-        let input_ids_bytes: Vec<u8> = token_ids
-            .iter()
-            .flat_map(|&id| (id as i64).to_le_bytes())
-            .collect();
-
-        // Attention mask: all ones, same length as token_ids.
-        let attention_mask_bytes: Vec<u8> = (0..token_ids.len())
-            .flat_map(|_| 1i64.to_le_bytes())
-            .collect();
-
-        let mut inputs = hologram::GraphInputs::new();
-        inputs.set(0, input_ids_bytes);
-        inputs.set(1, attention_mask_bytes);
-
-        let outputs = hologram::KvExecutor::execute_with_weights(
-            plan.graph(),
-            &self.model.schedule,
-            &inputs,
-            &self.model.registry,
-            plan.weights(),
-        ).context("hologram execution failed")?;
-
-        let (_, logit_bytes) = outputs.get(0)
-            .context("no outputs from execution")?;
-        let logits: Vec<f32> = bytemuck::cast_slice(logit_bytes).to_vec();
-
-        Ok(logits)
+impl CompiledModel {
+    /// Backward-compatible save method.
+    pub fn save_archive(&self, path: &std::path::Path) -> anyhow::Result<()> {
+        self.save(path)
     }
 }
 
 // ── Model compiler ────────────────────────────────────────────────────────────
 
-/// Compiles a `ModelSource` through the full pipeline into a `CompiledModel`.
+/// Compiles a `ModelSource` through the full pipeline into a `HoloArchive`.
 ///
-/// Build a compiler with the default settings via `ModelCompiler::default()`,
-/// then call `compile(source)`.
+/// Pipeline:
+///   import → optimize → validate → plan memory → lower → compile → embed weights
 pub struct ModelCompiler {
     /// Use memory-mapping for weight loading when possible.
     pub mmap: bool,
@@ -141,15 +100,12 @@ impl Default for ModelCompiler {
 }
 
 impl ModelCompiler {
-    /// Compile pipeline:
+    /// Compile a model source into a `.holo` archive.
     ///
-    /// 1. Import → `AiGraph`
-    /// 2. `OptPipeline::mvp().run()` → optimised `AiGraph`
-    /// 3. `MemoryPlanner.plan()` (KV sizing only for Sprint 001)
-    /// 4. `lower()` → `LoweringOutput { graph, registry }`
-    /// 5. `hologram::compile(graph)` → `CompilationOutput { archive, schedule }`
-    /// 6. Build `CompiledModel`
-    pub fn compile(&self, source: ModelSource) -> anyhow::Result<CompiledModel> {
+    /// For LLM models (GGUF with transformer architecture), produces a pipeline
+    /// archive with named layer entrypoints. For simpler models (ONNX), produces
+    /// a single-graph archive.
+    pub fn compile(&self, source: ModelSource) -> anyhow::Result<HoloArchive> {
         // Step 1 — import.
         let ai_graph = self.import(source)?;
 
@@ -164,12 +120,14 @@ impl ModelCompiler {
             anyhow::bail!("{} validation error(s): {}", errs.len(), errs[0].message);
         }
 
-        // Step 3 — memory plan (KV sizing).
+        // Step 3 — memory plan.
         let _plan = MemoryPlanner.plan(&ai_graph)
             .context("memory planning failed")?;
 
         // Extract metadata before lowering (borrows ai_graph).
         let metadata = extract_metadata(&ai_graph);
+        let import_warnings = ai_graph.warnings.len();
+        let node_count = ai_graph.nodes.len();
 
         // Step 4 — lower.
         let lower_out = lower(
@@ -178,24 +136,29 @@ impl ModelCompiler {
             &LoweringOptions::default(),
         ).context("lowering failed")?;
 
-        // Step 5 — hologram compile → archive + schedule.
+        // Step 5 — compile.
         let compilation = hologram::compile(lower_out.graph)
             .context("hologram::compile failed")?;
 
-        // Step 6 — embed weight data in the archive.
+        // Step 6 — embed weights.
         let weight_blob = collect_weight_bytes(&ai_graph)?;
-        let archive = if weight_blob.is_empty() {
+        let total_weight_bytes = weight_blob.len() as u64;
+
+        let archive_bytes = if weight_blob.is_empty() {
             compilation.archive
         } else {
             rebuild_archive_with_weights(&compilation.archive, weight_blob)?
         };
 
-        Ok(CompiledModel {
-            archive,
-            schedule:   Arc::new(compilation.schedule),
-            registry:   Arc::new(lower_out.registry),
-            kv_layout:  None,
+        Ok(HoloArchive {
+            bytes: archive_bytes,
             metadata,
+            stats: CompileStats {
+                import_warnings,
+                validation_errors: 0,
+                total_weight_bytes,
+                node_count,
+            },
         })
     }
 
@@ -284,9 +247,6 @@ fn collect_weight_bytes(ai_graph: &AiGraph) -> anyhow::Result<Vec<u8>> {
 }
 
 /// Rebuild a compiled archive with weight data embedded.
-///
-/// Extracts the serialized graph from the existing archive and re-assembles
-/// using `HoloWriter` with the weight blob added.
 fn rebuild_archive_with_weights(archive: &[u8], weights: Vec<u8>) -> anyhow::Result<Vec<u8>> {
     let plan = hologram::load_from_bytes(archive)
         .context("loading compiled archive for weight embedding")?;

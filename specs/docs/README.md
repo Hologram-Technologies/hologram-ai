@@ -1,3 +1,5 @@
+The two versions are identical - there are no differences between the ARCH VERSION and the SUBPROJECT VERSION. The merged result is the same as both inputs:
+
 # hologram-ai — Project Overview
 
 `hologram-ai` is a Rust-first, inference-first compiler and runtime integration

@@ -2,12 +2,11 @@
 
 use clap::Parser;
 use hologram_ai::download;
-use hologram_ai::session::{ModelCompiler, ModelSource, InferenceSession};
+use hologram_ai::compiler::{ModelCompiler, ModelSource};
 use std::path::PathBuf;
-use std::sync::Arc;
 
 #[derive(Parser)]
-#[command(name = "hologram-ai", about = "AI model inference via hologram runtime")]
+#[command(name = "hologram-ai", about = "AI model compiler for hologram runtime")]
 struct Cli {
     #[command(subcommand)]
     command: Command,
@@ -15,15 +14,15 @@ struct Cli {
 
 #[derive(clap::Subcommand)]
 enum Command {
-    /// Run inference on a model file.
+    /// Run a model file (facade to `hologram run`).
+    ///
+    /// For `.holo` files, delegates directly. For `.onnx`/`.gguf`, compiles
+    /// to a temporary `.holo` first, then delegates.
     Run {
         /// Path to a model file (.holo, .onnx, or .gguf).
         #[arg(short, long)]
         model: PathBuf,
-        /// Input token IDs for AI models (comma-separated, for ONNX/GGUF).
-        #[arg(short, long, value_delimiter = ',')]
-        tokens: Vec<u32>,
-        /// Raw input values as INDEX:HEX pairs (for .holo files).
+        /// Raw input values as INDEX:HEX pairs.
         #[arg(long = "input", value_name = "INDEX:HEX")]
         inputs: Vec<String>,
     },
@@ -54,29 +53,33 @@ fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Command::Run { model, tokens, inputs } => {
-            match model.extension().and_then(|e: &std::ffi::OsStr| e.to_str()).unwrap_or("") {
-                "holo" => run_holo(model, inputs)?,
+        Command::Run { model, inputs } => {
+            let holo_path = match model.extension().and_then(|e| e.to_str()).unwrap_or("") {
+                "holo" => model,
                 _ => {
+                    // Compile to a temp .holo, then run that.
                     let t0 = std::time::Instant::now();
                     let source = model_source_from_path(&model)?;
                     let compiled = ModelCompiler::default().compile(source)?;
-                    eprintln!("[compile] {:.2?}", t0.elapsed());
-                    let mut sess = InferenceSession::new(Arc::new(compiled));
-                    let t1 = std::time::Instant::now();
-                    let logits = sess.run(&tokens)?;
-                    eprintln!("[inference] {:.2?}", t1.elapsed());
-                    println!("logits shape: [{}]", logits.len());
+                    let tmp_dir = std::env::temp_dir().join("hologram-ai");
+                    std::fs::create_dir_all(&tmp_dir)?;
+                    let stem = model.file_stem().and_then(|s| s.to_str()).unwrap_or("model");
+                    let tmp_holo = tmp_dir.join(format!("{stem}.holo"));
+                    compiled.save_archive(&tmp_holo)?;
+                    eprintln!("[compile] {:.2?} → {}", t0.elapsed(), tmp_holo.display());
+                    tmp_holo
                 }
-            }
+            };
+            run_holo(holo_path, inputs)?;
         }
         Command::Info { file, detail } => {
-            let ext = file.extension().and_then(|e: &std::ffi::OsStr| e.to_str()).unwrap_or("");
+            let ext = file.extension().and_then(|e| e.to_str()).unwrap_or("");
             match ext {
                 "holo" => inspect_holo(file, detail)?,
                 "onnx" => inspect_onnx(&file)?,
+                "gguf" => inspect_gguf(&file)?,
                 other => anyhow::bail!(
-                    "info supports .holo and .onnx files, got '.{other}'"
+                    "info supports .holo, .onnx, and .gguf files, got '.{other}'"
                 ),
             }
         }
@@ -92,8 +95,13 @@ fn main() -> anyhow::Result<()> {
             std::fs::create_dir_all(&output)?;
             let stem = model.file_stem().and_then(|s| s.to_str()).unwrap_or("model");
             let holo_path = output.join(format!("{stem}.holo"));
-            compiled.save_archive(&holo_path)?;
-            println!("wrote {}", holo_path.display());
+            compiled.save(&holo_path)?;
+            println!("wrote {} ({} nodes, {} weight bytes, {} warnings)",
+                holo_path.display(),
+                compiled.stats.node_count,
+                compiled.stats.total_weight_bytes,
+                compiled.stats.import_warnings,
+            );
         }
         Command::Download(args) => {
             download::run(args)?;
@@ -103,23 +111,10 @@ fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-// ── Run sub-commands ─────────────────────────────────────────────────────────
+// ── Run ──────────────────────────────────────────────────────────────────────
 
-/// Run a compiled `.holo` archive.
-///
-/// If any input looks like text (not valid hex), we tokenize it and run
-/// through the AI inference pipeline (which has custom op handlers).
-/// Otherwise we delegate to the generic `hologram run`.
+/// Run a compiled `.holo` archive — delegates to `hologram run`.
 fn run_holo(file: PathBuf, inputs: Vec<String>) -> anyhow::Result<()> {
-    if has_text_inputs(&inputs) {
-        run_ai_inference(&file, &inputs)
-    } else {
-        run_holo_raw(file, inputs)
-    }
-}
-
-/// Raw `.holo` execution — delegates to generic `hologram run`.
-fn run_holo_raw(file: PathBuf, inputs: Vec<String>) -> anyhow::Result<()> {
     use hologram::hologram_cli::commands::run_cmd::{RunArgs, execute};
     let args = RunArgs { file, inputs };
     tokio::runtime::Builder::new_current_thread()
@@ -128,100 +123,7 @@ fn run_holo_raw(file: PathBuf, inputs: Vec<String>) -> anyhow::Result<()> {
         .map_err(|e| anyhow::anyhow!("{e}"))
 }
 
-/// AI inference with tokenization.
-///
-/// Tokenizes text input, finds the source model (ONNX/GGUF) next to the
-/// `.holo` file, compiles it (to get the custom op registry), and runs
-/// inference via `InferenceSession`.
-fn run_ai_inference(holo_path: &std::path::Path, inputs: &[String]) -> anyhow::Result<()> {
-    use hologram_ai_tokenizer::{NativeTokenizer, Tokenizer};
-
-    let dir = holo_path.parent().unwrap_or(std::path::Path::new("."));
-
-    // Find text to tokenize (first non-hex input value)
-    let text = inputs
-        .iter()
-        .find_map(|s| {
-            let (_, value) = s.split_once(':')?;
-            if is_valid_hex(value) { None } else { Some(value) }
-        })
-        .ok_or_else(|| anyhow::anyhow!("no text input found"))?;
-
-    // Discover and load tokenizer
-    let tok_path = dir.join("tokenizer.json");
-    anyhow::ensure!(tok_path.exists(),
-        "no tokenizer.json found in {}. Use --tokenizer to specify one.", dir.display());
-    let tokenizer = NativeTokenizer::from_tokenizer_json(&tok_path)?;
-    let token_ids = tokenizer.encode(text);
-
-    eprintln!(
-        "tokenized {} tokens (vocab={}, tokenizer={})",
-        token_ids.len(),
-        tokenizer.vocab_size(),
-        tok_path.display()
-    );
-
-    // Find source model to compile (needed for custom op registry)
-    let source_path = find_source_model(dir)?;
-    eprintln!("compiling {} ...", source_path.display());
-
-    let source = model_source_from_path(&source_path)?;
-    let compiled = ModelCompiler::default().compile(source)?;
-    let mut sess = InferenceSession::new(Arc::new(compiled));
-
-    let logits = sess.run(&token_ids)?;
-
-    let vocab_size = sess.model().metadata.vocab_size as usize;
-    let seq_len = token_ids.len();
-    eprintln!("logits: [{seq_len} x {vocab_size}]");
-
-    // Print top-5 predictions for the last token position
-    if vocab_size > 0 && logits.len() >= vocab_size {
-        let last_logits = &logits[logits.len() - vocab_size..];
-        let mut indexed: Vec<(usize, f32)> = last_logits.iter().copied().enumerate().collect();
-        indexed.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-
-        println!("top predictions:");
-        for (id, score) in indexed.iter().take(5) {
-            let token = tokenizer.id_to_token(*id as u32).unwrap_or("?");
-            println!("  {id:>6} {token:>20}  {score:.4}");
-        }
-    }
-
-    Ok(())
-}
-
-/// Find a source model (ONNX or GGUF) in the given directory.
-fn find_source_model(dir: &std::path::Path) -> anyhow::Result<PathBuf> {
-    for ext in &["onnx", "gguf"] {
-        for entry in std::fs::read_dir(dir)? {
-            let path = entry?.path();
-            if path.extension().and_then(|e| e.to_str()) == Some(ext) {
-                return Ok(path);
-            }
-        }
-    }
-    anyhow::bail!(
-        "no source model (.onnx or .gguf) found in {}. \
-         AI models need the source model for custom op handlers.",
-        dir.display()
-    )
-}
-
-/// Check if any input value looks like text (not valid hex).
-fn has_text_inputs(inputs: &[String]) -> bool {
-    inputs.iter().any(|s| {
-        let Some((_, value)) = s.split_once(':') else { return false };
-        !is_valid_hex(value)
-    })
-}
-
-/// Check if a string is valid hex (even length, all hex digits).
-fn is_valid_hex(s: &str) -> bool {
-    s.len() % 2 == 0 && !s.is_empty() && s.bytes().all(|b| b.is_ascii_hexdigit())
-}
-
-// ── Info sub-commands ────────────────────────────────────────────────────────
+// ── Info ─────────────────────────────────────────────────────────────────────
 
 /// Inspect a compiled `.holo` archive — delegates to `hologram inspect`.
 fn inspect_holo(
@@ -247,7 +149,6 @@ fn inspect_onnx(path: &std::path::Path) -> anyhow::Result<()> {
     println!("inputs:    {}", ai_graph.inputs.len());
     println!("outputs:   {}", ai_graph.outputs.len());
 
-    // Print model metadata if available.
     use hologram_ai_common::MetaValue;
     for (key, val) in &ai_graph.metadata {
         let s = match val {
@@ -259,6 +160,28 @@ fn inspect_onnx(path: &std::path::Path) -> anyhow::Result<()> {
         };
         println!("{key:<11}{s}");
     }
+
+    Ok(())
+}
+
+/// Inspect a GGUF model file (parse header + print metadata).
+fn inspect_gguf(path: &std::path::Path) -> anyhow::Result<()> {
+    let data = std::fs::read(path)?;
+    let gguf = hologram_ai_gguf::parser::parse_gguf(&data)?;
+    let arch = hologram_ai_gguf::metadata::ArchParams::from_gguf(&gguf, None)?;
+
+    println!("file:        {:?}", path);
+    println!("format:      GGUF v{}", gguf.version);
+    println!("arch:        {}", arch.arch);
+    println!("tensors:     {}", gguf.tensors.len());
+    println!("context:     {}", arch.context_length);
+    println!("embedding:   {}", arch.embedding_length);
+    println!("layers:      {}", arch.block_count);
+    println!("heads:       {} (kv: {})", arch.head_count, arch.head_count_kv);
+    println!("ffn:         {}", arch.feed_forward_length);
+    println!("vocab:       {}", arch.vocab_size);
+    println!("rope_base:   {:.1}", arch.rope_freq_base);
+    println!("rms_eps:     {:.1e}", arch.layer_norm_rms_epsilon);
 
     Ok(())
 }

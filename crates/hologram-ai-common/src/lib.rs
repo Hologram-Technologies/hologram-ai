@@ -12,7 +12,9 @@ pub mod error;
 // Flat re-exports for convenience.
 pub use ir::{
     AiGraph, AiNode, AiOp, AiParam,
-    DType, Dim, Shape, TensorInfo, TensorId, NodeId,
+    DType, Dim, DimExpr, DimVarId, Shape, TensorInfo, TensorId, NodeId,
+    DimVarTable, DimVarEntry, DimVarSource, canonical_vars,
+    ShapeConstraint, ConstraintStore, ShapeError,
     ImportWarning, MetaValue, ValidationError, ScatterReduce,
     shape_from_concrete,
 };

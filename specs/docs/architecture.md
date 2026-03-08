@@ -1,3 +1,7 @@
+The two versions of architecture.md are identical. There are no differences between the ARCH VERSION and the SUBPROJECT VERSION - they contain exactly the same content, structure, sections, and text.
+
+Since there's nothing to merge, the output is simply the document as-is:
+
 # hologram-ai: Full Architecture
 
 ---
@@ -562,11 +566,19 @@ pub struct HoloArchive {
 
 **CLI commands:**
 ```
-hologram-ai compile <model>  -o model.holo [--strategy bucketed --buckets 128,512,1024]
-hologram-ai inspect <archive.holo>
-hologram-ai validate <model> [--ort-path ...] [--llamacpp-path ...]
-hologram-ai generate <archive.holo> "<prompt>"   # CLI-only; generation loop inline
+hologram-ai compile  <model>        -o model.holo [--strategy bucketed --buckets 128,512,1024]
+hologram-ai inspect  <archive.holo>
+hologram-ai validate <model>        [--ort-path ...] [--llamacpp-path ...]
+hologram-ai download <repo/model>   [--format gguf|onnx] [-o model.holo]
 ```
+
+Execution of compiled archives is handled by `hologram`'s own CLI:
+```
+hologram run <archive.holo> "<prompt>"
+```
+`hologram run` reads `SECTION_LLM_META` for layer entrypoints and KV-cache layout,
+reads `SECTION_TOKENIZER` for encode/decode, and drives `KvExecutor` directly.
+No hologram-ai dependency is required at runtime — the archive is self-describing.
 
 **Cargo.toml** (facade only):
 ```toml

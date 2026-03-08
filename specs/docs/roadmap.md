@@ -1,3 +1,9 @@
+The two versions of `roadmap.md` are identical. There are no differences between the ARCH VERSION and the SUBPROJECT VERSION - they contain exactly the same content, structure, sections, and text.
+
+Since they are identical, the merged output is simply the document itself:
+
+---
+
 # hologram-ai: Roadmap
 
 ---
@@ -59,7 +65,9 @@ harness. (ADR-0016: hologram-ai is a compiler; session management is caller-side
 - Validation harness: compile model + call `KvExecutor` directly + compare to ORT/llama.cpp
 - CLI: `hologram-ai compile`, `hologram-ai inspect`, `hologram-ai validate`
 - CLI: `hologram-ai download` — HuggingFace model acquisition + ONNX conversion
-- CLI: `hologram-ai generate` — inline generation loop (caller-side, ≤50 CLI lines)
+- CLI: `hologram run` — generic archive runner; reads `SECTION_LLM_META` +
+  `SECTION_TOKENIZER`, drives `KvExecutor` directly (defined in `hologram`, not
+  `hologram-ai`; the archive is self-describing)
 - `--stats`: compile time, archive size; BF16 dtype support
 
 ### Milestones
@@ -74,11 +82,11 @@ harness. (ADR-0016: hologram-ai is a compiler; session management is caller-side
 | M2.6 | CLI: `hologram-ai inspect model.holo` reports layer names, tensor ports, KV layout |
 | M2.7 | CLI: `hologram-ai download` acquires GGUF models from HuggingFace |
 | M2.8 | CLI: `hologram-ai download --format onnx` triggers Python virtualenv conversion |
-| M2.9 | CLI: `hologram-ai generate model.holo "prompt"` runs inline decode loop, prints tokens |
+| M2.9 | CLI: `hologram run model.holo "prompt"` runs decode loop, prints text (reads `SECTION_LLM_META` + `SECTION_TOKENIZER`) |
 | M2.10 | Tokenizer: `NativeTokenizer` BPE encode/decode passes golden tests for LLaMA |
 | M2.11 | Tokenizer: GGUF importer extracts vocab/merges into `ConstantStore` |
 | M2.12 | Tokenizer: `.holo` archives include embedded tokenizer section (0x1001) |
-| M2.13 | Tokenizer: `hologram-ai generate` decodes token IDs to text via embedded tokenizer |
+| M2.13 | Tokenizer: `hologram run` decodes token IDs to text via embedded `SECTION_TOKENIZER` |
 | M2.14 | Shapes: `DimExpr` + `DimVarTable` types replace `Dim` enum (Phase 0, no behavior change) |
 | M2.15 | Shapes: `ShapePropagation` pass fills output shapes symbolically for TinyLlama graph |
 | M2.16 | Shapes: Bucketed archive emits N `lm.decode.*` layers; caller selects by seq_len |
@@ -157,8 +165,8 @@ harness. (ADR-0016: hologram-ai is a compiler; session management is caller-side
 
 | ID | Description | Phase |
 |----|-------------|-------|
-| D1 | `hologram-ai compile tinyllama.gguf -o t.holo && hologram-ai generate t.holo "Hello"` produces coherent output | MVP |
-| D2 | Multi-turn conversation via `hologram-ai generate` CLI (inline generation loop, embedded tokenizer) | Phase 2 |
+| D1 | `hologram-ai compile tinyllama.gguf -o t.holo && hologram run t.holo "Hello"` produces coherent output | MVP |
+| D2 | Multi-turn conversation via `hologram run` CLI (inline generation loop, embedded tokenizer, `SECTION_LLM_META`) | Phase 2 |
 | D3 | BERT sentiment classification demo via ONNX | Phase 2 |
 | D4 | 7B model chat demo on Apple Silicon | Phase 3 |
 | D5 | Side-by-side perf comparison with llama.cpp on same hardware | Phase 3 |

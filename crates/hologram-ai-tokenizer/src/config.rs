@@ -14,11 +14,25 @@ pub struct TokenizerConfig {
     pub add_eos: bool,
 }
 
-/// Tokenizer algorithm variant (only BPE for Phase 1).
+/// Tokenizer algorithm variant.
 pub enum TokenizerAlgorithm {
     Bpe {
         vocab: VocabTable,
         merges: MergeRules,
+    },
+    /// SentencePiece Unigram (Viterbi segmentation).
+    Unigram {
+        vocab: VocabTable,
+        /// (token_bytes, log_probability) pairs for Viterbi scoring.
+        scores: Vec<f32>,
+    },
+    /// WordPiece (greedy longest-prefix match).
+    WordPiece {
+        vocab: VocabTable,
+        /// Prefix for continuing subword tokens (typically "##").
+        continuing_subword_prefix: String,
+        /// Maximum characters per word before falling back to unk.
+        max_input_chars_per_word: usize,
     },
 }
 

@@ -37,6 +37,8 @@ mod tests {
             tensor_info: ti,
             metadata: HashMap::new(),
             warnings: vec![],
+            dim_vars: Default::default(),
+            shape_constraints: Default::default(),
         };
         let pass = ConstantFolding;
         let g2 = pass.run(g).unwrap();

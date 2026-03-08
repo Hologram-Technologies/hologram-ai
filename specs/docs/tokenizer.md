@@ -435,7 +435,9 @@ Resolution order:
 
 ## CLI Changes
 
-### `generate` command — tokenizer resolution
+### `hologram run` command — tokenizer resolution
+
+Execution is handled by the `hologram` CLI, not `hologram-ai`:
 
 ```
 Priority:

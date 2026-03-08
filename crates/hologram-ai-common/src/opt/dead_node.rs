@@ -24,6 +24,8 @@ impl Pass for DeadNodeElimination {
             tensor_info: graph.tensor_info,
             metadata: graph.metadata,
             warnings: graph.warnings,
+            dim_vars: graph.dim_vars,
+            shape_constraints: graph.shape_constraints,
         })
     }
 }
@@ -81,6 +83,8 @@ mod tests {
             tensor_info: ti,
             metadata: HashMap::new(),
             warnings: vec![],
+            dim_vars: Default::default(),
+            shape_constraints: Default::default(),
         }
     }
 

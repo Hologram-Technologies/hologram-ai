@@ -1,6 +1,9 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use hologram_ai_quant::QuantDescriptor;
-use super::{dtype::DType, shape::Shape, node::{AiNode, TensorId, NodeId}, param::AiParam};
+use super::{
+    dtype::DType, shape::Shape, node::{AiNode, TensorId, NodeId}, param::AiParam,
+    shape::{DimVarTable, ConstraintStore},
+};
 
 /// Full type + quantization information for a tensor.
 #[derive(Debug, Clone)]
@@ -60,6 +63,10 @@ pub struct AiGraph {
     pub tensor_info: HashMap<TensorId, TensorInfo>,
     pub metadata: HashMap<String, MetaValue>,
     pub warnings: Vec<ImportWarning>,
+    /// Registry of symbolic dimension variables (batch, seq_len, etc.).
+    pub dim_vars: DimVarTable,
+    /// Shape constraints collected during import and shape propagation.
+    pub shape_constraints: ConstraintStore,
 }
 
 impl AiGraph {
@@ -210,6 +217,8 @@ mod tests {
             tensor_info: ti,
             metadata: HashMap::new(),
             warnings: vec![],
+            dim_vars: DimVarTable::default(),
+            shape_constraints: ConstraintStore::default(),
         }
     }
 

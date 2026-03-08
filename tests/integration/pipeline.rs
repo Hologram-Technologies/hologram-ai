@@ -75,6 +75,8 @@ fn make_identity_graph() -> AiGraph {
         tensor_info,
         metadata: HashMap::new(),
         warnings: vec![],
+        dim_vars: Default::default(),
+        shape_constraints: Default::default(),
     }
 }
 
