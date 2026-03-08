@@ -5,6 +5,8 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+hologram.workspace   = true
 anyhow.workspace     = true
 serde.workspace      = true
 serde_json.workspace = true
+rkyv.workspace       = true

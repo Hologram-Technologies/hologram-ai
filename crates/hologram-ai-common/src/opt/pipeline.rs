@@ -19,8 +19,7 @@ impl OptPipeline {
     /// Standard optimization pipeline.
     pub fn mvp() -> Self {
         use super::{
-            constant_fold::ConstantFolding,
-            dead_node::DeadNodeElimination,
+            constant_fold::ConstantFolding, dead_node::DeadNodeElimination,
             shape_prop::ShapePropagation,
         };
         Self::new(vec![

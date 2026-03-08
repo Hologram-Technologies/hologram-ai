@@ -22,7 +22,7 @@ pub fn dequant_q4_0_block(block: &Q4_0Block) -> [f32; 32] {
     for (i, &byte) in block.qs.iter().enumerate() {
         let lo = (byte & 0x0F) as i32 - 8;
         let hi = ((byte >> 4) & 0x0F) as i32 - 8;
-        out[2 * i]     = lo as f32 * scale;
+        out[2 * i] = lo as f32 * scale;
         out[2 * i + 1] = hi as f32 * scale;
     }
     out
@@ -33,7 +33,11 @@ pub fn dequant_q4_0_block(block: &Q4_0Block) -> [f32; 32] {
 /// # Panics
 /// Panics if `data.len()` is not a multiple of `Q4_0_BLOCK_SIZE` (18).
 pub fn dequant_q4_0(data: &[u8]) -> Vec<f32> {
-    assert_eq!(data.len() % Q4_0_BLOCK_SIZE, 0, "Q4_0 data length must be a multiple of 18");
+    assert_eq!(
+        data.len() % Q4_0_BLOCK_SIZE,
+        0,
+        "Q4_0 data length must be a multiple of 18"
+    );
     let blocks: &[Q4_0Block] = bytemuck::cast_slice(data);
     let mut out = Vec::with_capacity(blocks.len() * 32);
     for block in blocks {
@@ -49,7 +53,10 @@ mod tests {
     #[test]
     fn dequant_zero_block() {
         // scale = f16::from_bits(0) = 0.0, all qs = 0x88 (nibbles all 8, so offset 0)
-        let block = Q4_0Block { scale: 0x3C00, qs: [0x88u8; 16] }; // scale = f16(1.0)
+        let block = Q4_0Block {
+            scale: 0x3C00,
+            qs: [0x88u8; 16],
+        }; // scale = f16(1.0)
         let vals = dequant_q4_0_block(&block);
         // low nibble = 8 & 0xF = 8, 8 - 8 = 0; high nibble = 8, 8 - 8 = 0
         for v in vals.iter() {
@@ -61,7 +68,10 @@ mod tests {
     fn dequant_known_block() {
         // scale = f16(1.0) = 0x3C00
         // qs[0] = 0x09 → lo nibble = 9 → 9-8=1, hi nibble = 0 → 0-8=-8
-        let mut block = Q4_0Block { scale: 0x3C00, qs: [0x88u8; 16] };
+        let mut block = Q4_0Block {
+            scale: 0x3C00,
+            qs: [0x88u8; 16],
+        };
         block.qs[0] = 0x09; // lo=9-8=1, hi=0-8=-8
         let vals = dequant_q4_0_block(&block);
         assert!((vals[0] - 1.0f32).abs() < 1e-5, "vals[0]={}", vals[0]);
@@ -76,10 +86,16 @@ mod tests {
     fn dequant_q4_0_slice() {
         // two identical blocks: scale=f16(2.0)=0x4000, all nibbles=8 (offset 0)
         let mut data = vec![0u8; 36];
-        data[0] = 0x00; data[1] = 0x40; // f16(2.0) LE
-        data[18] = 0x00; data[19] = 0x40;
-        for i in 2..18 { data[i] = 0x88; }
-        for i in 20..36 { data[i] = 0x88; }
+        data[0] = 0x00;
+        data[1] = 0x40; // f16(2.0) LE
+        data[18] = 0x00;
+        data[19] = 0x40;
+        for i in 2..18 {
+            data[i] = 0x88;
+        }
+        for i in 20..36 {
+            data[i] = 0x88;
+        }
         let out = dequant_q4_0(&data);
         assert_eq!(out.len(), 64);
         for v in out.iter() {

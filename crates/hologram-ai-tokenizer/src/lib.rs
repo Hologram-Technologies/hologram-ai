@@ -3,6 +3,7 @@
 //! Provides BPE tokenization with support for HuggingFace `tokenizer.json`
 //! format. Tokenizer data can be embedded in `.holo` archives (Phase 2).
 
+pub mod archive;
 mod bpe;
 mod config;
 mod native;
@@ -11,7 +12,7 @@ mod vocab;
 mod wordpiece;
 
 pub use config::{
-    NormalizationConfig, NormStep, PreTokenizerConfig, SpecialTokens, TokenizerAlgorithm,
+    NormStep, NormalizationConfig, PreTokenizerConfig, SpecialTokens, TokenizerAlgorithm,
     TokenizerConfig,
 };
 pub use native::NativeTokenizer;

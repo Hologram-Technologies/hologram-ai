@@ -48,3 +48,8 @@ sha2          = "0.10"
 dirs          = "5"
 which         = "7"
 tokio-util    = { version = "0.7", features = ["io"] }
+rkyv          = "0.8"
+
+# Keep debug symbols but optimize enough for usable LLM inference (~10-50x faster).
+[profile.dev]
+opt-level = 2

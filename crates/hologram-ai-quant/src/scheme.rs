@@ -30,16 +30,28 @@ pub struct QuantDescriptor {
 impl QuantDescriptor {
     /// Plain (unquantized) descriptor.
     pub fn none() -> Self {
-        Self { scheme: QuantScheme::None, block_size: 1, scale_dtype: ScaleDtype::F32 }
+        Self {
+            scheme: QuantScheme::None,
+            block_size: 1,
+            scale_dtype: ScaleDtype::F32,
+        }
     }
 
     /// Q4_0: 32 weights per block, f16 scale, 4-bit packed nibbles.
     pub fn q4_0() -> Self {
-        Self { scheme: QuantScheme::Q4_0, block_size: 32, scale_dtype: ScaleDtype::F16 }
+        Self {
+            scheme: QuantScheme::Q4_0,
+            block_size: 32,
+            scale_dtype: ScaleDtype::F16,
+        }
     }
 
     /// Q8_0: 32 weights per block, f16 scale, 8-bit signed integers.
     pub fn q8_0() -> Self {
-        Self { scheme: QuantScheme::Q8_0, block_size: 32, scale_dtype: ScaleDtype::F16 }
+        Self {
+            scheme: QuantScheme::Q8_0,
+            block_size: 32,
+            scale_dtype: ScaleDtype::F16,
+        }
     }
 }

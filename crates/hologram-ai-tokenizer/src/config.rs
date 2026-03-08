@@ -53,10 +53,7 @@ pub enum PreTokenizerConfig {
     None,
     /// Metaspace pre-tokenizer (SentencePiece convention).
     /// Replaces spaces with `replacement` char and optionally prepends it.
-    Metaspace {
-        replacement: char,
-        prepend: bool,
-    },
+    Metaspace { replacement: char, prepend: bool },
     /// Regex-based pre-tokenization (GPT-2 / LLaMA-3 style).
     Regex(String),
 }
@@ -79,5 +76,8 @@ pub enum NormStep {
     Lowercase,
     StripAccents,
     PrependSpace,
-    Replace { pattern: String, replacement: String },
+    Replace {
+        pattern: String,
+        replacement: String,
+    },
 }

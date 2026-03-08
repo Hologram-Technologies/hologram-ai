@@ -43,9 +43,7 @@ impl NativeTokenizer {
             serde_json::from_str(&data).context("parsing tokenizer JSON")?;
 
         let model = &json["model"];
-        let model_type = model["type"]
-            .as_str()
-            .context("missing model.type")?;
+        let model_type = model["type"].as_str().context("missing model.type")?;
 
         match model_type {
             "BPE" => Self::from_bpe_json(&json),
@@ -59,9 +57,7 @@ impl NativeTokenizer {
         let model = &json["model"];
 
         // Parse vocab: string → id map
-        let vocab_obj = model["vocab"]
-            .as_object()
-            .context("missing model.vocab")?;
+        let vocab_obj = model["vocab"].as_object().context("missing model.vocab")?;
         let vocab_map: HashMap<String, u32> = vocab_obj
             .iter()
             .map(|(k, v)| {
@@ -72,9 +68,7 @@ impl NativeTokenizer {
         let vocab = VocabTable::from_vocab_map(&vocab_map);
 
         // Parse merges — can be either ["a", "b"] arrays or "a b" strings
-        let merges_arr = model["merges"]
-            .as_array()
-            .context("missing model.merges")?;
+        let merges_arr = model["merges"].as_array().context("missing model.merges")?;
         let merges = MergeRules::from_json_merges(merges_arr);
 
         // byte_fallback
@@ -108,7 +102,10 @@ impl NativeTokenizer {
 
         let encoder = BpeEncoder::new(vocab, merges, byte_fallback, pre_tokenizer);
 
-        Ok(Self { config, backend: EncoderBackend::Bpe(encoder) })
+        Ok(Self {
+            config,
+            backend: EncoderBackend::Bpe(encoder),
+        })
     }
 
     fn from_unigram_json(json: &serde_json::Value) -> Result<Self> {
@@ -120,7 +117,9 @@ impl NativeTokenizer {
         let mut tokens = Vec::with_capacity(vocab_arr.len());
         let mut scores = Vec::with_capacity(vocab_arr.len());
         for entry in vocab_arr {
-            let arr = entry.as_array().context("vocab entry must be [token, score]")?;
+            let arr = entry
+                .as_array()
+                .context("vocab entry must be [token, score]")?;
             let token = arr[0].as_str().context("vocab token must be string")?;
             let score = arr[1].as_f64().unwrap_or(0.0) as f32;
             tokens.push(token.as_bytes().to_vec());
@@ -168,9 +167,7 @@ impl NativeTokenizer {
             .as_str()
             .unwrap_or("##")
             .to_string();
-        let max_chars = model["max_input_chars_per_word"]
-            .as_u64()
-            .unwrap_or(200) as usize;
+        let max_chars = model["max_input_chars_per_word"].as_u64().unwrap_or(200) as usize;
 
         let special = parse_special_tokens(json)?;
         let pre_tokenizer = parse_pre_tokenizer(json);
@@ -225,7 +222,11 @@ impl NativeTokenizer {
                 // Simple whitespace split, then encode each word.
                 text.split_whitespace()
                     .flat_map(|word| {
-                        let enc = WordPieceEncoder::new(vocab, continuing_prefix, *max_input_chars_per_word);
+                        let enc = WordPieceEncoder::new(
+                            vocab,
+                            continuing_prefix,
+                            *max_input_chars_per_word,
+                        );
                         enc.encode_word(word)
                     })
                     .collect()
@@ -359,7 +360,11 @@ fn parse_pre_tokenizer(json: &serde_json::Value) -> PreTokenizerConfig {
             }
         }
         Some("Split") => {
-            if let Some(pattern) = pt["pattern"].as_object().and_then(|p| p.get("Regex")).and_then(|r| r.as_str()) {
+            if let Some(pattern) = pt["pattern"]
+                .as_object()
+                .and_then(|p| p.get("Regex"))
+                .and_then(|r| r.as_str())
+            {
                 PreTokenizerConfig::Regex(pattern.to_string())
             } else {
                 PreTokenizerConfig::None

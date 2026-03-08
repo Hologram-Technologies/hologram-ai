@@ -646,6 +646,7 @@ dependencies = [
  "hologram",
  "hologram-ai-quant",
  "indexmap",
+ "rkyv",
  "serde",
  "smallvec",
  "thiserror 2.0.18",
@@ -705,6 +706,8 @@ name = "hologram-ai-tokenizer"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "hologram",
+ "rkyv",
  "serde",
  "serde_json",
 ]

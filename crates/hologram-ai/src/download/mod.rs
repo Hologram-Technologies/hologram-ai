@@ -93,10 +93,7 @@ fn resolve_format(
     }
 }
 
-fn try_resolve_gguf(
-    info: &ModelInfo,
-    quantization: Option<&str>,
-) -> Option<ResolvedDownload> {
+fn try_resolve_gguf(info: &ModelInfo, quantization: Option<&str>) -> Option<ResolvedDownload> {
     let gguf_files: Vec<_> = info
         .siblings
         .iter()
@@ -136,7 +133,9 @@ fn try_resolve_onnx(info: &ModelInfo) -> Option<ResolvedDownload> {
         return None;
     }
 
-    Some(ResolvedDownload::Onnx { filenames: onnx_files })
+    Some(ResolvedDownload::Onnx {
+        filenames: onnx_files,
+    })
 }
 
 // ── Entrypoint ───────────────────────────────────────────────────────────────
@@ -190,8 +189,7 @@ async fn run_async(args: DownloadArgs) -> anyhow::Result<()> {
         }
         ResolvedDownload::ConvertToOnnx => {
             eprintln!("No pre-built ONNX found. Converting via Python...");
-            let result =
-                convert::convert_to_onnx(&args.model_id, &output_dir, args.keep_venv)?;
+            let result = convert::convert_to_onnx(&args.model_id, &output_dir, args.keep_venv)?;
             eprintln!("Converted: {}", result.model_path.display());
         }
         ResolvedDownload::ConvertToGguf => {
@@ -264,9 +262,7 @@ async fn download_onnx(
 
     // Also download any external data files (e.g., model.onnx_data)
     for sibling in &info.siblings {
-        if sibling.filename.ends_with(".onnx_data")
-            || sibling.filename.ends_with(".onnx.data")
-        {
+        if sibling.filename.ends_with(".onnx_data") || sibling.filename.ends_with(".onnx.data") {
             let dest = output_dir.join(&sibling.filename);
             let total = sibling.size.unwrap_or(0);
             let pb = dp.add_file(&sibling.filename, total);

@@ -2,13 +2,13 @@
 //!
 //! Supports GGUF v2/v3 binary format with LLaMA architecture.
 
-pub mod parser;
-pub mod metadata;
 pub mod arch;
+pub mod metadata;
+pub mod parser;
 
-use std::path::Path;
-use hologram_ai_common::AiGraph;
 use anyhow::{bail, Context, Result};
+use hologram_ai_common::AiGraph;
+use std::path::Path;
 
 /// Options for GGUF import.
 pub struct GgufImportOptions {
@@ -18,7 +18,10 @@ pub struct GgufImportOptions {
 
 impl Default for GgufImportOptions {
     fn default() -> Self {
-        Self { mmap: true, arch_override: None }
+        Self {
+            mmap: true,
+            arch_override: None,
+        }
     }
 }
 
@@ -57,7 +60,9 @@ fn import_from_data(data: &[u8], model_path: &Path, opts: GgufImportOptions) -> 
         "llama" | "mistral" | "codellama" | "tinyllama" => {
             arch::llama::build_llama_graph(&gguf, &arch_params, model_path)
         }
-        other => bail!("unsupported GGUF architecture: {other:?} (supported: llama, mistral, codellama)"),
+        other => {
+            bail!("unsupported GGUF architecture: {other:?} (supported: llama, mistral, codellama)")
+        }
     }
 }
 

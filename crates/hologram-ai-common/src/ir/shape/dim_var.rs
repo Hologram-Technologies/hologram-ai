@@ -1,6 +1,6 @@
-use std::collections::HashMap;
-use super::dim_expr::{DimExpr, DimVarId};
 use super::constraint::ShapeError;
+use super::dim_expr::{DimExpr, DimVarId};
+use std::collections::HashMap;
 
 /// Where a dimension variable was introduced.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -121,9 +121,7 @@ impl DimVarTable {
         self.entries
             .iter()
             .enumerate()
-            .filter_map(|(i, e)| {
-                e.fixed.map(|v| (DimVarId(i as u32), DimExpr::Concrete(v)))
-            })
+            .filter_map(|(i, e)| e.fixed.map(|v| (DimVarId(i as u32), DimExpr::Concrete(v))))
             .collect()
     }
 

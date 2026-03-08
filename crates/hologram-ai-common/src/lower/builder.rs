@@ -3,12 +3,13 @@
 //! Uses `hologram::GraphBuilder` (fluent, index-based): each node-adding method
 //! increments the builder's index counter; `tid_to_idx` maps `TensorId` → builder index.
 
-use std::collections::HashMap;
-use anyhow::Context;
-use hologram::{ConstantData, FloatOp, GraphBuilder, GraphOp, f32_to_bits};
+use super::dispatch::{dispatch, DispatchTarget};
+use super::LowerPhase;
 use crate::ir::{AiGraph, AiOp, Dim, TensorId, TensorInfo};
 use crate::mem::KvCacheLayout;
-use super::dispatch::{dispatch, DispatchTarget};
+use anyhow::Context;
+use hologram::{f32_to_bits, ConstantData, FloatDType, FloatOp, GraphBuilder, GraphOp};
+use std::collections::HashMap;
 
 // ── Public types ──────────────────────────────────────────────────────────────
 
@@ -18,7 +19,11 @@ pub struct LoweringOptions {
 }
 
 impl Default for LoweringOptions {
-    fn default() -> Self { Self { quant_strategy: QuantStrategy::Auto } }
+    fn default() -> Self {
+        Self {
+            quant_strategy: QuantStrategy::Auto,
+        }
+    }
 }
 
 /// Quantized weight dequantization strategy.
@@ -34,6 +39,8 @@ pub enum QuantStrategy {
 /// Output of the lowering pass.
 pub struct LoweringOutput {
     pub graph: hologram::Graph,
+    /// Layer name for archive metadata (e.g. "lm.prefill", "model.forward").
+    pub layer_name: String,
 }
 
 // ── Entry point ───────────────────────────────────────────────────────────────
@@ -46,6 +53,7 @@ pub fn lower(
     ai_graph: &AiGraph,
     _kv_layout: &KvCacheLayout,
     _opts: &LoweringOptions,
+    phase: &LowerPhase,
 ) -> anyhow::Result<LoweringOutput> {
     let mut builder = GraphBuilder::new();
 
@@ -70,7 +78,10 @@ pub fn lower(
     for (&tid, param) in sorted_params {
         let constant = match param {
             crate::ir::AiParam::Mmap { len, .. } => {
-                let d = ConstantData::Deferred { byte_size: *len, source_id: mmap_offset };
+                let d = ConstantData::Deferred {
+                    byte_size: *len,
+                    source_id: mmap_offset,
+                };
                 mmap_offset += *len;
                 d
             }
@@ -90,10 +101,20 @@ pub fn lower(
     for nid in topo {
         let node = node_map[&nid];
 
-        let input_idxs: Vec<usize> = node.inputs.iter()
-            .map(|tid| tid_to_idx.get(tid).copied()
-                .with_context(|| format!("missing builder index for tensor {tid}")))
+        let input_idxs: Vec<usize> = node
+            .inputs
+            .iter()
+            .map(|tid| {
+                tid_to_idx
+                    .get(tid)
+                    .copied()
+                    .with_context(|| format!("missing builder index for tensor {tid}"))
+            })
             .collect::<anyhow::Result<_>>()?;
+
+        // ONNX Gather has (data, indices) but hologram executor expects
+        // (indices, data). Swap inputs for Gather/GatherElements.
+        let input_idxs = swap_gather_inputs(&node.op, input_idxs);
 
         match dispatch(&node.op) {
             DispatchTarget::GraphOp(graph_op) => {
@@ -103,9 +124,7 @@ pub fn lower(
                 }
             }
             DispatchTarget::FloatNeedsShape => {
-                let graph_op = resolve_float_op(
-                    &node.op, &node.inputs, &ai_graph.tensor_info,
-                )?;
+                let graph_op = resolve_float_op(&node.op, &node.inputs, &ai_graph.tensor_info)?;
                 builder = builder.node_with_inputs(graph_op, &input_idxs);
                 if let Some(&tid) = node.outputs.first() {
                     tid_to_idx.insert(tid, builder.len() - 1);
@@ -113,8 +132,7 @@ pub fn lower(
             }
             DispatchTarget::Identity => {
                 // Pass-through: output tensor maps to the same index as the input.
-                if let (Some(&in_tid), Some(&out_tid)) =
-                    (node.inputs.first(), node.outputs.first())
+                if let (Some(&in_tid), Some(&out_tid)) = (node.inputs.first(), node.outputs.first())
                 {
                     if let Some(&idx) = tid_to_idx.get(&in_tid) {
                         tid_to_idx.insert(out_tid, idx);
@@ -129,7 +147,9 @@ pub fn lower(
 
     // Add Output nodes and register named graph outputs.
     for (i, &tid) in ai_graph.outputs.iter().enumerate() {
-        let src_idx = tid_to_idx.get(&tid).copied()
+        let src_idx = tid_to_idx
+            .get(&tid)
+            .copied()
             .with_context(|| format!("missing builder index for output tensor {tid}"))?;
         builder = builder.node_with_inputs(GraphOp::Output, &[src_idx]);
         let out_node_idx = builder.len() - 1;
@@ -137,7 +157,10 @@ pub fn lower(
     }
 
     let graph = builder.build();
-    Ok(LoweringOutput { graph })
+    Ok(LoweringOutput {
+        graph,
+        layer_name: phase.layer_name().to_string(),
+    })
 }
 
 // ── Float op shape resolution ─────────────────────────────────────────────────
@@ -155,12 +178,19 @@ fn resolve_float_op(
             let m = second_last_dim(inputs.first(), tensor_info).unwrap_or(1) as u32;
             FloatOp::MatMul { m, k, n }
         }
-        AiOp::Gemm { alpha, beta, trans_a, trans_b } => {
+        AiOp::Gemm {
+            alpha,
+            beta,
+            trans_a,
+            trans_b,
+        } => {
             let k = last_dim(inputs.first(), tensor_info).unwrap_or(1) as u32;
             let n = last_dim(inputs.get(1), tensor_info).unwrap_or(1) as u32;
             let m = second_last_dim(inputs.first(), tensor_info).unwrap_or(1) as u32;
             FloatOp::Gemm {
-                m, k, n,
+                m,
+                k,
+                n,
                 alpha: f32_to_bits(*alpha),
                 beta: f32_to_bits(*beta),
                 trans_a: *trans_a,
@@ -177,11 +207,17 @@ fn resolve_float_op(
         }
         AiOp::RmsNorm { epsilon } => {
             let size = last_dim(inputs.first(), tensor_info).unwrap_or(1) as u32;
-            FloatOp::RmsNorm { size, epsilon: f32_to_bits(*epsilon) }
+            FloatOp::RmsNorm {
+                size,
+                epsilon: f32_to_bits(*epsilon),
+            }
         }
         AiOp::LayerNorm { epsilon, .. } => {
             let size = last_dim(inputs.first(), tensor_info).unwrap_or(1) as u32;
-            FloatOp::LayerNorm { size, epsilon: f32_to_bits(*epsilon) }
+            FloatOp::LayerNorm {
+                size,
+                epsilon: f32_to_bits(*epsilon),
+            }
         }
         AiOp::ReduceSum { .. } => {
             let size = last_dim(inputs.first(), tensor_info).unwrap_or(1) as u32;
@@ -212,20 +248,89 @@ fn resolve_float_op(
             let dim = last_dim(inputs.get(1), tensor_info).unwrap_or(1) as u32;
             FloatOp::Embed { dim }
         }
-        AiOp::MultiHeadAttention { head_dim, scale, causal, .. } => {
+        AiOp::MultiHeadAttention {
+            head_dim,
+            scale,
+            causal,
+            ..
+        } => {
             let s = scale.unwrap_or((*head_dim as f32).sqrt().recip());
-            FloatOp::Attention { head_dim: *head_dim, scale: f32_to_bits(s), causal: *causal }
+            FloatOp::Attention {
+                head_dim: *head_dim,
+                scale: f32_to_bits(s),
+                causal: *causal,
+            }
         }
-        AiOp::GroupedQueryAttention { head_dim, scale, causal, .. } => {
+        AiOp::GroupedQueryAttention {
+            head_dim,
+            scale,
+            causal,
+            ..
+        } => {
             let s = scale.unwrap_or((*head_dim as f32).sqrt().recip());
-            FloatOp::Attention { head_dim: *head_dim, scale: f32_to_bits(s), causal: *causal }
+            FloatOp::Attention {
+                head_dim: *head_dim,
+                scale: f32_to_bits(s),
+                causal: *causal,
+            }
         }
-        AiOp::FlashAttentionHint => {
-            FloatOp::Attention { head_dim: 64, scale: f32_to_bits(0.125), causal: true }
+        AiOp::FlashAttentionHint => FloatOp::Attention {
+            head_dim: 64,
+            scale: f32_to_bits(0.125),
+            causal: true,
+        },
+        AiOp::Cast { to } => {
+            let from = input_float_dtype(inputs.first(), tensor_info);
+            FloatOp::Cast {
+                from,
+                to: ai_dtype_to_float_dtype(to),
+            }
+        }
+        AiOp::Shape => {
+            let dtype = input_float_dtype(inputs.first(), tensor_info);
+            FloatOp::Shape { dtype }
         }
         _ => anyhow::bail!("resolve_float_op: unexpected op {:?}", op),
     };
     Ok(GraphOp::Float(float_op))
+}
+
+// ── Input reordering ─────────────────────────────────────────────────────────
+
+/// ONNX Gather/GatherElements: `(data, indices)` → hologram executor: `(indices, data)`.
+fn swap_gather_inputs(op: &AiOp, mut idxs: Vec<usize>) -> Vec<usize> {
+    if matches!(op, AiOp::Gather { .. } | AiOp::GatherElements { .. }) && idxs.len() >= 2 {
+        idxs.swap(0, 1);
+    }
+    idxs
+}
+
+// ── Dtype conversion ─────────────────────────────────────────────────────────
+
+/// Convert hologram-ai `DType` to hologram base crate `FloatDType`.
+fn ai_dtype_to_float_dtype(dtype: &crate::ir::DType) -> FloatDType {
+    use crate::ir::DType;
+    match dtype {
+        DType::F32 => FloatDType::F32,
+        DType::F16 => FloatDType::F16,
+        DType::BF16 => FloatDType::BF16,
+        DType::INT8 => FloatDType::I8,
+        DType::INT4 => FloatDType::I8,
+        DType::U8 => FloatDType::U8,
+        DType::INT32 => FloatDType::I32,
+        DType::INT64 => FloatDType::I64,
+        DType::BOOL => FloatDType::Bool,
+    }
+}
+
+/// Look up the logical dtype of the first input tensor, defaulting to F32.
+fn input_float_dtype(
+    tid: Option<&TensorId>,
+    tensor_info: &HashMap<TensorId, TensorInfo>,
+) -> FloatDType {
+    tid.and_then(|t| tensor_info.get(t))
+        .map(|info| ai_dtype_to_float_dtype(&info.logical_dtype))
+        .unwrap_or(FloatDType::F32)
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -233,23 +338,33 @@ fn resolve_float_op(
 /// Extract last concrete dimension from a tensor.
 fn last_dim(tid: Option<&TensorId>, tensor_info: &HashMap<TensorId, TensorInfo>) -> Option<u64> {
     tid.and_then(|t| tensor_info.get(t))
-       .and_then(|info| info.shape.last())
-       .and_then(concrete_dim)
+        .and_then(|info| info.shape.last())
+        .and_then(concrete_dim)
 }
 
 /// Extract second-to-last concrete dimension from a tensor.
-fn second_last_dim(tid: Option<&TensorId>, tensor_info: &HashMap<TensorId, TensorInfo>) -> Option<u64> {
+fn second_last_dim(
+    tid: Option<&TensorId>,
+    tensor_info: &HashMap<TensorId, TensorInfo>,
+) -> Option<u64> {
     tid.and_then(|t| tensor_info.get(t))
-       .and_then(|info| {
-           let n = info.shape.len();
-           if n >= 2 { info.shape.get(n - 2) } else { None }
-       })
-       .and_then(concrete_dim)
+        .and_then(|info| {
+            let n = info.shape.len();
+            if n >= 2 {
+                info.shape.get(n - 2)
+            } else {
+                None
+            }
+        })
+        .and_then(concrete_dim)
 }
 
 /// Extract the concrete value from a `Dim`, returning `None` for symbolic/dynamic dims.
 fn concrete_dim(dim: &Dim) -> Option<u64> {
-    match dim { Dim::Concrete(n) => Some(*n), _ => None }
+    match dim {
+        Dim::Concrete(n) => Some(*n),
+        _ => None,
+    }
 }
 
 /// Read parameter bytes into an owned `Vec<u8>`.
@@ -257,7 +372,9 @@ fn param_bytes_owned(param: &crate::ir::AiParam) -> anyhow::Result<Vec<u8>> {
     use crate::ir::AiParam;
     match param {
         AiParam::Inline { data, .. } => Ok(data.clone()),
-        AiParam::Mmap { path, offset, len, .. } => {
+        AiParam::Mmap {
+            path, offset, len, ..
+        } => {
             use std::io::{Read, Seek, SeekFrom};
             let mut f = std::fs::File::open(path)
                 .with_context(|| format!("opening mmap param at {path:?}"))?;

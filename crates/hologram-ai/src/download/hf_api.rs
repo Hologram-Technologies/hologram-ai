@@ -108,9 +108,7 @@ impl HfClient {
         dest: &Path,
         progress: &ProgressBar,
     ) -> anyhow::Result<()> {
-        let url = format!(
-            "https://huggingface.co/{model_id}/resolve/{revision}/{filename}"
-        );
+        let url = format!("https://huggingface.co/{model_id}/resolve/{revision}/{filename}");
         let mut req = self.client.get(&url);
         if let Some(ref token) = self.token {
             req = req.bearer_auth(token);

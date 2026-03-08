@@ -3,9 +3,9 @@
 //! Infers output shapes from input shapes for each node in topological order.
 //! Collects `ShapeConstraint` entries into `graph.shape_constraints`.
 
-use crate::ir::{AiGraph, AiOp, Shape, shape_from_concrete};
-use crate::ir::shape::DimExpr;
 use super::pipeline::Pass;
+use crate::ir::shape::DimExpr;
+use crate::ir::{shape_from_concrete, AiGraph, AiOp, Shape};
 
 /// Propagate shapes forward through the graph.
 ///
@@ -15,14 +15,20 @@ use super::pipeline::Pass;
 pub struct ShapePropagation;
 
 impl Pass for ShapePropagation {
-    fn name(&self) -> &str { "ShapePropagation" }
+    fn name(&self) -> &str {
+        "ShapePropagation"
+    }
 
     fn run(&self, mut graph: AiGraph) -> anyhow::Result<AiGraph> {
         let order = graph.topo_order();
 
         // Build node lookup.
-        let node_idx: std::collections::HashMap<u32, usize> =
-            graph.nodes.iter().enumerate().map(|(i, n)| (n.id, i)).collect();
+        let node_idx: std::collections::HashMap<u32, usize> = graph
+            .nodes
+            .iter()
+            .enumerate()
+            .map(|(i, n)| (n.id, i))
+            .collect();
 
         for &nid in &order {
             let idx = match node_idx.get(&nid) {
@@ -35,7 +41,8 @@ impl Pass for ShapePropagation {
                 .inputs
                 .iter()
                 .map(|tid| {
-                    graph.tensor_info
+                    graph
+                        .tensor_info
                         .get(tid)
                         .map(|ti| ti.shape.clone())
                         .unwrap_or_default()
@@ -52,7 +59,9 @@ impl Pass for ShapePropagation {
             for (i, tid) in output_tids.iter().enumerate() {
                 if let Some(shape) = inferred.get(i) {
                     if let Some(info) = graph.tensor_info.get_mut(tid) {
-                        if info.shape.is_empty() || info.shape.iter().all(|d| matches!(d, DimExpr::Dynamic)) {
+                        if info.shape.is_empty()
+                            || info.shape.iter().all(|d| matches!(d, DimExpr::Dynamic))
+                        {
                             info.shape = shape.clone();
                         }
                     }
@@ -68,20 +77,50 @@ impl Pass for ShapePropagation {
 fn infer_output_shapes(op: &AiOp, inputs: &[Shape]) -> Vec<Shape> {
     match op {
         // Unary elementwise — output shape = input shape.
-        AiOp::Relu | AiOp::Gelu | AiOp::GeluApprox | AiOp::Silu
-        | AiOp::Tanh | AiOp::Sigmoid | AiOp::Abs | AiOp::Neg
-        | AiOp::Sqrt | AiOp::Exp | AiOp::Log | AiOp::Sign
-        | AiOp::Floor | AiOp::Ceil | AiOp::Round | AiOp::Clip
-        | AiOp::Erf | AiOp::Reciprocal | AiOp::Cos | AiOp::Sin
-        | AiOp::IsNaN | AiOp::Not | AiOp::Identity | AiOp::Dequantize => {
-            inputs.first().cloned().into_iter().collect()
-        }
+        AiOp::Relu
+        | AiOp::Gelu
+        | AiOp::GeluApprox
+        | AiOp::Silu
+        | AiOp::Tanh
+        | AiOp::Sigmoid
+        | AiOp::Abs
+        | AiOp::Neg
+        | AiOp::Sqrt
+        | AiOp::Exp
+        | AiOp::Log
+        | AiOp::Sign
+        | AiOp::Floor
+        | AiOp::Ceil
+        | AiOp::Round
+        | AiOp::Clip
+        | AiOp::Erf
+        | AiOp::Reciprocal
+        | AiOp::Cos
+        | AiOp::Sin
+        | AiOp::IsNaN
+        | AiOp::Not
+        | AiOp::Identity
+        | AiOp::Dequantize
+        | AiOp::KvSlotWrite { .. }
+        | AiOp::KvSlotRead { .. } => inputs.first().cloned().into_iter().collect(),
 
         // Binary elementwise with broadcasting — use the longer shape.
-        AiOp::Add | AiOp::Sub | AiOp::Mul | AiOp::Div | AiOp::Pow | AiOp::Mod
-        | AiOp::Min | AiOp::Max | AiOp::And | AiOp::Or | AiOp::Xor
-        | AiOp::Equal | AiOp::Less | AiOp::LessOrEqual
-        | AiOp::Greater | AiOp::GreaterOrEqual => {
+        AiOp::Add
+        | AiOp::Sub
+        | AiOp::Mul
+        | AiOp::Div
+        | AiOp::Pow
+        | AiOp::Mod
+        | AiOp::Min
+        | AiOp::Max
+        | AiOp::And
+        | AiOp::Or
+        | AiOp::Xor
+        | AiOp::Equal
+        | AiOp::Less
+        | AiOp::LessOrEqual
+        | AiOp::Greater
+        | AiOp::GreaterOrEqual => {
             if inputs.len() >= 2 {
                 vec![broadcast_shape(&inputs[0], &inputs[1])]
             } else {
@@ -108,10 +147,10 @@ fn infer_output_shapes(op: &AiOp, inputs: &[Shape]) -> Vec<Shape> {
         }
 
         // Norms preserve shape (with weight input).
-        AiOp::RmsNorm { .. } | AiOp::LayerNorm { .. }
-        | AiOp::GroupNorm { .. } | AiOp::BatchNorm { .. } => {
-            inputs.first().cloned().into_iter().collect()
-        }
+        AiOp::RmsNorm { .. }
+        | AiOp::LayerNorm { .. }
+        | AiOp::GroupNorm { .. }
+        | AiOp::BatchNorm { .. } => inputs.first().cloned().into_iter().collect(),
 
         // Concat along axis — sum that dimension.
         AiOp::Concat { axis } => {
@@ -142,8 +181,16 @@ fn infer_output_shapes(op: &AiOp, inputs: &[Shape]) -> Vec<Shape> {
         }
 
         // Attention ops — output shape = [batch, seq, num_heads * head_dim]
-        AiOp::MultiHeadAttention { num_heads, head_dim, .. }
-        | AiOp::GroupedQueryAttention { num_heads, head_dim, .. } => {
+        AiOp::MultiHeadAttention {
+            num_heads,
+            head_dim,
+            ..
+        }
+        | AiOp::GroupedQueryAttention {
+            num_heads,
+            head_dim,
+            ..
+        } => {
             if !inputs.is_empty() && inputs[0].len() >= 2 {
                 let mut shape = inputs[0][..inputs[0].len() - 1].to_vec();
                 shape.push(DimExpr::Concrete((*num_heads as u64) * (*head_dim as u64)));
@@ -154,14 +201,10 @@ fn infer_output_shapes(op: &AiOp, inputs: &[Shape]) -> Vec<Shape> {
         }
 
         // FusedSwiGLU — output shape = input shape.
-        AiOp::FusedSwiGLU => {
-            inputs.first().cloned().into_iter().collect()
-        }
+        AiOp::FusedSwiGLU => inputs.first().cloned().into_iter().collect(),
 
         // RotaryEmbedding — preserves input shape.
-        AiOp::RotaryEmbedding { .. } => {
-            inputs.first().cloned().into_iter().collect()
-        }
+        AiOp::RotaryEmbedding { .. } => inputs.first().cloned().into_iter().collect(),
 
         // Reductions.
         AiOp::ReduceSum { axes, keepdims }
@@ -176,9 +219,7 @@ fn infer_output_shapes(op: &AiOp, inputs: &[Shape]) -> Vec<Shape> {
         }
 
         // Cast preserves shape.
-        AiOp::Cast { .. } => {
-            inputs.first().cloned().into_iter().collect()
-        }
+        AiOp::Cast { .. } => inputs.first().cloned().into_iter().collect(),
 
         // For complex ops we don't infer yet, return empty.
         _ => vec![Shape::new()],
@@ -204,8 +245,16 @@ fn broadcast_shape(a: &Shape, b: &Shape) -> Shape {
     let len = a.len().max(b.len());
     let mut result = Shape::new();
     for i in 0..len {
-        let ad = if i < a.len() { &a[a.len() - 1 - i] } else { &DimExpr::Concrete(1) };
-        let bd = if i < b.len() { &b[b.len() - 1 - i] } else { &DimExpr::Concrete(1) };
+        let ad = if i < a.len() {
+            &a[a.len() - 1 - i]
+        } else {
+            &DimExpr::Concrete(1)
+        };
+        let bd = if i < b.len() {
+            &b[b.len() - 1 - i]
+        } else {
+            &DimExpr::Concrete(1)
+        };
         let dim = match (ad.as_concrete(), bd.as_concrete()) {
             (Some(1), _) => bd.clone(),
             (_, Some(1)) => ad.clone(),
@@ -246,14 +295,20 @@ fn reduce_shape(input: &Shape, axes: &[i64], keepdims: bool) -> Shape {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ir::{AiGraph, AiNode, AiOp, DType, TensorInfo, shape_from_concrete};
+    use crate::ir::{shape_from_concrete, AiGraph, AiNode, AiOp, DType, TensorInfo};
     use std::collections::HashMap;
 
     #[test]
     fn propagate_matmul_shape() {
         let mut ti = HashMap::new();
-        ti.insert(0u32, TensorInfo::new(DType::F32, shape_from_concrete(&[1, 4, 8])));
-        ti.insert(1u32, TensorInfo::new(DType::F32, shape_from_concrete(&[8, 16])));
+        ti.insert(
+            0u32,
+            TensorInfo::new(DType::F32, shape_from_concrete(&[1, 4, 8])),
+        );
+        ti.insert(
+            1u32,
+            TensorInfo::new(DType::F32, shape_from_concrete(&[8, 16])),
+        );
         // Output starts with unknown shape.
         ti.insert(2u32, TensorInfo::new(DType::F32, Shape::new()));
 
@@ -283,8 +338,14 @@ mod tests {
     #[test]
     fn propagate_elementwise_broadcast() {
         let mut ti = HashMap::new();
-        ti.insert(0u32, TensorInfo::new(DType::F32, shape_from_concrete(&[4, 1])));
-        ti.insert(1u32, TensorInfo::new(DType::F32, shape_from_concrete(&[1, 8])));
+        ti.insert(
+            0u32,
+            TensorInfo::new(DType::F32, shape_from_concrete(&[4, 1])),
+        );
+        ti.insert(
+            1u32,
+            TensorInfo::new(DType::F32, shape_from_concrete(&[1, 8])),
+        );
         ti.insert(2u32, TensorInfo::new(DType::F32, Shape::new()));
 
         let g = AiGraph {

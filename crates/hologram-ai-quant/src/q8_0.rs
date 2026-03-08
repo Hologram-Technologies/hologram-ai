@@ -30,7 +30,11 @@ pub fn dequant_q8_0_block(block: &Q8_0Block) -> [f32; 32] {
 /// # Panics
 /// Panics if `data.len()` is not a multiple of `Q8_0_BLOCK_SIZE` (34).
 pub fn dequant_q8_0(data: &[u8]) -> Vec<f32> {
-    assert_eq!(data.len() % Q8_0_BLOCK_SIZE, 0, "Q8_0 data length must be a multiple of 34");
+    assert_eq!(
+        data.len() % Q8_0_BLOCK_SIZE,
+        0,
+        "Q8_0 data length must be a multiple of 34"
+    );
     // SAFETY: Q8_0Block is repr(C, packed) with Pod; alignment is 1.
     let blocks: &[Q8_0Block] = bytemuck::cast_slice(data);
     let mut out = Vec::with_capacity(blocks.len() * 32);
@@ -46,7 +50,10 @@ mod tests {
 
     #[test]
     fn dequant_zero_block() {
-        let block = Q8_0Block { scale: 0x3C00, qs: [0i8; 32] }; // scale = f16(1.0)
+        let block = Q8_0Block {
+            scale: 0x3C00,
+            qs: [0i8; 32],
+        }; // scale = f16(1.0)
         let vals = dequant_q8_0_block(&block);
         for v in vals.iter() {
             assert_eq!(*v, 0.0f32);
@@ -56,7 +63,10 @@ mod tests {
     #[test]
     fn dequant_known_values() {
         // scale = f16(0.5) = 0x3800; qs = [2, -4, 127, ...]
-        let mut block = Q8_0Block { scale: 0x3800, qs: [0i8; 32] };
+        let mut block = Q8_0Block {
+            scale: 0x3800,
+            qs: [0i8; 32],
+        };
         block.qs[0] = 2;
         block.qs[1] = -4;
         block.qs[2] = 127;
@@ -70,7 +80,8 @@ mod tests {
     fn dequant_q8_0_slice() {
         let mut data = vec![0u8; 34];
         // scale = f16(1.0) = 0x3C00 LE
-        data[0] = 0x00; data[1] = 0x3C;
+        data[0] = 0x00;
+        data[1] = 0x3C;
         // qs[0] = 5 → 5.0
         data[2] = 5u8;
         let out = dequant_q8_0(&data);

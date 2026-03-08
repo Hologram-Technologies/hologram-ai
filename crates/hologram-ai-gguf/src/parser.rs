@@ -178,12 +178,12 @@ impl GgmlType {
             Self::I16 => 2,
             Self::I32 => 4,
             Self::I64 => 8,
-            Self::Q4_0 => 18,   // block of 32 elements = 2 (scale) + 16 (nibbles)
-            Self::Q4_1 => 20,   // block of 32 = 2+2+16
-            Self::Q5_0 => 22,   // block of 32 = 2+4+16
-            Self::Q5_1 => 24,   // block of 32 = 2+2+4+16
-            Self::Q8_0 => 34,   // block of 32 = 2+32
-            Self::Q8_1 => 40,   // block of 32 = 4+4+32
+            Self::Q4_0 => 18, // block of 32 elements = 2 (scale) + 16 (nibbles)
+            Self::Q4_1 => 20, // block of 32 = 2+2+16
+            Self::Q5_0 => 22, // block of 32 = 2+4+16
+            Self::Q5_1 => 24, // block of 32 = 2+2+4+16
+            Self::Q8_0 => 34, // block of 32 = 2+32
+            Self::Q8_1 => 40, // block of 32 = 4+4+32
             Self::Q2K => 256,
             Self::Q3K => 256,
             Self::Q4K => 144,
@@ -197,10 +197,15 @@ impl GgmlType {
     /// Number of elements per block for quantized types.
     pub fn block_size(&self) -> usize {
         match self {
-            Self::F32 | Self::F16 | Self::BF16 | Self::F64
-            | Self::I8 | Self::I16 | Self::I32 | Self::I64 => 1,
-            Self::Q4_0 | Self::Q4_1 | Self::Q5_0 | Self::Q5_1
-            | Self::Q8_0 | Self::Q8_1 => 32,
+            Self::F32
+            | Self::F16
+            | Self::BF16
+            | Self::F64
+            | Self::I8
+            | Self::I16
+            | Self::I32
+            | Self::I64 => 1,
+            Self::Q4_0 | Self::Q4_1 | Self::Q5_0 | Self::Q5_1 | Self::Q8_0 | Self::Q8_1 => 32,
             Self::Q2K | Self::Q3K | Self::Q4K | Self::Q5K | Self::Q6K | Self::Q8K => 256,
             _ => 32,
         }

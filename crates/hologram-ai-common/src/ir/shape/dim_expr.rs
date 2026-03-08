@@ -66,18 +66,24 @@ impl DimExpr {
             DimExpr::Mul(a, b) => Some(a.evaluate()?.checked_mul(b.evaluate()?)?),
             DimExpr::Div(a, b) => {
                 let bv = b.evaluate()?;
-                if bv == 0 { return None; }
+                if bv == 0 {
+                    return None;
+                }
                 Some(a.evaluate()? / bv)
             }
             DimExpr::Mod(a, b) => {
                 let bv = b.evaluate()?;
-                if bv == 0 { return None; }
+                if bv == 0 {
+                    return None;
+                }
                 Some(a.evaluate()? % bv)
             }
             DimExpr::CeilDiv(a, b) => {
                 let av = a.evaluate()?;
                 let bv = b.evaluate()?;
-                if bv == 0 { return None; }
+                if bv == 0 {
+                    return None;
+                }
                 Some(av.div_ceil(bv))
             }
             DimExpr::Max(a, b) => Some(a.evaluate()?.max(b.evaluate()?)),
@@ -139,7 +145,9 @@ impl DimExpr {
             DimExpr::Mul(a, b) => DimExpr::Mul(Box::new(a.simplify()), Box::new(b.simplify())),
             DimExpr::Div(a, b) => DimExpr::Div(Box::new(a.simplify()), Box::new(b.simplify())),
             DimExpr::Mod(a, b) => DimExpr::Mod(Box::new(a.simplify()), Box::new(b.simplify())),
-            DimExpr::CeilDiv(a, b) => DimExpr::CeilDiv(Box::new(a.simplify()), Box::new(b.simplify())),
+            DimExpr::CeilDiv(a, b) => {
+                DimExpr::CeilDiv(Box::new(a.simplify()), Box::new(b.simplify()))
+            }
             DimExpr::Max(a, b) => DimExpr::Max(Box::new(a.simplify()), Box::new(b.simplify())),
             DimExpr::Min(a, b) => DimExpr::Min(Box::new(a.simplify()), Box::new(b.simplify())),
         }
@@ -155,10 +163,17 @@ impl DimExpr {
     fn collect_vars(&self, out: &mut HashSet<DimVarId>) {
         match self {
             DimExpr::Concrete(_) | DimExpr::Dynamic => {}
-            DimExpr::Var(id) => { out.insert(*id); }
-            DimExpr::Add(a, b) | DimExpr::Sub(a, b) | DimExpr::Mul(a, b)
-            | DimExpr::Div(a, b) | DimExpr::Mod(a, b) | DimExpr::CeilDiv(a, b)
-            | DimExpr::Max(a, b) | DimExpr::Min(a, b) => {
+            DimExpr::Var(id) => {
+                out.insert(*id);
+            }
+            DimExpr::Add(a, b)
+            | DimExpr::Sub(a, b)
+            | DimExpr::Mul(a, b)
+            | DimExpr::Div(a, b)
+            | DimExpr::Mod(a, b)
+            | DimExpr::CeilDiv(a, b)
+            | DimExpr::Max(a, b)
+            | DimExpr::Min(a, b) => {
                 a.collect_vars(out);
                 b.collect_vars(out);
             }
@@ -167,11 +182,15 @@ impl DimExpr {
 }
 
 impl From<u64> for DimExpr {
-    fn from(v: u64) -> Self { DimExpr::Concrete(v) }
+    fn from(v: u64) -> Self {
+        DimExpr::Concrete(v)
+    }
 }
 
 impl From<usize> for DimExpr {
-    fn from(v: usize) -> Self { DimExpr::Concrete(v as u64) }
+    fn from(v: usize) -> Self {
+        DimExpr::Concrete(v as u64)
+    }
 }
 
 impl serde::Serialize for DimExpr {
@@ -236,10 +255,7 @@ mod tests {
     #[test]
     fn substitute_var() {
         let v = DimVarId(0);
-        let e = DimExpr::Add(
-            Box::new(DimExpr::Var(v)),
-            Box::new(DimExpr::Concrete(1)),
-        );
+        let e = DimExpr::Add(Box::new(DimExpr::Var(v)), Box::new(DimExpr::Concrete(1)));
         let subst = e.substitute(v, &DimExpr::Concrete(10));
         assert_eq!(subst.evaluate(), Some(11));
     }

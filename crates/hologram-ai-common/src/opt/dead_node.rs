@@ -1,17 +1,21 @@
-use std::collections::HashSet;
-use crate::ir::{AiGraph, TensorId};
 use super::pipeline::Pass;
+use crate::ir::{AiGraph, TensorId};
+use std::collections::HashSet;
 
 /// Remove nodes whose outputs are not reachable from any graph output.
 pub struct DeadNodeElimination;
 
 impl Pass for DeadNodeElimination {
-    fn name(&self) -> &str { "DeadNodeElimination" }
+    fn name(&self) -> &str {
+        "DeadNodeElimination"
+    }
 
     fn run(&self, graph: AiGraph) -> anyhow::Result<AiGraph> {
         let live = live_tensors(&graph);
 
-        let nodes: Vec<_> = graph.nodes.into_iter()
+        let nodes: Vec<_> = graph
+            .nodes
+            .into_iter()
             .filter(|n| n.outputs.iter().any(|tid| live.contains(tid)))
             .collect();
 
@@ -65,12 +69,14 @@ fn live_tensors(graph: &AiGraph) -> HashSet<TensorId> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ir::{AiGraph, AiNode, AiOp, DType, TensorInfo, shape_from_concrete};
+    use crate::ir::{shape_from_concrete, AiGraph, AiNode, AiOp, DType, TensorInfo};
     use std::collections::HashMap;
 
     fn two_node_graph() -> AiGraph {
         let mut ti = HashMap::new();
-        for i in 0u32..=3 { ti.insert(i, TensorInfo::new(DType::F32, shape_from_concrete(&[1]))); }
+        for i in 0u32..=3 {
+            ti.insert(i, TensorInfo::new(DType::F32, shape_from_concrete(&[1])));
+        }
         AiGraph {
             name: "test".into(),
             nodes: vec![

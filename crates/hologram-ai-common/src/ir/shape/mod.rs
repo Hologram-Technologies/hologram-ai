@@ -1,10 +1,10 @@
+pub mod constraint;
 pub mod dim_expr;
 pub mod dim_var;
-pub mod constraint;
 
+pub use constraint::{ConstraintStore, ShapeConstraint, ShapeError};
 pub use dim_expr::{DimExpr, DimVarId};
-pub use dim_var::{DimVarTable, DimVarEntry, DimVarSource};
-pub use constraint::{ShapeConstraint, ConstraintStore, ShapeError};
+pub use dim_var::{DimVarEntry, DimVarSource, DimVarTable};
 
 use smallvec::SmallVec;
 

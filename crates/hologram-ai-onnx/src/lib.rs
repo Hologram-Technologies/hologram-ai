@@ -3,19 +3,19 @@
 //! Parses an ONNX model (protobuf binary) and produces a canonical `AiGraph`
 //! ready for optimization and lowering. Priority importer for Sprint 001.
 
-use prost::Message;
-use hologram_ai_common::AiGraph;
 use error::OnnxError;
+use hologram_ai_common::AiGraph;
+use prost::Message;
 
 mod onnx_pb {
     include!(concat!(env!("OUT_DIR"), "/onnx.rs"));
 }
 
 mod dtype_map;
+pub mod error;
+mod graph_builder;
 mod op_map;
 mod tensor_map;
-mod graph_builder;
-pub mod error;
 
 /// Options controlling ONNX import behaviour.
 #[derive(Debug, Clone, Default)]
@@ -38,9 +38,12 @@ pub fn import_onnx(bytes: &[u8], opts: OnnxImportOptions) -> anyhow::Result<AiGr
 /// Import an ONNX model from a file path.
 ///
 /// Automatically resolves external data files relative to the model directory.
-pub fn import_onnx_path(path: &std::path::Path, opts: OnnxImportOptions) -> anyhow::Result<AiGraph> {
-    let bytes = std::fs::read(path)
-        .map_err(|e| anyhow::anyhow!("reading ONNX file {path:?}: {e}"))?;
+pub fn import_onnx_path(
+    path: &std::path::Path,
+    opts: OnnxImportOptions,
+) -> anyhow::Result<AiGraph> {
+    let bytes =
+        std::fs::read(path).map_err(|e| anyhow::anyhow!("reading ONNX file {path:?}: {e}"))?;
     let model_dir = path.parent();
     import_onnx_inner(&bytes, opts, model_dir)
 }
@@ -50,11 +53,14 @@ fn import_onnx_inner(
     _opts: OnnxImportOptions,
     model_dir: Option<&std::path::Path>,
 ) -> anyhow::Result<AiGraph> {
-    let model = onnx_pb::ModelProto::decode(bytes)
-        .map_err(OnnxError::Decode)?;
+    let model = onnx_pb::ModelProto::decode(bytes).map_err(OnnxError::Decode)?;
 
     let graph_proto = model.graph.ok_or(OnnxError::NoGraph)?;
-    let graph_name  = if model.domain.is_empty() { "onnx_model" } else { &model.domain };
+    let graph_name = if model.domain.is_empty() {
+        "onnx_model"
+    } else {
+        &model.domain
+    };
 
     let ai_graph = graph_builder::build_ai_graph(&graph_proto, graph_name, model_dir)?;
 
@@ -83,7 +89,7 @@ mod tests {
                 name: "test".to_string(),
                 node: vec![NodeProto {
                     op_type: "Identity".to_string(),
-                    input:  vec!["x".to_string()],
+                    input: vec!["x".to_string()],
                     output: vec!["y".to_string()],
                     ..Default::default()
                 }],
@@ -95,17 +101,24 @@ mod tests {
                             shape: Some(TensorShapeProto {
                                 dim: vec![
                                     tensor_shape_proto::Dimension {
-                                        value: Some(tensor_shape_proto::dimension::Value::DimValue(1)),
+                                        value: Some(
+                                            tensor_shape_proto::dimension::Value::DimValue(1),
+                                        ),
                                     },
                                     tensor_shape_proto::Dimension {
-                                        value: Some(tensor_shape_proto::dimension::Value::DimValue(64)),
+                                        value: Some(
+                                            tensor_shape_proto::dimension::Value::DimValue(64),
+                                        ),
                                     },
                                 ],
                             }),
                         })),
                     }),
                 }],
-                output: vec![ValueInfoProto { name: "y".to_string(), ..Default::default() }],
+                output: vec![ValueInfoProto {
+                    name: "y".to_string(),
+                    ..Default::default()
+                }],
                 ..Default::default()
             }),
             ..Default::default()

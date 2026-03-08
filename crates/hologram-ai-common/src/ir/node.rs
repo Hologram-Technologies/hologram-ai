@@ -17,6 +17,11 @@ pub struct AiNode {
 
 impl AiNode {
     pub fn new(id: NodeId, op: AiOp, inputs: Vec<TensorId>, outputs: Vec<TensorId>) -> Self {
-        Self { id, op, inputs, outputs }
+        Self {
+            id,
+            op,
+            inputs,
+            outputs,
+        }
     }
 }

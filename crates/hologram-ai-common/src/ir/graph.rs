@@ -1,9 +1,12 @@
-use std::collections::{HashMap, HashSet, VecDeque};
-use hologram_ai_quant::QuantDescriptor;
 use super::{
-    dtype::DType, shape::Shape, node::{AiNode, TensorId, NodeId}, param::AiParam,
-    shape::{DimVarTable, ConstraintStore},
+    dtype::DType,
+    node::{AiNode, NodeId, TensorId},
+    param::AiParam,
+    shape::Shape,
+    shape::{ConstraintStore, DimVarTable},
 };
+use hologram_ai_quant::QuantDescriptor;
+use std::collections::{HashMap, HashSet, VecDeque};
 
 /// Full type + quantization information for a tensor.
 #[derive(Debug, Clone)]
@@ -134,7 +137,9 @@ impl AiGraph {
 
         // DAG check — Kahn's algorithm.
         if self.has_cycle() {
-            errors.push(ValidationError { message: "graph contains a cycle".to_string() });
+            errors.push(ValidationError {
+                message: "graph contains a cycle".to_string(),
+            });
         }
 
         errors
@@ -205,8 +210,14 @@ mod tests {
 
     fn minimal_graph() -> AiGraph {
         let mut ti = HashMap::new();
-        ti.insert(0u32, TensorInfo::new(DType::F32, shape_from_concrete(&[1, 64])));
-        ti.insert(1u32, TensorInfo::new(DType::F32, shape_from_concrete(&[1, 64])));
+        ti.insert(
+            0u32,
+            TensorInfo::new(DType::F32, shape_from_concrete(&[1, 64])),
+        );
+        ti.insert(
+            1u32,
+            TensorInfo::new(DType::F32, shape_from_concrete(&[1, 64])),
+        );
 
         AiGraph {
             name: "test".into(),

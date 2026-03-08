@@ -1,5 +1,5 @@
-use std::path::PathBuf;
 use super::graph::TensorInfo;
+use std::path::PathBuf;
 
 /// A model weight or constant tensor.
 ///
@@ -10,7 +10,12 @@ pub enum AiParam {
     /// Small weights embedded directly in the graph.
     Inline { data: Vec<u8>, info: TensorInfo },
     /// Large weights memory-mapped from the source model file.
-    Mmap { path: PathBuf, offset: u64, len: u64, info: TensorInfo },
+    Mmap {
+        path: PathBuf,
+        offset: u64,
+        len: u64,
+        info: TensorInfo,
+    },
 }
 
 impl AiParam {
@@ -21,14 +26,19 @@ impl AiParam {
 
     /// Construct a memory-mapped parameter reference.
     pub fn mmap(path: PathBuf, offset: u64, len: u64, info: TensorInfo) -> Self {
-        Self::Mmap { path, offset, len, info }
+        Self::Mmap {
+            path,
+            offset,
+            len,
+            info,
+        }
     }
 
     /// Metadata for this parameter.
     pub fn info(&self) -> &TensorInfo {
         match self {
             AiParam::Inline { info, .. } => info,
-            AiParam::Mmap  { info, .. } => info,
+            AiParam::Mmap { info, .. } => info,
         }
     }
 
@@ -36,7 +46,7 @@ impl AiParam {
     pub fn is_empty(&self) -> bool {
         match self {
             AiParam::Inline { data, .. } => data.is_empty(),
-            AiParam::Mmap  { len, .. }  => *len == 0,
+            AiParam::Mmap { len, .. } => *len == 0,
         }
     }
 }

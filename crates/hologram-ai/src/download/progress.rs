@@ -26,8 +26,7 @@ impl DownloadProgress {
 
     #[allow(dead_code)]
     pub fn add_spinner(&self, message: &str) -> ProgressBar {
-        let style =
-            ProgressStyle::with_template("  {spinner:.green} {msg}").unwrap();
+        let style = ProgressStyle::with_template("  {spinner:.green} {msg}").unwrap();
         let pb = self.multi.add(ProgressBar::new_spinner());
         pb.set_style(style);
         pb.set_message(message.to_string());

@@ -16,15 +16,15 @@ impl DType {
     /// Size of a single element in bytes. Returns `None` for sub-byte types (INT4).
     pub fn byte_size(self) -> Option<usize> {
         match self {
-            DType::F32   => Some(4),
-            DType::F16   => Some(2),
-            DType::BF16  => Some(2),
-            DType::INT8  => Some(1),
-            DType::U8    => Some(1),
+            DType::F32 => Some(4),
+            DType::F16 => Some(2),
+            DType::BF16 => Some(2),
+            DType::INT8 => Some(1),
+            DType::U8 => Some(1),
             DType::INT32 => Some(4),
             DType::INT64 => Some(8),
-            DType::BOOL  => Some(1),
-            DType::INT4  => None,  // 4 bits — caller handles packing
+            DType::BOOL => Some(1),
+            DType::INT4 => None, // 4 bits — caller handles packing
         }
     }
 }

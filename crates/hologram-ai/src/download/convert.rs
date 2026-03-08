@@ -216,7 +216,10 @@ pub fn convert_to_gguf(
         cmd.args(["--outtype", q]);
     }
 
-    run_cmd(&mut cmd, "GGUF conversion failed. Check model compatibility.")?;
+    run_cmd(
+        &mut cmd,
+        "GGUF conversion failed. Check model compatibility.",
+    )?;
 
     // Copy output files
     std::fs::create_dir_all(output_dir)?;

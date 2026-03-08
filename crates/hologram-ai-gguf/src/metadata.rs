@@ -63,8 +63,8 @@ impl ArchParams {
         let embedding_length = get_u32(&format!("{prefix}.embedding_length"))?;
         let block_count = get_u32(&format!("{prefix}.block_count"))?;
         let head_count = get_u32(&format!("{prefix}.attention.head_count"))?;
-        let head_count_kv = get_u32(&format!("{prefix}.attention.head_count_kv"))
-            .unwrap_or(head_count);
+        let head_count_kv =
+            get_u32(&format!("{prefix}.attention.head_count_kv")).unwrap_or(head_count);
         let feed_forward_length = get_u32(&format!("{prefix}.feed_forward_length"))?;
 
         // Vocab size can come from metadata or from tensor count.
@@ -72,11 +72,10 @@ impl ArchParams {
             .get(&format!("{prefix}.vocab_size"))
             .and_then(|v| v.as_u32())
             .or_else(|| {
-                meta.get("tokenizer.ggml.tokens")
-                    .and_then(|v| match v {
-                        MetaValue::Array(arr) => Some(arr.len() as u32),
-                        _ => None,
-                    })
+                meta.get("tokenizer.ggml.tokens").and_then(|v| match v {
+                    MetaValue::Array(arr) => Some(arr.len() as u32),
+                    _ => None,
+                })
             })
             .unwrap_or(32000);
 
@@ -85,10 +84,8 @@ impl ArchParams {
             .get(&format!("{prefix}.rope.dimension_count"))
             .and_then(|v| v.as_u32())
             .unwrap_or(embedding_length / head_count);
-        let layer_norm_rms_epsilon = get_f32(
-            &format!("{prefix}.attention.layer_norm_rms_epsilon"),
-            1e-5,
-        );
+        let layer_norm_rms_epsilon =
+            get_f32(&format!("{prefix}.attention.layer_norm_rms_epsilon"), 1e-5);
 
         Ok(Self {
             arch,
@@ -127,23 +124,29 @@ impl TokenizerMeta {
             .get("tokenizer.ggml.scores")
             .and_then(|v| v.as_f32_array());
 
-        let token_types = meta
-            .get("tokenizer.ggml.token_type")
-            .and_then(|v| match v {
-                MetaValue::Array(arr) => {
-                    let mut out = Vec::with_capacity(arr.len());
-                    for item in arr {
-                        out.push(item.as_u32()?);
-                    }
-                    Some(out)
+        let token_types = meta.get("tokenizer.ggml.token_type").and_then(|v| match v {
+            MetaValue::Array(arr) => {
+                let mut out = Vec::with_capacity(arr.len());
+                for item in arr {
+                    out.push(item.as_u32()?);
                 }
-                _ => None,
-            });
+                Some(out)
+            }
+            _ => None,
+        });
 
-        let bos_id = meta.get("tokenizer.ggml.bos_token_id").and_then(|v| v.as_u32());
-        let eos_id = meta.get("tokenizer.ggml.eos_token_id").and_then(|v| v.as_u32());
-        let unk_id = meta.get("tokenizer.ggml.unknown_token_id").and_then(|v| v.as_u32());
-        let pad_id = meta.get("tokenizer.ggml.padding_token_id").and_then(|v| v.as_u32());
+        let bos_id = meta
+            .get("tokenizer.ggml.bos_token_id")
+            .and_then(|v| v.as_u32());
+        let eos_id = meta
+            .get("tokenizer.ggml.eos_token_id")
+            .and_then(|v| v.as_u32());
+        let unk_id = meta
+            .get("tokenizer.ggml.unknown_token_id")
+            .and_then(|v| v.as_u32());
+        let pad_id = meta
+            .get("tokenizer.ggml.padding_token_id")
+            .and_then(|v| v.as_u32());
 
         let add_bos = meta
             .get("tokenizer.ggml.add_bos_token")
