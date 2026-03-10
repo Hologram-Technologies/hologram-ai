@@ -152,6 +152,14 @@ impl DimVarTable {
             .map(|(i, e)| (DimVarId(i as u32), e))
     }
 
+    /// Iterate all variables mutably.
+    pub fn iter_mut(&mut self) -> impl Iterator<Item = (DimVarId, &mut DimVarEntry)> {
+        self.entries
+            .iter_mut()
+            .enumerate()
+            .map(|(i, e)| (DimVarId(i as u32), e))
+    }
+
     /// Returns the number of interned variables.
     pub fn len(&self) -> usize {
         self.entries.len()

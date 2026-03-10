@@ -17,6 +17,10 @@ pub struct TensorInfo {
     pub storage_dtype: DType,
     pub shape: Shape,
     pub quant: QuantDescriptor,
+    /// Known constant values for small integer tensors (shape computation).
+    /// `Some(v)` = concrete value, `None` = dynamic/symbolic.
+    /// Populated by the `DataPropagation` pass.
+    pub known_i64_values: Option<Vec<Option<i64>>>,
 }
 
 impl TensorInfo {
@@ -26,6 +30,7 @@ impl TensorInfo {
             storage_dtype: dtype,
             shape,
             quant: QuantDescriptor::none(),
+            known_i64_values: None,
         }
     }
 }

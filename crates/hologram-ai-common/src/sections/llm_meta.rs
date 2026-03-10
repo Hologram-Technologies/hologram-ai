@@ -6,6 +6,8 @@
 
 use hologram::hologram_archive::section::{EmbeddableSection, SECTION_CUSTOM_BASE};
 
+use crate::exec_context::ExecContext;
+
 /// Section kind for LLM metadata.
 pub const SECTION_LLM_META: u32 = SECTION_CUSTOM_BASE + 0x11;
 
@@ -68,6 +70,16 @@ impl EmbeddableSection for LlmMetaSection {
         rkyv::to_bytes::<rkyv::rancor::Error>(self)
             .expect("LlmMetaSection serialization")
             .to_vec()
+    }
+}
+
+impl ExecContext for LlmMetaSection {
+    fn section_id() -> u32 {
+        SECTION_LLM_META
+    }
+
+    fn from_context_bytes(bytes: &[u8]) -> anyhow::Result<Self> {
+        Self::deserialize_from(bytes).map_err(|e| anyhow::anyhow!("deserialize LlmMeta: {e}"))
     }
 }
 

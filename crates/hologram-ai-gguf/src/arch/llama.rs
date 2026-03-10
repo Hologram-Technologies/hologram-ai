@@ -7,8 +7,8 @@ use crate::metadata::ArchParams;
 use crate::parser::{GgmlType, GgufFile};
 use anyhow::{Context, Result};
 use hologram_ai_common::{
-    shape_from_concrete, AiGraph, AiNode, AiOp, AiParam, ConstraintStore, DType, DimVarTable,
-    QuantDescriptor, TensorId, TensorInfo,
+    canonical_vars, shape_from_concrete, AiGraph, AiNode, AiOp, AiParam, ConstraintStore, DType,
+    DimExpr, DimVarSource, DimVarTable, QuantDescriptor, Shape, TensorId, TensorInfo,
 };
 use std::collections::HashMap;
 use std::path::Path;
@@ -22,81 +22,51 @@ pub fn build_llama_graph(
     let mut b = GraphAssembler::new(params, model_path);
 
     // ── Token embedding ────────────────────────────────────────────────
-    let input_ids = b.add_input("input_ids", DType::INT64, &[1, 0]); // [batch, seq_len]
+    let input_shape = Shape::from_vec(vec![b.batch_dim.clone(), b.seq_len_dim.clone()]);
+    let input_ids = b.add_input("input_ids", DType::INT64, input_shape);
     let embed_weight = b.add_tensor(
         "token_embd.weight",
         gguf,
         params.vocab_size as u64,
         params.embedding_length as u64,
     )?;
+    let emb_dim = params.embedding_length as u64;
     let embedded = b.add_node(
         AiOp::Embed,
         vec![input_ids, embed_weight],
         DType::F32,
-        &[1, 0, params.embedding_length as u64],
+        b.bsv(emb_dim),
     );
 
     let mut hidden = embedded;
+    let ffn_dim = params.feed_forward_length as u64;
+    let kv_dim = params.head_count_kv as u64 * (params.embedding_length / params.head_count) as u64;
+    let vocab = params.vocab_size as u64;
 
     // ── Transformer blocks ─────────────────────────────────────────────
     for layer in 0..params.block_count {
         let prefix = format!("blk.{layer}");
 
         // Attention norm (RMSNorm)
-        let attn_norm_w = b.add_tensor(
-            &format!("{prefix}.attn_norm.weight"),
-            gguf,
-            params.embedding_length as u64,
-            1,
-        )?;
+        let attn_norm_w = b.add_tensor(&format!("{prefix}.attn_norm.weight"), gguf, emb_dim, 1)?;
         let normed = b.add_node(
             AiOp::RmsNorm {
                 epsilon: params.layer_norm_rms_epsilon,
             },
             vec![hidden, attn_norm_w],
             DType::F32,
-            &[1, 0, params.embedding_length as u64],
+            b.bsv(emb_dim),
         );
 
         // Q/K/V projections
         let head_dim = params.embedding_length / params.head_count;
-        let q_w = b.add_tensor(
-            &format!("{prefix}.attn_q.weight"),
-            gguf,
-            params.embedding_length as u64,
-            params.embedding_length as u64,
-        )?;
-        let k_w = b.add_tensor(
-            &format!("{prefix}.attn_k.weight"),
-            gguf,
-            params.head_count_kv as u64 * head_dim as u64,
-            params.embedding_length as u64,
-        )?;
-        let v_w = b.add_tensor(
-            &format!("{prefix}.attn_v.weight"),
-            gguf,
-            params.head_count_kv as u64 * head_dim as u64,
-            params.embedding_length as u64,
-        )?;
+        let q_w = b.add_tensor(&format!("{prefix}.attn_q.weight"), gguf, emb_dim, emb_dim)?;
+        let k_w = b.add_tensor(&format!("{prefix}.attn_k.weight"), gguf, kv_dim, emb_dim)?;
+        let v_w = b.add_tensor(&format!("{prefix}.attn_v.weight"), gguf, kv_dim, emb_dim)?;
 
-        let q = b.add_node(
-            AiOp::MatMul,
-            vec![normed, q_w],
-            DType::F32,
-            &[1, 0, params.embedding_length as u64],
-        );
-        let k = b.add_node(
-            AiOp::MatMul,
-            vec![normed, k_w],
-            DType::F32,
-            &[1, 0, params.head_count_kv as u64 * head_dim as u64],
-        );
-        let v = b.add_node(
-            AiOp::MatMul,
-            vec![normed, v_w],
-            DType::F32,
-            &[1, 0, params.head_count_kv as u64 * head_dim as u64],
-        );
+        let q = b.add_node(AiOp::MatMul, vec![normed, q_w], DType::F32, b.bsv(emb_dim));
+        let k = b.add_node(AiOp::MatMul, vec![normed, k_w], DType::F32, b.bsv(kv_dim));
+        let v = b.add_node(AiOp::MatMul, vec![normed, v_w], DType::F32, b.bsv(kv_dim));
 
         // RoPE
         let q_rope = b.add_node(
@@ -106,7 +76,7 @@ pub fn build_llama_graph(
             },
             vec![q],
             DType::F32,
-            &[1, 0, params.embedding_length as u64],
+            b.bsv(emb_dim),
         );
         let k_rope = b.add_node(
             AiOp::RotaryEmbedding {
@@ -115,7 +85,7 @@ pub fn build_llama_graph(
             },
             vec![k],
             DType::F32,
-            &[1, 0, params.head_count_kv as u64 * head_dim as u64],
+            b.bsv(kv_dim),
         );
 
         // Grouped-query attention
@@ -129,21 +99,21 @@ pub fn build_llama_graph(
             },
             vec![q_rope, k_rope, v],
             DType::F32,
-            &[1, 0, params.embedding_length as u64],
+            b.bsv(emb_dim),
         );
 
         // Output projection
         let o_w = b.add_tensor(
             &format!("{prefix}.attn_output.weight"),
             gguf,
-            params.embedding_length as u64,
-            params.embedding_length as u64,
+            emb_dim,
+            emb_dim,
         )?;
         let attn_proj = b.add_node(
             AiOp::MatMul,
             vec![attn_out, o_w],
             DType::F32,
-            &[1, 0, params.embedding_length as u64],
+            b.bsv(emb_dim),
         );
 
         // Residual connection
@@ -151,103 +121,68 @@ pub fn build_llama_graph(
             AiOp::Add,
             vec![hidden, attn_proj],
             DType::F32,
-            &[1, 0, params.embedding_length as u64],
+            b.bsv(emb_dim),
         );
 
         // FFN norm (RMSNorm)
-        let ffn_norm_w = b.add_tensor(
-            &format!("{prefix}.ffn_norm.weight"),
-            gguf,
-            params.embedding_length as u64,
-            1,
-        )?;
+        let ffn_norm_w = b.add_tensor(&format!("{prefix}.ffn_norm.weight"), gguf, emb_dim, 1)?;
         let ffn_normed = b.add_node(
             AiOp::RmsNorm {
                 epsilon: params.layer_norm_rms_epsilon,
             },
             vec![residual1, ffn_norm_w],
             DType::F32,
-            &[1, 0, params.embedding_length as u64],
+            b.bsv(emb_dim),
         );
 
         // FFN: gate + up projections → SwiGLU → down projection
-        let gate_w = b.add_tensor(
-            &format!("{prefix}.ffn_gate.weight"),
-            gguf,
-            params.feed_forward_length as u64,
-            params.embedding_length as u64,
-        )?;
-        let up_w = b.add_tensor(
-            &format!("{prefix}.ffn_up.weight"),
-            gguf,
-            params.feed_forward_length as u64,
-            params.embedding_length as u64,
-        )?;
-        let down_w = b.add_tensor(
-            &format!("{prefix}.ffn_down.weight"),
-            gguf,
-            params.feed_forward_length as u64,
-            params.embedding_length as u64,
-        )?;
+        let gate_w = b.add_tensor(&format!("{prefix}.ffn_gate.weight"), gguf, ffn_dim, emb_dim)?;
+        let up_w = b.add_tensor(&format!("{prefix}.ffn_up.weight"), gguf, ffn_dim, emb_dim)?;
+        let down_w = b.add_tensor(&format!("{prefix}.ffn_down.weight"), gguf, ffn_dim, emb_dim)?;
 
         let gate = b.add_node(
             AiOp::MatMul,
             vec![ffn_normed, gate_w],
             DType::F32,
-            &[1, 0, params.feed_forward_length as u64],
+            b.bsv(ffn_dim),
         );
         let up = b.add_node(
             AiOp::MatMul,
             vec![ffn_normed, up_w],
             DType::F32,
-            &[1, 0, params.feed_forward_length as u64],
+            b.bsv(ffn_dim),
         );
         let swiglu = b.add_node(
             AiOp::FusedSwiGLU,
             vec![gate, up],
             DType::F32,
-            &[1, 0, params.feed_forward_length as u64],
+            b.bsv(ffn_dim),
         );
         let down = b.add_node(
             AiOp::MatMul,
             vec![swiglu, down_w],
             DType::F32,
-            &[1, 0, params.embedding_length as u64],
+            b.bsv(emb_dim),
         );
 
         // Residual connection
-        hidden = b.add_node(
-            AiOp::Add,
-            vec![residual1, down],
-            DType::F32,
-            &[1, 0, params.embedding_length as u64],
-        );
+        hidden = b.add_node(AiOp::Add, vec![residual1, down], DType::F32, b.bsv(emb_dim));
     }
 
     // ── Final norm + LM head ───────────────────────────────────────────
-    let final_norm_w = b.add_tensor(
-        "output_norm.weight",
-        gguf,
-        params.embedding_length as u64,
-        1,
-    )?;
+    let final_norm_w = b.add_tensor("output_norm.weight", gguf, emb_dim, 1)?;
     let final_normed = b.add_node(
         AiOp::RmsNorm {
             epsilon: params.layer_norm_rms_epsilon,
         },
         vec![hidden, final_norm_w],
         DType::F32,
-        &[1, 0, params.embedding_length as u64],
+        b.bsv(emb_dim),
     );
 
     // LM head — may share weights with token embedding (tied embeddings).
     let lm_head_w = if b.has_tensor("output.weight", gguf) {
-        b.add_tensor(
-            "output.weight",
-            gguf,
-            params.vocab_size as u64,
-            params.embedding_length as u64,
-        )?
+        b.add_tensor("output.weight", gguf, vocab, emb_dim)?
     } else {
         embed_weight // tied embeddings
     };
@@ -255,7 +190,7 @@ pub fn build_llama_graph(
         AiOp::MatMul,
         vec![final_normed, lm_head_w],
         DType::F32,
-        &[1, 0, params.vocab_size as u64],
+        b.bsv(vocab),
     );
 
     b.finish(vec![input_ids], vec![logits])
@@ -273,10 +208,31 @@ struct GraphAssembler<'a> {
     ai_params: HashMap<TensorId, AiParam>,
     tensor_name_to_tid: HashMap<String, TensorId>,
     warnings: Vec<hologram_ai_common::ImportWarning>,
+    dim_vars: DimVarTable,
+    /// Symbolic batch dimension expression.
+    batch_dim: DimExpr,
+    /// Symbolic seq_len dimension expression.
+    seq_len_dim: DimExpr,
 }
 
 impl<'a> GraphAssembler<'a> {
     fn new(params: &'a ArchParams, model_path: &'a Path) -> Self {
+        let mut dim_vars = DimVarTable::default();
+
+        // Register canonical symbolic dimensions with bounds.
+        let batch_id = dim_vars.intern_with_bounds(
+            canonical_vars::BATCH,
+            Some(1),
+            Some(1), // MVP: batch=1 for now
+            DimVarSource::Import,
+        );
+        let seq_len_id = dim_vars.intern_with_bounds(
+            canonical_vars::SEQ_LEN,
+            Some(1),
+            Some(params.context_length as u64),
+            DimVarSource::Import,
+        );
+
         Self {
             params,
             model_path,
@@ -287,6 +243,9 @@ impl<'a> GraphAssembler<'a> {
             ai_params: HashMap::new(),
             tensor_name_to_tid: HashMap::new(),
             warnings: Vec::new(),
+            dim_vars,
+            batch_dim: DimExpr::Var(batch_id),
+            seq_len_dim: DimExpr::Var(seq_len_id),
         }
     }
 
@@ -302,10 +261,9 @@ impl<'a> GraphAssembler<'a> {
         nid
     }
 
-    fn add_input(&mut self, _name: &str, dtype: DType, shape: &[u64]) -> TensorId {
+    fn add_input(&mut self, _name: &str, dtype: DType, shape: Shape) -> TensorId {
         let tid = self.alloc_tid();
-        self.tensor_info
-            .insert(tid, TensorInfo::new(dtype, shape_from_concrete(shape)));
+        self.tensor_info.insert(tid, TensorInfo::new(dtype, shape));
         tid
     }
 
@@ -351,6 +309,7 @@ impl<'a> GraphAssembler<'a> {
             storage_dtype,
             shape,
             quant,
+            known_i64_values: None,
         };
 
         let byte_offset = gguf.data_offset + desc.offset;
@@ -371,19 +330,26 @@ impl<'a> GraphAssembler<'a> {
         op: AiOp,
         inputs: Vec<TensorId>,
         output_dtype: DType,
-        output_shape: &[u64],
+        output_shape: Shape,
     ) -> TensorId {
         let output_tid = self.alloc_tid();
-        self.tensor_info.insert(
-            output_tid,
-            TensorInfo::new(output_dtype, shape_from_concrete(output_shape)),
-        );
+        self.tensor_info
+            .insert(output_tid, TensorInfo::new(output_dtype, output_shape));
 
         let nid = self.alloc_nid();
         self.nodes
             .push(AiNode::new(nid, op, inputs, vec![output_tid]));
 
         output_tid
+    }
+
+    /// Build a symbolic shape: [batch, seq_len, concrete_last_dim].
+    fn bsv(&self, last_dim: u64) -> Shape {
+        Shape::from_vec(vec![
+            self.batch_dim.clone(),
+            self.seq_len_dim.clone(),
+            DimExpr::Concrete(last_dim),
+        ])
     }
 
     fn finish(self, inputs: Vec<TensorId>, outputs: Vec<TensorId>) -> Result<AiGraph> {
@@ -420,7 +386,7 @@ impl<'a> GraphAssembler<'a> {
             tensor_info: self.tensor_info,
             metadata,
             warnings: self.warnings,
-            dim_vars: DimVarTable::default(),
+            dim_vars: self.dim_vars,
             shape_constraints: ConstraintStore::default(),
         })
     }

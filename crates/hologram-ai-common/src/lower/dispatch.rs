@@ -103,7 +103,7 @@ pub fn dispatch(op: &AiOp) -> DispatchTarget {
             D::GraphOp(GraphOp::Float(FloatOp::Transpose { perm: arr, ndim }))
         }
         Cast { .. } => D::FloatNeedsShape,
-        Shape => D::FloatNeedsShape,
+        Shape { .. } => D::FloatNeedsShape,
         GatherND { .. } => D::GraphOp(GraphOp::Float(FloatOp::GatherND)),
         Where => D::GraphOp(GraphOp::Float(FloatOp::Where)),
         Range => D::GraphOp(GraphOp::Float(FloatOp::Range)),
@@ -119,7 +119,7 @@ pub fn dispatch(op: &AiOp) -> DispatchTarget {
         Squeeze { .. } => D::Identity,
         Unsqueeze { .. } => D::Identity,
         Expand => D::GraphOp(GraphOp::Float(FloatOp::Reshape)),
-        Slice { .. } => D::Identity,
+        Slice { .. } => D::FloatNeedsShape,
         Split { .. } => D::Identity,
         Tile { .. } => D::Identity,
         Identity => D::Identity,

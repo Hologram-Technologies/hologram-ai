@@ -1,6 +1,29 @@
 use super::{dtype::DType, param::AiParam};
 use hologram_ai_quant::QuantScheme;
 
+/// Behavioral category for shape/dtype/value inference.
+///
+/// Most `AiOp` variants fall into a standard category with uniform inference
+/// rules. Only `Custom` ops need per-variant logic in the propagation passes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OpCategory {
+    /// `output_shape = input[0].shape`, `output_dtype = input[0].dtype`.
+    /// Value propagation: pass-through (values unchanged).
+    UnaryElementwise,
+    /// `output_shape = broadcast(input[0], input[1])`, `output_dtype = input[0].dtype`.
+    /// Value propagation: elementwise arithmetic on i64 values.
+    BinaryElementwise,
+    /// `output_shape = broadcast(input[0], input[1])`, `output_dtype = BOOL`.
+    /// Value propagation: none.
+    BinaryComparison,
+    /// `output_shape = input[0].shape` (extra inputs like weights are ignored).
+    /// `output_dtype = input[0].dtype`. Value propagation: none.
+    ShapePreserving,
+    /// Op-specific shape/dtype/value rules. Each op gets a dedicated match arm
+    /// in the propagation passes.
+    Custom,
+}
+
 /// How scatter reduction is applied.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ScatterReduce {
@@ -130,7 +153,11 @@ pub enum AiOp {
         batch_dims: i64,
     },
     /// Extract shape of input tensor as a 1-D INT64 tensor.
-    Shape,
+    /// `start`/`end` (opset 15+) slice the output to a subrange of dims.
+    Shape {
+        start: Option<i64>,
+        end: Option<i64>,
+    },
     /// Conditional element selection: Where(cond, x, y).
     Where,
     /// Generate a range [start, limit) with step.
@@ -247,4 +274,116 @@ pub enum AiOp {
         op_type: String,
         raw_attrs: Vec<u8>,
     },
+}
+
+impl AiOp {
+    /// Behavioral category for shape/dtype/value inference.
+    ///
+    /// IMPORTANT: This match is exhaustive (no catch-all). When adding a new
+    /// `AiOp` variant, the compiler forces you to assign a category, which
+    /// automatically gives it correct shape/dtype/value propagation for the
+    /// standard categories.
+    pub fn category(&self) -> OpCategory {
+        use OpCategory::*;
+        match self {
+            // ── Unary elementwise: output = input shape/dtype ─────────────
+            AiOp::Relu
+            | AiOp::Gelu
+            | AiOp::GeluApprox
+            | AiOp::Silu
+            | AiOp::Tanh
+            | AiOp::Sigmoid
+            | AiOp::Abs
+            | AiOp::Neg
+            | AiOp::Sqrt
+            | AiOp::Exp
+            | AiOp::Log
+            | AiOp::Sign
+            | AiOp::Floor
+            | AiOp::Ceil
+            | AiOp::Round
+            | AiOp::Clip
+            | AiOp::Erf
+            | AiOp::Reciprocal
+            | AiOp::Cos
+            | AiOp::Sin
+            | AiOp::Not
+            | AiOp::Identity
+            | AiOp::Dequantize => UnaryElementwise,
+
+            // ── Binary elementwise: broadcast shape, first-input dtype ────
+            AiOp::Add
+            | AiOp::Sub
+            | AiOp::Mul
+            | AiOp::Div
+            | AiOp::Pow
+            | AiOp::Mod
+            | AiOp::Min
+            | AiOp::Max
+            | AiOp::And
+            | AiOp::Or
+            | AiOp::Xor => BinaryElementwise,
+
+            // ── Binary comparison: broadcast shape, BOOL dtype ────────────
+            AiOp::Equal
+            | AiOp::Less
+            | AiOp::LessOrEqual
+            | AiOp::Greater
+            | AiOp::GreaterOrEqual
+            | AiOp::IsNaN => BinaryComparison,
+
+            // ── Shape-preserving: output shape = first input shape ────────
+            AiOp::Softmax { .. }
+            | AiOp::LogSoftmax { .. }
+            | AiOp::RmsNorm { .. }
+            | AiOp::LayerNorm { .. }
+            | AiOp::GroupNorm { .. }
+            | AiOp::BatchNorm { .. }
+            | AiOp::RotaryEmbedding { .. }
+            | AiOp::FusedSwiGLU
+            | AiOp::FusedLayerNormResidual
+            | AiOp::KvSlotWrite { .. }
+            | AiOp::KvSlotRead { .. }
+            | AiOp::Quantize { .. } => ShapePreserving,
+
+            // ── Custom: op-specific shape/dtype/value rules ───────────────
+            AiOp::MatMul
+            | AiOp::BatchMatMul
+            | AiOp::Gemm { .. }
+            | AiOp::Einsum { .. }
+            | AiOp::MultiHeadAttention { .. }
+            | AiOp::GroupedQueryAttention { .. }
+            | AiOp::FlashAttentionHint
+            | AiOp::AlibiSlope
+            | AiOp::Reshape { .. }
+            | AiOp::Transpose { .. }
+            | AiOp::Concat { .. }
+            | AiOp::Split { .. }
+            | AiOp::Slice { .. }
+            | AiOp::Gather { .. }
+            | AiOp::GatherElements { .. }
+            | AiOp::GatherND { .. }
+            | AiOp::Scatter { .. }
+            | AiOp::Unsqueeze { .. }
+            | AiOp::Squeeze { .. }
+            | AiOp::Expand
+            | AiOp::Tile { .. }
+            | AiOp::Flatten { .. }
+            | AiOp::Shape { .. }
+            | AiOp::Where
+            | AiOp::Range
+            | AiOp::ReduceSum { .. }
+            | AiOp::ReduceMean { .. }
+            | AiOp::ReduceMax { .. }
+            | AiOp::ReduceMin { .. }
+            | AiOp::ArgMax { .. }
+            | AiOp::ArgMin { .. }
+            | AiOp::Embed
+            | AiOp::CausalMask
+            | AiOp::QuantizedMatMul { .. }
+            | AiOp::Cast { .. }
+            | AiOp::Constant { .. }
+            | AiOp::Opaque { .. } => Custom,
+        }
+    }
 }

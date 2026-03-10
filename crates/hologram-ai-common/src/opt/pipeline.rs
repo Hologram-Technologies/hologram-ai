@@ -19,12 +19,26 @@ impl OptPipeline {
     /// Standard optimization pipeline.
     pub fn mvp() -> Self {
         use super::{
-            constant_fold::ConstantFolding, dead_node::DeadNodeElimination,
-            shape_prop::ShapePropagation,
+            const_dedup::ConstantDeduplication, const_eval::ConstantEvaluation,
+            constant_fold::ConstantFolding, data_prop::DataPropagation,
+            dead_node::DeadNodeElimination, shape_prop::ShapePropagation,
         };
         Self::new(vec![
             Box::new(ShapePropagation),
+            Box::new(DataPropagation),
+            // Second shape pass: DataPropagation fills known_i64_values for
+            // Reshape/Expand shape tensors. This pass uses them to infer
+            // output shapes that the first pass couldn't resolve.
+            Box::new(ShapePropagation),
+            // Evaluate nodes with all-constant inputs at compile time.
+            // Handles N-D broadcast that the runtime can't do.
+            Box::new(ConstantEvaluation),
             Box::new(ConstantFolding),
+            // Deduplicate identical constants by content hash.
+            // Cross-layer duplicates (e.g., RoPE constants computed per
+            // transformer layer) share the same bytes but have different
+            // TensorIds, so op-based CSE can't catch them.
+            Box::new(ConstantDeduplication),
             Box::new(DeadNodeElimination),
         ])
     }

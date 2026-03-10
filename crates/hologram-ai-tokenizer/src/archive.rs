@@ -61,9 +61,7 @@ impl TokenizerSectionData {
         // Extract vocab as ordered Vec<String> indexed by token ID.
         let vocab: Vec<String> = match model_type {
             "BPE" | "WordPiece" => {
-                let vocab_obj = model["vocab"]
-                    .as_object()
-                    .context("missing model.vocab")?;
+                let vocab_obj = model["vocab"].as_object().context("missing model.vocab")?;
                 let mut pairs: Vec<(u32, String)> = vocab_obj
                     .iter()
                     .map(|(k, v)| (v.as_u64().unwrap_or(0) as u32, k.clone()))
@@ -92,11 +90,7 @@ impl TokenizerSectionData {
                         if let Some(s) = v.as_str() {
                             Some(s.to_string())
                         } else if let Some(a) = v.as_array() {
-                            Some(format!(
-                                "{} {}",
-                                a.first()?.as_str()?,
-                                a.get(1)?.as_str()?
-                            ))
+                            Some(format!("{} {}", a.first()?.as_str()?, a.get(1)?.as_str()?))
                         } else {
                             None
                         }

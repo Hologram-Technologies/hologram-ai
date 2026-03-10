@@ -157,7 +157,10 @@ pub fn map_op(ctx: &OpContext<'_>) -> anyhow::Result<Option<AiOp>> {
         "GatherND" => GatherND {
             batch_dims: ctx.attr_i("batch_dims").unwrap_or(0),
         },
-        "Shape" => Shape,
+        "Shape" => Shape {
+            start: ctx.attr_i("start"),
+            end: ctx.attr_i("end"),
+        },
         "Where" => Where,
         "Range" => Range,
         "Flatten" => Flatten {

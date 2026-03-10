@@ -1,7 +1,9 @@
 pub mod builder;
 pub mod dispatch;
+pub mod strategy;
 
 pub use builder::{lower, LoweringOptions, LoweringOutput, QuantStrategy};
+pub use strategy::{ConcreteStrategy, DeferredStrategy, LoweringStrategy, SymbolicLowering};
 
 /// Which phase of execution this graph is being lowered for.
 ///

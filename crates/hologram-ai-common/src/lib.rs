@@ -4,6 +4,7 @@
 //! It does NOT import hologram subcrates directly — only the root `hologram` crate.
 
 pub mod error;
+pub mod exec_context;
 pub mod ir;
 pub mod lower;
 pub mod mem;
@@ -12,6 +13,10 @@ pub mod sections;
 
 // Flat re-exports for convenience.
 pub use error::CommonError;
+pub use exec_context::{
+    ContextBundle, ExecContext, NodeShapeRecipe, ParamRecipe, RuntimeContext, ShapeRecipeSection,
+    SimpleRuntimeContext, SECTION_SHAPE_RECIPE,
+};
 pub use hologram_ai_quant::{QuantDescriptor, QuantScheme, ScaleDtype};
 pub use ir::{
     canonical_vars, shape_from_concrete, AiGraph, AiNode, AiOp, AiParam, ConstraintStore, DType,
@@ -21,4 +26,7 @@ pub use ir::{
 };
 pub use lower::{lower, LowerPhase, LoweringOptions, LoweringOutput, QuantStrategy};
 pub use mem::{KvCacheLayout, MemoryPlan, MemoryPlanner};
-pub use opt::{OptPipeline, Pass};
+pub use opt::{
+    AggressiveShapePropagation, ConstantDeduplication, OptPipeline, Pass, ShapeHealing,
+    SliceToGather,
+};

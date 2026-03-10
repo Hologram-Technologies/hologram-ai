@@ -28,6 +28,7 @@ pub fn tensor_to_param(
         storage_dtype: dtype,
         shape,
         quant: QuantDescriptor::none(),
+        known_i64_values: None,
     };
 
     // Use Mmap for external data to avoid loading multi-GB weight files into memory.

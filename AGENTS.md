@@ -28,6 +28,8 @@ specs/
 2. Do not modify files outside this repository unless explicitly instructed
 3. Run `cargo clippy -- -D warnings` before committing Rust changes
 4. Use a consistent naming prefix for all crate names
+5. **ALWAYS solve bugs holistically** — take a project-wide perspective instead of patching symptoms locally. Fix the root cause in the appropriate pass or abstraction layer.
+6. **Prefer simpler code and smaller functions.** Functions should be short, focused, and easily testable. If a function is getting large, break it into smaller well-named helpers. Avoid complex nested logic when a flatter structure is clearer.
 
 ---
 
@@ -60,3 +62,121 @@ These rules apply to all repositories in the Hologram ecosystem.
 - Update `AGENTS.md` when adding new conventions or rules
 <!-- ARCHON:MANAGED:END -->
 
+## Shape System Strategy
+
+The hologram-ai compiler must resolve all tensor shapes to concrete values before
+lowering to hologram's byte-domain graph. The shape pipeline is:
+
+```
+ONNX/GGUF symbolic dims
+  → AiGraph (DimExpr: Var, Dynamic, Concrete)
+  → ShapePropagation (forward inference from input shapes)
+  → DataPropagation (evaluate shape-computation subgraphs)
+  → ShapePropagation (second pass: use known_i64_values for Reshape/Expand)
+  → concretize_all_dims (Var → upper bounds, Dynamic → 1)
+  → ShapeHealing (infer remaining empty shapes from op semantics)
+  → lower (emit full tensor shapes into compiled graph)
+```
+
+### Key principles
+
+1. **Full shapes on every compiled node.** Every node in the compiled
+   hologram::Graph must have a correct multi-dim shape in the shape_map.
+   The runtime uses these for batched matmul dispatch and output allocation.
+2. **Fail loud at compile time, not silently at runtime.** If a MatMul
+   dimension can't be determined, the compiler should error — never emit
+   a fallback like m=1 that will crash at runtime.
+3. **Shape healing as a safety net.** After concretization, a final pass
+   infers any remaining empty shapes from op semantics, element count
+   conservation, and input shapes. This is the last resort before lowering.
+4. **Don't fix individual ops in isolation.** When a new shape bug surfaces,
+   first check: (a) does ShapePropagation handle this op? (b) does
+   DataPropagation track its values? (c) does ShapeHealing cover it?
+   Fix the gap in the appropriate pass, not in the lowering code.
+5. **Prefer simple implementations over complex ones.** Solve problems at
+   the right abstraction layer with the minimum code needed. Avoid building
+   elaborate inference machinery when a simpler approach (e.g., re-running
+   an existing pass after concretization) achieves the same result.
+
+### Milestone: TinyLlama end-to-end
+
+The defined goal is to compile TinyLlama-1.1B (ONNX) to a `.holo` archive
+and run it with a joke prompt to produce coherent English text. This validates
+the full pipeline: import → optimize → concretize → lower → execute.
+
+Higher-level goal: support ANY ONNX or GGUF model (focusing on ONNX first).
+
+### What the runtime needs from compiled shapes
+
+- `FloatOp::MatMul { m, k, n }`: Only last-2-dim hints. The runtime uses
+  `input_shapes` from the compiled graph to dispatch batched matmul for ≥3D
+  tensors. **Correct shapes on MatMul inputs are more important than m/k/n.**
+- `FloatOp::Softmax/RmsNorm/etc { size }`: Last-dim size. Runtime resolves
+  size=0 from actual input shape.
+- Reshape/Transpose/Identity: Passthrough — runtime just copies bytes.
+
+### Holistic compilation strategy
+
+The compiler must solve two systemic problems:
+1. **Shape resolution**: all tensor shapes must be concrete before lowering
+2. **Runtime capability gaps**: hologram's runtime supports only 1-D broadcasting
+   (element-wise with repeat), NOT N-D tensor broadcasting that ONNX models
+   rely on for causal masks, attention scores, RoPE, etc.
+
+**The core principle: evaluate everything possible at compile time.**
+Instead of fixing individual ops (whack-a-mole), the compiler uses a
+layered pipeline that progressively eliminates runtime work:
+
+#### Phase 1: Shape resolution (pre-concretization)
+ShapeProp → DataProp → ShapeProp.
+Works with symbolic dims. Gets as far as possible.
+
+#### Phase 2: Concretization
+Var → upper bounds, Dynamic → 1. Clear stale intermediate values.
+Re-run: AggressiveShapeProp → DataProp → AggressiveShapeProp → ConstFold → DeadNode.
+
+#### Phase 3: Compile-time tensor evaluation (post-concretization)
+**This is the key phase.** After concretization, many subgraphs become
+fully constant (all inputs are materialized AiParam constants). The
+**ConstantEvaluation pass** evaluates these nodes at compile time:
+
+- Element-wise arithmetic (Add, Sub, Mul, Div) with N-D broadcast
+- Comparisons (LessOrEqual, Less, Greater, Equal) with N-D broadcast
+- Logical ops (And, Or, Not) with N-D broadcast
+- Expand (broadcast to target shape)
+- Where (conditional selection with N-D broadcast)
+- Cast (dtype conversion)
+- Reshape, Transpose, Concat, etc.
+
+The evaluator uses actual tensor data with proper N-D broadcasting
+(numpy-style). Results are stored as AiParam::Inline constants.
+ConstantFolding then removes the redundant nodes.
+
+This eliminates entire subgraphs like:
+- **Causal mask**: Range → Unsqueeze → LessOrEqual → And → Expand → Where
+- **Position embeddings**: Gather from constant frequency tables
+- **Shape computation**: Shape → Gather → Concat chains
+
+**Rule: when a runtime op fails, first check if it could have been
+evaluated at compile time. If ALL inputs are constants, add the op
+to ConstantEvaluation. Only add runtime support as a last resort.**
+
+#### Phase 4: Lowering validation
+Before emitting a node, verify:
+- Element counts match between input and output for reshape-like ops
+- The runtime op (FloatOp) can handle the actual input shapes
+- All required shape parameters are non-zero
+
+#### Bug investigation protocol
+When a new runtime failure occurs:
+1. **Trace the AiGraph node** → identify the ONNX op and its inputs
+2. **Check if inputs are constants** → if yes, add to ConstantEvaluation
+3. **Check if the dispatch is correct** → e.g., Expand ≠ Reshape
+4. **Check lowering strategy** → verify shape parameters are correct
+5. **Only then** consider runtime changes (in hologram base crate)
+
+<!-- ARCHON:CONTEXT:BEGIN -->
+## Ecosystem Context (auto-generated by archon)
+
+See [`.archon/context.md`](.archon/context.md) for full dependency graph, public API surface, and contract details for this repo.
+<!-- ARCHON:CONTEXT:END -->

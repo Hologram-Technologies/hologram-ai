@@ -46,7 +46,18 @@ impl Pass for ConstantFolding {
                         }
                     }
                 }
-                _ => {}
+                // Materialized constant output: DataPropagation has already
+                // computed this node's output and stored it as an AiParam.
+                // The node is redundant — remove it so it doesn't get lowered
+                // to a runtime op with potentially wrong semantics (e.g.,
+                // hologram's FloatOp::Shape returns element count, not dims).
+                _ => {
+                    if !node.outputs.is_empty()
+                        && node.outputs.iter().all(|tid| param_tids.contains(tid))
+                    {
+                        removed_node_ids.insert(node.id);
+                    }
+                }
             }
         }
 

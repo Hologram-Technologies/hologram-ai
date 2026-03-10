@@ -1,0 +1,31 @@
+name: hologram-ai
+description: AI inference library providing ONNX, GGUF, and GGML model support for Hologram
+role: core
+depends_on:
+- hologram
+crates:
+- name: hologram-ai
+  public: true
+- name: hologram-ai-common
+  public: true
+- name: hologram-ai-ggml
+  public: true
+- name: hologram-ai-gguf
+  public: true
+- name: hologram-ai-onnx
+  public: true
+- name: hologram-ai-quant
+  public: true
+- name: hologram-ai-tokenizer
+  public: true
+registry: ../hologram-architecture/archon-registry
+rules:
+- id: tests-pass
+  run: cargo test --all
+  description: All tests pass across the workspace
+- id: no-clippy-warnings
+  run: cargo clippy --all -- -D warnings
+  description: No clippy warnings or errors
+- id: builds-clean
+  run: cargo build --all
+  description: All crates build successfully
