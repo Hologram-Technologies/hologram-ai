@@ -34,6 +34,7 @@ pub fn build_ai_graph(
     let mut params = HashMap::new();
     let mut warnings = Vec::new();
     let mut dim_vars = DimVarTable::default();
+    let mut subgraphs: HashMap<String, AiGraph> = HashMap::new();
 
     let mut alloc_tid = |name: &str, name_to_tid: &mut HashMap<String, TensorId>| -> TensorId {
         if let Some(&tid) = name_to_tid.get(name) {
@@ -191,6 +192,23 @@ pub fn build_ai_graph(
                 });
             }
         }
+
+        // ── Recursive subgraph import for control flow ops ─────────────
+        if matches!(n.op_type.as_str(), "If" | "Loop" | "Scan") {
+            let nid = next_nid.saturating_sub(1);
+            import_subgraph_attrs(
+                &ctx,
+                &n.op_type,
+                nid,
+                &mut subgraphs,
+                &mut warnings,
+                model_dir,
+            );
+            // Rewrite placeholder branch names to actual subgraph keys.
+            if let Some(node) = nodes.last_mut() {
+                rewrite_subgraph_keys(&mut node.op, nid);
+            }
+        }
     }
 
     // Re-resolve graph outputs (tensors may have been allocated during node pass).
@@ -266,7 +284,7 @@ pub fn build_ai_graph(
             warnings,
             dim_vars,
             shape_constraints: Default::default(),
-            subgraphs: HashMap::new(),
+            subgraphs,
         },
         oracle,
     ))
@@ -533,6 +551,73 @@ fn extract_i64_const(
             )
         }
         _ => None,
+    }
+}
+
+/// Rewrite placeholder branch names in control flow AiOps to the actual
+/// subgraph keys (e.g., "then_branch" → "then_branch_42").
+fn rewrite_subgraph_keys(op: &mut AiOp, node_id: u32) {
+    match op {
+        AiOp::If {
+            then_branch,
+            else_branch,
+        } => {
+            *then_branch = format!("then_branch_{node_id}");
+            if let Some(eb) = else_branch {
+                *eb = format!("else_branch_{node_id}");
+            }
+        }
+        AiOp::Loop { body, .. } | AiOp::Scan { body, .. } => {
+            *body = format!("body_{node_id}");
+        }
+        _ => {}
+    }
+}
+
+/// Recursively import subgraph attributes from control flow ops (If/Loop/Scan).
+///
+/// Extracts `GraphProto` attributes from the ONNX node, builds child `AiGraph`s
+/// via `build_ai_graph`, and stores them in the parent's `subgraphs` map.
+/// The keys match the branch names used by the `AiOp::If`/`Loop`/`Scan` variants.
+fn import_subgraph_attrs(
+    ctx: &OpContext<'_>,
+    op_type: &str,
+    node_id: u32,
+    subgraphs: &mut HashMap<String, AiGraph>,
+    warnings: &mut Vec<ImportWarning>,
+    model_dir: Option<&Path>,
+) {
+    let branch_attrs: Vec<(&str, &str)> = match op_type {
+        "If" => vec![("then_branch", "then_branch"), ("else_branch", "else_branch")],
+        "Loop" => vec![("body", "body")],
+        "Scan" => vec![("body", "body")],
+        _ => return,
+    };
+
+    for (attr_name, key_prefix) in branch_attrs {
+        if let Some(graph_proto) = ctx.attr_g(attr_name) {
+            let subgraph_key = format!("{key_prefix}_{node_id}");
+            match build_ai_graph(graph_proto, &subgraph_key, model_dir) {
+                Ok((child_graph, _oracle)) => {
+                    tracing::debug!(
+                        node_id,
+                        op_type,
+                        key = %subgraph_key,
+                        nodes = child_graph.nodes.len(),
+                        "imported subgraph"
+                    );
+                    subgraphs.insert(subgraph_key, child_graph);
+                }
+                Err(e) => {
+                    warnings.push(ImportWarning {
+                        message: format!(
+                            "failed to import {attr_name} subgraph for {op_type} node {node_id}: {e}"
+                        ),
+                        node_name: None,
+                    });
+                }
+            }
+        }
     }
 }
 

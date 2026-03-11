@@ -38,9 +38,10 @@ CLI: `compile`, `info`, `download` — nothing else.
 ### Phase 4: Subgraph Support (If/Loop/Scan)
 - [x] Add `subgraphs: HashMap<String, AiGraph>` to AiGraph
 - [x] Add AiOp::If, Loop, Scan variants
-- [ ] Add recursive ONNX import with lexical scope capture
-- [ ] Add subgraph shape propagation + optimization pass recursion
-- [ ] Add lowering to hologram's native SubgraphDef + CallSubgraph
+- [x] Add `attr_g()` graph attribute accessor + ONNX If/Loop/Scan op mappings
+- [x] Add recursive ONNX import with subgraph key rewriting
+- [x] Add optimization pass recursion into subgraphs
+- [ ] Add lowering to hologram's native SubgraphDef + CallSubgraph (blocked on hologram base)
 
 ### Phase 5: Long-Tail + Conformance
 - [ ] Map remaining niche ops to Opaque with warnings

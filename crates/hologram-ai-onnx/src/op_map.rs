@@ -42,6 +42,14 @@ impl<'a> OpContext<'a> {
             .filter(|a| !a.s.is_empty())
             .map(|a| String::from_utf8_lossy(&a.s).into_owned())
     }
+
+    /// Get a graph-valued attribute (used for control flow: If/Loop/Scan subgraphs).
+    pub fn attr_g(&self, name: &str) -> Option<&crate::onnx_pb::GraphProto> {
+        self.attrs
+            .iter()
+            .find(|a| a.name == name)
+            .and_then(|a| a.g.as_ref())
+    }
 }
 
 /// Convert an ONNX node op to `AiOp`.
@@ -373,6 +381,26 @@ pub fn map_op(ctx: &OpContext<'_>) -> anyhow::Result<Option<AiOp>> {
             scheme: hologram_ai_quant::QuantScheme::Q8_0,
         },
         "DequantizeLinear" => Dequantize,
+
+        // ── Control flow (subgraphs imported by graph_builder) ────────
+        // Branch names are placeholders; graph_builder rewrites them to
+        // "{prefix}_{node_id}" after importing the subgraphs.
+        "If" => If {
+            then_branch: "then_branch".into(),
+            else_branch: if ctx.attr_g("else_branch").is_some() {
+                Some("else_branch".into())
+            } else {
+                None
+            },
+        },
+        "Loop" => Loop {
+            body: "body".into(),
+            max_trip_count: None,
+        },
+        "Scan" => Scan {
+            body: "body".into(),
+            num_scan_inputs: ctx.attr_i("num_scan_inputs").unwrap_or(0) as u32,
+        },
 
         // ── Fallback ──────────────────────────────────────────────────────
         _ => Opaque {

@@ -50,11 +50,29 @@ impl OptPipeline {
     }
 
     /// Run all passes in order, short-circuiting on error.
+    ///
+    /// After running all passes on the main graph, recursively runs the same
+    /// pipeline on each subgraph (If branches, Loop/Scan bodies). This ensures
+    /// all optimization passes (shape prop, data prop, constant folding, dead
+    /// node elimination, etc.) apply to subgraphs too.
     pub fn run(&self, mut graph: AiGraph) -> anyhow::Result<AiGraph> {
         for pass in &self.passes {
             tracing::debug!(pass = pass.name(), "running opt pass");
             graph = pass.run(graph)?;
         }
+
+        // Recurse into subgraphs (If/Loop/Scan bodies).
+        if !graph.subgraphs.is_empty() {
+            let keys: Vec<String> = graph.subgraphs.keys().cloned().collect();
+            for key in keys {
+                if let Some(sub) = graph.subgraphs.remove(&key) {
+                    tracing::debug!(subgraph = %key, "optimizing subgraph");
+                    let optimized = self.run(sub)?;
+                    graph.subgraphs.insert(key, optimized);
+                }
+            }
+        }
+
         Ok(graph)
     }
 }
