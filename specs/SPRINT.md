@@ -2,26 +2,47 @@
 
 ## Sprint Goal
 
-Enforce compiler-only boundary: remove runtime code, add KV-cache and
-multi-graph lowering, produce pipeline archives with named entrypoints.
+**ONNX Last Mile:** Full op coverage + subgraph support so any ONNX model
+imports and compiles. See `specs/plans/004-onnx-last-mile.md`.
 
 **Design principle:** hologram-ai is a compiler only (ADR-0016). It ships
-zero runtime code. All kernels (GEMM, attention, norms, etc.) belong in
-hologram base crate. CLI: `compile`, `info`, `download` — nothing else.
+zero runtime code. All kernels belong in hologram base crate.
+CLI: `compile`, `info`, `download` — nothing else.
 
 ---
 
 ## In Progress
 
-- [ ] Production-ready multi-modal `hologram run` (testing with real models)
-  - `ModelMetaSection` (0x1002): `ModelKind` enum (TextLlm, Vision, Audio, etc.)
-  - `MiniBpeEncoder`: lightweight BPE encoder in hologram-archive
-  - `--prompt` / `--max-tokens`: autoregressive text generation loop
-  - `--input-file SLOT:PATH`: load inputs from binary files
-  - Typed output formatting: f32/f64/i32/i64 summary vs raw hex
-  - dtype-aware token serialization (I32 vs I64 for `input_ids`)
-  - Compiler embeds `ModelMetaSection` + `TokenizerSection` automatically
-  - 728+ tests passing, zero clippy warnings across both repos
+### Phase 1: Vision-Critical Ops
+- [ ] Add 9 AiOp variants: Conv, ConvTranspose, MaxPool, AveragePool, GlobalAveragePool, Resize, Pad, InstanceNorm, LRN
+- [ ] Add ONNX op mappings + `attr_s()` accessor to OpContext
+- [ ] Add dynamic param resolution for Pad/Resize (opset 11+ inputs)
+- [ ] Add shape propagation rules (Conv/Pool formula, Resize, Pad, etc.)
+- [ ] Add data propagation match arms
+- [ ] Add lowering dispatch entries (Unsupported until hologram base adds FloatOp)
+
+### Phase 2: Utility Ops
+- [ ] Add 12 AiOp variants: ReduceProd, ReduceL1, ReduceL2, TopK, ScatterND, CumSum, NonZero, OneHot, DepthToSpace, SpaceToDepth, Compress, ReverseSequence
+- [ ] Add ONNX mappings + quantization integration (QuantizeLinear, DequantizeLinear, MatMulInteger)
+- [ ] Add shape propagation + lowering (decompositions where possible)
+
+### Phase 3: Proto/Type Gaps
+- [ ] Add F64 dtype + ONNX type 11 mapping
+- [ ] Add widening casts for UINT16/INT16/UINT32/UINT64
+- [ ] Add opset version validation + version-aware op semantics
+- [ ] Document and handle optional input semantics
+
+### Phase 4: Subgraph Support (If/Loop/Scan)
+- [ ] Add `subgraphs: HashMap<String, AiGraph>` to AiGraph
+- [ ] Add AiOp::If, Loop, Scan variants
+- [ ] Add recursive ONNX import with lexical scope capture
+- [ ] Add subgraph shape propagation + optimization pass recursion
+- [ ] Add lowering to hologram's native SubgraphDef + CallSubgraph
+
+### Phase 5: Long-Tail + Conformance
+- [ ] Map remaining niche ops to Opaque with warnings
+- [ ] Verify multi-output ops (TopK, Split, BatchNorm training)
+- [ ] ONNX conformance test runner (node test suite)
 
 ---
 
@@ -53,35 +74,23 @@ hologram base crate. CLI: `compile`, `info`, `download` — nothing else.
 - [x] Shape-tracked execution: `ShapeMap`, `FloatOp::Transpose` with physical permutation,
   actual Reshape (reads shape tensor), N-D broadcasting (Expand), i64/i32 shape auto-detection
 - [x] TinyLlama 1.1B end-to-end: ONNX → .holo → execute all 1612 nodes (~215s debug build)
-- [x] Tokenizer embedding: `--tokenizer` CLI flag (auto-detects `tokenizer.json` in model dir),
-  `TokenizerSectionData::from_tokenizer_json()`, mirror `TokenizerSection` in hologram-archive
+- [x] Tokenizer embedding: `--tokenizer` CLI flag, `TokenizerSectionData::from_tokenizer_json()`
 - [x] Output decoding: `hologram run` applies argmax + tokenizer decode when section present
 - [x] `--prompt` flag: autoregressive text generation with `MiniBpeEncoder`
 - [x] `ModelMetaSection` (0x1002): `ModelKind` enum, arch, capabilities
 - [x] `--input-file`: load raw binary inputs from files
 - [x] Typed output formatting: f32/f64/i32/i64 dtype-aware display
 - [x] Compiler auto-embeds `ModelMetaSection` in compiled archives
+- [x] ONNX shape oracle: seed shapes from ValueInfoProto, settled-shape protection
+- [x] RmsNorm fusion pass: Pow→ReduceMean→Add→Sqrt→Reciprocal→Mul → AiOp::RmsNorm
+- [x] Multi-level DataProp: re-materialization for transitive shape dependencies
+- [x] Seq_len sentinel: dynamic dims use 0-sentinel, resolved at runtime
+- [x] Inf/NaN diagnostic: scan compiled params for broken scale factors
 
-See `specs/plans/001-spec-alignment-completed.md` and `specs/plans/002-mvp-remaining.md` for full details.
+See `specs/plans/001-spec-alignment-completed.md`, `specs/plans/002-mvp-remaining.md`,
+and `specs/plans/004-onnx-last-mile.md` for full details.
 
 ---
-
-## Recently Unblocked
-
-- **All ops are native FloatOp** — `FloatOp` expanded to 55 variants.
-  `custom_ops.rs` deleted. Archives are fully self-describing.
-- **LLM meta + tokenizer sections** — implemented locally with rkyv
-  zero-copy serialization and `EmbeddableSection` trait. No longer blocked
-  on hologram base crate.
-- **Pipeline archives** — `PipelineWriter` used to bundle prefill + decode
-  sub-archives. LLM detection heuristic in compiler selects pipeline vs
-  single-archive path automatically.
-- **TinyLlama end-to-end execution** — ONNX → .holo compilation and full
-  execution of all 1612 nodes (1.1B params, 3.9 GiB weights) in ~215s
-  (debug build). Required: `FloatOp::Transpose` with physical data
-  permutation, `ShapeMap` for tensor shape tracking, N-D broadcasting
-  (Expand), actual Reshape with shape tensor reading, i64/i32 auto-detection
-  for ONNX shape constants.
 
 ## Still Blocked on hologram base crate
 
@@ -89,6 +98,12 @@ See `specs/plans/001-spec-alignment-completed.md` and `specs/plans/002-mvp-remai
   shape/dtype, forcing shapes to be baked into closure captures
 - **`KvExecutor::execute_layer()`** — does not exist; manual sub-archive
   extraction required
+- **Vision FloatOp variants** — Conv2d, MaxPool2d, AvgPool2d, GlobalAvgPool,
+  Resize, Pad needed for Phase 1 lowering
+- **Utility FloatOp variants** — TopK, CumSum, NonZero, ScatterND, ReduceProd
+  needed for Phase 2 lowering
+- **`LayerEntrypoint::Subgraph(u32)` runtime** — declared but not implemented;
+  needed for Phase 4 dynamic control flow
 
 ---
 
@@ -99,5 +114,5 @@ See `specs/plans/001-spec-alignment-completed.md` and `specs/plans/002-mvp-remai
 - GGUF importer supports `llama`, `mistral`, `codellama`, `tinyllama` arch names
 - No backwards compatibility concerns — can break APIs freely
 - Future extensibility: op decomposition (now), serializable op descriptors (Phase 3), WASM kernels (Phase 4+). See `specs/plans/003-op-extensibility.md`.
-- Archive sections use rkyv for zero-copy access from memory-mapped files — no serde_json in archive path.
+- Archive sections use rkyv for zero-copy access from memory-mapped files.
 - `rkyv = "0.8"` added to workspace dependencies.
