@@ -18,17 +18,18 @@ use crate::ir::{shape_from_concrete, AiGraph, AiOp, Shape};
 /// When `known_i64_values` are available on shape-input tensors (populated by
 /// `DataPropagation`), this pass can resolve Reshape and Expand output shapes.
 ///
-/// Settled shapes (non-empty with no `Dynamic` dims) are never overwritten —
-/// this preserves oracle-seeded shapes from `ShapeOraclePass` and correctly
-/// inferred shapes from prior passes.
+/// Settled shapes (non-empty with ALL `Concrete` dims) are never overwritten —
+/// this preserves fully-concrete oracle-seeded shapes and correctly-inferred
+/// shapes from prior passes. Shapes with any `Var` or `Dynamic` dim are not
+/// settled and may be overwritten by DataProp + subsequent ShapeProp passes.
 pub struct ShapePropagation;
 
 /// Alias for `ShapePropagation` used in the post-concretization repair loop.
 ///
-/// After `concretize_all_dims` all symbolic `Var` dims are concrete, so oracle
-/// shapes become fully settled. The settled-shape protection in
-/// `ShapePropagation` applies identically here — this alias exists for
-/// call-site clarity in the compiler pipeline.
+/// After `concretize_all_dims` all symbolic `Var` dims are concrete, so any
+/// remaining shapes with Var dims have been resolved. The settled-shape
+/// protection (all-Concrete dims) applies identically here — this alias exists
+/// for call-site clarity in the compiler pipeline.
 pub struct AggressiveShapePropagation;
 
 impl Pass for ShapePropagation {
@@ -37,7 +38,7 @@ impl Pass for ShapePropagation {
     }
 
     fn run(&self, graph: AiGraph) -> anyhow::Result<AiGraph> {
-        propagate_shapes(graph)
+        propagate_shapes(graph, true)
     }
 }
 
@@ -47,11 +48,14 @@ impl Pass for AggressiveShapePropagation {
     }
 
     fn run(&self, graph: AiGraph) -> anyhow::Result<AiGraph> {
-        propagate_shapes(graph)
+        // No settled-shape protection: overwrite any shape when a better
+        // inference is available. Safe because this runs post-concretization
+        // where all dims are concrete and DataProp has resolved Reshape targets.
+        propagate_shapes(graph, false)
     }
 }
 
-fn propagate_shapes(mut graph: AiGraph) -> anyhow::Result<AiGraph> {
+fn propagate_shapes(mut graph: AiGraph, protect_settled: bool) -> anyhow::Result<AiGraph> {
         let order = graph.topo_order();
 
         // Build node lookup.
@@ -102,19 +106,22 @@ fn propagate_shapes(mut graph: AiGraph) -> anyhow::Result<AiGraph> {
             for (i, tid) in output_tids.iter().enumerate() {
                 if let Some(shape) = inferred.get(i) {
                     if let Some(info) = graph.tensor_info.get_mut(tid) {
-                        // A "settled" shape is non-empty with no Dynamic dims.
-                        // This includes oracle-seeded shapes (all-concrete or
-                        // symbolic Var dims) and any shapes from prior passes
-                        // that fully resolved every dimension.
+                        // ShapePropagation (protect_settled=true) protects
+                        // fully-concrete shapes so oracle-seeded values and
+                        // previously-correct inferences are not replaced by
+                        // weaker op-rule inferences.
                         //
-                        // Settled shapes are preserved even in overwrite mode
-                        // (AggressiveShapePropagation) — re-deriving them from
-                        // op rules could produce wrong results when ops carry
-                        // stale parameters (e.g. head_dim=0 before resolution).
-                        // Dynamic dims are always overwritten when propagation
-                        // can provide something better.
-                        let is_settled = !info.shape.is_empty()
-                            && info.shape.iter().all(|d| !matches!(d, DimExpr::Dynamic));
+                        // AggressiveShapePropagation (protect_settled=false)
+                        // overwrites any existing shape when it can infer a
+                        // non-empty one. Used post-concretization to repair
+                        // oracle shapes that were concretized to wrong values
+                        // (e.g. '(32//batch_size)' Var → 1 instead of 32).
+                        //
+                        // The `!shape.is_empty()` guard ensures Opaque ops
+                        // (infer empty) never clear existing shapes.
+                        let is_settled = protect_settled
+                            && !info.shape.is_empty()
+                            && info.shape.iter().all(|d| matches!(d, DimExpr::Concrete(_)));
                         if !is_settled && !shape.is_empty() {
                             info.shape = shape.clone();
                         }

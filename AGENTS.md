@@ -18,18 +18,25 @@ Standards version: `2026.03`
 specs/
   docs/         — project documentation
   adrs/         — architecture decision records
+models/         — test models for development (TinyLlama ONNX, etc.)
 ```
+
+> **Models directory**: Test models live in a sibling directory `../hologram-ai/models` (i.e., this repo's `models/` subdirectory). Do not search for models in the repository root or elsewhere.
 
 ---
 
 ## Rules for Agents
 
-1. Follow the architecture standards defined in the architecture repo
-2. Do not modify files outside this repository unless explicitly instructed
-3. Run `cargo clippy -- -D warnings` before committing Rust changes
-4. Use a consistent naming prefix for all crate names
-5. **ALWAYS solve bugs holistically** — take a project-wide perspective instead of patching symptoms locally. Fix the root cause in the appropriate pass or abstraction layer.
-6. **Prefer simpler code and smaller functions.** Functions should be short, focused, and easily testable. If a function is getting large, break it into smaller well-named helpers. Avoid complex nested logic when a flatter structure is clearer.
+1. **SOLVE PROBLEMS IN THE MOST PRODUCTION-READY WAY POSSIBLE.** Always take a project-wide perspective — solutions must be robust, correct, and ready to ship. No hacks, no shortcuts, no "good enough for now." Every change should be something you'd confidently deploy to production.
+2. **ZERO RUNTIME PERFORMANCE PENALTIES.** Never introduce unnecessary allocations, copies, indirections, or overhead in hot paths. Prefer zero-cost abstractions, compile-time evaluation, and in-place operations. If a solution has a runtime cost, justify it explicitly and minimize it. Profile-guided decisions over guesswork.
+3. Follow the architecture standards defined in the architecture repo
+4. Do not modify files outside this repository unless explicitly instructed
+5. Run `cargo clippy -- -D warnings` before committing Rust changes
+6. Use a consistent naming prefix for all crate names
+7. **ALWAYS solve bugs holistically** — take a project-wide perspective instead of patching symptoms locally. Fix the root cause in the appropriate pass or abstraction layer.
+8. **Prefer simpler code and smaller functions.** Functions should be short, focused, and easily testable. If a function is getting large, break it into smaller well-named helpers. Avoid complex nested logic when a flatter structure is clearer.
+9. **Never commit test modules or scratch files to this repo.** Use `/tmp` for any throwaway test scripts, one-off experiments, or scratch files. Do not leave `test_*.rs`, `scratch_*.rs`, or similar files in the source tree.
+10. **Clean up after yourself.** Before finishing a task, remove any scratch files, temporary debug files, and `dbg!`/`eprintln!` debugging output that were added during investigation and are not part of the final solution.
 
 ---
 

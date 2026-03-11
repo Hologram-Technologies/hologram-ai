@@ -148,7 +148,20 @@ impl ModelCompiler {
                     data_prop::DataPropagation, dead_node::DeadNodeElimination,
                 },
             };
+            // Two DataProp passes handle multi-level shape dependencies:
+            //
+            //   Pass 1 (DataProp #1): evaluates shape subgraphs like Expand
+            //     targets that depend on concrete input tensor shapes.
+            //   Pass 2 (AggressiveProp #2): propagates DataProp #1 results
+            //     to correctly shape intermediate tensors (e.g. K_intermediate).
+            //   Pass 3 (DataProp #2): re-evaluates shape subgraphs that depend
+            //     on K_intermediate's now-correct shape (e.g. K^T target).
+            //     DataProp's re-materialization logic (computed_tids) ensures
+            //     it overwrites any stale results from DataProp #1.
+            //   Pass 4 (AggressiveProp #3): applies DataProp #2 results.
             OptPipeline::new(vec![
+                Box::new(AggressiveShapePropagation),
+                Box::new(DataPropagation),
                 Box::new(AggressiveShapePropagation),
                 Box::new(DataPropagation),
                 Box::new(AggressiveShapePropagation),
@@ -171,14 +184,17 @@ impl ModelCompiler {
             }
         }
 
-        // Replace any Dynamic dims introduced by the aggressive pipeline
-        // (e.g., broadcast_shape returns Dynamic for non-matching concrete dims).
+        // Replace any Dynamic or remaining Var dims introduced by the
+        // aggressive pipeline (e.g., broadcast_shape returns Dynamic for
+        // non-matching concrete dims).
         {
             use hologram_ai_common::Dim;
             for info in ai_graph.tensor_info.values_mut() {
                 for dim in info.shape.iter_mut() {
                     if matches!(dim, Dim::Dynamic) {
                         *dim = Dim::Concrete(1);
+                    } else if matches!(dim, Dim::Var(_)) {
+                        *dim = Dim::Concrete(0);
                     }
                 }
             }
@@ -312,6 +328,36 @@ impl ModelCompiler {
                     );
                     matmul_count += 1;
                 }
+            }
+        }
+
+        // Diagnostic: scan compiled params for inf/NaN (catches broken scale factors).
+        {
+            use hologram_ai_common::AiParam;
+            use hologram_ai_common::DType;
+            let mut nan_params = 0u32;
+            for (&tid, param) in &ai_graph.params {
+                if let AiParam::Inline { data, info } = param {
+                    if info.logical_dtype == DType::F32 && !data.is_empty() && data.len() % 4 == 0 {
+                        let floats: &[f32] = bytemuck::cast_slice(data);
+                        let nan_count = floats.iter().filter(|f| f.is_nan()).count();
+                        let inf_count = floats.iter().filter(|f| f.is_infinite()).count();
+                        if nan_count > 0 || inf_count > 0 {
+                            let shape = ai_graph.tensor_info.get(&tid)
+                                .map(|i| format!("{:?}", i.shape.as_slice()))
+                                .unwrap_or_default();
+                            let producer = ai_graph.nodes.iter()
+                                .find(|n| n.outputs.contains(&tid))
+                                .map(|n| format!("{:?}", n.op))
+                                .unwrap_or_else(|| "input/param".into());
+                            warn!(tid, nan_count, inf_count, total=floats.len(), shape = %shape, producer = &producer[..producer.len().min(80)], "compiled f32 param has inf/NaN");
+                            nan_params += 1;
+                        }
+                    }
+                }
+            }
+            if nan_params > 0 {
+                warn!(nan_params, "WARNING: inf/NaN scalar params detected — attention scale may be wrong!");
             }
         }
 
@@ -769,20 +815,23 @@ fn concretize_all_dims(mut graph: AiGraph) -> anyhow::Result<AiGraph> {
 
     // Set upper bounds for ONNX dim vars that don't have them,
     // using heuristic defaults based on the variable name.
+    //
+    // Sequence-like vars are fixed to 0 (sentinel) rather than a concrete value.
+    // The executor resolves them at runtime from actual input buffer sizes,
+    // enabling dynamic-length inference without padding to a fixed seq_len.
     for (_, entry) in graph.dim_vars.iter_mut() {
         if entry.fixed.is_some() {
             continue;
         }
         if entry.upper.is_none() {
             let name_lower = entry.name.to_lowercase();
-            let default_val = if name_lower.contains("batch") {
-                1u64
-            } else if name_lower.contains("seq") || name_lower.contains("length") {
-                2048u64
+            if name_lower.contains("seq") || name_lower.contains("length") {
+                // Emit as 0-sentinel: runtime resolves from actual token count.
+                entry.fixed = Some(0);
             } else {
-                1u64
-            };
-            entry.upper = Some(default_val);
+                let default_val = if name_lower.contains("batch") { 1u64 } else { 1u64 };
+                entry.upper = Some(default_val);
+            }
         }
     }
 
@@ -838,6 +887,10 @@ fn concretize_all_dims(mut graph: AiGraph) -> anyhow::Result<AiGraph> {
             }
             if matches!(dim, Dim::Dynamic) {
                 *dim = Dim::Concrete(1);
+            } else if matches!(dim, Dim::Var(_)) {
+                // Safety net: any remaining Var (e.g. seq-like fixed=0) that
+                // wasn't substituted above gets the 0-sentinel treatment.
+                *dim = Dim::Concrete(0);
             }
         }
     }

@@ -90,6 +90,13 @@ impl Pass for ConstantEvaluation {
             if let Some((result_bytes, result_dtype, result_shape)) =
                 eval_node(&node.op, &inputs, &input_shapes)
             {
+                // Skip empty results: a 0-element tensor means a dynamic dim
+                // was substituted with 0 (e.g. seq_len sentinel). Materializing
+                // it as an empty constant would fail validation.
+                if result_shape.iter().any(|&d| d == 0) || result_bytes.is_empty() {
+                    continue;
+                }
+
                 let byte_len = result_bytes.len();
 
                 let shape = shape_from_concrete(

@@ -50,6 +50,11 @@ impl Pass for DataPropagation {
             }
         }
 
+        // Track which TIDs were freshly computed by this forward pass.
+        // Used in materialization to allow re-writing a DataProp-created param
+        // when the shape computation is re-evaluated with updated input shapes.
+        let mut computed_tids: std::collections::HashSet<TensorId> = std::collections::HashSet::new();
+
         // Forward pass in topological order.
         for &nid in &order {
             let idx = match node_idx.get(&nid) {
@@ -75,6 +80,7 @@ impl Pass for DataPropagation {
                 if let Some(&out_tid) = output_tids.first() {
                     tracing::trace!(nid, ?op, out_tid, ?result, "DataProp: evaluated op");
                     known.insert(out_tid, result);
+                    computed_tids.insert(out_tid);
                 }
             } else if matches!(
                 op,
@@ -174,6 +180,7 @@ impl Pass for DataPropagation {
                             // Store the resolved shape as the Reshape output's known values.
                             // This feeds into shape_prop for the compiled output shape.
                             known.insert(out_tid, resolved_vals);
+                            computed_tids.insert(out_tid);
                         }
                     }
                 }
@@ -194,9 +201,16 @@ impl Pass for DataPropagation {
         // (INT64, INT32, INT8). Known i64 values are only meaningful for
         // shape/index tensors. Materializing F32 tensors as INT64 corrupts
         // downstream data paths (e.g., attention Q/K/V become INT64 garbage).
+        //
+        // Re-materialization policy: if this pass computed a value for a TID
+        // that already exists as a param (from a previous DataProp run), we
+        // overwrite it with the freshly-computed value. This handles multi-level
+        // shape dependencies where a second DataProp pass (after AggressiveProp
+        // has propagated DataProp's first-pass results) produces better values.
+        // We NEVER overwrite original model params (not in computed_tids).
         for (tid, vals) in &known {
-            // Skip tensors that are already params.
-            if graph.params.contains_key(tid) {
+            // Skip original model params that DataProp did not recompute.
+            if graph.params.contains_key(tid) && !computed_tids.contains(tid) {
                 continue;
             }
             // Only materialize integer-typed tensors (shape/index subgraphs).
@@ -208,9 +222,14 @@ impl Pass for DataPropagation {
             if !is_integer_tensor {
                 continue;
             }
-            // Only materialize if all values are concrete.
+            // Only materialize if all values are concrete and non-empty.
+            // An empty list means a 0-element tensor (dynamic dim = 0 sentinel)
+            // — skip to avoid creating invalid empty params.
             if vals.iter().all(|v| v.is_some()) {
                 let concrete: Vec<i64> = vals.iter().map(|v| v.unwrap()).collect();
+                if concrete.is_empty() {
+                    continue;
+                }
                 let bytes: Vec<u8> = concrete.iter().flat_map(|v| v.to_le_bytes()).collect();
                 let shape = crate::ir::shape_from_concrete(&[concrete.len() as u64]);
                 let info = TensorInfo::new(DType::INT64, shape);
@@ -340,6 +359,9 @@ fn eval_custom_op(
                 shape[s..e]
                     .iter()
                     .map(|dim| match dim {
+                        // Concrete(0) is a 0-sentinel for dynamic dims (seq_len etc.) —
+                        // treat as unknown so the shape subgraph stays live at runtime.
+                        DimExpr::Concrete(0) => None,
                         DimExpr::Concrete(n) => Some(*n as i64),
                         _ => None,
                     })

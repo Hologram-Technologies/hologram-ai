@@ -21,7 +21,8 @@ impl OptPipeline {
         use super::{
             const_dedup::ConstantDeduplication, const_eval::ConstantEvaluation,
             constant_fold::ConstantFolding, data_prop::DataPropagation,
-            dead_node::DeadNodeElimination, shape_prop::ShapePropagation,
+            dead_node::DeadNodeElimination, rmsnorm_fusion::RmsNormFusion,
+            shape_prop::ShapePropagation,
         };
         Self::new(vec![
             Box::new(ShapePropagation),
@@ -34,6 +35,11 @@ impl OptPipeline {
             // Handles N-D broadcast that the runtime can't do.
             Box::new(ConstantEvaluation),
             Box::new(ConstantFolding),
+            // Fuse explicit Pow→ReduceMean→Add→Sqrt→Reciprocal→Mul chains
+            // into AiOp::RmsNorm. Must run after ConstantFolding so that the
+            // scalar epsilon and exponent params are already materialized as
+            // AiParam::Inline (otherwise scalar_f32_param returns None).
+            Box::new(RmsNormFusion),
             // Deduplicate identical constants by content hash.
             // Cross-layer duplicates (e.g., RoPE constants computed per
             // transformer layer) share the same bytes but have different
