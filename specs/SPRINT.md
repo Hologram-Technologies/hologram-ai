@@ -19,12 +19,15 @@ CLI: `compile`, `info`, `download` — nothing else.
 - [x] Add shape propagation rules (Conv/Pool formula, Resize, Pad, etc.)
 - [x] Add data propagation match arms
 - [ ] Add dynamic param resolution for Pad/Resize (opset 11+ inputs)
-- [x] Add lowering dispatch entries (Unsupported until hologram base adds FloatOp)
+- [x] Add lowering dispatch entries → FloatNeedsShape (FloatOp variants added to hologram base)
+- [x] Add resolve_op strategy arms for Conv2d, ConvTranspose, MaxPool2d, AvgPool2d, GlobalAvgPool, Resize, Pad, InstanceNorm, LRN
 
 ### Phase 2: Utility Ops
 - [x] Add 12 AiOp variants: ReduceProd, ReduceL1, ReduceL2, TopK, ScatterND, CumSum, NonZero, OneHot, DepthToSpace, SpaceToDepth, Compress, ReverseSequence
 - [x] Add ONNX mappings + quantization integration (QuantizeLinear, DequantizeLinear)
 - [x] Add shape propagation rules for utility ops (reductions, TopK, ScatterND, NonZero, OneHot, DepthToSpace, SpaceToDepth, Compress)
+- [x] Add lowering dispatch entries → FloatNeedsShape (FloatOp variants added to hologram base)
+- [x] Add resolve_op strategy arms for ReduceProd, TopK, ScatterND, CumSum, NonZero, Compress, ReverseSequence
 - [ ] Add lowering decompositions where possible (ReduceL1/L2, DepthToSpace, SpaceToDepth)
 
 ### Phase 3: Proto/Type Gaps
@@ -103,10 +106,9 @@ and `specs/plans/004-onnx-last-mile.md` for full details.
   shape/dtype, forcing shapes to be baked into closure captures
 - **`KvExecutor::execute_layer()`** — does not exist; manual sub-archive
   extraction required
-- **Vision FloatOp variants** — Conv2d, MaxPool2d, AvgPool2d, GlobalAvgPool,
-  Resize, Pad needed for Phase 1 lowering
-- **Utility FloatOp variants** — TopK, CumSum, NonZero, ScatterND, ReduceProd
-  needed for Phase 2 lowering
+- ~~**Vision FloatOp variants**~~ — DONE: Conv2d, ConvTranspose, MaxPool2d, AvgPool2d, GlobalAvgPool, Resize, PadOp, InstanceNorm, LRN added
+- ~~**Utility FloatOp variants**~~ — DONE: ReduceProd, TopK, ScatterND, CumSum, NonZero, Compress, ReverseSequence added
+- **Vision/utility runtime kernels** — FloatOp variants exist but dispatch returns `UnsupportedOp` (stub); kernels not yet implemented
 - **`LayerEntrypoint::Subgraph(u32)` runtime** — declared but not implemented;
   needed for Phase 4 dynamic control flow
 

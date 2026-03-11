@@ -165,56 +165,32 @@ pub fn dispatch(op: &AiOp) -> DispatchTarget {
             reason: "opaque op cannot be lowered",
         },
 
-        // ── Vision ops (Phase 1): blocked on hologram base FloatOp ──────
-        Conv { .. } => D::Unsupported {
-            reason: "requires FloatOp::Conv2d in hologram base",
-        },
-        ConvTranspose { .. } => D::Unsupported {
-            reason: "requires FloatOp::ConvTranspose in hologram base",
-        },
-        MaxPool { .. } => D::Unsupported {
-            reason: "requires FloatOp::MaxPool2d in hologram base",
-        },
-        AveragePool { .. } => D::Unsupported {
-            reason: "requires FloatOp::AvgPool2d in hologram base",
-        },
-        GlobalAveragePool => D::Unsupported {
-            reason: "requires FloatOp::GlobalAvgPool in hologram base",
-        },
-        Resize { .. } => D::Unsupported {
-            reason: "requires FloatOp::Resize in hologram base",
-        },
-        Pad { .. } => D::Unsupported {
-            reason: "requires FloatOp::Pad in hologram base",
-        },
-        InstanceNorm { .. } => D::Unsupported {
-            reason: "requires FloatOp::InstanceNorm in hologram base",
-        },
-        LRN { .. } => D::Unsupported {
-            reason: "requires FloatOp::LRN in hologram base",
-        },
+        // ── Vision ops (Phase 1): needs shape resolution ────────────────
+        Conv { .. }
+        | ConvTranspose { .. }
+        | MaxPool { .. }
+        | AveragePool { .. }
+        | GlobalAveragePool
+        | Resize { .. }
+        | Pad { .. }
+        | InstanceNorm { .. }
+        | LRN { .. } => D::FloatNeedsShape,
 
-        // ── Utility ops (Phase 2): blocked on hologram base FloatOp ─────
-        ReduceProd { .. } => D::Unsupported {
-            reason: "requires FloatOp::ReduceProd in hologram base",
-        },
+        // ── Utility ops (Phase 2): needs shape resolution ───────────────
+        ReduceProd { .. }
+        | TopK { .. }
+        | ScatterND { .. }
+        | CumSum { .. }
+        | NonZero
+        | Compress { .. }
+        | ReverseSequence { .. } => D::FloatNeedsShape,
+
+        // ── Decomposition ops (multi-node expansion, not yet implemented) ─
         ReduceL1 { .. } => D::Unsupported {
             reason: "ReduceL1 decomposition not yet implemented",
         },
         ReduceL2 { .. } => D::Unsupported {
             reason: "ReduceL2 decomposition not yet implemented",
-        },
-        TopK { .. } => D::Unsupported {
-            reason: "requires FloatOp::TopK in hologram base",
-        },
-        ScatterND { .. } => D::Unsupported {
-            reason: "requires FloatOp::ScatterND in hologram base",
-        },
-        CumSum { .. } => D::Unsupported {
-            reason: "requires FloatOp::CumSum in hologram base",
-        },
-        NonZero => D::Unsupported {
-            reason: "requires FloatOp::NonZero in hologram base",
         },
         OneHot { .. } => D::Unsupported {
             reason: "OneHot decomposition not yet implemented",
@@ -224,12 +200,6 @@ pub fn dispatch(op: &AiOp) -> DispatchTarget {
         },
         SpaceToDepth { .. } => D::Unsupported {
             reason: "SpaceToDepth decomposition not yet implemented",
-        },
-        Compress { .. } => D::Unsupported {
-            reason: "requires FloatOp::Compress in hologram base",
-        },
-        ReverseSequence { .. } => D::Unsupported {
-            reason: "requires FloatOp::ReverseSequence in hologram base",
         },
 
         // ── Control flow (Phase 4): subgraph lowering ──────────────────

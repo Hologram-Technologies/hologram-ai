@@ -414,10 +414,212 @@ fn resolve_op(
             )
         }
 
+        // ── Vision ops ───────────────────────────────────────────────────
+        AiOp::Conv {
+            kernel_shape,
+            strides,
+            pads,
+            dilations,
+            group,
+            ..
+        } => {
+            let (kh, kw) = get_hw(kernel_shape, 1);
+            let (sh, sw) = get_hw(strides, 1);
+            let (ph, pw) = get_pads_hw(pads);
+            let (dh, dw) = get_hw(dilations, 1);
+            (
+                FloatOp::Conv2d {
+                    kernel_h: kh as u32, kernel_w: kw as u32,
+                    stride_h: sh as u32, stride_w: sw as u32,
+                    pad_h: ph as u32, pad_w: pw as u32,
+                    dilation_h: dh as u32, dilation_w: dw as u32,
+                    group: *group as u32,
+                },
+                vec![],
+            )
+        }
+        AiOp::ConvTranspose {
+            kernel_shape,
+            strides,
+            pads,
+            output_padding,
+            dilations,
+            group,
+            ..
+        } => {
+            let (kh, kw) = get_hw(kernel_shape, 1);
+            let (sh, sw) = get_hw(strides, 1);
+            let (ph, pw) = get_pads_hw(pads);
+            let (dh, dw) = get_hw(dilations, 1);
+            let (oph, opw) = get_hw(output_padding, 0);
+            (
+                FloatOp::ConvTranspose {
+                    kernel_h: kh as u32, kernel_w: kw as u32,
+                    stride_h: sh as u32, stride_w: sw as u32,
+                    pad_h: ph as u32, pad_w: pw as u32,
+                    dilation_h: dh as u32, dilation_w: dw as u32,
+                    group: *group as u32,
+                    output_pad_h: oph as u32, output_pad_w: opw as u32,
+                },
+                vec![],
+            )
+        }
+        AiOp::MaxPool {
+            kernel_shape,
+            strides,
+            pads,
+            ..
+        } => {
+            let (kh, kw) = get_hw(kernel_shape, 1);
+            let (sh, sw) = get_hw(strides, 1);
+            let (ph, pw) = get_pads_hw(pads);
+            (
+                FloatOp::MaxPool2d {
+                    kernel_h: kh as u32, kernel_w: kw as u32,
+                    stride_h: sh as u32, stride_w: sw as u32,
+                    pad_h: ph as u32, pad_w: pw as u32,
+                },
+                vec![],
+            )
+        }
+        AiOp::AveragePool {
+            kernel_shape,
+            strides,
+            pads,
+            ..
+        } => {
+            let (kh, kw) = get_hw(kernel_shape, 1);
+            let (sh, sw) = get_hw(strides, 1);
+            let (ph, pw) = get_pads_hw(pads);
+            (
+                FloatOp::AvgPool2d {
+                    kernel_h: kh as u32, kernel_w: kw as u32,
+                    stride_h: sh as u32, stride_w: sw as u32,
+                    pad_h: ph as u32, pad_w: pw as u32,
+                },
+                vec![],
+            )
+        }
+        AiOp::GlobalAveragePool => (FloatOp::GlobalAvgPool, vec![]),
+        AiOp::Resize { mode, .. } => {
+            let mode_u8 = match mode.as_str() {
+                "nearest" => 0,
+                "linear" | "bilinear" => 1,
+                "cubic" | "bicubic" => 2,
+                _ => 0,
+            };
+            (FloatOp::Resize { mode: mode_u8 }, vec![])
+        }
+        AiOp::Pad { mode } => {
+            let mode_u8 = match mode.as_str() {
+                "constant" => 0,
+                "reflect" => 1,
+                "edge" => 2,
+                _ => 0,
+            };
+            (FloatOp::PadOp { mode: mode_u8 }, vec![])
+        }
+        AiOp::InstanceNorm { epsilon } => {
+            size_op!(inputs, tensor_info, dim_var_names, |size| {
+                FloatOp::InstanceNorm {
+                    size,
+                    epsilon: f32_to_bits(*epsilon),
+                }
+            })
+        }
+        AiOp::LRN { alpha, beta, bias, size } => (
+            FloatOp::LRN {
+                size: *size as u32,
+                alpha: f32_to_bits(*alpha),
+                beta: f32_to_bits(*beta),
+                bias: f32_to_bits(*bias),
+            },
+            vec![],
+        ),
+
+        // ── Utility ops ─────────────────────────────────────────────────
+        AiOp::ReduceProd { .. } => {
+            size_op!(inputs, tensor_info, dim_var_names, |size| {
+                FloatOp::ReduceProd { size }
+            })
+        }
+        AiOp::TopK { axis, largest, .. } => {
+            let norm_axis = normalize_axis(*axis, inputs.first(), tensor_info);
+            (
+                FloatOp::TopK {
+                    axis: norm_axis as u32,
+                    largest: *largest,
+                },
+                vec![],
+            )
+        }
+        AiOp::ScatterND { .. } => (FloatOp::ScatterND, vec![]),
+        AiOp::CumSum { .. } => {
+            // CumSum axis is typically 0 or from a 1-element input tensor.
+            // Default to axis 0.
+            (FloatOp::CumSum { axis: 0 }, vec![])
+        }
+        AiOp::NonZero => (FloatOp::NonZero, vec![]),
+        AiOp::Compress { axis } => {
+            let norm_axis = axis
+                .map(|a| normalize_axis(a, inputs.first(), tensor_info))
+                .unwrap_or(0);
+            (FloatOp::Compress { axis: norm_axis as u32 }, vec![])
+        }
+        AiOp::ReverseSequence { batch_axis, time_axis } => {
+            let ba = normalize_axis(*batch_axis, inputs.first(), tensor_info);
+            let ta = normalize_axis(*time_axis, inputs.first(), tensor_info);
+            (
+                FloatOp::ReverseSequence {
+                    batch_axis: ba as u32,
+                    time_axis: ta as u32,
+                },
+                vec![],
+            )
+        }
+
         _ => return Ok(None),
     };
 
     Ok(Some(result))
+}
+
+// ── Spatial param helpers ────────────────────────────────────────────────────
+
+/// Extract (H, W) from a spatial param vec, using `default` if missing.
+fn get_hw(v: &[u64], default: u64) -> (u64, u64) {
+    match v.len() {
+        0 => (default, default),
+        1 => (v[0], v[0]),
+        _ => (v[0], v[1]),
+    }
+}
+
+/// Extract (pad_h, pad_w) from ONNX-style pads [h_begin, w_begin, h_end, w_end].
+/// Returns (h_begin, w_begin) — symmetric padding assumed for now.
+fn get_pads_hw(pads: &[u64]) -> (u64, u64) {
+    match pads.len() {
+        0 => (0, 0),
+        2 => (pads[0], pads[1]),
+        4 => (pads[0], pads[1]), // [h_begin, w_begin, h_end, w_end]
+        _ => (pads.first().copied().unwrap_or(0), pads.get(1).copied().unwrap_or(0)),
+    }
+}
+
+/// Normalize a potentially-negative axis to a positive index.
+fn normalize_axis(
+    axis: i64,
+    tid: Option<&TensorId>,
+    tensor_info: &HashMap<TensorId, TensorInfo>,
+) -> i64 {
+    if axis >= 0 {
+        return axis;
+    }
+    let ndim = tid
+        .and_then(|t| tensor_info.get(t))
+        .map(|info| info.shape.len() as i64)
+        .unwrap_or(0);
+    (ndim + axis).max(0)
 }
 
 // ── Dim expression helpers ──────────────────────────────────────────────────
