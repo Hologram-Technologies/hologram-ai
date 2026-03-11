@@ -556,11 +556,13 @@ pub(crate) fn ai_dtype_to_float_dtype(dtype: &crate::ir::DType) -> FloatDType {
     use crate::ir::DType;
     match dtype {
         DType::F32 => FloatDType::F32,
+        DType::F64 => FloatDType::F32, // F64 → F32 at lowering (hologram base has no f64 kernels)
         DType::F16 => FloatDType::F16,
         DType::BF16 => FloatDType::BF16,
         DType::INT8 => FloatDType::I8,
         DType::INT4 => FloatDType::I8,
         DType::U8 => FloatDType::U8,
+        DType::INT16 => FloatDType::I32, // INT16 widened to I32 at lowering
         DType::INT32 => FloatDType::I32,
         DType::INT64 => FloatDType::I64,
         DType::BOOL => FloatDType::Bool,

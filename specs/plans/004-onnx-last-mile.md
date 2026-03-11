@@ -13,7 +13,7 @@
 - [x] All passes carry subgraphs through transforms
 - [x] Shape propagation rules for new ops (Conv/Pool formula, ConvTranspose, GlobalAvgPool, Resize, Pad, reductions, TopK, ScatterND, NonZero, OneHot, DepthToSpace, SpaceToDepth, Compress, ArgMax/ArgMin, Split, Tile, Gemm, GatherND)
 - [x] Data propagation match arms for new ops (catch-all handles non-shape-computing ops)
-- [ ] F64 dtype, widening casts, opset validation (Phase 3)
+- [x] F64/INT16 dtypes, widening casts (UINT16→INT32, UINT32/UINT64→INT64), opset validation (Phase 3)
 - [ ] Recursive ONNX subgraph import (Phase 4)
 - [ ] Subgraph shape prop, pass recursion, lowering to SubgraphDef (Phase 4)
 - [ ] Long-tail ops + conformance tests (Phase 5)

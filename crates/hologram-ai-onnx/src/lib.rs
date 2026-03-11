@@ -50,10 +50,27 @@ pub fn import_onnx_path(
 
 fn import_onnx_inner(
     bytes: &[u8],
-    _opts: OnnxImportOptions,
+    opts: OnnxImportOptions,
     model_dir: Option<&std::path::Path>,
 ) -> anyhow::Result<AiGraph> {
     let model = onnx_pb::ModelProto::decode(bytes).map_err(OnnxError::Decode)?;
+
+    // Parse opset version from opset_import (empty domain = standard ONNX ops).
+    let opset_version = model
+        .opset_import
+        .iter()
+        .find(|osi| osi.domain.is_empty())
+        .map(|osi| osi.version)
+        .unwrap_or(0);
+
+    // Enforce max_opset if configured.
+    if opts.max_opset > 0 && opset_version > opts.max_opset as i64 {
+        anyhow::bail!(
+            "ONNX model requires opset {} but max_opset is {}",
+            opset_version,
+            opts.max_opset
+        );
+    }
 
     let graph_proto = model.graph.ok_or(OnnxError::NoGraph)?;
     let graph_name = if model.domain.is_empty() {
@@ -62,8 +79,16 @@ fn import_onnx_inner(
         &model.domain
     };
 
-    let (ai_graph, oracle) =
+    let (mut ai_graph, oracle) =
         graph_builder::build_ai_graph(&graph_proto, graph_name, model_dir)?;
+
+    // Store opset version in graph metadata for downstream passes.
+    if opset_version > 0 {
+        ai_graph.metadata.insert(
+            "opset_version".to_string(),
+            hologram_ai_common::ir::graph::MetaValue::Int(opset_version),
+        );
+    }
 
     // Surface warnings.
     for w in &ai_graph.warnings {

@@ -28,9 +28,11 @@ CLI: `compile`, `info`, `download` — nothing else.
 - [ ] Add lowering decompositions where possible (ReduceL1/L2, DepthToSpace, SpaceToDepth)
 
 ### Phase 3: Proto/Type Gaps
-- [ ] Add F64 dtype + ONNX type 11 mapping
-- [ ] Add widening casts for UINT16/INT16/UINT32/UINT64
-- [ ] Add opset version validation + version-aware op semantics
+- [x] Add F64 dtype + ONNX type 11 mapping
+- [x] Add INT16 dtype
+- [x] Add widening casts for UINT16→INT32, UINT32→INT64, UINT64→INT64
+- [x] Add opset version validation (parse opset_import, enforce max_opset, store in metadata)
+- [x] F64→F32 and INT16→I32 lowering at weight serialization and FloatDType mapping
 - [ ] Document and handle optional input semantics
 
 ### Phase 4: Subgraph Support (If/Loop/Scan)

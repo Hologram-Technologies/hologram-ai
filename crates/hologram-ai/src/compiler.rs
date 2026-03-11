@@ -768,11 +768,13 @@ fn ai_dtype_to_weight_dtype(
     use hologram_ai_common::DType;
     match dtype {
         DType::F32 => WeightDType::F32,
+        DType::F64 => WeightDType::F32, // F64 → F32 at weight serialization
         DType::F16 => WeightDType::F16,
         DType::BF16 => WeightDType::BF16,
         DType::INT8 => WeightDType::I8,
         DType::INT4 => WeightDType::I4,
         DType::U8 => WeightDType::U8,
+        DType::INT16 => WeightDType::I32, // INT16 widened to I32
         DType::INT32 => WeightDType::I32,
         DType::INT64 => WeightDType::I64,
         DType::BOOL => WeightDType::U8,

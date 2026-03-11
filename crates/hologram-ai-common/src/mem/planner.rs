@@ -27,9 +27,9 @@ impl KvCacheLayout {
             return 0;
         }
         let elem_bytes = match self.dtype {
-            DType::F32 | DType::INT32 => 4u64,
-            DType::F16 | DType::BF16 => 2,
-            DType::INT64 => 8,
+            DType::F64 | DType::INT64 => 8u64,
+            DType::F32 | DType::INT32 => 4,
+            DType::F16 | DType::BF16 | DType::INT16 => 2,
             DType::INT8 | DType::U8 | DType::BOOL => 1,
             DType::INT4 => 1, // conservatively rounded up
         };
