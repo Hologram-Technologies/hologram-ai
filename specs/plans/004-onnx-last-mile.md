@@ -17,7 +17,9 @@
 - [x] Recursive ONNX subgraph import + attr_g() + If/Loop/Scan op mappings (Phase 4)
 - [x] Optimization pass recursion into subgraphs (Phase 4)
 - [ ] Lowering to hologram's native SubgraphDef + CallSubgraph (Phase 4, blocked on hologram base)
-- [ ] Long-tail ops + conformance tests (Phase 5)
+- [x] Long-tail ops mapped to Opaque (RNG, ML, linear algebra, sequence, optional) (Phase 5)
+- [x] Validate recursion into subgraphs (Phase 5)
+- [ ] Multi-output op verification + ONNX conformance test runner (Phase 5)
 
 ## Context
 

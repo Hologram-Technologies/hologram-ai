@@ -172,6 +172,15 @@ impl AiGraph {
             });
         }
 
+        // Recurse into subgraphs.
+        for (key, sub) in &self.subgraphs {
+            for e in sub.validate() {
+                errors.push(ValidationError {
+                    message: format!("subgraph '{key}': {}", e.message),
+                });
+            }
+        }
+
         errors
     }
 

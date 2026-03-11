@@ -44,7 +44,8 @@ CLI: `compile`, `info`, `download` — nothing else.
 - [ ] Add lowering to hologram's native SubgraphDef + CallSubgraph (blocked on hologram base)
 
 ### Phase 5: Long-Tail + Conformance
-- [ ] Map remaining niche ops to Opaque with warnings
+- [x] Map remaining niche ops to Opaque with warnings (RNG, ML, linear algebra, sequence, optional)
+- [x] Validate recursion into subgraphs
 - [ ] Verify multi-output ops (TopK, Split, BatchNorm training)
 - [ ] ONNX conformance test runner (node test suite)
 

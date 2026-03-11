@@ -402,6 +402,45 @@ pub fn map_op(ctx: &OpContext<'_>) -> anyhow::Result<Option<AiOp>> {
             num_scan_inputs: ctx.attr_i("num_scan_inputs").unwrap_or(0) as u32,
         },
 
+        // ── Explicitly known but unsupported ops (Phase 5: long-tail) ────
+        // These produce Opaque with the op name so lowering gives clear errors.
+
+        // RNG ops — require runtime random state, not compilable.
+        "RandomNormal" | "RandomNormalLike" | "RandomUniform" | "RandomUniformLike"
+        | "Bernoulli" | "Multinomial" => Opaque {
+            op_type: ctx.op_type.to_string(),
+            raw_attrs: vec![],
+        },
+
+        // ONNX-ML ops — not part of standard DNN inference.
+        "StringNormalizer" | "TfIdfVectorizer" | "LinearClassifier"
+        | "LinearRegressor" | "SVMClassifier" | "SVMRegressor"
+        | "TreeEnsembleClassifier" | "TreeEnsembleRegressor"
+        | "Normalizer" | "Binarizer" | "LabelEncoder" => Opaque {
+            op_type: ctx.op_type.to_string(),
+            raw_attrs: vec![],
+        },
+
+        // Linear algebra — rare in inference graphs.
+        "Det" | "Inverse" | "EyeLike" | "Trilu" => Opaque {
+            op_type: ctx.op_type.to_string(),
+            raw_attrs: vec![],
+        },
+
+        // String/sequence ops — no tensor representation.
+        "SequenceConstruct" | "SequenceAt" | "SequenceLength"
+        | "SequenceInsert" | "SequenceErase" | "SequenceEmpty"
+        | "ConcatFromSequence" | "SplitToSequence" => Opaque {
+            op_type: ctx.op_type.to_string(),
+            raw_attrs: vec![],
+        },
+
+        // Optional type ops.
+        "Optional" | "OptionalGetElement" | "OptionalHasElement" => Opaque {
+            op_type: ctx.op_type.to_string(),
+            raw_attrs: vec![],
+        },
+
         // ── Fallback ──────────────────────────────────────────────────────
         _ => Opaque {
             op_type: ctx.op_type.to_string(),
