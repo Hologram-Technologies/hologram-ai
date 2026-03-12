@@ -33,6 +33,7 @@ impl Pass for DeadNodeElimination {
             dim_vars: graph.dim_vars,
             shape_constraints: graph.shape_constraints,
             subgraphs: graph.subgraphs,
+            tensor_names: graph.tensor_names,
         })
     }
 }
@@ -97,6 +98,7 @@ mod tests {
             dim_vars: Default::default(),
             shape_constraints: Default::default(),
             subgraphs: HashMap::new(),
+            tensor_names: HashMap::new(),
         }
     }
 

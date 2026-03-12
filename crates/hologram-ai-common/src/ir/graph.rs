@@ -84,6 +84,10 @@ pub struct AiGraph {
     /// Named subgraphs for control flow ops (If branches, Loop/Scan bodies).
     /// Empty for models without control flow — zero cost.
     pub subgraphs: HashMap<String, AiGraph>,
+    /// Reverse mapping from TensorId to original source name (e.g. ONNX tensor name).
+    /// Populated by importers, used by `compile_with_debug_info()` for conformance testing.
+    /// Empty for models imported without name tracking — zero cost.
+    pub tensor_names: HashMap<TensorId, String>,
 }
 
 impl AiGraph {
@@ -272,6 +276,7 @@ mod tests {
             dim_vars: DimVarTable::default(),
             shape_constraints: ConstraintStore::default(),
             subgraphs: HashMap::new(),
+            tensor_names: HashMap::new(),
         }
     }
 

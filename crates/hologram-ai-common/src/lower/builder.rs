@@ -48,6 +48,9 @@ pub struct LoweringOutput {
     pub layer_name: String,
     /// All context sections produced during lowering (shape recipes, etc.).
     pub context: ContextBundle,
+    /// Mapping from AiGraph TensorId → builder node index.
+    /// Preserved for `compile_with_debug_info()` conformance testing.
+    pub tid_to_idx: HashMap<TensorId, usize>,
 }
 
 // ── Entry point ───────────────────────────────────────────────────────────────
@@ -345,6 +348,7 @@ pub fn lower(
         graph,
         layer_name: phase.layer_name().to_string(),
         context,
+        tid_to_idx,
     })
 }
 

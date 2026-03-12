@@ -69,6 +69,7 @@ fn run_single_op(
         dim_vars: Default::default(),
         shape_constraints: Default::default(),
         subgraphs: HashMap::new(),
+        tensor_names: HashMap::new(),
     };
 
     OptPipeline::mvp().run(graph).expect("opt pipeline failed")
@@ -582,6 +583,7 @@ fn build_if_graph() -> AiGraph {
         dim_vars: Default::default(),
         shape_constraints: Default::default(),
         subgraphs: HashMap::new(),
+        tensor_names: HashMap::new(),
     };
 
     // Else branch: input(0) → Neg → output
@@ -603,6 +605,7 @@ fn build_if_graph() -> AiGraph {
         dim_vars: Default::default(),
         shape_constraints: Default::default(),
         subgraphs: HashMap::new(),
+        tensor_names: HashMap::new(),
     };
 
     let mut subgraphs = HashMap::new();
@@ -631,6 +634,7 @@ fn build_if_graph() -> AiGraph {
         dim_vars: Default::default(),
         shape_constraints: Default::default(),
         subgraphs,
+        tensor_names: HashMap::new(),
     }
 }
 
@@ -712,6 +716,7 @@ fn subgraph_loop_known_trip_count() {
         dim_vars: Default::default(),
         shape_constraints: Default::default(),
         subgraphs: HashMap::new(),
+        tensor_names: HashMap::new(),
     };
 
     let mut subgraphs = HashMap::new();
@@ -739,6 +744,7 @@ fn subgraph_loop_known_trip_count() {
         dim_vars: Default::default(),
         shape_constraints: Default::default(),
         subgraphs,
+        tensor_names: HashMap::new(),
     };
 
     let kv = KvCacheLayout::none();
@@ -792,6 +798,7 @@ fn subgraph_loop_zero_trip() {
         dim_vars: Default::default(),
         shape_constraints: Default::default(),
         subgraphs: HashMap::new(),
+        tensor_names: HashMap::new(),
     };
 
     let mut subgraphs = HashMap::new();
@@ -819,6 +826,7 @@ fn subgraph_loop_zero_trip() {
         dim_vars: Default::default(),
         shape_constraints: Default::default(),
         subgraphs,
+        tensor_names: HashMap::new(),
     };
 
     let kv = KvCacheLayout::none();

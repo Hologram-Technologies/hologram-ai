@@ -12,7 +12,7 @@ pub mod validate;
 
 // Flat re-exports.
 pub use compiler::{
-    CompileStats, CompiledModel, HoloArchive, ModelCompiler, ModelMetadata, ModelSource,
+    CompileStats, CompiledModel, DebugMap, HoloArchive, ModelCompiler, ModelMetadata, ModelSource,
 };
 pub use hologram_ai_common::{AiGraph, AiNode, AiOp, DType, NodeId, Shape, TensorId, TensorInfo};
 pub use hologram_ai_gguf::{import_gguf, GgufImportOptions};

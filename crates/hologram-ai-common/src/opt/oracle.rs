@@ -99,6 +99,7 @@ mod tests {
             dim_vars: DimVarTable::default(),
             shape_constraints: ConstraintStore::default(),
             subgraphs: HashMap::new(),
+            tensor_names: HashMap::new(),
         }
     }
 

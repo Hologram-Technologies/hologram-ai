@@ -374,6 +374,7 @@ mod tests {
             dim_vars: Default::default(),
             shape_constraints: Default::default(),
             subgraphs: HashMap::new(),
+            tensor_names: HashMap::new(),
         }
     }
 

@@ -58,6 +58,16 @@ pub struct HoloArchive {
     pub stats: CompileStats,
 }
 
+/// Debug mapping from source tensor names to compiled node indices.
+///
+/// Used by execution conformance testing to correlate ORT intermediate
+/// tensors (keyed by ONNX name) with hologram executor buffers (keyed
+/// by NodeId, which is derived from the builder index).
+pub struct DebugMap {
+    /// ONNX tensor name → builder node index in the compiled graph.
+    pub name_to_idx: std::collections::HashMap<String, usize>,
+}
+
 impl HoloArchive {
     /// Write the compiled `.holo` archive to `path`.
     pub fn save(&self, path: &std::path::Path) -> anyhow::Result<()> {
@@ -381,6 +391,22 @@ impl ModelCompiler {
         }
         info!("validation passed");
 
+        // Shape consistency check: catch shape/weight mismatches before lowering.
+        let shape_errors =
+            hologram_ai_common::opt::shape_consistency::validate_shape_consistency(&ai_graph);
+        if !shape_errors.is_empty() {
+            warn!(
+                count = shape_errors.len(),
+                "shape consistency issues detected"
+            );
+            for err in &shape_errors {
+                warn!(
+                    node = err.node_name.as_deref().unwrap_or("-"),
+                    "{}", err.message
+                );
+            }
+        }
+
         // Step 3 — memory plan.
         let mem_plan = MemoryPlanner
             .plan(&ai_graph)
@@ -420,6 +446,144 @@ impl ModelCompiler {
                 node_count,
             },
         })
+    }
+
+    /// Compile a model and return a debug map alongside the archive.
+    ///
+    /// The `DebugMap` maps ONNX tensor names → compiled builder node indices,
+    /// enabling node-by-node comparison between ORT and hologram execution.
+    ///
+    /// Only meaningful for single-graph (non-LLM) models. LLM pipeline
+    /// compilation does not produce a debug map.
+    pub fn compile_with_debug_info(
+        &self,
+        source: ModelSource,
+    ) -> anyhow::Result<(HoloArchive, DebugMap)> {
+        // Reuse the full compile pipeline.
+        let ai_graph = self.import(source)?;
+        info!(nodes = ai_graph.nodes.len(), params = ai_graph.params.len(), "import complete (debug)");
+
+        // Capture tensor_names before optimization passes (passes preserve it).
+        let ai_graph = OptPipeline::mvp()
+            .run(ai_graph)
+            .context("optimization pass failed")?;
+        let ai_graph = concretize_all_dims(ai_graph).context("shape concretization failed")?;
+
+        // Post-concretization repair (same as compile()).
+        let mut ai_graph = ai_graph;
+        for info in ai_graph.tensor_info.values_mut() {
+            info.known_i64_values = None;
+        }
+        let aggressive_pipeline = {
+            use hologram_ai_common::{
+                AggressiveShapePropagation, ConstantDeduplication,
+                opt::{
+                    const_eval::ConstantEvaluation, constant_fold::ConstantFolding,
+                    data_prop::DataPropagation, dead_node::DeadNodeElimination,
+                },
+            };
+            OptPipeline::new(vec![
+                Box::new(AggressiveShapePropagation),
+                Box::new(DataPropagation),
+                Box::new(AggressiveShapePropagation),
+                Box::new(DataPropagation),
+                Box::new(AggressiveShapePropagation),
+                Box::new(ConstantEvaluation),
+                Box::new(ConstantFolding),
+                Box::new(ConstantDeduplication),
+                Box::new(DeadNodeElimination),
+            ])
+        };
+        for pass_num in 0..3 {
+            ai_graph = aggressive_pipeline
+                .run(ai_graph)
+                .with_context(|| format!("post-concretization repair pass {pass_num} failed"))?;
+            for info in ai_graph.tensor_info.values_mut() {
+                info.known_i64_values = None;
+            }
+        }
+        {
+            use hologram_ai_common::Dim;
+            for info in ai_graph.tensor_info.values_mut() {
+                for dim in info.shape.iter_mut() {
+                    if matches!(dim, Dim::Dynamic) {
+                        *dim = Dim::Concrete(1);
+                    } else if matches!(dim, Dim::Var(_)) {
+                        *dim = Dim::Concrete(0);
+                    }
+                }
+            }
+        }
+        let ai_graph = hologram_ai_common::SliceToGather
+            .run(ai_graph)
+            .context("slice-to-gather conversion failed")?;
+        let ai_graph = hologram_ai_common::ShapeHealing
+            .run(ai_graph)
+            .context("shape healing failed")?;
+
+        // Validate.
+        let errs = ai_graph.validate();
+        if !errs.is_empty() {
+            anyhow::bail!("{} validation error(s): {}", errs.len(), errs[0].message);
+        }
+
+        // Memory plan.
+        let mem_plan = MemoryPlanner
+            .plan(&ai_graph)
+            .context("memory planning failed")?;
+
+        let metadata = extract_metadata(&ai_graph);
+        let import_warnings = ai_graph.warnings.len();
+        let node_count = ai_graph.nodes.len();
+
+        // Lower (single-graph only for debug mode).
+        let lower_out = lower(
+            &ai_graph,
+            &mem_plan.kv_cache_layout,
+            &LoweringOptions::default(),
+            &LowerPhase::Forward,
+        )
+        .context("lowering failed")?;
+
+        // Build debug map: compose tensor_names (TensorId→name) with tid_to_idx (TensorId→idx).
+        let mut name_to_idx = std::collections::HashMap::new();
+        for (tid, name) in &ai_graph.tensor_names {
+            if let Some(&idx) = lower_out.tid_to_idx.get(tid) {
+                name_to_idx.insert(name.clone(), idx);
+            }
+        }
+        let debug_map = DebugMap { name_to_idx };
+        info!(mapped = debug_map.name_to_idx.len(), "debug map built");
+
+        // Compile graph.
+        let compilation = hologram::compile(lower_out.graph).context("hologram::compile failed")?;
+        let unpacked = unpack_archive(&compilation.archive)?;
+        let layer_header = build_tensor_port_header(&unpacked.plan, &ai_graph);
+        let weights = collect_weight_bytes(&ai_graph)?;
+        let bundle = if lower_out.context.is_empty() {
+            None
+        } else {
+            Some(&lower_out.context)
+        };
+        let archive_bytes = build_final_archive(
+            unpacked,
+            if weights.is_empty() { None } else { Some(weights.clone()) },
+            Some(layer_header),
+            bundle,
+        )?;
+
+        let archive = HoloArchive {
+            bytes: archive_bytes,
+            metadata,
+            stats: CompileStats {
+                import_warnings,
+                validation_errors: 0,
+                total_weight_bytes: weights.len() as u64,
+                node_count,
+            },
+        };
+
+        Ok((archive, debug_map))
     }
 
     /// Compile a non-LLM model into a single-graph archive.

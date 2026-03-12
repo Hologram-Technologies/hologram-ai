@@ -2,12 +2,13 @@
 
 ## Sprint Goal
 
-**Conformance Testing & Validation:** Production-ready testing architecture
-that validates every kernel in hologram-exec against a reference implementation.
-See `specs/plans/005-conformance-testing.md`.
+**Execution Conformance Testing:** Validate the full compile → lower → execute
+pipeline, not just individual kernels. Catch shape propagation errors, dynamic
+dim sentinel failures, and dtype confusion at compile time and via ORT comparison.
+See `specs/plans/006-execution-conformance.md`.
 
-**Previous sprint (complete):** ONNX Last Mile — full op coverage + subgraph support.
-See `specs/plans/004-onnx-last-mile.md`.
+**Previous sprint (complete):** Kernel Conformance Testing (Plan 005) — 187+ tests.
+See `specs/plans/005-conformance-testing.md`.
 
 **Design principle:** hologram-ai is a compiler only (ADR-0016). It ships
 zero runtime code. All kernels belong in hologram base crate.
@@ -17,50 +18,49 @@ CLI: `compile`, `info`, `download` — nothing else.
 
 ## In Progress
 
-### Conformance Testing (Plan 005)
+### Execution Conformance Testing (Plan 006)
 
-#### Shape Propagation (existing — 33 tests passing)
+#### Phase 1: Layer E — Compile-Time Shape Consistency (hologram-ai only)
+- [x] Create `shape_consistency.rs` validation pass in hologram-ai-common (8 unit tests)
+- [x] Integrate into `compiler.rs` after concretization, before lowering
+- [x] Add tests: param/shape mismatch, MatMul k-dim mismatch, dynamic dim, zero-product, Gemm trans_b
+- [x] Run on TinyLlama ONNX: found 52 issues (1 MatMul k-dim mismatch, ~50 zero-product shapes from unresolved seq_len=0 sentinels)
+
+#### Phase 2: Layer D — Executor Intermediate Capture (hologram base repo)
+- [x] Add `BufferArena::snapshot()` in `arena.rs` (non-destructive, `#[cfg(feature = "profile")]`)
+- [x] Add `ShapeMap::snapshot()` (feature-gated)
+- [x] Add `KvExecutor::execute_with_intermediates()` + `IntermediateCapture` struct (feature-gated)
+
+#### Phase 3: Layer D — Execution Conformance Harness (hologram-ai repo)
+- [x] Add `compile_with_debug_info()` to `ModelCompiler` (ONNX name → NodeId map)
+- [ ] Add ORT intermediate tensor capture in `ort_runner.rs`
+- [ ] Add `exec_comparator.rs` — node-by-node comparison with tolerances
+- [ ] Add `tests/exec_conformance.rs` — multi-node ONNX integration tests
+
+---
+
+## Previous Sprint (Complete): Kernel Conformance Testing (Plan 005)
+
+### Shape Propagation (33 tests)
 - [x] Shape conformance for all major op categories (onnx_conformance.rs)
 - [x] Conv2d, MatMul, Gemm, MaxPool, GlobalAvgPool, reductions, TopK, etc.
 - [x] Subgraph shape propagation (If, Loop)
 
-#### Step 1: Layer A — Expand hologram-exec inline tests (pure Rust, no new deps)
-- [x] Expand `float_dispatch.rs` mod tests from 12 → 87
-- [x] Known-answer tests for all major FloatOp variants
-- [x] Property tests (softmax sums to 1, relu >= 0, norm unit RMS, etc.)
-- [x] Numerical stability tests (NaN, inf, subnormals, edge cases)
+### Layer A — hologram-exec inline tests (87 tests, pure Rust)
+- [x] Known-answer, property, numerical stability tests for all major FloatOp variants
 - [x] Exhaustive match ensuring new FloatOp variants require tests
-- [x] Add `tests/float_conformance.rs` integration test
-- [x] Remove temporary debug prints from float_dispatch.rs
+- [x] `tests/float_conformance.rs` integration test
 
-#### Step 2: Layer B — hologram-ai-conformance crate (reference cross-validation)
-- [x] Create `crates/hologram-ai-conformance/` crate with tolerance, comparator, reference modules
-- [x] Per-op-category tolerance definitions (tolerance.rs)
-- [x] Pure-Rust reference implementations for all complex ops (reference.rs)
-- [x] Comparator: dispatch_float vs expected with detailed error reporting (comparator.rs)
-- [x] 31 cross-validation tests (tests/op_conformance.rs): Softmax, LogSoftmax, RmsNorm, LayerNorm, MatMul, Gemm, Attention (single/causal/GQA), RoPE, FusedSwiGLU, Conv2d, all reductions, GELU, SiLU, Sigmoid
-- [x] ORT runner for ONNX cross-validation (17 tests: 8 unary, 4 binary, 2 softmax, 1 matmul, 2 gemm)
+### Layer B — hologram-ai-conformance (reference cross-validation)
+- [x] Tolerance, comparator, reference modules
+- [x] 31 cross-validation tests (op_conformance.rs)
+- [x] ORT runner: 17 ONNX tests (8 unary, 4 binary, 2 softmax, 1 matmul, 2 gemm)
+- [x] ORT composite models (RmsNorm, LayerNorm)
 
-#### Step 3: Complex ops + quantization conformance
-- [x] Complex ops cross-validated in Step 2 (RmsNorm, Attention, FusedSwiGLU, RoPE, LayerNorm, Conv2d, Gemm)
-- [x] Quant Tier 1: cross-validate hologram-ai-quant vs hologram-exec dequantize (5 tests in quant_conformance.rs)
-- [x] Quant Tier 2: golden vectors (Python script → JSON fixtures, 4 tests in quant_golden.rs)
-- [x] ORT composite ONNX models (RmsNorm, LayerNorm as multi-node ONNX subgraphs, cross-validated via ORT)
-
-#### Step 4: Layer C — Validate CLI command
-- [x] Fill `validate.rs` with import → optimize → compile → report pipeline
-- [x] Add `Validate` subcommand to CLI (`hologram-ai validate --model <path>`)
-- [x] Report format: op coverage, node counts, compilation status
-- [x] Tested on TinyLlama ONNX (1612 nodes, 29 op types) and GGUF (333 nodes, 7 op types)
-- [x] ORT model validation: `validate_model_with_ort()` + fixture tests (identity, tiny-mlp)
-
-#### Step 5: CI + model-level tests
-- [x] Un-ignore ONNX test fixtures in .gitignore (`!tests/fixtures/**/*.onnx`)
-- [x] Validate integration tests using committed fixtures (identity.onnx, tiny-mlp.onnx)
-- [x] `validate_graph()` API for in-memory validation without files
-- [x] CI Tier 1: `cargo test` — 187 tests, all passing (<30s)
-- [x] CI Tier 2: `cargo test --features=conformance` — ORT single-op (GitHub Actions + Justfile)
-- [x] CI Tier 3: nightly workflow (ONNX Zoo models, all tiers, manual trigger)
+### Layer C — Validate CLI + quantization
+- [x] `hologram-ai validate --model <path>` (compilation-level validation)
+- [x] Quant Tier 1 + Tier 2 (golden vectors)
+- [x] CI Tier 1/2/3 (nightly workflow, GitHub Actions)
 
 ---
 

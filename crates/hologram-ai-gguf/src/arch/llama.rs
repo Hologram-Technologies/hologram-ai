@@ -385,6 +385,7 @@ impl<'a> GraphAssembler<'a> {
             dim_vars: self.dim_vars,
             shape_constraints: ConstraintStore::default(),
             subgraphs: HashMap::new(),
+            tensor_names: HashMap::new(),
         })
     }
 }

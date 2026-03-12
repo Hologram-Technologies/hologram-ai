@@ -285,6 +285,7 @@ pub fn build_ai_graph(
             dim_vars,
             shape_constraints: Default::default(),
             subgraphs,
+            tensor_names: name_to_tid.into_iter().map(|(name, tid)| (tid, name)).collect(),
         },
         oracle,
     ))
