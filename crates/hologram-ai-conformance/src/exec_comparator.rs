@@ -195,6 +195,47 @@ mod tests {
         }
     }
 
+    /// Verify that ONNX-imported RmsNorm models have correct structure for fusion.
+    #[cfg(feature = "conformance")]
+    #[test]
+    fn rmsnorm_onnx_import_and_fusion() {
+        use crate::ort_runner::onnx_builder;
+
+        let model_bytes = onnx_builder::rms_norm(2, 16, 1e-6);
+        let graph = hologram_ai_onnx::import_onnx(&model_bytes, Default::default())
+            .expect("import failed");
+
+        eprintln!("Imported {} nodes, {} params", graph.nodes.len(), graph.params.len());
+        for node in &graph.nodes {
+            eprintln!("  id={} {:?} inputs={:?} outputs={:?}", node.id, node.op, node.inputs, node.outputs);
+        }
+        for (&tid, param) in &graph.params {
+            match param {
+                hologram_ai_common::AiParam::Inline { data, info } => {
+                    let val_str = if data.len() == 4 {
+                        format!("= {}", f32::from_le_bytes(data[..4].try_into().unwrap()))
+                    } else {
+                        format!("{} bytes", data.len())
+                    };
+                    eprintln!("  param tid={}: dtype={:?} shape={:?} {}", tid, info.logical_dtype, info.shape, val_str);
+                }
+                _ => eprintln!("  param tid={}: non-inline", tid),
+            }
+        }
+
+        // Run pipeline.
+        let pipeline = hologram_ai_common::opt::pipeline::OptPipeline::mvp();
+        let graph = pipeline.run(graph).unwrap();
+
+        eprintln!("\nAfter optimization: {} nodes", graph.nodes.len());
+        for node in &graph.nodes {
+            eprintln!("  {:?} inputs={:?}", node.op, node.inputs);
+        }
+
+        let has_rmsnorm = graph.nodes.iter().any(|n| matches!(n.op, hologram_ai_common::AiOp::RmsNorm { .. }));
+        assert!(has_rmsnorm, "RmsNorm fusion should have fired on ONNX-imported model");
+    }
+
     #[test]
     fn matching_outputs_pass() {
         let ort = vec![

@@ -11,7 +11,7 @@ ci: fmt-check clippy test
 
 # Run all tests
 test:
-    cargo test --workspace
+    cargo nextest run --workspace
 
 # Run clippy with deny warnings
 clippy:

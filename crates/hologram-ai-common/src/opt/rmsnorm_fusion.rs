@@ -85,7 +85,12 @@ impl Pass for RmsNormFusion {
                 (node.inputs[1], node.inputs[0]),
             ];
             for (normed_tid, weight_tid) in candidates {
-                if !graph.params.contains_key(&weight_tid) {
+                // Weight can be a param (GGUF initializer) OR a graph input
+                // (ONNX models pass weight as a feed input). The key test is
+                // that `normed_tid` must be a *computed* tensor.
+                let weight_is_param = graph.params.contains_key(&weight_tid);
+                let weight_is_graph_input = graph.inputs.contains(&weight_tid);
+                if !weight_is_param && !weight_is_graph_input {
                     continue;
                 }
                 if graph.params.contains_key(&normed_tid) {
@@ -392,6 +397,97 @@ mod tests {
         assert_eq!(node.inputs[0], 0); // x
         assert_eq!(node.inputs[1], 9); // weight
         assert_eq!(node.outputs[0], 10); // out
+    }
+
+    /// Build a Div-variant RmsNorm graph (matching onnx_builder::rms_norm):
+    /// Pow(x,2) → ReduceMean → Add(eps) → Sqrt → Div(x, rms) → Mul(normed, weight)
+    fn build_rmsnorm_div_graph(hidden: u64) -> AiGraph {
+        let x_tid: TensorId = 0;
+        let two_tid: TensorId = 1;
+        let pow2_tid: TensorId = 2;
+        let mean_tid: TensorId = 3;
+        let eps_tid: TensorId = 4;
+        let biased_tid: TensorId = 5;
+        let rms_tid: TensorId = 6;
+        let normed_tid: TensorId = 7;
+        let w_tid: TensorId = 8;
+        let out_tid: TensorId = 9;
+
+        let x_shape = shape_from_concrete(&[2, hidden]);
+        let scalar_shape = shape_from_concrete(&[]);
+        let reduced_shape = shape_from_concrete(&[2, 1]);
+        let hidden_shape = shape_from_concrete(&[hidden]);
+
+        let mut tensor_info: HashMap<TensorId, TensorInfo> = HashMap::new();
+        tensor_info.insert(x_tid, TensorInfo::new(DType::F32, x_shape.clone()));
+        tensor_info.insert(two_tid, TensorInfo::new(DType::F32, scalar_shape.clone()));
+        tensor_info.insert(pow2_tid, TensorInfo::new(DType::F32, x_shape.clone()));
+        tensor_info.insert(mean_tid, TensorInfo::new(DType::F32, reduced_shape.clone()));
+        tensor_info.insert(eps_tid, TensorInfo::new(DType::F32, scalar_shape));
+        tensor_info.insert(biased_tid, TensorInfo::new(DType::F32, reduced_shape.clone()));
+        tensor_info.insert(rms_tid, TensorInfo::new(DType::F32, reduced_shape));
+        tensor_info.insert(normed_tid, TensorInfo::new(DType::F32, x_shape.clone()));
+        tensor_info.insert(w_tid, TensorInfo::new(DType::F32, hidden_shape));
+        tensor_info.insert(out_tid, TensorInfo::new(DType::F32, x_shape));
+
+        let mut params: HashMap<TensorId, AiParam> = HashMap::new();
+        params.insert(two_tid, f32_param(2.0));
+        params.insert(eps_tid, f32_param(1e-6));
+        params.insert(w_tid, vec_param(&vec![1.0f32; hidden as usize]));
+
+        let nodes = vec![
+            AiNode::new(0, AiOp::Pow, vec![x_tid, two_tid], vec![pow2_tid]),
+            AiNode::new(1, AiOp::ReduceMean { axes: vec![-1], keepdims: true }, vec![pow2_tid], vec![mean_tid]),
+            AiNode::new(2, AiOp::Add, vec![mean_tid, eps_tid], vec![biased_tid]),
+            AiNode::new(3, AiOp::Sqrt, vec![biased_tid], vec![rms_tid]),
+            AiNode::new(4, AiOp::Div, vec![x_tid, rms_tid], vec![normed_tid]),
+            AiNode::new(5, AiOp::Mul, vec![normed_tid, w_tid], vec![out_tid]),
+        ];
+
+        AiGraph {
+            name: "test_div".to_string(),
+            nodes,
+            inputs: vec![x_tid],
+            outputs: vec![out_tid],
+            input_names: vec!["x".to_string()],
+            output_names: vec!["out".to_string()],
+            params,
+            tensor_info,
+            metadata: HashMap::new(),
+            warnings: vec![],
+            dim_vars: Default::default(),
+            shape_constraints: Default::default(),
+            subgraphs: HashMap::new(),
+            tensor_names: HashMap::new(),
+        }
+    }
+
+    #[test]
+    fn fuses_rmsnorm_div_variant() {
+        let graph = build_rmsnorm_div_graph(16);
+        let pass = RmsNormFusion;
+        let graph = pass.run(graph).unwrap();
+
+        assert_eq!(graph.nodes.len(), 1, "expected 1 node after fusion, got {}: {:?}",
+            graph.nodes.len(), graph.nodes.iter().map(|n| &n.op).collect::<Vec<_>>());
+        let node = &graph.nodes[0];
+        assert!(matches!(node.op, AiOp::RmsNorm { epsilon } if (epsilon - 1e-6).abs() < 1e-10));
+        assert_eq!(node.inputs[0], 0); // x
+        assert_eq!(node.inputs[1], 8); // weight
+        assert_eq!(node.outputs[0], 9); // out
+    }
+
+    #[test]
+    fn fuses_rmsnorm_div_variant_through_pipeline() {
+        use crate::opt::pipeline::OptPipeline;
+        let graph = build_rmsnorm_div_graph(16);
+        let pipeline = OptPipeline::mvp();
+        let graph = pipeline.run(graph).unwrap();
+
+        // After the full pipeline, the RmsNorm should still be fused.
+        let rmsnorm_nodes: Vec<_> = graph.nodes.iter().filter(|n| matches!(n.op, AiOp::RmsNorm { .. })).collect();
+        assert_eq!(rmsnorm_nodes.len(), 1, "expected 1 RmsNorm after pipeline, got {}: {:?}",
+            graph.nodes.len(), graph.nodes.iter().map(|n| &n.op).collect::<Vec<_>>());
     }
 
     #[test]
