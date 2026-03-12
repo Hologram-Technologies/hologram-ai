@@ -2,6 +2,7 @@
 .holoarch/
 **/*.onnx
 **/*.gguf
+!tests/fixtures/**/*.onnx
 models/
 .mypy_cache
 .claude/

@@ -54,4 +54,13 @@ impl QuantDescriptor {
             scale_dtype: ScaleDtype::F16,
         }
     }
+
+    /// Q6_K: 256 weights per super-block, 6-bit quants + 8-bit scales + f16 super-scale.
+    pub fn q6_k() -> Self {
+        Self {
+            scheme: QuantScheme::Q6K,
+            block_size: 256,
+            scale_dtype: ScaleDtype::F16,
+        }
+    }
 }

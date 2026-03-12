@@ -176,6 +176,43 @@ fn matmul_recipes(
     Some((m, k, n, recipes))
 }
 
+/// Extract m/k/n recipes for Gemm with trans_b=true.
+/// Weight B is stored as [n, k], so:
+///   k = last_dim(B)   (not second_last)
+///   n = second_last_dim(B)   (not last)
+fn gemm_trans_b_recipes(
+    inputs: &[TensorId],
+    tensor_info: &HashMap<TensorId, TensorInfo>,
+    dim_var_names: &HashMap<DimVarId, u32>,
+) -> Option<(u32, u32, u32, Vec<ParamRecipe>)> {
+    let fallback = ParamRecipe::Concrete(1);
+    // k = last_dim(input[0]) = last_dim(B) (both should agree)
+    let k_recipe = dim_recipe(last_dim_expr(inputs.first(), tensor_info), dim_var_names)
+        .or_else(|| dim_recipe(last_dim_expr(inputs.get(1), tensor_info), dim_var_names))
+        .unwrap_or(fallback.clone());
+    // n = second_last_dim(B) when trans_b (B is [n, k])
+    let n_recipe = dim_recipe(second_last_dim_expr(inputs.get(1), tensor_info), dim_var_names)
+        .unwrap_or(fallback.clone());
+    let m_recipe = dim_recipe(
+        second_last_dim_expr(inputs.first(), tensor_info),
+        dim_var_names,
+    )
+    .unwrap_or(fallback);
+
+    let m = resolve_or_zero(&m_recipe) as u32;
+    let k = resolve_or_zero(&k_recipe) as u32;
+    let n = resolve_or_zero(&n_recipe) as u32;
+
+    let any_deferred = is_deferred(&m_recipe) || is_deferred(&k_recipe) || is_deferred(&n_recipe);
+    let recipes = if any_deferred {
+        vec![m_recipe, k_recipe, n_recipe]
+    } else {
+        vec![]
+    };
+
+    Some((m, k, n, recipes))
+}
+
 fn resolve_op(
     op: &AiOp,
     inputs: &[TensorId],
@@ -197,10 +234,20 @@ fn resolve_op(
             trans_a,
             trans_b,
         } => {
-            let (m, k, n, recipes) = match matmul_recipes(inputs, tensor_info, dim_var_names) {
-                Some(v) => v,
-                None => return Ok(None),
+            // When trans_b=true, weight is stored as [n, k] instead of [k, n].
+            // Swap the dim extraction accordingly.
+            let (m, k, n, recipes) = if *trans_b {
+                match gemm_trans_b_recipes(inputs, tensor_info, dim_var_names) {
+                    Some(v) => v,
+                    None => return Ok(None),
+                }
+            } else {
+                match matmul_recipes(inputs, tensor_info, dim_var_names) {
+                    Some(v) => v,
+                    None => return Ok(None),
+                }
             };
+            let qb = quant_code(inputs.get(1), tensor_info);
             (
                 FloatOp::Gemm {
                     m,
@@ -210,6 +257,7 @@ fn resolve_op(
                     beta: f32_to_bits(*beta),
                     trans_a: *trans_a,
                     trans_b: *trans_b,
+                    quant_b: qb,
                 },
                 recipes,
             )
@@ -289,7 +337,22 @@ fn resolve_op(
         }
         AiOp::Embed => {
             let dim = concrete_last_dim(inputs.get(1), tensor_info).unwrap_or(1) as u32;
-            (FloatOp::Embed { dim }, vec![])
+            let quant = quant_code(inputs.get(1), tensor_info);
+            (FloatOp::Embed { dim, quant }, vec![])
+        }
+
+        // ── RoPE: needs hidden_dim from input shape to compute n_heads ──
+        AiOp::RotaryEmbedding { base, dim } => {
+            let hidden_dim = concrete_last_dim(inputs.first(), tensor_info).unwrap_or(*dim as u64);
+            let n_heads = (hidden_dim / (*dim as u64).max(1)) as u32;
+            (
+                FloatOp::RotaryEmbedding {
+                    dim: *dim,
+                    base: f32_to_bits(*base),
+                    n_heads,
+                },
+                vec![],
+            )
         }
 
         // ── Attention ops (params from AiOp fields, always concrete) ────
@@ -741,6 +804,22 @@ fn concrete_concat_row_size(
         product = product.saturating_mul(dim.as_concrete()? as usize);
     }
     Some(product.max(1))
+}
+
+/// Get the quantization code for a tensor: 0=none, 1=Q4_0, 2=Q8_0.
+fn quant_code(
+    tid: Option<&TensorId>,
+    tensor_info: &HashMap<TensorId, TensorInfo>,
+) -> u8 {
+    use hologram_ai_quant::QuantScheme;
+    tid.and_then(|t| tensor_info.get(t))
+        .map(|info| match info.quant.scheme {
+            QuantScheme::Q4_0 => 1,
+            QuantScheme::Q8_0 => 2,
+            QuantScheme::Q6K => 3,
+            _ => 0,
+        })
+        .unwrap_or(0)
 }
 
 /// Look up the logical dtype of a tensor, defaulting to F32.

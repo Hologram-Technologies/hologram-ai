@@ -64,9 +64,17 @@ pub fn build_llama_graph(
         let k_w = b.add_tensor(&format!("{prefix}.attn_k.weight"), gguf, kv_dim, emb_dim)?;
         let v_w = b.add_tensor(&format!("{prefix}.attn_v.weight"), gguf, kv_dim, emb_dim)?;
 
-        let q = b.add_node(AiOp::MatMul, vec![normed, q_w], DType::F32, b.bsv(emb_dim));
-        let k = b.add_node(AiOp::MatMul, vec![normed, k_w], DType::F32, b.bsv(kv_dim));
-        let v = b.add_node(AiOp::MatMul, vec![normed, v_w], DType::F32, b.bsv(kv_dim));
+        let gemm = |b: &mut GraphAssembler, x, w, out_dim| {
+            b.add_node(
+                AiOp::Gemm { alpha: 1.0, beta: 0.0, trans_a: false, trans_b: true },
+                vec![x, w],
+                DType::F32,
+                b.bsv(out_dim),
+            )
+        };
+        let q = gemm(&mut b, normed, q_w, emb_dim);
+        let k = gemm(&mut b, normed, k_w, kv_dim);
+        let v = gemm(&mut b, normed, v_w, kv_dim);
 
         // RoPE
         let q_rope = b.add_node(
@@ -109,12 +117,7 @@ pub fn build_llama_graph(
             emb_dim,
             emb_dim,
         )?;
-        let attn_proj = b.add_node(
-            AiOp::MatMul,
-            vec![attn_out, o_w],
-            DType::F32,
-            b.bsv(emb_dim),
-        );
+        let attn_proj = gemm(&mut b, attn_out, o_w, emb_dim);
 
         // Residual connection
         let residual1 = b.add_node(
@@ -140,30 +143,15 @@ pub fn build_llama_graph(
         let up_w = b.add_tensor(&format!("{prefix}.ffn_up.weight"), gguf, ffn_dim, emb_dim)?;
         let down_w = b.add_tensor(&format!("{prefix}.ffn_down.weight"), gguf, ffn_dim, emb_dim)?;
 
-        let gate = b.add_node(
-            AiOp::MatMul,
-            vec![ffn_normed, gate_w],
-            DType::F32,
-            b.bsv(ffn_dim),
-        );
-        let up = b.add_node(
-            AiOp::MatMul,
-            vec![ffn_normed, up_w],
-            DType::F32,
-            b.bsv(ffn_dim),
-        );
+        let gate = gemm(&mut b, ffn_normed, gate_w, ffn_dim);
+        let up = gemm(&mut b, ffn_normed, up_w, ffn_dim);
         let swiglu = b.add_node(
             AiOp::FusedSwiGLU,
             vec![gate, up],
             DType::F32,
             b.bsv(ffn_dim),
         );
-        let down = b.add_node(
-            AiOp::MatMul,
-            vec![swiglu, down_w],
-            DType::F32,
-            b.bsv(emb_dim),
-        );
+        let down = gemm(&mut b, swiglu, down_w, emb_dim);
 
         // Residual connection
         hidden = b.add_node(AiOp::Add, vec![residual1, down], DType::F32, b.bsv(emb_dim));
@@ -187,7 +175,7 @@ pub fn build_llama_graph(
         embed_weight // tied embeddings
     };
     let logits = b.add_node(
-        AiOp::MatMul,
+        AiOp::Gemm { alpha: 1.0, beta: 0.0, trans_a: false, trans_b: true },
         vec![final_normed, lm_head_w],
         DType::F32,
         b.bsv(vocab),
@@ -292,15 +280,23 @@ impl<'a> GraphAssembler<'a> {
         let tid = self.alloc_tid();
         let (storage_dtype, logical_dtype) = ggml_type_to_dtypes(desc.ggml_type);
 
+        // GGUF stores dims in ggml order [ne[0], ne[1]] where ne[0] is stride-1
+        // (contiguous/inner dimension). Reverse to ML convention [outer, inner]
+        // so that e.g. embedding weights become [vocab, dim] not [dim, vocab].
+        // Note: all linear weights use Gemm { trans_b: true } since ggml
+        // computes y = x @ W^T, so the physical data is transposed vs y = x @ W.
         let shape = if desc.dims.is_empty() {
             shape_from_concrete(&[rows, cols])
         } else {
-            shape_from_concrete(&desc.dims)
+            let mut reversed = desc.dims.clone();
+            reversed.reverse();
+            shape_from_concrete(&reversed)
         };
 
         let quant = match desc.ggml_type {
             GgmlType::Q4_0 => QuantDescriptor::q4_0(),
             GgmlType::Q8_0 => QuantDescriptor::q8_0(),
+            GgmlType::Q6K => QuantDescriptor::q6_k(),
             _ => QuantDescriptor::none(),
         };
 

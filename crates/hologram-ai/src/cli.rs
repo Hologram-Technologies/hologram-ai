@@ -39,6 +39,12 @@ enum Command {
     Run(hologram::hologram_cli::commands::run_cmd::RunArgs),
     /// Download a model from HuggingFace Hub.
     Download(download::DownloadArgs),
+    /// Validate a model: import, optimize, compile, and report results.
+    Validate {
+        /// Path to the model file (ONNX or GGUF).
+        #[arg(short, long)]
+        model: PathBuf,
+    },
 }
 
 fn main() -> anyhow::Result<()> {
@@ -132,6 +138,13 @@ fn main() -> anyhow::Result<()> {
         }
         Command::Download(args) => {
             download::run(args)?;
+        }
+        Command::Validate { model } => {
+            let report = hologram_ai::validate::validate_model(&model);
+            println!("{report}");
+            if !report.compilation_ok {
+                std::process::exit(1);
+            }
         }
     }
 

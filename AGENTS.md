@@ -33,10 +33,68 @@ models/         — test models for development (TinyLlama ONNX, etc.)
 4. Do not modify files outside this repository unless explicitly instructed
 5. Run `cargo clippy -- -D warnings` before committing Rust changes
 6. Use a consistent naming prefix for all crate names
-7. **ALWAYS solve bugs holistically** — take a project-wide perspective instead of patching symptoms locally. Fix the root cause in the appropriate pass or abstraction layer.
+7. **ALWAYS solve problems holistically** — see the Problem-Solving Philosophy section below.
 8. **Prefer simpler code and smaller functions.** Functions should be short, focused, and easily testable. If a function is getting large, break it into smaller well-named helpers. Avoid complex nested logic when a flatter structure is clearer.
 9. **Never commit test modules or scratch files to this repo.** Use `/tmp` for any throwaway test scripts, one-off experiments, or scratch files. Do not leave `test_*.rs`, `scratch_*.rs`, or similar files in the source tree.
 10. **Clean up after yourself.** Before finishing a task, remove any scratch files, temporary debug files, and `dbg!`/`eprintln!` debugging output that were added during investigation and are not part of the final solution.
+11. **Never use `.unwrap()` in production code.** Use `.expect("descriptive message")` instead so that failures produce actionable context. This applies to all code — library and binary crates alike. The only exception is throwaway scratch files in `/tmp`.
+12. **Keep site docs up to date.** When making structural changes, adding new features, changing APIs, or modifying the compilation pipeline, update the relevant documentation in `specs/docs/` (e.g., `architecture.md`, `lowering.md`, `data-model.md`, `cli.md`). Docs must reflect the current state of the code — stale documentation is worse than no documentation.
+
+---
+
+## Problem-Solving Philosophy
+
+**Think like a principal systems architect, not a task-completing code monkey.**
+
+Every problem — whether a bug, a missing feature, or a refactor — deserves an
+expert-level architectural response. Before writing a single line of code, step
+back and understand the full picture. The goal is never to "make this one thing
+work"; it is to design a solution that is correct, general, and production-ready.
+
+### Anti-patterns (never do these)
+
+- **Band-aid fixes.** Patching the symptom where it surfaces without understanding
+  why it happens. If you find yourself adding a special case, a hardcoded fallback,
+  or a "just check for this" guard — stop. You are treating symptoms, not causes.
+- **Whack-a-mole.** Fixing one instance of a problem only to have the same class
+  of problem appear elsewhere. If the fix is not general, it is not a fix.
+- **Solving at the wrong layer.** Adding complexity to a downstream consumer when
+  the real gap is in an upstream pass, abstraction, or data structure.
+- **Accumulating small patches.** Ten small "just this one thing" changes that
+  together create an unmaintainable mess. One correct change at the right
+  abstraction layer is always better than many scattered patches.
+
+### Required methodology
+
+For every non-trivial problem, follow this sequence:
+
+1. **Step back.** Do not immediately jump to the code where the error occurs.
+   Understand the broader system: what pipeline stage are we in? What are the
+   inputs, outputs, and invariants of this layer?
+2. **Trace the root cause.** Follow the data flow upstream. Where did the bad
+   state originate? Often the symptom is 3–4 layers removed from the cause.
+3. **Identify the right abstraction layer.** The fix belongs where the invariant
+   should be established — not where it is consumed. If a shape is wrong at
+   lowering time, the fix is probably in shape propagation, not in the lowering
+   code.
+4. **Design a general solution.** Will this fix handle all instances of this
+   problem class, not just the one you're looking at? If not, generalize.
+5. **Implement once, correctly.** A single well-placed change that solves the
+   class of problems. No scattered guards, no defensive checks at every
+   call site, no "just in case" fallbacks.
+6. **Verify end-to-end.** Confirm the fix works through the full pipeline, not
+   just in isolation. Check that it doesn't break other paths.
+
+### This applies to everything
+
+This philosophy is not just for bugs. It applies equally to:
+
+- **New features**: Design them to fit cleanly into the existing architecture.
+  Don't bolt things on the side.
+- **Refactors**: Improve the system's structural integrity, don't just shuffle
+  code around.
+- **Performance work**: Understand the actual bottleneck before optimizing. Never
+  optimize what you haven't measured.
 
 ---
 

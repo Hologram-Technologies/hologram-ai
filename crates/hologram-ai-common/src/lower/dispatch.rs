@@ -89,10 +89,7 @@ pub fn dispatch(op: &AiOp) -> DispatchTarget {
         FusedSwiGLU => D::GraphOp(GraphOp::Float(FloatOp::FusedSwiGLU)),
 
         // ── Native FloatOp: params from AiOp (no shape resolution needed) ─
-        RotaryEmbedding { base, dim } => D::GraphOp(GraphOp::Float(FloatOp::RotaryEmbedding {
-            dim: *dim,
-            base: f32_to_bits(*base),
-        })),
+        RotaryEmbedding { .. } => D::FloatNeedsShape,
 
         // ── Native FloatOp: pass-through / structural ────────────────────
         Reshape { .. } => D::GraphOp(GraphOp::Float(FloatOp::Reshape)),

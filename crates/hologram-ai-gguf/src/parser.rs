@@ -6,7 +6,7 @@ use anyhow::{bail, Context, Result};
 use std::collections::HashMap;
 
 /// GGUF magic bytes: "GGUF" in little-endian.
-const GGUF_MAGIC: u32 = 0x46475547; // 'G','G','U','F'
+const GGUF_MAGIC: u32 = 0x46554747; // "GGUF" as little-endian u32
 
 /// Parsed GGUF file header + metadata + tensor descriptors.
 #[derive(Debug)]

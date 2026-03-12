@@ -1,0 +1,29 @@
+[package]
+name = "hologram-ai-conformance"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Conformance testing for hologram float kernels against ONNX Runtime"
+
+[dependencies]
+hologram = { workspace = true }
+hologram-ai-common = { workspace = true }
+hologram-ai-quant = { workspace = true }
+anyhow = { workspace = true }
+bytemuck = { workspace = true }
+half = { workspace = true }
+
+# ORT + model validation deps — behind `conformance` feature.
+ort = { version = "2.0.0-rc.9", features = ["load-dynamic"], optional = true }
+ndarray = { version = "0.16", optional = true }
+hologram-ai = { path = "../hologram-ai", optional = true }
+hologram-ai-onnx = { workspace = true, optional = true }
+
+[features]
+conformance = ["ort", "ndarray", "hologram-ai", "hologram-ai-onnx"]
+
+[dev-dependencies]
+approx = { workspace = true }
+rand = "0.8"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

@@ -45,6 +45,26 @@ sync:
 check:
     holoarch check
 
+# Generate test fixtures (ONNX models + quant golden vectors)
+gen-fixtures:
+    python3 scripts/gen-fixtures.py
+    python3 scripts/gen-quant-vectors.py
+
+# Run conformance tests (Tier 1: no external deps)
+conformance:
+    cargo test -p hologram-ai-conformance
+
+# Run ORT conformance tests (Tier 2: requires ORT_DYLIB_PATH)
+conformance-ort:
+    cargo test -p hologram-ai-conformance --features=conformance
+
+# Run validate integration tests
+conformance-validate:
+    cargo test -p hologram-ai --test validate_test
+
+# Run all conformance tiers (Tier 1 + 2 + validate)
+conformance-all: conformance conformance-ort conformance-validate
+
 # Run tests for hologram base crate (sibling dependency)
 test-base:
     cd ../hologram && cargo test --workspace

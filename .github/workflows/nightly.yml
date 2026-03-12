@@ -1,0 +1,64 @@
+name: Nightly Conformance
+
+on:
+  schedule:
+    - cron: '0 6 * * *'  # 6 AM UTC daily
+  workflow_dispatch:  # allow manual trigger
+
+jobs:
+  model-validation:
+    name: Model Validation (Tier 3)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry + build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-nightly-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-nightly-
+
+      - name: Install ONNX Runtime
+        run: |
+          wget -q https://github.com/microsoft/onnxruntime/releases/download/v1.18.1/onnxruntime-linux-x64-1.18.1.tgz
+          tar xzf onnxruntime-linux-x64-1.18.1.tgz
+          echo "ORT_DYLIB_PATH=$(pwd)/onnxruntime-linux-x64-1.18.1/lib/libonnxruntime.so" >> "$GITHUB_ENV"
+
+      - name: Generate fixtures
+        run: |
+          pip3 install onnx numpy --break-system-packages 2>/dev/null || pip install onnx numpy
+          python3 scripts/gen-fixtures.py
+          python3 scripts/gen-quant-vectors.py
+
+      - name: Tier 1 - All unit tests
+        run: cargo test --workspace
+
+      - name: Tier 2 - ORT conformance
+        run: cargo test -p hologram-ai-conformance --features=conformance
+
+      - name: Tier 3 - Model validation (committed fixtures)
+        run: cargo test -p hologram-ai --test validate_test
+
+      - name: Download ONNX Zoo models
+        run: |
+          mkdir -p models/onnx-zoo
+          wget -q -O models/onnx-zoo/squeezenet1.0.onnx \
+            "https://github.com/onnx/models/raw/main/validated/vision/classification/squeezenet/model/squeezenet1.0-7.onnx" \
+            || echo "squeezenet download failed (non-fatal)"
+
+      - name: Tier 3 - Validate ONNX Zoo models
+        run: |
+          for model in models/onnx-zoo/*.onnx; do
+            if [ -f "$model" ]; then
+              echo "=== Validating $model ==="
+              cargo run --release -- validate --model "$model" || echo "FAILED: $model"
+            fi
+          done
