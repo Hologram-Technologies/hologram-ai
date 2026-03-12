@@ -257,7 +257,9 @@ pub enum AiOp {
     Floor,
     Ceil,
     Round,
-    Clip,
+    /// Clip to [min, max]. Defaults: min=-inf, max=+inf.
+    /// ONNX opset 11+: min/max come as optional tensor inputs, resolved at import.
+    Clip { min: f32, max: f32 },
     Erf,
     Reciprocal,
     Cos,
@@ -439,7 +441,7 @@ impl AiOp {
             | AiOp::Floor
             | AiOp::Ceil
             | AiOp::Round
-            | AiOp::Clip
+            | AiOp::Clip { .. }
             | AiOp::Erf
             | AiOp::Reciprocal
             | AiOp::Cos
@@ -475,7 +477,6 @@ impl AiOp {
             | AiOp::RmsNorm { .. }
             | AiOp::LayerNorm { .. }
             | AiOp::GroupNorm { .. }
-            | AiOp::BatchNorm { .. }
             | AiOp::RotaryEmbedding { .. }
             | AiOp::FusedSwiGLU
             | AiOp::FusedLayerNormResidual
@@ -544,6 +545,8 @@ impl AiOp {
             | AiOp::DepthToSpace { .. }
             | AiOp::SpaceToDepth { .. }
             | AiOp::Compress { .. }
+            // BatchNorm: training mode has 5 outputs
+            | AiOp::BatchNorm { .. }
             // Phase 4: control flow
             | AiOp::If { .. }
             | AiOp::Loop { .. }

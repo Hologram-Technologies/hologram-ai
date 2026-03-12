@@ -20,6 +20,9 @@ pub enum DispatchTarget {
     FloatNeedsShape,
     /// Pass-through (identity: one input, same output).
     Identity,
+    /// Control flow op with subgraph(s). Handled specially in builder.rs
+    /// via compile-time flattening.
+    Subgraph,
     /// Lowering not yet supported.
     Unsupported { reason: &'static str },
 }
@@ -54,10 +57,9 @@ pub fn dispatch(op: &AiOp) -> DispatchTarget {
         Erf => D::GraphOp(GraphOp::Float(FloatOp::Erf)),
         IsNaN => D::GraphOp(GraphOp::Float(FloatOp::IsNaN)),
 
-        // Clip: no min/max in AiOp, use f32 full range as default
-        Clip => D::GraphOp(GraphOp::Float(FloatOp::Clip {
-            min: f32_to_bits(f32::NEG_INFINITY),
-            max: f32_to_bits(f32::INFINITY),
+        Clip { min, max } => D::GraphOp(GraphOp::Float(FloatOp::Clip {
+            min: f32_to_bits(*min),
+            max: f32_to_bits(*max),
         })),
 
         // ── Native FloatOp: parameterless binary arithmetic ──────────────
@@ -203,15 +205,7 @@ pub fn dispatch(op: &AiOp) -> DispatchTarget {
         },
 
         // ── Control flow (Phase 4): subgraph lowering ──────────────────
-        If { .. } => D::Unsupported {
-            reason: "If subgraph lowering not yet implemented",
-        },
-        Loop { .. } => D::Unsupported {
-            reason: "Loop subgraph lowering not yet implemented",
-        },
-        Scan { .. } => D::Unsupported {
-            reason: "Scan subgraph lowering not yet implemented",
-        },
+        If { .. } | Loop { .. } | Scan { .. } => D::Subgraph,
 
         // ── Remaining ops ───────────────────────────────────────────────
         _ => D::Unsupported {

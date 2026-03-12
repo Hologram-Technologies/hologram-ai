@@ -10,10 +10,10 @@ use super::strategy::{
 };
 use super::LowerPhase;
 use crate::exec_context::{ContextBundle, NodeShapeRecipe, ShapeRecipeSection};
-use crate::ir::{AiGraph, AiOp, Dim, DimVarId, TensorId, TensorInfo};
+use crate::ir::{AiGraph, AiNode, AiOp, Dim, DimVarId, TensorId, TensorInfo};
 use crate::mem::KvCacheLayout;
 use anyhow::Context;
-use hologram::{ConstantData, GraphBuilder, GraphOp};
+use hologram::{ConstantData, FloatOp, GraphBuilder, GraphOp, SubgraphDef};
 use std::collections::HashMap;
 
 // ── Public types ──────────────────────────────────────────────────────────────
@@ -301,6 +301,18 @@ pub fn lower(
                     }
                 }
             }
+            DispatchTarget::Subgraph => {
+                lower_subgraph_op(
+                    node,
+                    &input_idxs,
+                    ai_graph,
+                    &mut builder,
+                    &mut tid_to_idx,
+                    _kv_layout,
+                    _opts,
+                    phase,
+                )?;
+            }
             DispatchTarget::Unsupported { reason } => {
                 anyhow::bail!("cannot lower op {:?}: {reason}", node.op);
             }
@@ -334,6 +346,266 @@ pub fn lower(
         layer_name: phase.layer_name().to_string(),
         context,
     })
+}
+
+// ── Subgraph lowering ────────────────────────────────────────────────────────
+
+/// Shared context for recursive subgraph lowering.
+struct SubgraphCtx<'a> {
+    ai_graph: &'a AiGraph,
+    builder: &'a mut GraphBuilder,
+    tid_to_idx: &'a mut HashMap<TensorId, usize>,
+    kv_layout: &'a KvCacheLayout,
+    opts: &'a LoweringOptions,
+    phase: &'a LowerPhase,
+}
+
+/// Lower a control flow op (If/Loop/Scan) by recursively lowering its
+/// child subgraphs and flattening them into the parent graph.
+#[allow(clippy::too_many_arguments)]
+fn lower_subgraph_op(
+    node: &AiNode,
+    input_idxs: &[usize],
+    ai_graph: &AiGraph,
+    builder: &mut GraphBuilder,
+    tid_to_idx: &mut HashMap<TensorId, usize>,
+    kv_layout: &KvCacheLayout,
+    opts: &LoweringOptions,
+    phase: &LowerPhase,
+) -> anyhow::Result<()> {
+    let mut ctx = SubgraphCtx {
+        ai_graph,
+        builder,
+        tid_to_idx,
+        kv_layout,
+        opts,
+        phase,
+    };
+    match &node.op {
+        AiOp::If {
+            then_branch,
+            else_branch,
+        } => lower_if_op(node, input_idxs, then_branch, else_branch.as_deref(), &mut ctx),
+        AiOp::Loop {
+            body,
+            max_trip_count,
+        } => lower_loop_op(node, input_idxs, body, *max_trip_count, &mut ctx),
+        AiOp::Scan {
+            body,
+            num_scan_inputs,
+        } => {
+            let child = ctx
+                .ai_graph
+                .subgraphs
+                .get(body)
+                .with_context(|| format!("Scan body subgraph '{body}' not found"))?;
+            let lowered = lower(child, ctx.kv_layout, ctx.opts, ctx.phase)?;
+            let sub_id =
+                ctx.builder
+                    .subgraph_with_id(SubgraphDef::new(body.clone(), lowered.graph));
+            *ctx.builder = std::mem::take(ctx.builder).node_with_inputs(
+                GraphOp::CallSubgraph(sub_id),
+                &input_idxs[..1.min(input_idxs.len())],
+            );
+            let idx = ctx.builder.len() - 1;
+            for &tid in &node.outputs {
+                let dtype = input_float_dtype(Some(&tid), &ctx.ai_graph.tensor_info);
+                *ctx.builder = std::mem::take(ctx.builder).set_node_dtype(idx, dtype);
+                ctx.tid_to_idx.insert(tid, idx);
+            }
+            tracing::warn!(
+                "Scan op lowered to CallSubgraph — requires runtime dispatch (num_scan_inputs={num_scan_inputs})"
+            );
+            Ok(())
+        }
+        _ => anyhow::bail!("lower_subgraph_op called with non-subgraph op: {:?}", node.op),
+    }
+}
+
+/// Lower an If op: flatten both branches, select outputs with Where.
+fn lower_if_op(
+    node: &AiNode,
+    input_idxs: &[usize],
+    then_branch: &str,
+    else_branch: Option<&str>,
+    ctx: &mut SubgraphCtx<'_>,
+) -> anyhow::Result<()> {
+    let cond_idx = input_idxs
+        .first()
+        .copied()
+        .with_context(|| "If op has no condition input")?;
+    let feed_idxs = &input_idxs[1..];
+
+    // Lower and flatten then branch.
+    let then_child = ctx
+        .ai_graph
+        .subgraphs
+        .get(then_branch)
+        .with_context(|| format!("If then_branch subgraph '{then_branch}' not found"))?;
+    let then_lowered = lower(then_child, ctx.kv_layout, ctx.opts, ctx.phase)?;
+    let then_sub_id = ctx
+        .builder
+        .subgraph_with_id(SubgraphDef::new(then_branch.to_string(), then_lowered.graph));
+    let bindings: Vec<(u32, usize)> = feed_idxs
+        .iter()
+        .enumerate()
+        .map(|(i, &idx)| (i as u32, idx))
+        .collect();
+    let then_outputs = ctx
+        .builder
+        .flatten_registered_subgraph(then_sub_id, &bindings)
+        .map_err(|e| anyhow::anyhow!("failed to flatten If then_branch: {e}"))?;
+
+    if let Some(else_name) = else_branch {
+        // Lower and flatten else branch.
+        let else_child = ctx
+            .ai_graph
+            .subgraphs
+            .get(else_name)
+            .with_context(|| format!("If else_branch subgraph '{else_name}' not found"))?;
+        let else_lowered = lower(else_child, ctx.kv_layout, ctx.opts, ctx.phase)?;
+        let else_sub_id = ctx
+            .builder
+            .subgraph_with_id(SubgraphDef::new(else_name.to_string(), else_lowered.graph));
+        let else_outputs = ctx
+            .builder
+            .flatten_registered_subgraph(else_sub_id, &bindings)
+            .map_err(|e| anyhow::anyhow!("failed to flatten If else_branch: {e}"))?;
+
+        // For each output: Where(condition, then_out, else_out).
+        for (i, (&then_out, &else_out)) in then_outputs
+            .iter()
+            .zip(else_outputs.iter())
+            .take(node.outputs.len())
+            .enumerate()
+        {
+            let where_inputs = [cond_idx, then_out, else_out];
+            *ctx.builder = std::mem::take(ctx.builder)
+                .node_with_inputs(GraphOp::Float(FloatOp::Where), &where_inputs);
+            let idx = ctx.builder.len() - 1;
+            let tid = node.outputs[i];
+            if let Some(shape) = output_shape(Some(&tid), &ctx.ai_graph.tensor_info) {
+                *ctx.builder = std::mem::take(ctx.builder).set_node_shape(idx, shape);
+            }
+            let dtype = input_float_dtype(Some(&tid), &ctx.ai_graph.tensor_info);
+            *ctx.builder = std::mem::take(ctx.builder).set_node_dtype(idx, dtype);
+            ctx.tid_to_idx.insert(tid, idx);
+        }
+    } else {
+        // No else branch: outputs are just the then branch outputs.
+        for (tid, &out_idx) in node.outputs.iter().zip(then_outputs.iter()) {
+            ctx.tid_to_idx.insert(*tid, out_idx);
+        }
+    }
+
+    Ok(())
+}
+
+/// Lower a Loop op. If the trip count is known at compile time, unroll.
+/// Otherwise emit CallSubgraph for runtime dispatch.
+fn lower_loop_op(
+    node: &AiNode,
+    input_idxs: &[usize],
+    body: &str,
+    max_trip_count: Option<i64>,
+    ctx: &mut SubgraphCtx<'_>,
+) -> anyhow::Result<()> {
+    let child = ctx
+        .ai_graph
+        .subgraphs
+        .get(body)
+        .with_context(|| format!("Loop body subgraph '{body}' not found"))?;
+
+    // Try to resolve trip count from the AiOp field or from constant input.
+    let trip_count = max_trip_count.or_else(|| {
+        node.inputs.first().and_then(|&tid| {
+            ctx.ai_graph
+                .tensor_info
+                .get(&tid)
+                .and_then(|ti| ti.known_i64_values.as_ref())
+                .and_then(|vals| vals.first().copied().flatten())
+        })
+    });
+
+    if let Some(n) = trip_count {
+        if n <= 0 {
+            // Zero iterations: outputs are the initial carry state (inputs[2..]).
+            for (i, &tid) in node.outputs.iter().enumerate() {
+                if let Some(&src_idx) = input_idxs.get(i + 2) {
+                    ctx.tid_to_idx.insert(tid, src_idx);
+                }
+            }
+            return Ok(());
+        }
+
+        let n = n.min(1024) as usize;
+        if n > 64 {
+            tracing::warn!("Loop unrolling {n} iterations — consider runtime dispatch");
+        }
+
+        let lowered_body = lower(child, ctx.kv_layout, ctx.opts, ctx.phase)?;
+        let sub_id = ctx
+            .builder
+            .subgraph_with_id(SubgraphDef::new(body.to_string(), lowered_body.graph));
+
+        // Initial carry state: input_idxs[2..] (skip trip_count and condition).
+        let num_carry = child.inputs.len().saturating_sub(2);
+        let mut carry_idxs: Vec<usize> = input_idxs
+            .get(2..)
+            .unwrap_or(&[])
+            .iter()
+            .take(num_carry)
+            .copied()
+            .collect();
+
+        for _iter in 0..n {
+            // Bind carry state to body inputs 2..
+            let bindings: Vec<(u32, usize)> = carry_idxs
+                .iter()
+                .enumerate()
+                .map(|(i, &idx)| ((i + 2) as u32, idx))
+                .collect();
+
+            let outputs = ctx
+                .builder
+                .flatten_registered_subgraph(sub_id, &bindings)
+                .map_err(|e| anyhow::anyhow!("failed to flatten Loop body iteration: {e}"))?;
+
+            // Body outputs: [condition, ...updated_carry, ...scan_outputs].
+            carry_idxs = outputs.get(1..1 + num_carry).unwrap_or(&[]).to_vec();
+        }
+
+        // Map node outputs to final carry state.
+        for (i, &tid) in node.outputs.iter().enumerate() {
+            if let Some(&idx) = carry_idxs.get(i) {
+                if let Some(shape) = output_shape(Some(&tid), &ctx.ai_graph.tensor_info) {
+                    *ctx.builder = std::mem::take(ctx.builder).set_node_shape(idx, shape);
+                }
+                let dtype = input_float_dtype(Some(&tid), &ctx.ai_graph.tensor_info);
+                *ctx.builder = std::mem::take(ctx.builder).set_node_dtype(idx, dtype);
+                ctx.tid_to_idx.insert(tid, idx);
+            }
+        }
+    } else {
+        // Dynamic trip count: emit CallSubgraph for runtime dispatch.
+        let lowered_body = lower(child, ctx.kv_layout, ctx.opts, ctx.phase)?;
+        let sub_id = ctx
+            .builder
+            .subgraph_with_id(SubgraphDef::new(body.to_string(), lowered_body.graph));
+        *ctx.builder = std::mem::take(ctx.builder).node_with_inputs(
+            GraphOp::CallSubgraph(sub_id),
+            &input_idxs[..1.min(input_idxs.len())],
+        );
+        let idx = ctx.builder.len() - 1;
+        for &tid in &node.outputs {
+            let dtype = input_float_dtype(Some(&tid), &ctx.ai_graph.tensor_info);
+            *ctx.builder = std::mem::take(ctx.builder).set_node_dtype(idx, dtype);
+            ctx.tid_to_idx.insert(tid, idx);
+        }
+        tracing::warn!("Loop with dynamic trip count lowered to CallSubgraph — requires runtime dispatch");
+    }
+
+    Ok(())
 }
 
 // ── Input reordering ─────────────────────────────────────────────────────────

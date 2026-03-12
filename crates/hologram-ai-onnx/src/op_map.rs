@@ -211,7 +211,7 @@ pub fn map_op(ctx: &OpContext<'_>) -> anyhow::Result<Option<AiOp>> {
         "Floor" => Floor,
         "Ceil" => Ceil,
         "Round" => Round,
-        "Clip" => Clip,
+        "Clip" => Clip { min: f32::NEG_INFINITY, max: f32::INFINITY },
         "Erf" => Erf,
         "Reciprocal" => Reciprocal,
         "Cos" => Cos,

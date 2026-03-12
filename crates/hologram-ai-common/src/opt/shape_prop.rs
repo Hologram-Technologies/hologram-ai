@@ -95,9 +95,12 @@ fn propagate_shapes(mut graph: AiGraph, protect_settled: bool) -> anyhow::Result
                             .and_then(|ti| ti.known_i64_values.clone())
                     })
                 }
-                // Resize: sizes from input[3] (opset 11+).
+                // Resize: sizes/scales from input[1] (after dynamic param resolution
+                // normalizes inputs to [X, scales_or_sizes]).
+                // Falls back to input[3] for unresolved 4-input layout.
                 AiOp::Resize { .. } => {
-                    graph.nodes[idx].inputs.get(3).and_then(|tid| {
+                    let inputs = &graph.nodes[idx].inputs;
+                    inputs.get(3).or_else(|| inputs.get(1)).and_then(|tid| {
                         graph
                             .tensor_info
                             .get(tid)
@@ -175,9 +178,11 @@ fn propagate_shapes(mut graph: AiGraph, protect_settled: bool) -> anyhow::Result
 
             let output_tids = graph.nodes[idx].outputs.clone();
             let op = graph.nodes[idx].op.clone();
-            let inferred_dtype = infer_output_dtype(&op, &input_dtypes);
+            let inferred_dtypes = infer_output_dtypes(&op, &input_dtypes, output_tids.len());
 
-            for tid in &output_tids {
+            for (i, tid) in output_tids.iter().enumerate() {
+                let inferred_dtype = inferred_dtypes.get(i).copied()
+                    .unwrap_or_else(|| input_dtypes.first().copied().unwrap_or(DType::F32));
                 if let Some(info) = graph.tensor_info.get_mut(tid) {
                     // Update if the current dtype differs from inferred AND
                     // the inferred dtype is more specific than F32 default.
@@ -1007,6 +1012,23 @@ fn infer_custom_output_shapes(
             }
         }
 
+        // BatchNorm: inference mode → 1 output (input shape).
+        // Training mode → 5 outputs: Y, mean, var, saved_mean, saved_var.
+        // mean/var/saved_mean/saved_var have shape [C] (from input dim 1).
+        AiOp::BatchNorm { training, .. } => {
+            if let Some(x) = inputs.first() {
+                let y_shape = x.clone();
+                if *training && x.len() >= 2 {
+                    let c_shape = Shape::from(vec![x[1].clone()]);
+                    vec![y_shape, c_shape.clone(), c_shape.clone(), c_shape.clone(), c_shape]
+                } else {
+                    vec![y_shape]
+                }
+            } else {
+                vec![Shape::new()]
+            }
+        }
+
         // ── Phase 4: Control flow ops ───────────────────────────────────────
         // If/Loop/Scan: we can't infer shapes without recursing into subgraphs.
         // Return empty for now — Phase 4 will add subgraph shape prop.
@@ -1308,19 +1330,25 @@ fn reduce_shape(input: &Shape, axes: &[i64], keepdims: bool) -> Shape {
     }
 }
 
-/// Infer the output dtype for a single op given input dtypes.
-fn infer_output_dtype(op: &AiOp, inputs: &[DType]) -> DType {
-    match op.category() {
+/// Infer per-output dtypes for an op given input dtypes.
+fn infer_output_dtypes(op: &AiOp, inputs: &[DType], num_outputs: usize) -> Vec<DType> {
+    let default = inputs.first().copied().unwrap_or(DType::F32);
+    let single = match op.category() {
         OpCategory::UnaryElementwise
         | OpCategory::BinaryElementwise
-        | OpCategory::ShapePreserving => inputs.first().copied().unwrap_or(DType::F32),
+        | OpCategory::ShapePreserving => default,
         OpCategory::BinaryComparison => DType::BOOL,
         OpCategory::Custom => match op {
-            AiOp::Shape { .. } | AiOp::Range => DType::INT64,
+            AiOp::Shape { .. } | AiOp::Range | AiOp::NonZero => DType::INT64,
             AiOp::Cast { to, .. } => *to,
-            _ => inputs.first().copied().unwrap_or(DType::F32),
+            // TopK: output[0]=values (input dtype), output[1]=indices (INT64)
+            AiOp::TopK { .. } => {
+                return vec![default, DType::INT64];
+            }
+            _ => default,
         },
-    }
+    };
+    vec![single; num_outputs]
 }
 
 #[cfg(test)]

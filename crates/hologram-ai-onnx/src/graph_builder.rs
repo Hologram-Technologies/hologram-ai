@@ -386,8 +386,31 @@ fn value_info_to_tensor_info(vi: &ValueInfoProto, dim_vars: &mut DimVarTable) ->
     }
 }
 
-/// Resolve op parameters that ONNX opset 10+/13+ provides as tensor inputs
-/// rather than node attributes (Slice starts/ends/axes/steps, Unsqueeze axes, etc.).
+/// Resolve op parameters that ONNX opset 10+/13+/18+ provides as tensor inputs
+/// rather than node attributes.
+///
+/// # Optional Input Semantics
+///
+/// ONNX uses empty-string input names (`""`) for optional inputs that are not
+/// provided. During graph construction these are filtered out by
+/// `filter(|name| !name.is_empty())`, which means positional indexing into
+/// `node.inputs` does NOT correspond to the ONNX input position when optional
+/// inputs are absent.
+///
+/// This function resolves the ambiguity for position-sensitive ops by:
+/// 1. Extracting constant values from tensor inputs and storing them on the
+///    `AiOp` variant (Slice starts/ends, Clip min/max, etc.)
+/// 2. Normalizing `node.inputs` to match the arity expected by lowering
+///    (Pad → 2 inputs, Resize → 2 inputs, Clip → 1 input, etc.)
+///
+/// # Resolved ops
+///
+/// - **Slice** (opset 10+): starts, ends, axes, steps from inputs[1-4]
+/// - **Squeeze/Unsqueeze** (opset 13+): axes from input[1]
+/// - **ReduceMean/Sum/Max/Min** (opset 18+): axes from input[1]
+/// - **Pad** (opset 11+): drop optional constant_value (input[2])
+/// - **Resize** (opset 11+): normalize to [X, scales_or_sizes], prefer sizes
+/// - **Clip** (opset 11+): min/max from optional inputs[1-2]
 fn resolve_dynamic_op_params(
     nodes: &mut [AiNode],
     params: &HashMap<TensorId, hologram_ai_common::AiParam>,
@@ -511,8 +534,84 @@ fn resolve_dynamic_op_params(
                 }
             }
 
+            // ONNX opset 11+: Pad(data, pads, constant_value?)
+            // FloatOp::PadOp expects arity 2: [data, pads].
+            // Drop optional constant_value input (input[2]).
+            AiOp::Pad { .. } => {
+                if node.inputs.len() > 2 {
+                    node.inputs.truncate(2);
+                }
+            }
+
+            // ONNX opset 11+: Resize(X, roi, scales, sizes)
+            // Empty-name inputs are already filtered, so we may have 2-4 inputs.
+            // FloatOp::Resize expects arity 2: [data, scales_or_sizes].
+            // Prefer sizes (i64) over scales (f32); drop roi.
+            AiOp::Resize { .. } => {
+                if node.inputs.len() > 2 {
+                    let data = node.inputs[0];
+                    // Find the best param: prefer i64 (sizes) over f32 (scales).
+                    let mut best = node.inputs[node.inputs.len() - 1];
+                    for &tid in &node.inputs[1..] {
+                        if let Some(info) = tensor_info.get(&tid) {
+                            if info.logical_dtype == DType::INT64 {
+                                best = tid;
+                                break;
+                            }
+                        }
+                    }
+                    node.inputs = vec![data, best];
+                }
+            }
+
+            // ONNX opset 11+: Clip(input, min?, max?)
+            // Empty-name inputs are filtered, so we may have 1-3 inputs.
+            // Resolve min/max from constant scalar inputs and store on AiOp.
+            AiOp::Clip { .. } => {
+                let min_val = if node.inputs.len() >= 2 {
+                    extract_f32_scalar(node.inputs[1], params, tensor_info)
+                } else {
+                    None
+                };
+                let max_val = if node.inputs.len() >= 3 {
+                    extract_f32_scalar(node.inputs[2], params, tensor_info)
+                } else {
+                    None
+                };
+                node.op = AiOp::Clip {
+                    min: min_val.unwrap_or(f32::NEG_INFINITY),
+                    max: max_val.unwrap_or(f32::INFINITY),
+                };
+                // Keep only data input; min/max are now on the op.
+                node.inputs.truncate(1);
+            }
+
             _ => {}
         }
+    }
+}
+
+/// Extract a single f32 scalar from a constant parameter tensor.
+fn extract_f32_scalar(
+    tid: TensorId,
+    params: &HashMap<TensorId, hologram_ai_common::AiParam>,
+    tensor_info: &HashMap<TensorId, TensorInfo>,
+) -> Option<f32> {
+    let param = params.get(&tid)?;
+    let info = tensor_info.get(&tid)?;
+    let data = match param {
+        hologram_ai_common::AiParam::Inline { data, .. } => data.as_slice(),
+        _ => return None,
+    };
+
+    match info.logical_dtype {
+        DType::F32 if data.len() == 4 => {
+            Some(f32::from_le_bytes(data.try_into().unwrap()))
+        }
+        DType::F64 if data.len() == 8 => {
+            Some(f64::from_le_bytes(data.try_into().unwrap()) as f32)
+        }
+        _ => None,
     }
 }
 
@@ -553,6 +652,8 @@ fn extract_i64_const(
         _ => None,
     }
 }
+
+
 
 /// Rewrite placeholder branch names in control flow AiOps to the actual
 /// subgraph keys (e.g., "then_branch" → "then_branch_42").
