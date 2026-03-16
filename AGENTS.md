@@ -44,12 +44,19 @@ models/         — test models for development (TinyLlama ONNX, etc.)
 
 ## Problem-Solving Philosophy
 
-**Think like a principal systems architect, not a task-completing code monkey.**
+**Think like a principal systems architect, not a patch author.** When encountering bugs, build failures, or design issues, do not apply narrow band-aid fixes that address only the immediate symptom. Instead:
 
-Every problem — whether a bug, a missing feature, or a refactor — deserves an
-expert-level architectural response. Before writing a single line of code, step
-back and understand the full picture. The goal is never to "make this one thing
-work"; it is to design a solution that is correct, general, and production-ready.
+1. **Diagnose the root cause.** Before writing any fix, understand *why* the problem exists. Trace it back to the underlying design decision, missing abstraction, or architectural gap that allowed it to surface.
+
+2. **Assess the blast radius.** Ask: is this a one-off mistake, or a symptom of a systemic pattern? If the same class of bug could occur elsewhere, the fix must address the class, not just the instance.
+
+3. **Propose a production-ready solution.** Design the fix as if this code will run in production under load, across tenants, for years. Consider concurrency, error propagation, backward compatibility, and operational debuggability. A correct fix that is fragile or hard to reason about is not production-ready.
+
+4. **Refactor when the problem is structural.** If the root cause is that a function does too much, a type doesn't enforce its invariants, or responsibilities are in the wrong module — fix the structure. Moving code, splitting types, introducing a new abstraction, or changing an API boundary are all valid (and often necessary) responses to a bug.
+
+5. **Never play whack-a-mole.** If you find yourself fixing the same kind of issue in multiple places with small, repetitive patches, stop. That pattern means the underlying design needs to change. Propose the holistic fix, not N localized patches.
+
+6. **Validate the fix is complete.** After implementing a solution, check whether the same class of issue exists anywhere else in the codebase. A fix that leaves known instances of the same bug untouched is incomplete.
 
 ### Anti-patterns (never do these)
 
@@ -97,6 +104,29 @@ This philosophy is not just for bugs. It applies equally to:
   optimize what you haven't measured.
 
 ---
+
+## Conformance Testing Mandate
+
+**Any runtime bug or connected-op bug MUST have a conformance test before the fix is applied.**
+
+The `hologram-ai-conformance` crate (`crates/hologram-ai-conformance/`) provides the testing harness:
+- `ort_runner::onnx_builder` — build multi-node ONNX models programmatically (matmul, concat, gemm, softmax, rms_norm, etc.)
+- `ort_runner::runner::run_onnx_all_outputs` — run a model through ORT and collect all outputs
+- `exec_conformance.rs` — integration tests that compile ONNX → hologram, execute, and compare against ORT
+
+### When you find a runtime bug
+
+1. **Reproduce it in `exec_conformance.rs`** — add a test that calls `compile_and_execute()` and compares against `run_onnx_all_outputs()`. The test should FAIL until the bug is fixed.
+2. **If the ONNX builder lacks the required graph type** — add a builder function to `ort_runner/onnx_builder.rs` (e.g., `concat_along_axis`, `batched_matmul_4d`, `scaled_dot_product_attention`).
+3. **Never fix the bug without a test** — a fix without a failing test is a guess.
+4. **Do NOT write one-off dispatch patches or runtime guards** — trace the root cause to the compiler (shape propagation, lowering strategy, concat axis calculation) and fix the general case there.
+
+This applies to:
+- Shape tracking bugs (wrong dimensions after transpose, reshape, concat)
+- Connected-op bugs (where output of one op feeds into another with wrong shape)
+- Execution dispatching bugs (wrong batched matmul, wrong broadcast expansion)
+
+The `shape_chain.rs` tests in hologram base (`hologram/crates/hologram-exec/tests/shape_chain.rs`) cover dispatch-level correctness for individual ops. The `exec_conformance.rs` tests cover full ONNX pipeline correctness end-to-end (compile + execute).
 
 <!-- ARCHON:MANAGED:BEGIN -->
 ## Ecosystem Rules

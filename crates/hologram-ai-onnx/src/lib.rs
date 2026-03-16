@@ -4,7 +4,9 @@
 //! ready for optimization and lowering. Priority importer for Sprint 001.
 
 use error::OnnxError;
-use hologram_ai_common::{opt::pipeline::Pass, AiGraph, ShapeOraclePass};
+use hologram_ai_common::{
+    opt::pipeline::Pass, AiGraph, AiNode, AiOp, DType, DimExpr, ShapeOraclePass, TensorInfo,
+};
 use prost::Message;
 
 mod onnx_pb {
@@ -105,7 +107,119 @@ fn import_onnx_inner(
     // them from being overwritten by AggressiveShapePropagation.
     let ai_graph = ShapeOraclePass::new(oracle).run(ai_graph)?;
 
+    // Inject lm_head if the ONNX export only has last_hidden_state output
+    // (i.e., the language model head was not included in the export).
+    let ai_graph = inject_lm_head_if_needed(ai_graph);
+
     Ok(ai_graph)
+}
+
+/// Inject a language model head Gemm node for ONNX models that export
+/// `last_hidden_state` instead of `logits`.
+///
+/// Many ONNX exports of decoder-only transformers (e.g., TinyLlama from
+/// HuggingFace without the `--task causal-lm` flag) omit the final
+/// projection from hidden_size → vocab_size. TinyLlama uses tied weights
+/// (lm_head = embed_tokens.weight), so if `embed_tokens.weight` is present
+/// in the graph we can reconstruct the missing head:
+///
+///   logits = last_hidden_state @ embed_tokens.weight^T
+///         = [batch, seq, hidden] @ [vocab, hidden]^T
+///         = [batch, seq, vocab]
+///
+/// This is a lossless fix — no approximation or new weights are introduced.
+fn inject_lm_head_if_needed(mut graph: AiGraph) -> AiGraph {
+    // Only inject when output is last_hidden_state (not already logits).
+    let lhs_idx = match graph.output_names.iter().position(|n| n == "last_hidden_state") {
+        Some(i) => i,
+        None => return graph,
+    };
+    if graph.output_names.iter().any(|n| n == "logits") {
+        return graph;
+    }
+
+    // Find the embedding weight — try several name variants across HF export versions.
+    // Different exporters use different names for the same weight:
+    //   "embed_tokens.weight"        — older HF optimum exports
+    //   "model.embed_tokens.weight"  — recent transformers / optimum-onnx exports
+    //   "token_embd.weight"          — llama.cpp / GGUF-derived ONNX exports
+    const EMBED_WEIGHT_NAMES: &[&str] =
+        &["embed_tokens.weight", "model.embed_tokens.weight", "token_embd.weight"];
+    let embed_tid = match EMBED_WEIGHT_NAMES.iter().find_map(|candidate| {
+        graph
+            .tensor_names
+            .iter()
+            .find(|(tid, name)| name.as_str() == *candidate && graph.params.contains_key(tid))
+            .map(|(tid, _)| *tid)
+    }) {
+        Some(t) => t,
+        None => {
+            tracing::debug!(
+                "inject_lm_head: no embedding weight found (tried {:?}); skipping injection",
+                EMBED_WEIGHT_NAMES
+            );
+            return graph;
+        }
+    };
+
+    // Derive vocab_size from the embedding weight shape [vocab_size, emb_dim].
+    let vocab_size = match graph
+        .tensor_info
+        .get(&embed_tid)
+        .and_then(|info| info.shape.first())
+        .and_then(|d| d.as_concrete())
+    {
+        Some(v) if v > 0 => v,
+        _ => return graph,
+    };
+
+    let lhs_tid = graph.outputs[lhs_idx];
+
+    // Build logits output shape: same as last_hidden_state but last dim = vocab_size.
+    let logits_shape = match graph.tensor_info.get(&lhs_tid) {
+        Some(info) if info.shape.len() >= 2 => {
+            let mut shape = info.shape.clone();
+            if let Some(last) = shape.last_mut() {
+                *last = DimExpr::Concrete(vocab_size);
+            }
+            shape
+        }
+        _ => return graph,
+    };
+
+    // Allocate a fresh TensorId beyond all existing ones.
+    let new_tid = graph
+        .tensor_info
+        .keys()
+        .chain(graph.params.keys())
+        .max()
+        .copied()
+        .unwrap_or(0)
+        + 1;
+    let new_nid = graph.nodes.iter().map(|n| n.id).max().unwrap_or(0) + 1;
+
+    graph
+        .tensor_info
+        .insert(new_tid, TensorInfo::new(DType::F32, logits_shape));
+    graph.tensor_names.insert(new_tid, "logits".to_string());
+
+    // logits = last_hidden_state @ embed_tokens.weight^T
+    graph.nodes.push(AiNode::new(
+        new_nid,
+        AiOp::Gemm { alpha: 1.0, beta: 0.0, trans_a: false, trans_b: true },
+        vec![lhs_tid, embed_tid],
+        vec![new_tid],
+    ));
+
+    graph.outputs[lhs_idx] = new_tid;
+    graph.output_names[lhs_idx] = "logits".to_string();
+
+    tracing::info!(
+        vocab_size,
+        "injected lm_head (embed_tokens.weight) for ONNX model missing logits output"
+    );
+
+    graph
 }
 
 #[cfg(test)]
@@ -239,5 +353,108 @@ mod tests {
         assert_eq!(y_shape.len(), 2);
         assert_eq!(y_shape[0].as_concrete(), Some(2));
         assert_eq!(y_shape[1].as_concrete(), Some(8));
+    }
+
+    /// `inject_lm_head_if_needed` should inject a Gemm node and rename the output
+    /// to "logits" when `embed_tokens.weight` is present as a param and the graph
+    /// output is named "last_hidden_state".
+    #[test]
+    fn inject_lm_head_activates_when_weight_present() {
+        use hologram_ai_common::{shape_from_concrete, AiParam};
+        use std::collections::HashMap;
+
+        let lhs_tid: u32 = 0;
+        let embed_tid: u32 = 1;
+
+        let lhs_info = TensorInfo::new(DType::F32, shape_from_concrete(&[1u64, 4, 2048]));
+        let embed_info = TensorInfo::new(DType::F32, shape_from_concrete(&[32000u64, 2048]));
+        // Minimal non-empty byte slice so AiParam::is_empty() returns false.
+        let embed_param = AiParam::inline(vec![0u8; 4], embed_info.clone());
+
+        let mut tensor_info = HashMap::new();
+        tensor_info.insert(lhs_tid, lhs_info);
+        tensor_info.insert(embed_tid, embed_info);
+
+        let mut params = HashMap::new();
+        params.insert(embed_tid, embed_param);
+
+        let mut tensor_names = HashMap::new();
+        tensor_names.insert(lhs_tid, "last_hidden_state".to_string());
+        tensor_names.insert(embed_tid, "embed_tokens.weight".to_string());
+
+        let graph = AiGraph {
+            name: "test".to_string(),
+            nodes: vec![],
+            inputs: vec![lhs_tid],
+            outputs: vec![lhs_tid],
+            input_names: vec!["last_hidden_state".to_string()],
+            output_names: vec!["last_hidden_state".to_string()],
+            params,
+            tensor_info,
+            tensor_names,
+            metadata: Default::default(),
+            warnings: vec![],
+            dim_vars: Default::default(),
+            shape_constraints: Default::default(),
+            subgraphs: Default::default(),
+        };
+
+        let result = inject_lm_head_if_needed(graph);
+
+        assert_eq!(result.output_names[0], "logits", "output should be renamed to logits");
+        // The new output tensor should have vocab_size=32000 as its last dimension.
+        let out_tid = result.outputs[0];
+        let out_shape = &result.tensor_info[&out_tid].shape;
+        let last_dim = out_shape
+            .last()
+            .and_then(|d| d.as_concrete())
+            .expect("last dim should be concrete vocab_size");
+        assert_eq!(last_dim, 32000);
+        // A Gemm node should have been appended.
+        assert_eq!(result.nodes.len(), 1);
+        assert!(matches!(result.nodes[0].op, AiOp::Gemm { trans_b: true, .. }));
+    }
+
+    /// `inject_lm_head_if_needed` must be a no-op when `embed_tokens.weight` is
+    /// absent from params — the graph must be returned unchanged.
+    #[test]
+    fn inject_lm_head_no_op_when_weight_absent() {
+        use hologram_ai_common::shape_from_concrete;
+        use std::collections::HashMap;
+
+        let lhs_tid: u32 = 0;
+        let lhs_info = TensorInfo::new(DType::F32, shape_from_concrete(&[1u64, 4, 2048]));
+
+        let mut tensor_info = HashMap::new();
+        tensor_info.insert(lhs_tid, lhs_info);
+
+        let mut tensor_names = HashMap::new();
+        tensor_names.insert(lhs_tid, "last_hidden_state".to_string());
+
+        let graph = AiGraph {
+            name: "test".to_string(),
+            nodes: vec![],
+            inputs: vec![lhs_tid],
+            outputs: vec![lhs_tid],
+            input_names: vec!["last_hidden_state".to_string()],
+            output_names: vec!["last_hidden_state".to_string()],
+            params: Default::default(),
+            tensor_info,
+            tensor_names,
+            metadata: Default::default(),
+            warnings: vec![],
+            dim_vars: Default::default(),
+            shape_constraints: Default::default(),
+            subgraphs: Default::default(),
+        };
+
+        let result = inject_lm_head_if_needed(graph);
+
+        assert_eq!(
+            result.output_names[0], "last_hidden_state",
+            "output name must remain last_hidden_state when weight absent"
+        );
+        assert_eq!(result.outputs[0], lhs_tid, "output tensor id must be unchanged");
+        assert!(result.nodes.is_empty(), "no nodes should have been injected");
     }
 }

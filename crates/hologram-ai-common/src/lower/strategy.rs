@@ -415,9 +415,16 @@ fn resolve_op(
                 vec![],
             )
         }
-        AiOp::Shape { .. } => {
+        AiOp::Shape { start, end } => {
             let dtype = input_float_dtype(inputs.first(), tensor_info);
-            (FloatOp::Shape { dtype }, vec![])
+            (
+                FloatOp::Shape {
+                    dtype,
+                    start: start.unwrap_or(0),
+                    end: end.unwrap_or(i64::MAX),
+                },
+                vec![],
+            )
         }
 
         AiOp::Slice {
@@ -799,7 +806,13 @@ fn concrete_concat_row_size(
     } else {
         (axis as usize).min(ndim.saturating_sub(1))
     };
-    let mut product = 1usize;
+    // Row size = dim[ax] * product(dims after ax).
+    // dispatch_concat uses size_a/size_b to interleave rows: for each "outer"
+    // position (product of dims before ax), it copies size_a elements from A
+    // then size_b from B. Including dim[ax] ensures mid-axis and last-axis
+    // concats produce the correct stride, not just axis=0 (simple append).
+    let ax_dim = info.shape.get(ax)?.as_concrete()? as usize;
+    let mut product = ax_dim;
     for dim in info.shape.iter().skip(ax + 1) {
         product = product.saturating_mul(dim.as_concrete()? as usize);
     }

@@ -8,6 +8,10 @@ license.workspace = true
 name = "hologram-ai"
 path = "src/cli.rs"
 
+[features]
+# Feature-gate large model E2E tests that require local model files (not run in CI).
+e2e = []
+
 [dependencies]
 hologram-ai-common.workspace = true
 hologram-ai-quant.workspace  = true

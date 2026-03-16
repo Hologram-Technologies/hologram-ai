@@ -17,6 +17,89 @@ pub mod runner {
         pub data: Vec<f32>,
     }
 
+    /// Input for ORT that can carry either f32 or i64 data.
+    pub enum OrtInputTyped {
+        F32 { name: String, shape: Vec<usize>, data: Vec<f32> },
+        I64 { name: String, shape: Vec<usize>, data: Vec<i64> },
+    }
+
+    impl OrtInputTyped {
+        pub fn name(&self) -> &str {
+            match self {
+                Self::F32 { name, .. } | Self::I64 { name, .. } => name,
+            }
+        }
+    }
+
+    /// Run an in-memory ONNX model through ORT with mixed-dtype inputs.
+    ///
+    /// Returns all outputs that can be extracted as f32 (skips non-f32 outputs).
+    pub fn run_onnx_typed(
+        model_bytes: &[u8],
+        inputs: Vec<OrtInputTyped>,
+    ) -> Result<Vec<IntermediateTensor>> {
+        run_onnx_typed_impl(None, Some(model_bytes), inputs)
+    }
+
+    /// Run a file-based ONNX model through ORT with mixed-dtype inputs.
+    ///
+    /// Preferred for large models (>100MB) since ORT can load incrementally.
+    pub fn run_onnx_file_typed(
+        model_path: &std::path::Path,
+        inputs: Vec<OrtInputTyped>,
+    ) -> Result<Vec<IntermediateTensor>> {
+        run_onnx_typed_impl(Some(model_path), None, inputs)
+    }
+
+    fn run_onnx_typed_impl(
+        model_path: Option<&std::path::Path>,
+        model_bytes: Option<&[u8]>,
+        inputs: Vec<OrtInputTyped>,
+    ) -> Result<Vec<IntermediateTensor>> {
+        let mut session = Session::builder()
+            .context("failed to create ORT session builder")?;
+        let mut session = if let Some(path) = model_path {
+            session.commit_from_file(path)
+                .context("failed to load ONNX model from file into ORT")?
+        } else {
+            let bytes = model_bytes.expect("either model_path or model_bytes required");
+            session.commit_from_memory(bytes)
+                .context("failed to load ONNX model into ORT")?
+        };
+
+        let mut ort_inputs: Vec<(String, ort::value::DynValue)> = Vec::new();
+        for inp in &inputs {
+            match inp {
+                OrtInputTyped::F32 { name, shape, data } => {
+                    let shape_i64: Vec<i64> = shape.iter().map(|&d| d as i64).collect();
+                    let tensor = Tensor::<f32>::from_array((shape_i64, data.clone()))
+                        .context("creating f32 ORT input")?;
+                    ort_inputs.push((name.clone(), tensor.into_dyn()));
+                }
+                OrtInputTyped::I64 { name, shape, data } => {
+                    let shape_i64: Vec<i64> = shape.iter().map(|&d| d as i64).collect();
+                    let tensor = Tensor::<i64>::from_array((shape_i64, data.clone()))
+                        .context("creating i64 ORT input")?;
+                    ort_inputs.push((name.clone(), tensor.into_dyn()));
+                }
+            }
+        }
+
+        let outputs = session.run(ort_inputs).context("ORT session run failed")?;
+
+        let mut result = Vec::new();
+        for (name, value) in outputs.iter() {
+            if let Ok((shape, data)) = value.try_extract_tensor::<f32>() {
+                result.push(IntermediateTensor {
+                    name: name.to_string(),
+                    shape: shape.iter().map(|&d| d as usize).collect(),
+                    data: data.to_vec(),
+                });
+            }
+        }
+        Ok(result)
+    }
+
     /// Run an in-memory ONNX model (protobuf bytes) through ORT with the given inputs.
     pub fn run_onnx_bytes(model_bytes: &[u8], inputs: Vec<OrtInput>) -> Result<Vec<f32>> {
         let mut session = Session::builder()
@@ -257,6 +340,718 @@ pub mod onnx_builder {
         build_multi_node_model(nodes, inputs, &all_outputs, initializers)
     }
 
+    /// Build a 4D batched MatMul ONNX model.
+    /// A [batch, heads, m, k] × B [batch, heads, k, n] → Y [batch, heads, m, n]
+    /// Models the Q@K^T and scores@V patterns in multi-head attention.
+    pub fn batched_matmul_4d(batch: usize, heads: usize, m: usize, k: usize, n: usize) -> Vec<u8> {
+        build_model(
+            "MatMul",
+            &[("A", &[batch, heads, m, k]), ("B", &[batch, heads, k, n])],
+            &[("Y", &[batch, heads, m, n])],
+            &[],
+        )
+    }
+
+    /// Build a Concat ONNX model that concatenates two 4D tensors along axis 3 (last axis).
+    /// A [batch, heads, seq, dim_a] ++ B [batch, heads, seq, dim_b] → Y [batch, heads, seq, dim_a+dim_b]
+    /// Models the concat-of-halves pattern in RoPE's rotate_half function.
+    pub fn concat_4d_last_axis(
+        batch: usize,
+        heads: usize,
+        seq: usize,
+        dim_a: usize,
+        dim_b: usize,
+    ) -> Vec<u8> {
+        let nodes = vec![Node::with_attrs(
+            "Concat",
+            &["A", "B"],
+            &["Y"],
+            &[("axis", AttrVal::Int(3))],
+        )];
+        build_multi_node_model(
+            &nodes,
+            &[("A", &[batch, heads, seq, dim_a]), ("B", &[batch, heads, seq, dim_b])],
+            &[("Y", &[batch, heads, seq, dim_a + dim_b])],
+            &[],
+        )
+    }
+
+    /// Build a Scaled Dot-Product Attention ONNX model.
+    /// Q, K, V: [batch, heads, seq, head_dim]
+    /// Steps: K_T = Transpose(K, perm=[0,1,3,2])
+    ///        QK  = Q @ K_T / sqrt(head_dim)
+    ///        out = Softmax(QK) @ V
+    /// Output: [batch, heads, seq, head_dim]
+    pub fn scaled_dot_product_attention(
+        batch: usize,
+        heads: usize,
+        seq: usize,
+        head_dim: usize,
+    ) -> Vec<u8> {
+        let scale = 1.0_f32 / (head_dim as f32).sqrt();
+        let nodes = vec![
+            Node::with_attrs(
+                "Transpose",
+                &["K"],
+                &["K_T"],
+                &[("perm", AttrVal::Ints(vec![0, 1, 3, 2]))],
+            ),
+            Node::new("MatMul", &["Q", "K_T"], &["QK"]),
+            Node::new("Mul", &["QK", "scale"], &["QK_scaled"]),
+            Node::with_attrs(
+                "Softmax",
+                &["QK_scaled"],
+                &["QK_soft"],
+                &[("axis", AttrVal::Int(-1))],
+            ),
+            Node::new("MatMul", &["QK_soft", "V"], &["AttnOut"]),
+        ];
+        let initializers = vec![Initializer::scalar("scale", scale)];
+        build_multi_node_model(
+            &nodes,
+            &[
+                ("Q", &[batch, heads, seq, head_dim]),
+                ("K", &[batch, heads, seq, head_dim]),
+                ("V", &[batch, heads, seq, head_dim]),
+            ],
+            &[("AttnOut", &[batch, heads, seq, head_dim])],
+            &initializers,
+        )
+    }
+
+    /// Build a GQA (Grouped Query Attention) ONNX model.
+    ///
+    /// Models TinyLlama's GQA expansion pattern where K and V are projected to
+    /// n_kv_heads, then repeated to n_heads via Unsqueeze → Expand → Reshape:
+    ///
+    ///   K_compact [batch, n_kv_heads, seq, head_dim]
+    ///     → Unsqueeze(axis=2)  → [batch, n_kv_heads, 1, seq, head_dim]
+    ///     → Expand             → [batch, n_kv_heads, group_size, seq, head_dim]
+    ///     → Reshape            → [batch, n_heads, seq, head_dim]
+    ///
+    ///   AttnOut = softmax(Q @ K_T / sqrt(head_dim)) @ V_expanded
+    ///
+    /// This is the canonical ONNX representation of GQA. The ONNX Expand op
+    /// requires dim=1 in the input for broadcasting; the Unsqueeze adds that
+    /// dimension so the group axis can be broadcast to group_size.
+    ///
+    /// group_size = n_heads / n_kv_heads (must divide evenly).
+    /// A failure here exposes incorrect Expand or Reshape handling for 5D tensors,
+    /// which causes the downstream attention output to have wrong element counts.
+    pub fn gqa_expand_attention(
+        batch: usize,
+        n_heads: usize,
+        n_kv_heads: usize,
+        seq: usize,
+        head_dim: usize,
+    ) -> Vec<u8> {
+        let group_size = n_heads / n_kv_heads;
+        let scale = 1.0_f32 / (head_dim as f32).sqrt();
+        // Target shape for Expand: [batch, n_kv_heads, group_size, seq, head_dim]
+        let expand_shape_k: Vec<i64> = vec![
+            batch as i64,
+            n_kv_heads as i64,
+            group_size as i64,
+            seq as i64,
+            head_dim as i64,
+        ];
+        let expand_shape_v = expand_shape_k.clone();
+
+        let nodes = vec![
+            // K: [batch, n_kv, seq, hdim] → [batch, n_kv, 1, seq, hdim]
+            // Opset 13: axes is a second input tensor, not an attribute.
+            Node::new("Unsqueeze", &["K_compact", "unsq_axes"], &["K_unsq"]),
+            // K: [batch, n_kv, 1, seq, hdim] → [batch, n_kv, group, seq, hdim]
+            Node::new("Expand", &["K_unsq", "expand_shape_k"], &["K_5d"]),
+            // K: [batch, n_kv, group, seq, hdim] → [batch, n_heads, seq, hdim]
+            Node::new("Reshape", &["K_5d", "attn_shape"], &["K_exp"]),
+            // V: same pattern
+            Node::new("Unsqueeze", &["V_compact", "unsq_axes"], &["V_unsq"]),
+            Node::new("Expand", &["V_unsq", "expand_shape_v"], &["V_5d"]),
+            Node::new("Reshape", &["V_5d", "attn_shape"], &["V_exp"]),
+            // Attention: Q @ K_T / scale → softmax → @ V
+            Node::with_attrs(
+                "Transpose",
+                &["K_exp"],
+                &["K_T"],
+                &[("perm", AttrVal::Ints(vec![0, 1, 3, 2]))],
+            ),
+            Node::new("MatMul", &["Q", "K_T"], &["QK"]),
+            Node::new("Mul", &["QK", "scale"], &["QK_scaled"]),
+            Node::with_attrs(
+                "Softmax",
+                &["QK_scaled"],
+                &["QK_soft"],
+                &[("axis", AttrVal::Int(-1))],
+            ),
+            Node::new("MatMul", &["QK_soft", "V_exp"], &["AttnOut"]),
+        ];
+        let attn_shape: Vec<i64> =
+            vec![batch as i64, n_heads as i64, seq as i64, head_dim as i64];
+        let initializers = vec![
+            Initializer::int64_1d("unsq_axes", vec![2]),
+            Initializer::int64_1d("expand_shape_k", expand_shape_k),
+            Initializer::int64_1d("expand_shape_v", expand_shape_v),
+            Initializer::int64_1d("attn_shape", attn_shape),
+            Initializer::scalar("scale", scale),
+        ];
+
+        build_multi_node_model(
+            &nodes,
+            &[
+                ("Q", &[batch, n_heads, seq, head_dim]),
+                ("K_compact", &[batch, n_kv_heads, seq, head_dim]),
+                ("V_compact", &[batch, n_kv_heads, seq, head_dim]),
+            ],
+            &[("AttnOut", &[batch, n_heads, seq, head_dim])],
+            &initializers,
+        )
+    }
+
+    /// Build a model that tests `Shape` with `start`/`end` attributes (opset 15).
+    ///
+    /// Graph:
+    ///   K [batch, n_kv, seq, head_dim]
+    ///   Shape(K, start=0, end=1) → batch_dim INT64[1]     — first dim only
+    ///   Shape(K, start=2, end=4) → seq_hdim INT64[2]      — last two dims only
+    ///   Cast(batch_dim, to=FLOAT) → batch_f32 [1]
+    ///   Cast(seq_hdim,  to=FLOAT) → seqhdim_f32 [2]
+    ///   Concat([batch_f32, seqhdim_f32], axis=0) → Y [3]  — [batch, seq, head_dim]
+    ///
+    /// Expected: Y = [batch as f32, seq as f32, head_dim as f32].
+    ///
+    /// A failure means `Shape` ignores `start`/`end` and returns all dims instead
+    /// of the requested slice, yielding `[batch, n_kv, seq, head_dim, ...]` instead.
+    /// This is the root cause regression test for the TinyLlama `A=[40,4096]` bug:
+    /// TinyLlama uses `Shape(input_ids, start=0, end=1)` and
+    /// `Shape(attention_mask, start=1, end=2)` in its GQA shape computation chain.
+    pub fn shape_with_start_end_attrs(
+        batch: usize,
+        n_kv_heads: usize,
+        seq: usize,
+        head_dim: usize,
+    ) -> Vec<u8> {
+        let nodes = vec![
+            // Extract only dim 0 (batch).
+            Node::with_attrs(
+                "Shape",
+                &["K"],
+                &["batch_dim"],
+                &[("start", AttrVal::Int(0)), ("end", AttrVal::Int(1))],
+            ),
+            // Extract dims 2..4 (seq, head_dim).
+            Node::with_attrs(
+                "Shape",
+                &["K"],
+                &["seq_hdim"],
+                &[("start", AttrVal::Int(2)), ("end", AttrVal::Int(4))],
+            ),
+            // Cast to float so we can compare numerically.
+            Node::with_attrs("Cast", &["batch_dim"], &["batch_f"], &[("to", AttrVal::Int(1))]),
+            Node::with_attrs("Cast", &["seq_hdim"], &["seqhd_f"], &[("to", AttrVal::Int(1))]),
+            // Concat: [batch] ++ [seq, head_dim] → [batch, seq, head_dim]
+            Node::with_attrs(
+                "Concat",
+                &["batch_f", "seqhd_f"],
+                &["Y"],
+                &[("axis", AttrVal::Int(0))],
+            ),
+        ];
+        build_multi_node_model(
+            &nodes,
+            &[("K", &[batch, n_kv_heads, seq, head_dim])],
+            &[("Y", &[3])],
+            &[],
+        )
+    }
+
+    /// Build a GQA K-expand model that uses `Shape` with `start`/`end` attributes
+    /// to extract dimensions, matching TinyLlama's exact graph pattern:
+    ///
+    ///   batch_dim = Shape(input_like, start=0, end=1)  → INT64[1] = [batch]
+    ///   seq_hdim  = Shape(K_compact,  start=2, end=4)  → INT64[2] = [seq, head_dim]
+    ///   expand_shape = Concat([batch_dim, nkv_c, group_c, seq_hdim])
+    ///   K_exp = Reshape(Expand(Unsqueeze(K_compact), expand_shape), reshape_tgt)
+    ///
+    /// Exposes the bug where `start`/`end` are stripped from `FloatOp::Shape`,
+    /// causing `batch_dim` to return `[batch, n_kv_heads, seq, head_dim]`
+    /// (all 4 dims) instead of just `[batch]`. This corrupts the Concat-built
+    /// expand shape, producing wrong K/V element counts downstream.
+    pub fn gqa_k_expand_with_shape_start_end(
+        batch: usize,
+        n_heads: usize,
+        n_kv_heads: usize,
+        seq: usize,
+        head_dim: usize,
+    ) -> Vec<u8> {
+        let group_size = n_heads / n_kv_heads;
+        let nodes = vec![
+            // Use Shape with start/end to extract only dim 0 (batch).
+            Node::with_attrs(
+                "Shape",
+                &["K_compact"],
+                &["batch_dim"],
+                &[("start", AttrVal::Int(0)), ("end", AttrVal::Int(1))],
+            ),
+            // Use Shape with start/end to extract dims 2..4 (seq, head_dim).
+            Node::with_attrs(
+                "Shape",
+                &["K_compact"],
+                &["seq_hdim"],
+                &[("start", AttrVal::Int(2)), ("end", AttrVal::Int(4))],
+            ),
+            // Build expand shape [batch, n_kv, group, seq, head_dim]
+            Node::with_attrs(
+                "Concat",
+                &["batch_dim", "nkv_c", "group_c", "seq_hdim"],
+                &["expand_shape"],
+                &[("axis", AttrVal::Int(0))],
+            ),
+            // Unsqueeze K to [batch, n_kv, 1, seq, hdim] (opset 13 axes-as-tensor).
+            Node::new("Unsqueeze", &["K_compact", "unsq_ax2"], &["K_unsq"]),
+            // Expand to [batch, n_kv, group, seq, hdim].
+            Node::new("Expand", &["K_unsq", "expand_shape"], &["K_5d"]),
+            // Build reshape target [batch, n_heads, seq, head_dim].
+            Node::with_attrs(
+                "Concat",
+                &["batch_dim", "nheads_c", "seq_hdim"],
+                &["reshape_tgt"],
+                &[("axis", AttrVal::Int(0))],
+            ),
+            // Reshape to [batch, n_heads, seq, head_dim].
+            Node::new("Reshape", &["K_5d", "reshape_tgt"], &["K_exp"]),
+        ];
+        let initializers = vec![
+            Initializer::int64_1d("nkv_c", vec![n_kv_heads as i64]),
+            Initializer::int64_1d("group_c", vec![group_size as i64]),
+            Initializer::int64_1d("nheads_c", vec![n_heads as i64]),
+            Initializer::int64_1d("unsq_ax2", vec![2]),
+        ];
+        build_multi_node_model(
+            &nodes,
+            &[("K_compact", &[batch, n_kv_heads, seq, head_dim])],
+            &[("K_exp", &[batch, n_heads, seq, head_dim])],
+            &initializers,
+        )
+    }
+
+    /// Build a Shape(start,end) model with a **dynamic** `seq` dimension.
+    ///
+    /// This forces the `FloatOp::Shape` node to survive DataPropagation (which
+    /// can only fold Shape ops whose input has fully-concrete dims) and execute
+    /// at runtime. A buggy executor that ignores `start`/`end` will return all 4
+    /// dims instead of the expected 2, causing the Cast output to be length 4
+    /// instead of 2 — which the test detects as a value or shape mismatch vs ORT.
+    ///
+    /// Graph:
+    ///   K [batch, n_kv_heads, seq_DYN, head_dim]  ← seq is symbolic ("dyn")
+    ///   Shape(K, start=2, end=4) → seq_hdim INT64[2]
+    ///   Cast(to=FLOAT) → Y f32[2]
+    ///
+    /// Expected: Y = [seq as f32, head_dim as f32]
+    /// Buggy result (FloatOp::Shape ignores start/end): Y = [batch, n_kv_heads, seq, head_dim]
+    pub fn shape_start_end_with_dynamic_seq(
+        batch: usize,
+        n_kv_heads: usize,
+        seq: usize,
+        head_dim: usize,
+    ) -> Vec<u8> {
+        let nodes = vec![
+            Node::with_attrs(
+                "Shape",
+                &["K"],
+                &["seq_hdim"],
+                &[("start", AttrVal::Int(2)), ("end", AttrVal::Int(4))],
+            ),
+            Node::with_attrs("Cast", &["seq_hdim"], &["Y"], &[("to", AttrVal::Int(1))]),
+        ];
+        // Build the model manually so we can use `encode_value_info_dyn`
+        // to declare `seq` as a dynamic (symbolic) dimension.
+        let mut buf = Vec::new();
+        let graph_input = encode_value_info_dyn(
+            "K",
+            &[Some(batch), Some(n_kv_heads), None, Some(head_dim)],
+        );
+        let graph_output = encode_value_info("Y", &[2]);
+
+        let mut graph = Vec::new();
+        for node in &nodes {
+            let encoded = encode_node_struct(node);
+            write_field(&mut graph, 1, &encoded);
+        }
+        write_string(&mut graph, 2, "test_graph");
+        write_field(&mut graph, 11, &graph_input);
+        write_field(&mut graph, 12, &graph_output);
+
+        write_varint_field(&mut buf, 1, 8); // ir_version = 8
+        write_field(&mut buf, 7, &graph);
+        let opset = encode_opset(17);
+        write_field(&mut buf, 8, &opset);
+        let _ = seq; // used only for test invocation, not in ONNX model type
+        buf
+    }
+
+    /// Build a model that tests the `Shape` op via `Cast` to float.
+    ///
+    /// Graph: X [batch, seq, hidden] → Shape → shape_int64 [3] → Cast(to=FLOAT) → Y [3]
+    ///
+    /// ORT should return `[batch as f32, seq as f32, hidden as f32]`.
+    /// A failure here means `Shape` returns wrong dimension values (e.g. a scalar
+    /// element count instead of per-axis dims), which breaks the
+    /// Shape → Slice → Concat → Expand chains in GQA models like TinyLlama.
+    pub fn shape_then_cast_to_float(batch: usize, seq: usize, hidden: usize) -> Vec<u8> {
+        let nodes = vec![
+            Node::new("Shape", &["X"], &["X_shape"]),
+            Node::with_attrs("Cast", &["X_shape"], &["Y"], &[("to", AttrVal::Int(1))]),
+        ];
+        build_multi_node_model(
+            &nodes,
+            &[("X", &[batch, seq, hidden])],
+            &[("Y", &[3])],
+            &[],
+        )
+    }
+
+    /// Build a model where a Reshape target is computed at runtime via
+    /// Shape → Slice → Concat, matching TinyLlama's dynamic shape pattern.
+    ///
+    /// Graph:
+    ///   X [batch, seq, hidden]
+    ///   → Shape(X)                     → shape [3] (INT64)
+    ///   → Slice(shape, 0:2)            → first_two [2] (INT64 = [batch, seq])
+    ///   → Concat([first_two, hdim_c])  → reshape_tgt [3] (INT64 = [batch, seq, hidden])
+    ///   → Expand(X, reshape_tgt)       → Y [batch, seq, hidden]
+    ///
+    /// This validates that dynamically computed shape tensors (from Shape op output)
+    /// propagate correctly through Slice and Concat and produce the right values in
+    /// Expand. A bug in `dispatch_shape` that returns a scalar element count instead
+    /// of per-axis dims will cause Slice to produce wrong values and Expand to fail
+    /// or produce an incorrectly-sized output.
+    pub fn expand_via_dynamic_shape(batch: usize, seq: usize, hidden: usize) -> Vec<u8> {
+        let nodes = vec![
+            Node::new("Shape", &["X"], &["x_shape"]),
+            // Slice the first 2 dims: [batch, seq]
+            Node::new(
+                "Slice",
+                &["x_shape", "slice_s02", "slice_e02", "slice_ax0"],
+                &["first_two"],
+            ),
+            // Concat first two dims + constant hidden → full shape
+            Node::with_attrs(
+                "Concat",
+                &["first_two", "hidden_c"],
+                &["reshape_tgt"],
+                &[("axis", AttrVal::Int(0))],
+            ),
+            // Expand X to itself (should be no-op, but exercises the shape chain)
+            Node::new("Expand", &["X", "reshape_tgt"], &["Y"]),
+        ];
+        let initializers = vec![
+            Initializer::int64_1d("slice_s02", vec![0]),
+            Initializer::int64_1d("slice_e02", vec![2]),
+            Initializer::int64_1d("slice_ax0", vec![0]),
+            Initializer::int64_1d("hidden_c", vec![hidden as i64]),
+        ];
+        build_multi_node_model(
+            &nodes,
+            &[("X", &[batch, seq, hidden])],
+            &[("Y", &[batch, seq, hidden])],
+            &initializers,
+        )
+    }
+
+    /// Build a GQA K-expand model where the Expand and Reshape targets are
+    /// computed at runtime via Shape → Slice → Concat, matching TinyLlama's
+    /// exact dynamic-shape pattern.
+    ///
+    /// Unlike `gqa_expand_attention` (which uses constant INT64 initializers
+    /// for the expand target), this model builds the expand shape at runtime:
+    ///
+    ///   K_compact [batch, n_kv_heads, seq, head_dim]
+    ///   Shape(K_compact) → k_shape INT64 [4]
+    ///   Slice(k_shape, 2:4) → seq_hdim INT64 [2] = [seq, head_dim]
+    ///   Concat([batch_c, nkv_c, group_c, seq_hdim]) → expand_shape INT64 [5]
+    ///   Unsqueeze(K_compact, [2]) → K_unsq [batch, n_kv, 1, seq, head_dim]
+    ///   Expand(K_unsq, expand_shape) → K_5d [batch, n_kv, group, seq, head_dim]
+    ///   Concat([batch_c, nheads_c, seq_hdim]) → reshape_tgt INT64 [4]
+    ///   Reshape(K_5d, reshape_tgt) → K_exp [batch, n_heads, seq, head_dim]
+    ///
+    /// A failure exposes bugs where `Shape(K_compact)` returns wrong values
+    /// (e.g. a scalar element count), causing Slice to produce garbage and
+    /// Expand to produce wrong element count — the root cause of the
+    /// TinyLlama `A=[40,4096]` shape mismatch at NodeId(336).
+    pub fn gqa_k_expand_with_dynamic_shape(
+        batch: usize,
+        n_heads: usize,
+        n_kv_heads: usize,
+        seq: usize,
+        head_dim: usize,
+    ) -> Vec<u8> {
+        let group_size = n_heads / n_kv_heads;
+        let nodes = vec![
+            // Extract [seq, head_dim] from K_compact's runtime shape.
+            Node::new("Shape", &["K_compact"], &["k_shape"]),
+            Node::new(
+                "Slice",
+                &["k_shape", "slice_s24", "slice_e24", "slice_ax0"],
+                &["seq_hdim"],
+            ),
+            // Unsqueeze K to [batch, n_kv, 1, seq, hdim] (opset 13 axes-as-tensor).
+            Node::new("Unsqueeze", &["K_compact", "unsq_ax2"], &["K_unsq"]),
+            // Build expand shape [batch, n_kv, group, seq, hdim] from runtime + constants.
+            Node::with_attrs(
+                "Concat",
+                &["batch_c", "nkv_c", "group_c", "seq_hdim"],
+                &["expand_shape"],
+                &[("axis", AttrVal::Int(0))],
+            ),
+            // Expand: [batch, n_kv, 1, seq, hdim] → [batch, n_kv, group, seq, hdim]
+            Node::new("Expand", &["K_unsq", "expand_shape"], &["K_5d"]),
+            // Build reshape shape [batch, n_heads, seq, hdim] from runtime + constants.
+            Node::with_attrs(
+                "Concat",
+                &["batch_c", "nheads_c", "seq_hdim"],
+                &["reshape_tgt"],
+                &[("axis", AttrVal::Int(0))],
+            ),
+            // Reshape: [batch, n_kv, group, seq, hdim] → [batch, n_heads, seq, hdim]
+            Node::new("Reshape", &["K_5d", "reshape_tgt"], &["K_exp"]),
+        ];
+        let initializers = vec![
+            Initializer::int64_1d("slice_s24", vec![2]),
+            Initializer::int64_1d("slice_e24", vec![4]),
+            Initializer::int64_1d("slice_ax0", vec![0]),
+            Initializer::int64_1d("unsq_ax2", vec![2]),
+            Initializer::int64_1d("batch_c", vec![batch as i64]),
+            Initializer::int64_1d("nkv_c", vec![n_kv_heads as i64]),
+            Initializer::int64_1d("group_c", vec![group_size as i64]),
+            Initializer::int64_1d("nheads_c", vec![n_heads as i64]),
+        ];
+        build_multi_node_model(
+            &nodes,
+            &[("K_compact", &[batch, n_kv_heads, seq, head_dim])],
+            &[("K_exp", &[batch, n_heads, seq, head_dim])],
+            &initializers,
+        )
+    }
+
+    /// Build an ONNX model that exercises Range with i64 scalar inputs.
+    ///
+    /// Graph: Range(i64_zero, i64_n, i64_one) → positions [n] → Cast(to=FLOAT) → output [n]
+    ///
+    /// This tests the case where the Range `limit` input is an 8-byte i64 scalar
+    /// (as emitted by the Shape op in model_causal.onnx).  Before the fix, hologram
+    /// would call cast_f32() on the i64 bytes, interpreting them as subnormals ≈0,
+    /// producing a 1-element output instead of [0.0, 1.0, ..., n-1.0].
+    ///
+    /// ORT: Range(i64) → i64 [n], Cast → f32 [0.0..n-1.0]
+    /// hologram (fixed): Range reads i64 inputs correctly → f32 [0.0..n-1.0], Cast = no-op
+    pub fn range_i64_then_cast(n: usize) -> Vec<u8> {
+        let nodes = vec![
+            Node::new("Range", &["start", "limit", "delta"], &["positions"]),
+            Node::with_attrs(
+                "Cast",
+                &["positions"],
+                &["output"],
+                &[("to", AttrVal::Int(1))], // to=FLOAT (1)
+            ),
+        ];
+        let initializers = vec![
+            Initializer::int64_scalar("start", 0),
+            Initializer::int64_scalar("limit", n as i64),
+            Initializer::int64_scalar("delta", 1),
+        ];
+        build_multi_node_model(&nodes, &[], &[("output", &[n])], &initializers)
+    }
+
+    /// Build an ONNX model that computes `LessOrEqual(row, col)` → Cast to float.
+    ///
+    /// `row` has shape `[seq, 1]` and `col` has shape `[1, seq]`, both holding
+    /// `[0.0, 1.0, …, seq-1.0]`.  The orthogonal broadcast produces `[seq, seq]`
+    /// where `entry[i,j] = if i <= j { 1.0 } else { 0.0 }` (upper-triangular mask).
+    ///
+    /// This exercises the case where `out_len = seq² > seq = max(a.len(), b.len())`.
+    /// The stale-shape guard in `binary_compare_broadcast` incorrectly treats this
+    /// as inflation and falls back to element cycling, producing a `[seq]` all-1.0
+    /// tensor instead of the correct `[seq, seq]` matrix.
+    ///
+    /// This is the exact pattern used by `model_causal.onnx` to build the causal
+    /// attention mask:
+    ///   query_pos = Unsqueeze(arange, axis=1) → [seq, 1]
+    ///   key_pos   = Unsqueeze(arange, axis=0) → [1, seq]
+    ///   mask      = LessOrEqual(query_pos, key_pos) → [seq, seq]
+    ///
+    /// Inputs: none (constants baked in as initializers).
+    /// Output: float `[seq, seq]` — upper-triangular 0/1 mask.
+    pub fn causal_mask_less_equal(seq: usize) -> Vec<u8> {
+        let row_data: Vec<f32> = (0..seq).map(|i| i as f32).collect(); // [seq, 1]
+        let col_data: Vec<f32> = (0..seq).map(|i| i as f32).collect(); // [1, seq]
+        let nodes = vec![
+            Node::new("LessOrEqual", &["row", "col"], &["mask_bool"]),
+            Node::with_attrs(
+                "Cast",
+                &["mask_bool"],
+                &["output"],
+                &[("to", AttrVal::Int(1))], // to=FLOAT (1)
+            ),
+        ];
+        let initializers = vec![
+            Initializer { name: "row", data: InitData::Float(row_data), shape: vec![seq, 1] },
+            Initializer { name: "col", data: InitData::Float(col_data), shape: vec![1, seq] },
+        ];
+        build_multi_node_model(&nodes, &[], &[("output", &[seq, seq])], &initializers)
+    }
+
+    /// Build an ONNX model that computes SwiGLU: `silu(gate) * up`.
+    ///
+    /// The equivalent ONNX graph is:
+    ///   gate → Sigmoid → sig_gate
+    ///   Mul(gate, sig_gate) → silu_gate      (= silu(gate) = gate * sigmoid(gate))
+    ///   Mul(silu_gate, up)  → output
+    ///
+    /// This is the SwiGLU FFN activation used in TinyLlama/LLaMA GGUF models.
+    /// hologram compiles this as the fused `FloatOp::FusedSwiGLU` kernel.
+    /// A mismatch here indicates either the ONNX lowering or the fused kernel is wrong.
+    ///
+    /// Inputs: gate [rows, cols], up [rows, cols]
+    /// Output: [rows, cols]
+    pub fn swiglu(rows: usize, cols: usize) -> Vec<u8> {
+        let nodes = vec![
+            // sig_gate = Sigmoid(gate)
+            Node::new("Sigmoid", &["gate"], &["sig_gate"]),
+            // silu_gate = gate * sig_gate  (= silu(gate))
+            Node::new("Mul", &["gate", "sig_gate"], &["silu_gate"]),
+            // output = silu_gate * up
+            Node::new("Mul", &["silu_gate", "up"], &["output"]),
+        ];
+        build_multi_node_model(
+            &nodes,
+            &[("gate", &[rows, cols]), ("up", &[rows, cols])],
+            &[("output", &[rows, cols])],
+            &[],
+        )
+    }
+
+    /// Build an ONNX model for GQA with flat inputs (GGUF/LLaMA format) and causal mask.
+    ///
+    /// Inputs arrive as flat `[seq, n_heads * head_dim]` rather than pre-split
+    /// `[batch, n_heads, seq, head_dim]`. This matches what the hologram GGUF
+    /// import produces: Q/K/V outputs of `Gemm(hidden, W)` → flat.
+    ///
+    /// The reference ONNX graph:
+    ///   Q flat [seq, n_q*head_dim]  → Reshape [seq, n_q, head_dim] → Transpose [n_q, seq, head_dim]
+    ///   K flat [seq, n_kv*head_dim] → Reshape [seq, n_kv, head_dim] → Transpose [n_kv, seq, head_dim]
+    ///   V flat [seq, n_kv*head_dim] → Reshape → Transpose
+    ///   For each query-head group (group_size = n_q / n_kv):
+    ///     Gather Q-slice, Gather KV slice, SDPA + causal mask
+    ///   Concat → Transpose → Reshape → output [seq, n_q*head_dim]
+    ///
+    /// Because the full gather+loop cannot be expressed in a single ONNX graph
+    /// for variable n_q, this builder targets the common single-KV-head case
+    /// (n_kv_heads=1, n_q_heads=n_heads) to keep the ONNX simple. For the
+    /// general GQA case the ONNX `gqa_expand_attention` builder handles it with
+    /// compact-input format. This test validates the flat input path specifically.
+    ///
+    /// For n_kv_heads=1 (all queries share a single KV head):
+    ///   K is repeated to [n_heads, seq, head_dim] via Expand after Transpose.
+    ///
+    /// Inputs: Q [seq, n_q*head_dim], K [seq, head_dim], V [seq, head_dim]
+    /// Output: [seq, n_q*head_dim]
+    pub fn gqa_flat_single_kv(n_q_heads: usize, seq: usize, head_dim: usize) -> Vec<u8> {
+        let scale = 1.0_f32 / (head_dim as f32).sqrt();
+        // K/V come as [seq, head_dim] (single KV head, flat) — same as Q per head.
+        // Q comes as [seq, n_q*head_dim] — all Q heads concatenated.
+        //
+        // Step 1: Reshape Q → [seq, n_q, head_dim], Transpose → [n_q, seq, head_dim]
+        // Step 2: Reshape K → [1, seq, head_dim], Expand → [n_q, seq, head_dim]
+        // Step 3: QK^T → scale → + causal_mask → Softmax → V → Transpose → Reshape
+        let q_shape: Vec<i64> = vec![seq as i64, n_q_heads as i64, head_dim as i64];
+        let q_t_shape: Vec<i64> = vec![n_q_heads as i64, seq as i64, head_dim as i64];
+        let k_shape_1: Vec<i64> = vec![1, seq as i64, head_dim as i64];
+        let out_flat_shape: Vec<i64> = vec![seq as i64, (n_q_heads * head_dim) as i64];
+
+        // Build lower-triangular causal mask for [seq, seq]: 0 on/below diagonal, -inf above.
+        let causal_data: Vec<f32> = (0..seq)
+            .flat_map(|i| {
+                (0..seq).map(move |j| if j > i { f32::NEG_INFINITY } else { 0.0_f32 })
+            })
+            .collect();
+
+        let nodes = vec![
+            // Q: [seq, n_q*head_dim] → [seq, n_q, head_dim] → [n_q, seq, head_dim]
+            Node::new("Reshape", &["Q_flat", "q_shape"], &["Q_3d"]),
+            Node::with_attrs(
+                "Transpose",
+                &["Q_3d"],
+                &["Q_t"],
+                &[("perm", AttrVal::Ints(vec![1, 0, 2]))],
+            ),
+            // K: [seq, head_dim] → [1, seq, head_dim] → [n_q, seq, head_dim]
+            Node::new("Reshape", &["K_flat", "k_shape_1"], &["K_1sq"]),
+            Node::new("Expand", &["K_1sq", "q_t_shape"], &["K_exp"]),
+            // K^T for QK matmul: [n_q, seq, head_dim] → [n_q, head_dim, seq]
+            Node::with_attrs(
+                "Transpose",
+                &["K_exp"],
+                &["K_T"],
+                &[("perm", AttrVal::Ints(vec![0, 2, 1]))],
+            ),
+            // V: [seq, head_dim] → [1, seq, head_dim] → [n_q, seq, head_dim]
+            Node::new("Reshape", &["V_flat", "k_shape_1_v"], &["V_1sq"]),
+            Node::new("Expand", &["V_1sq", "q_t_shape_v"], &["V_exp"]),
+            // QK^T: [n_q, seq, seq]
+            Node::new("MatMul", &["Q_t", "K_T"], &["QK"]),
+            // Scale
+            Node::new("Mul", &["QK", "scale"], &["QK_s"]),
+            // Causal mask: add lower-triangular 0/-inf mask
+            Node::new("Add", &["QK_s", "causal_mask"], &["QK_masked"]),
+            // Softmax over last axis
+            Node::with_attrs(
+                "Softmax",
+                &["QK_masked"],
+                &["scores"],
+                &[("axis", AttrVal::Int(-1))],
+            ),
+            // scores @ V: [n_q, seq, seq] × [n_q, seq, head_dim] → [n_q, seq, head_dim]
+            Node::new("MatMul", &["scores", "V_exp"], &["AttnOut_t"]),
+            // Transpose back: [n_q, seq, head_dim] → [seq, n_q, head_dim]
+            Node::with_attrs(
+                "Transpose",
+                &["AttnOut_t"],
+                &["AttnOut_3d"],
+                &[("perm", AttrVal::Ints(vec![1, 0, 2]))],
+            ),
+            // Reshape → [seq, n_q*head_dim]
+            Node::new("Reshape", &["AttnOut_3d", "out_flat_shape"], &["output"]),
+        ];
+
+        let initializers = vec![
+            Initializer::int64_1d("q_shape", q_shape),
+            Initializer::int64_1d("q_t_shape", q_t_shape.clone()),
+            Initializer::int64_1d("q_t_shape_v", q_t_shape),
+            Initializer::int64_1d("k_shape_1", k_shape_1.clone()),
+            Initializer::int64_1d("k_shape_1_v", k_shape_1),
+            Initializer::int64_1d("out_flat_shape", out_flat_shape),
+            Initializer::scalar("scale", scale),
+            Initializer {
+                name: "causal_mask",
+                data: InitData::Float(causal_data),
+                shape: vec![seq, seq],
+            },
+        ];
+
+        build_multi_node_model(
+            &nodes,
+            &[
+                ("Q_flat", &[seq, n_q_heads * head_dim]),
+                ("K_flat", &[seq, head_dim]),
+                ("V_flat", &[seq, head_dim]),
+            ],
+            &[("output", &[seq, n_q_heads * head_dim])],
+            &initializers,
+        )
+    }
+
     // ── Protobuf encoding helpers ───────────────────────────────────────────
 
     pub enum AttrVal {
@@ -297,15 +1092,31 @@ pub mod onnx_builder {
         }
     }
 
+    pub enum InitData {
+        Float(Vec<f32>),
+        Int64(Vec<i64>),
+    }
+
     pub struct Initializer {
         pub name: &'static str,
-        pub data: Vec<f32>,
+        pub data: InitData,
         pub shape: Vec<usize>,
     }
 
     impl Initializer {
         pub fn scalar(name: &'static str, val: f32) -> Self {
-            Self { name, data: vec![val], shape: vec![] }
+            Self { name, data: InitData::Float(vec![val]), shape: vec![] }
+        }
+
+        /// 1-D INT64 initializer — used for shape inputs (e.g. Expand's `shape` argument).
+        pub fn int64_1d(name: &'static str, vals: Vec<i64>) -> Self {
+            let n = vals.len();
+            Self { name, data: InitData::Int64(vals), shape: vec![n] }
+        }
+
+        /// Scalar (rank-0) INT64 initializer — used for Range start/limit/delta.
+        pub fn int64_scalar(name: &'static str, val: i64) -> Self {
+            Self { name, data: InitData::Int64(vec![val]), shape: vec![] }
         }
     }
 
@@ -492,18 +1303,57 @@ pub mod onnx_builder {
         for &d in &init.shape {
             write_varint_field(&mut tp, 1, d as u64);
         }
-        // field 2: data_type = FLOAT (1)
-        write_varint_field(&mut tp, 2, 1);
-        // field 4: float_data (repeated float, packed)
-        // For small tensors, use field 4 (float_data) with packed encoding
-        let mut float_bytes = Vec::new();
-        for &v in &init.data {
-            float_bytes.extend_from_slice(&v.to_le_bytes());
+        match &init.data {
+            InitData::Float(data) => {
+                // field 2: data_type = FLOAT (1)
+                write_varint_field(&mut tp, 2, 1);
+                // field 4: float_data (raw bytes, little-endian)
+                let mut float_bytes = Vec::with_capacity(data.len() * 4);
+                for &v in data {
+                    float_bytes.extend_from_slice(&v.to_le_bytes());
+                }
+                write_field(&mut tp, 4, &float_bytes);
+            }
+            InitData::Int64(data) => {
+                // field 2: data_type = INT64 (7)
+                write_varint_field(&mut tp, 2, 7);
+                // field 7: int64_data (repeated int64 varints)
+                for &v in data {
+                    write_varint_field(&mut tp, 7, v as u64);
+                }
+            }
         }
-        write_field(&mut tp, 4, &float_bytes);
         // field 8: name
         write_string(&mut tp, 8, init.name);
         tp
+    }
+
+    /// Like `encode_value_info` but accepts `None` for fully-dynamic dimensions.
+    ///
+    /// A `None` dim is encoded as an **empty** TensorShapeProto.Dimension message
+    /// (no fields written).  prost decodes `value = None` → `Dim::Dynamic` in
+    /// hologram-ai's ONNX importer, which DataPropagation cannot concretize.
+    /// This ensures `FloatOp::Shape` nodes survive to runtime so start/end
+    /// slicing is exercised.
+    fn encode_value_info_dyn(name: &str, shape: &[Option<usize>]) -> Vec<u8> {
+        let mut vi = Vec::new();
+        write_string(&mut vi, 1, name);
+        let mut type_proto = Vec::new();
+        let mut tensor_type = Vec::new();
+        write_varint_field(&mut tensor_type, 1, 1); // elem_type = FLOAT (1)
+        let mut shape_proto = Vec::new();
+        for &dim in shape {
+            let mut dim_proto = Vec::new();
+            match dim {
+                Some(v) => write_varint_field(&mut dim_proto, 1, v as u64), // dim_value
+                None => {}  // empty → prost value=None → Dim::Dynamic (not folded)
+            }
+            write_field(&mut shape_proto, 1, &dim_proto);
+        }
+        write_field(&mut tensor_type, 2, &shape_proto);
+        write_field(&mut type_proto, 1, &tensor_type);
+        write_field(&mut vi, 2, &type_proto);
+        vi
     }
 
     fn encode_value_info(name: &str, shape: &[usize]) -> Vec<u8> {

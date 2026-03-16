@@ -1,0 +1,7 @@
+# Workspace-level Cargo configuration.
+
+[env]
+# Use the system-installed ONNX Runtime for conformance tests.
+# Prevents ORT from downloading a copy on every `cargo test`.
+# Requires ORT to be installed (e.g. via Homebrew: brew install onnxruntime).
+ORT_STRATEGY = "system"
