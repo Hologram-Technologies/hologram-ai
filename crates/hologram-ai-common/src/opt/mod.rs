@@ -8,6 +8,7 @@ pub mod decompose;
 pub mod kv_slot_injection;
 pub mod oracle;
 pub mod pipeline;
+pub mod position_ids_injection;
 pub mod rmsnorm_fusion;
 pub mod shape_consistency;
 pub mod shape_heal;

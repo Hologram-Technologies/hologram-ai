@@ -23,6 +23,7 @@ impl OptPipeline {
             const_eval::ConstantEvaluation, constant_fold::ConstantFolding,
             data_prop::DataPropagation, dead_node::DeadNodeElimination,
             decompose::OpDecomposition, kv_slot_injection::KvSlotInjection,
+            position_ids_injection::PositionIdsInjection,
             rmsnorm_fusion::RmsNormFusion, shape_prop::ShapePropagation,
         };
         Self::new(vec![
@@ -41,6 +42,10 @@ impl OptPipeline {
             // scalar epsilon and exponent params are already materialized as
             // AiParam::Inline (otherwise scalar_f32_param returns None).
             Box::new(RmsNormFusion),
+            // Replace Range(0, seq, 1) position generators with a position_ids
+            // input. Enables KV cache decode at seq=1 by passing the correct
+            // absolute position from the generation loop.
+            Box::new(PositionIdsInjection),
             Box::new(AttentionFusion),
             Box::new(KvSlotInjection),
             // Decompose compound ops (ReduceL1/L2, DepthToSpace, SpaceToDepth)

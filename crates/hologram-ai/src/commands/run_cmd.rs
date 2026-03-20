@@ -221,6 +221,14 @@ fn run_generation(
         .map(|i| i as u32);
     let mask_dtype = mask_slot.map(|_| resolve_input_dtype(plan, "attention_mask"));
 
+    // position_ids: injected by PositionIdsInjection pass for KV cache decode.
+    let pos_slot = plan
+        .graph()
+        .input_names
+        .iter()
+        .position(|n| n == "position_ids")
+        .map(|i| i as u32);
+
     let vocab_size = encoder.vocab_size();
     let bytes_per_pos = vocab_size * 4;
     let start = std::time::Instant::now();
@@ -260,6 +268,31 @@ fn run_generation(
                 serialize_ones(padded_len, mask_dtype_val)
             };
             inputs.set_with_shape(slot, mask_bytes, vec![1, padded_len]);
+        }
+
+        // position_ids: absolute positions for each token in the input.
+        // For prefill: [0, 1, 2, ..., actual_len-1, 0, 0, ..., 0] (padded)
+        // For KV cache decode: [kv_write_pos] (single token at absolute position)
+        if let Some(slot) = pos_slot {
+            let pos_offset = if use_kv_cache && step > 0 {
+                kv_state.as_ref().map(|kv| kv.write_pos()).unwrap_or(0)
+            } else {
+                0
+            };
+            let position_ids: Vec<i64> = (0..padded_len as i64)
+                .map(|i| {
+                    if (i as usize) < actual_len {
+                        pos_offset as i64 + i
+                    } else {
+                        0 // padding positions
+                    }
+                })
+                .collect();
+            let pos_bytes: Vec<u8> = position_ids
+                .iter()
+                .flat_map(|&v| v.to_le_bytes())
+                .collect();
+            inputs.set_with_shape(slot, pos_bytes, vec![1, padded_len]);
         }
 
         // Execute: use KV cache if available, otherwise standard shape-aware.
