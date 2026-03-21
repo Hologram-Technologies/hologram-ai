@@ -57,7 +57,10 @@ zero runtime code. All kernels belong in hologram base crate.
 ## Medium Term: Multi-model support
 
 ### Any ONNX model
-- [ ] Test with ResNet-50 (vision, no attention)
+- [x] Test with ResNet-50 (vision, no attention) — **compilation works** (225 nodes
+  after BatchNorm decomposition + constant folding). Conv2d conformance tests pass
+  (single Conv2d, stride variants). Execution blocked on naive Conv2d being too slow
+  at full 224×224 resolution for practical e2e testing.
 - [ ] Test with BERT (encoder-only, bidirectional attention)
 - [ ] Test with Stable Diffusion UNet (vision + attention + cross-attention)
 - [ ] Test with Whisper (encoder-decoder, audio)
@@ -104,6 +107,17 @@ zero runtime code. All kernels belong in hologram base crate.
 - [x] `SeqMode::FixedPad` only (removed `Variable` variant)
 - [x] `HoloRunner::execute` uses `execute_plan` (no shape walker)
 - [x] Post-concretization cleanup uses `Concrete(1)` not `Concrete(0)`
+
+### ResNet-50 / multi-model support
+- [x] `OpDecomposition` pass: BatchNorm inference decomposition
+  (`scale/sqrt(var+eps)`, bias correction, NCHW broadcast via Unsqueeze)
+- [x] ResNet-50 compiles: 582 → 225 nodes after BatchNorm decomposition +
+  constant folding, 0 warnings
+- [x] Conv2d conformance tests (ORT vs hologram): single Conv2d, stride=2,
+  padding variants — all pass
+- [x] Mini vision classifier conformance test (Conv+Relu+GlobalAvgPool+Flatten+Gemm)
+- [x] `onnx_builder::conv2d()` and `mini_vision_classifier()` test builders
+- [x] `position_ids` injection pass for KV cache decode
 
 ### Root causes found and fixed
 - [x] **Shape bug**: seq-like dims set to 0-sentinel → RoPE slices produce `[32,1]`

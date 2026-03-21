@@ -1520,6 +1520,137 @@ pub mod onnx_builder {
         )
     }
 
+    // ── Vision op builders ──────────────────────────────────────────────────
+
+    /// Build a Conv ONNX model with initializer weights.
+    /// Graph: input "X" [n, ic, h, w] + initializer "W" [oc, ic, kh, kw] → Conv → "Y"
+    #[allow(clippy::too_many_arguments)]
+    pub fn conv2d(
+        n: usize, ic: usize, h: usize, w: usize,
+        oc: usize, kh: usize, kw: usize,
+        stride: usize, pad: usize,
+    ) -> Vec<u8> {
+        let h_out = (h + 2 * pad - kh) / stride + 1;
+        let w_out = (w + 2 * pad - kw) / stride + 1;
+        let weight_len = oc * ic * kh * kw;
+        let weight_data: Vec<f32> = (0..weight_len)
+            .map(|i| ((i as f32) * 0.01).sin())
+            .collect();
+        let nodes = vec![
+            Node::with_attrs(
+                "Conv",
+                &["X", "W"],
+                &["Y"],
+                &[
+                    ("kernel_shape", AttrVal::Ints(vec![kh as i64, kw as i64])),
+                    ("strides", AttrVal::Ints(vec![stride as i64, stride as i64])),
+                    ("pads", AttrVal::Ints(vec![pad as i64, pad as i64, pad as i64, pad as i64])),
+                ],
+            ),
+        ];
+        let initializers = vec![
+            Initializer::float_nd("W", weight_data, vec![oc, ic, kh, kw]),
+        ];
+        build_multi_node_model(
+            &nodes,
+            &[("X", &[n, ic, h, w])],
+            &[("Y", &[n, oc, h_out, w_out])],
+            &initializers,
+        )
+    }
+
+    /// Build a Conv+Relu+GlobalAveragePool model (no FC layer).
+    pub fn conv_relu_gap(ic: usize, h: usize, w: usize, oc: usize) -> Vec<u8> {
+        let kh = 3;
+        let kw = 3;
+        let weight_len = oc * ic * kh * kw;
+        let weight_data: Vec<f32> = (0..weight_len)
+            .map(|i| ((i as f32) * 0.01).sin())
+            .collect();
+        let nodes = vec![
+            Node::with_attrs(
+                "Conv",
+                &["X", "conv_W"],
+                &["conv_out"],
+                &[("kernel_shape", AttrVal::Ints(vec![kh as i64, kw as i64]))],
+            ),
+            Node::new("Relu", &["conv_out"], &["relu_out"]),
+            Node::new("GlobalAveragePool", &["relu_out"], &["Y"]),
+        ];
+        let initializers = vec![
+            Initializer::float_nd("conv_W", weight_data, vec![oc, ic, kh, kw]),
+        ];
+        build_multi_node_model(
+            &nodes,
+            &[("X", &[1, ic, h, w])],
+            &[("Y", &[1, oc, 1, 1])],
+            &initializers,
+        )
+    }
+
+    /// Build a Conv+Relu+GlobalAveragePool+Flatten+Gemm (mini classifier) model.
+    /// This exercises the full ResNet-style pipeline at tiny scale.
+    pub fn mini_vision_classifier(
+        ic: usize, h: usize, w: usize, oc: usize, num_classes: usize,
+    ) -> Vec<u8> {
+        let kh = 3;
+        let kw = 3;
+        let conv_weight_len = oc * ic * kh * kw;
+        let conv_weight: Vec<f32> = (0..conv_weight_len)
+            .map(|i| ((i as f32) * 0.01).sin())
+            .collect();
+        // Gemm weight: [num_classes, oc] and bias: [num_classes]
+        let gemm_weight: Vec<f32> = (0..num_classes * oc)
+            .map(|i| ((i as f32) * 0.005).cos())
+            .collect();
+        let gemm_bias: Vec<f32> = (0..num_classes)
+            .map(|i| (i as f32) * 0.01)
+            .collect();
+
+        let h_out = h - kh + 1; // no padding
+        let w_out = w - kw + 1;
+        // GlobalAveragePool: [1, oc, h_out, w_out] → [1, oc, 1, 1]
+
+        let nodes = vec![
+            Node::with_attrs(
+                "Conv",
+                &["X", "conv_W"],
+                &["conv_out"],
+                &[
+                    ("kernel_shape", AttrVal::Ints(vec![kh as i64, kw as i64])),
+                ],
+            ),
+            Node::new("Relu", &["conv_out"], &["relu_out"]),
+            Node::new("GlobalAveragePool", &["relu_out"], &["pool_out"]),
+            Node::with_attrs(
+                "Flatten",
+                &["pool_out"],
+                &["flat_out"],
+                &[("axis", AttrVal::Int(1))],
+            ),
+            Node::with_attrs(
+                "Gemm",
+                &["flat_out", "gemm_W", "gemm_B"],
+                &["Y"],
+                &[("transB", AttrVal::Int(1))],
+            ),
+        ];
+        let initializers = vec![
+            Initializer::float_nd("conv_W", conv_weight, vec![oc, ic, kh, kw]),
+            Initializer::float_nd("gemm_W", gemm_weight, vec![num_classes, oc]),
+            Initializer::float_nd("gemm_B", gemm_bias, vec![num_classes]),
+        ];
+        // Note: output shape for ORT doesn't need to be exact — ORT infers it.
+        // We provide a best-effort shape for the value_info.
+        let _ = (h_out, w_out); // used for documentation only
+        build_multi_node_model(
+            &nodes,
+            &[("X", &[1, ic, h, w])],
+            &[("Y", &[1, num_classes])],
+            &initializers,
+        )
+    }
+
     // ── Protobuf encoding helpers ───────────────────────────────────────────
 
     pub enum AttrVal {
@@ -1585,6 +1716,11 @@ pub mod onnx_builder {
         /// Scalar (rank-0) INT64 initializer — used for Range start/limit/delta.
         pub fn int64_scalar(name: &'static str, val: i64) -> Self {
             Self { name, data: InitData::Int64(vec![val]), shape: vec![] }
+        }
+
+        /// N-D float initializer — used for Conv2d weights, biases, etc.
+        pub fn float_nd(name: &'static str, data: Vec<f32>, shape: Vec<usize>) -> Self {
+            Self { name, data: InitData::Float(data), shape }
         }
     }
 

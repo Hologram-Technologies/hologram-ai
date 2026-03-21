@@ -199,6 +199,7 @@ struct SdpaChain {
     /// Whether a mask (Add) was detected.
     has_mask: bool,
     /// Mask tensor ID (the additive mask input to the Add node), if present.
+    #[allow(dead_code)]
     mask_tid: Option<TensorId>,
     /// Output tensor of the final MatMul (attention @ V).
     output_tid: TensorId,
@@ -258,18 +259,15 @@ fn match_sdpa_chain(
     let mut mask_tid: Option<TensorId> = None;
     if let Some(next) = find_consumer_by_op(current_tid, consumers, graph, |op| matches!(op, AiOp::Add)) {
         let n = &graph.nodes[next];
-        if matches!(n.op, AiOp::Add) && n.inputs.len() >= 2 {
-            if n.inputs[0] == current_tid || n.inputs[1] == current_tid {
-                has_mask = true;
-                // Identify the mask tensor (the Add input that isn't the scores).
-                mask_tid = if n.inputs[0] == current_tid {
-                    Some(n.inputs[1])
-                } else {
-                    Some(n.inputs[0])
-                };
-                chain_indices.push(next);
-                current_tid = *n.outputs.first()?;
-            }
+        if n.inputs.len() >= 2 && (n.inputs[0] == current_tid || n.inputs[1] == current_tid) {
+            has_mask = true;
+            mask_tid = if n.inputs[0] == current_tid {
+                Some(n.inputs[1])
+            } else {
+                Some(n.inputs[0])
+            };
+            chain_indices.push(next);
+            current_tid = *n.outputs.first()?;
         }
     }
 

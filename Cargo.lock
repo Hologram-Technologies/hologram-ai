@@ -842,6 +842,7 @@ dependencies = [
  "hologram-graph",
  "rayon",
  "rkyv",
+ "smallvec",
 ]
 
 [[package]]

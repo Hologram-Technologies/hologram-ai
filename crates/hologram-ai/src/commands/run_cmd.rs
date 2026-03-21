@@ -313,10 +313,13 @@ fn run_generation(
                     n_layers, n_kv_heads, head_dim, max_seq,
                 ));
             }
-            runner.execute_with_kv(
-                &inputs,
-                kv_state.as_mut().expect("kv_state initialized above"),
-            )?
+            let kv = kv_state.as_mut().expect("kv_state initialized above");
+            // For padded prefill (step 0), only advance KV cache by actual
+            // prompt length — padding positions are meaningless for K/V.
+            if step == 0 && padded_len > actual_len {
+                kv.set_advance_override(actual_len);
+            }
+            runner.execute_with_kv(&inputs, kv)?
         } else {
             runner.execute(&inputs)?
         };

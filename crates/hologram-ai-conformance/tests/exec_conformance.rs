@@ -45,9 +45,12 @@ fn compile_and_execute(
     let plan = hologram::load_from_bytes(&archive.bytes).expect("loading archive");
     let outputs = hologram::execute_plan(&plan, &graph_inputs).expect("execution failed");
 
-    // Extract first output as f32.
+    // Extract first output as f32 (safe — no alignment requirement).
     let (_, out_bytes) = outputs.get(0).expect("no outputs");
-    bytemuck::cast_slice::<u8, f32>(out_bytes).to_vec()
+    out_bytes
+        .chunks_exact(4)
+        .map(|c| f32::from_le_bytes(c.try_into().expect("chunk is 4 bytes")))
+        .collect()
 }
 
 /// Test: debug map is populated for a compiled model.
@@ -2482,3 +2485,134 @@ fn swiglu_fused_kernel_matches_decomposed() {
     );
 }
 
+// ── Vision / Conv2d conformance ─────────────────────────────────────────────
+
+/// Test: single Conv2d node matches ORT.
+#[test]
+fn conv2d_matches_ort() {
+    let (n, ic, h, w) = (1, 3, 8, 8);
+    let (oc, kh, kw) = (4, 3, 3);
+    let (stride, pad) = (1, 1);
+    let model_bytes = onnx_builder::conv2d(n, ic, h, w, oc, kh, kw, stride, pad);
+
+    let input_data: Vec<f32> = (0..n * ic * h * w)
+        .map(|i| ((i as f32) * 0.02).sin())
+        .collect();
+
+    let ort_outputs = run_onnx_all_outputs(
+        &model_bytes,
+        vec![OrtInput { name: "X".into(), shape: vec![n, ic, h, w], data: input_data.clone() }],
+    )
+    .expect("ORT failed");
+
+    let holo_out = compile_and_execute(
+        &model_bytes,
+        &[("X", vec![n, ic, h, w], input_data)],
+    );
+
+    let tol = Tolerance { atol: 1e-4, rtol: 1e-3 };
+    let cmp = hologram_ai_conformance::tolerance::compare_outputs(
+        &holo_out, &ort_outputs[0].data, tol,
+    );
+    assert!(cmp.passed, "Conv2d mismatch: {}", cmp.message);
+}
+
+/// Test: Conv2d with stride=2 and no padding matches ORT.
+#[test]
+fn conv2d_stride2_matches_ort() {
+    let (n, ic, h, w) = (1, 3, 8, 8);
+    let (oc, kh, kw) = (8, 3, 3);
+    let (stride, pad) = (2, 0);
+    let model_bytes = onnx_builder::conv2d(n, ic, h, w, oc, kh, kw, stride, pad);
+
+    let input_data: Vec<f32> = (0..n * ic * h * w)
+        .map(|i| ((i as f32) * 0.03).cos())
+        .collect();
+
+    let ort_outputs = run_onnx_all_outputs(
+        &model_bytes,
+        vec![OrtInput { name: "X".into(), shape: vec![n, ic, h, w], data: input_data.clone() }],
+    )
+    .expect("ORT failed");
+
+    let holo_out = compile_and_execute(
+        &model_bytes,
+        &[("X", vec![n, ic, h, w], input_data)],
+    );
+
+    let tol = Tolerance { atol: 1e-4, rtol: 1e-3 };
+    let cmp = hologram_ai_conformance::tolerance::compare_outputs(
+        &holo_out, &ort_outputs[0].data, tol,
+    );
+    assert!(cmp.passed, "Conv2d stride=2 mismatch: {}", cmp.message);
+}
+
+/// Test: Conv+Relu+GlobalAvgPool matches ORT (no FC layer).
+#[test]
+fn conv_relu_gap_matches_ort() {
+    let (ic, h, w) = (3, 8, 8);
+    let oc = 4;
+    let model_bytes = onnx_builder::conv_relu_gap(ic, h, w, oc);
+
+    let input_data: Vec<f32> = (0..1 * ic * h * w)
+        .map(|i| ((i as f32) * 0.01).sin())
+        .collect();
+
+    let ort_outputs = run_onnx_all_outputs(
+        &model_bytes,
+        vec![OrtInput { name: "X".into(), shape: vec![1, ic, h, w], data: input_data.clone() }],
+    )
+    .expect("ORT failed");
+
+    let holo_out = compile_and_execute(
+        &model_bytes,
+        &[("X", vec![1, ic, h, w], input_data)],
+    );
+
+    assert!(
+        !holo_out.is_empty(),
+        "Conv+Relu+GAP produced empty output (ORT got {} floats)",
+        ort_outputs[0].data.len()
+    );
+
+    let tol = Tolerance { atol: 1e-4, rtol: 1e-3 };
+    let cmp = hologram_ai_conformance::tolerance::compare_outputs(
+        &holo_out, &ort_outputs[0].data, tol,
+    );
+    assert!(cmp.passed, "Conv+Relu+GAP mismatch: {}", cmp.message);
+}
+
+/// Test: mini vision classifier (Conv+Relu+GlobalAvgPool+Flatten+Gemm) matches ORT.
+#[test]
+fn mini_vision_classifier_matches_ort() {
+    let (ic, h, w) = (3, 8, 8);
+    let oc = 4;
+    let num_classes = 5;
+    let model_bytes = onnx_builder::mini_vision_classifier(ic, h, w, oc, num_classes);
+
+    let input_data: Vec<f32> = (0..1 * ic * h * w)
+        .map(|i| ((i as f32) * 0.01).sin())
+        .collect();
+
+    let ort_outputs = run_onnx_all_outputs(
+        &model_bytes,
+        vec![OrtInput { name: "X".into(), shape: vec![1, ic, h, w], data: input_data.clone() }],
+    )
+    .expect("ORT failed");
+
+    let holo_out = compile_and_execute(
+        &model_bytes,
+        &[("X", vec![1, ic, h, w], input_data)],
+    );
+
+    assert!(
+        !holo_out.is_empty(),
+        "hologram produced empty output for mini vision classifier"
+    );
+
+    let tol = Tolerance { atol: 1e-3, rtol: 1e-2 };
+    let cmp = hologram_ai_conformance::tolerance::compare_outputs(
+        &holo_out, &ort_outputs[0].data, tol,
+    );
+    assert!(cmp.passed, "Mini vision classifier mismatch: {}", cmp.message);
+}

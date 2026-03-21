@@ -91,21 +91,18 @@ impl Pass for PositionIdsInjection {
             // Create the position_ids input tensor info.
             // Same shape as the Range output (1D: [seq_len]).
             let pos_tid = next_tid; // Reuse same tid for all Range replacements
-            if !graph.tensor_info.contains_key(&pos_tid) {
-                graph.tensor_info.insert(
-                    pos_tid,
-                    TensorInfo {
-                        logical_dtype: DType::INT64,
-                        storage_dtype: DType::INT64,
-                        shape: range_shape.clone(),
-                        quant: QuantDescriptor::none(),
-                        known_i64_values: None, // Runtime-provided, not constant
-                    },
-                );
+            graph.tensor_info.entry(pos_tid).or_insert_with(|| {
                 graph.tensor_names.insert(pos_tid, "position_ids".into());
                 graph.inputs.push(pos_tid);
                 graph.input_names.push("position_ids".into());
-            }
+                TensorInfo {
+                    logical_dtype: DType::INT64,
+                    storage_dtype: DType::INT64,
+                    shape: range_shape.clone(),
+                    quant: QuantDescriptor::none(),
+                    known_i64_values: None, // Runtime-provided, not constant
+                }
+            });
 
             // Replace the Range node with Identity(position_ids).
             let node = &mut graph.nodes[idx];
@@ -133,16 +130,14 @@ fn get_i64_param(tid: u32, graph: &AiGraph) -> Option<i64> {
         }
     }
     // Check inline param data.
-    if let Some(param) = graph.params.get(&tid) {
-        if let AiParam::Inline { data, info } = param {
-            if info.logical_dtype == DType::INT64 && data.len() == 8 {
-                return Some(i64::from_le_bytes(data[..8].try_into().ok()?));
-            }
-            // Also handle f32 scalars (common for Range start/step).
-            if info.logical_dtype == DType::F32 && data.len() == 4 {
-                let f = f32::from_le_bytes(data[..4].try_into().ok()?);
-                return Some(f as i64);
-            }
+    if let Some(AiParam::Inline { data, info }) = graph.params.get(&tid) {
+        if info.logical_dtype == DType::INT64 && data.len() == 8 {
+            return Some(i64::from_le_bytes(data[..8].try_into().ok()?));
+        }
+        // Also handle f32 scalars (common for Range start/step).
+        if info.logical_dtype == DType::F32 && data.len() == 4 {
+            let f = f32::from_le_bytes(data[..4].try_into().ok()?);
+            return Some(f as i64);
         }
     }
     None
