@@ -32,43 +32,63 @@ zero runtime code. All kernels belong in hologram base crate.
 
 ## Active: Performance (make it fast)
 
-### P1: Variable-length prefill (IN PROGRESS)
-- [ ] Wire `ShapeContextGraph` into `HoloRunner.execute()` — project shapes
-  at runtime from actual input dimensions instead of compiled seq_len
-- [ ] Add `SeqMode::Variable` — no padding, process actual prompt length
-- [ ] Expected: prefill ~13s → ~40ms for 6-token prompt (~340x speedup)
+### P1: Prefill speed (DONE — via --seq-len)
+- [x] Compile with `--seq-len 32` for short prompts — prefill 15s → **170ms**
+  (89x speedup). Variable-length prefill deferred to P4.
+- [x] Verified: TinyLlama ONNX pipeline, 29.9 tok/s
+- Note: chat models require the user to supply the full chat template in
+  `--prompt` (e.g. `<|user|>\nTell me a joke</s>\n<|assistant|>` for
+  TinyLlama-Chat). The CLI does not apply templates automatically.
 
 ### P2: Decode speed — wire Sprint 13 infrastructure (IN PROGRESS)
 
-#### P2a: Execution hot-path fast paths (hologram base, no cross-repo dep)
-- [ ] SameAs(0) fast path in `propagate_level_shapes` — skip full shape
+#### P2a: Execution hot-path fast paths (DONE — hologram base)
+- [x] SameAs(0) fast path in `propagate_level_shapes` — skip full shape
   resolution for elementwise ops (~60-70% of nodes, just copy input[0] shape)
-- [ ] Skip `input_shapes` gathering in `dispatch_level` for unary ops and
+- [x] Skip `input_shapes` gathering in `dispatch_level` for unary ops and
   non-broadcasting binary ops (eliminate per-input HashMap lookups)
 
-#### P2b: Tape executor (hologram base)
-- [ ] `TapeBuilder` — pre-resolve kernel fn pointers + `output_elem_size`
-  per node at graph-load time (eliminates per-dispatch op match + HashMap
+#### P2b: Tape executor (DONE — hologram base)
+- [x] `TapeBuilder` — pre-resolve kernel fn pointers + `output_elem_size`
+  per node at graph-load time, with dynamic size resolution for Softmax,
+  RmsNorm, LayerNorm, Reduce* (eliminates per-dispatch op match + HashMap
   lookups for `compiled_dtypes`)
-- [ ] Wire tape executor into hologram public API (`build_tape_from_plan`,
-  `execute_tape`, `execute_tape_with_kv_state`)
+- [x] `BoxedTape` execution loop with prefetch + pre-computed elem_size
+- [x] Wire tape executor into hologram public API (`build_tape_from_plan`,
+  `execute_tape`)
 
-#### P2c: Integration (hologram-ai + hologram base)
-- [ ] Wire tape executor from `HoloRunner` — build tape at load time, use
+#### P2c: Integration (DONE — hologram-ai)
+- [x] Wire tape executor from `HoloRunner` — build tape at load time, use
   for inference with fallback to `execute_plan`
-- [ ] Wire `WeightCache` into tape executor — cache deserialized quantized
-  weights across dispatches (currently ~5-10x overhead)
-- [ ] Wire `dispatch_float_into` — buffer reuse, eliminate per-op allocation
 
-- [ ] Expected: decode 0.7s/token → <0.1s/token
+#### P2d: Remaining decode optimizations
+- [ ] Wire `dispatch_float_into` — buffer reuse, eliminate ~1000 per-op
+  allocations per decode token
+- [ ] Wire `WeightCache` into tape executor — cache deserialized quantized
+  weights across dispatches (currently ~5-10x overhead for GGUF)
+- [ ] Level-aware tape execution for KV cache decode path — split tape
+  around KvWrite/KvRead ops per level
+- Note: f32 ONNX decode at 13.6 tok/s is near memory bandwidth ceiling
+  (4.1 GB weights × ~60 GB/s DDR ≈ 15 tok/s theoretical max). Further
+  speedup requires weight quantization — see GGUF models section.
 
 ### P3: Compilation speed (Plan 017)
+
 - [ ] Release profile with LTO (`codegen-units = 1, lto = "thin"`)
 - [ ] Early convergence detection in fixpoint loop (break when dynamic dims
   stop decreasing, saves up to 9 pass invocations)
 - [ ] Avoid double LLM compilation (clone AiGraph after MVP, concretize
   twice instead of re-importing from disk)
 - [ ] Cache `topo_order` on AiGraph (called ~40 times per compilation)
+
+### P4: Variable-length prefill (deferred from P1)
+- [ ] Wire `ShapeContextGraph` into `HoloRunner.execute()` — project shapes
+  at runtime from actual input dimensions instead of compiled seq_len
+- [ ] Add `SeqMode::Variable` — no padding, process actual prompt length
+- [ ] Requires hologram executor to resolve baked FloatOp params (m/k/n in
+  MatMul, size in Softmax) from runtime buffer sizes when they differ
+  from compiled values
+- [ ] Expected: any prompt length without recompilation
 
 ---
 
