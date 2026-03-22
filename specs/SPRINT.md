@@ -153,10 +153,13 @@ zero runtime code. All kernels belong in hologram base crate.
 - [x] Online softmax benchmarked: row-based 2-4x faster standalone; online
   softmax's real win is in fused attention (avoids scores matrix). Current
   split (online in fused attention, row-based standalone) is optimal.
-- [ ] GPU backend: `ComputeBackend` abstraction in hologram base (in progress)
-  — will enable Metal, CUDA, WebGPU backends alongside CPU enum dispatch
-- [ ] GPU backend: Metal MatMul + Attention kernels
-- [ ] GPU backend: CUDA MatMul + Attention kernels
+- [x] GPU backend: `ComputeBackend` trait + `BackendSelector` + auto-detection
+  in hologram base (Sprint 16 Phases 1-7)
+- [x] GPU backend: Metal elementwise (13 MSL kernels), tiled SGEMM matmul,
+  softmax, RmsNorm, MTLBuffer-backed arena, zero-copy output path
+- [ ] GPU backend: Metal async command buffer batching (amortize launch overhead)
+- [ ] GPU backend: Metal Attention kernel (fused QKV on GPU)
+- [ ] GPU backend: CUDA kernel implementations
 - [ ] GPU backend: WebGPU via wgpu crate
 
 ### Architecture
