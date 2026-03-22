@@ -34,7 +34,7 @@ zero runtime code. All kernels belong in hologram base crate.
 
 ### P1: Prefill speed (DONE — via --seq-len)
 - [x] Compile with `--seq-len 32` for short prompts — prefill 15s → **170ms**
-  (89x speedup). Variable-length prefill deferred to P4.
+  (89x speedup). Variable-length prefill deferred to P5 (now done).
 - [x] Verified: TinyLlama ONNX pipeline, 29.9 tok/s
 - Note: chat models require the user to supply the full chat template in
   `--prompt` (e.g. `<|user|>\nTell me a joke</s>\n<|assistant|>` for
@@ -180,7 +180,7 @@ zero runtime code. All kernels belong in hologram base crate.
 - [x] `concretize_all_dims` uses `context_length` from model metadata
 - [x] `--seq-len` CLI flag on compile command
 - [x] `seq_len_override` field on `ModelCompiler`
-- [x] `SeqMode::FixedPad` only (removed `Variable` variant)
+- [x] `SeqMode::Variable` enabled (was FixedPad-only until P5 blocker resolved)
 - [x] `HoloRunner::execute` uses `execute_plan` (no shape walker)
 - [x] Post-concretization cleanup uses `Concrete(1)` not `Concrete(0)`
 
@@ -227,6 +227,29 @@ zero runtime code. All kernels belong in hologram base crate.
 - [x] LUT-GEMM Q4/Q8 (`MatMulLut4`/`MatMulLut8`) with `WeightCache`
 - [x] Rayon parallel level execution (`execute_parallel()`)
 - [x] Memory-mapped weight loading with madvise page discipline
+
+### Variable-length prefill (P5)
+- [x] hologram base `resolve_size()` applied to legacy `dispatch_float_ctx`
+  path (Softmax, RmsNorm, LayerNorm, Reduce*, InstanceNorm)
+- [x] `SeqMode::Variable` enabled as default in `run_cmd.rs`
+- [x] `mini_transformer_variable_seq_len_runs` test passes (seq=1, 7, 128)
+
+### Fusion pass infrastructure
+- [x] `MatMulActivationFusion` pass — fuses MatMul+Relu/Gelu/Silu into
+  `MatMulRelu`/`MatMulGelu`/`MatMulSilu` (AiOp variants + lowering added,
+  awaiting fused FloatOp kernels in hologram base)
+- [x] `ConcatMatMulFusion` pass — fuses Concat+MatMul into `ConcatMatMul`
+  (AiOp variant + lowering added, awaiting fused FloatOp kernel)
+
+### Architecture refactoring
+- [x] `compile()` reduced from 257→98 lines by extracting
+  `log_post_repair_diagnostics()` and `post_concretization_repair()`
+- [x] `Clone` derived for `AiGraph` (cheap: Mmap weights not deep-copied)
+
+### Performance benchmarking
+- [x] Online softmax benchmark: row-based 2-4x faster standalone; current
+  split (online in fused attention, row-based standalone) is optimal
+- [x] GGUF causal logit consistency test passes
 
 ### Sprint 13 hologram correctness fixes
 - [x] **Softmax precision**: restored `f32::exp()` — Sprint 13's `fast_exp()`
