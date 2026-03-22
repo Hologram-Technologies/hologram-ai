@@ -385,8 +385,8 @@ pub enum AiOp {
     // ── Fused ops (produced by optimization passes) ────────────────────────
     /// gate × up → silu(gate) × up
     FusedSwiGLU,
-    /// x + residual → layernorm
-    FusedLayerNormResidual,
+    /// x + residual → rmsnorm. Inputs: [x, residual, weight].
+    FusedLayerNormResidual { epsilon: f32 },
 
     // ── Control flow (subgraph ops) ────────────────────────────────────────
     /// Conditional: execute then_branch or else_branch subgraph based on
@@ -488,7 +488,7 @@ impl AiOp {
             | AiOp::GroupNorm { .. }
             | AiOp::RotaryEmbedding { .. }
             | AiOp::FusedSwiGLU
-            | AiOp::FusedLayerNormResidual
+            | AiOp::FusedLayerNormResidual { .. }
             | AiOp::KvSlotWrite { .. }
             | AiOp::KvSlotRead { .. }
             | AiOp::Quantize { .. }

@@ -53,3 +53,10 @@ rkyv          = "0.8"
 # Keep debug symbols but optimize enough for usable LLM inference (~10-50x faster).
 [profile.dev]
 opt-level = 2
+
+# Release: full optimization with thin LTO and single codegen unit.
+# codegen-units = 1 yields 10-20% for compute-bound workloads.
+# thin LTO adds cross-crate inlining (benefits hologram base kernels).
+[profile.release]
+lto = "thin"
+codegen-units = 1

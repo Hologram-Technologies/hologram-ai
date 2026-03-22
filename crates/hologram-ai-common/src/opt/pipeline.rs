@@ -19,12 +19,14 @@ impl OptPipeline {
     /// Standard optimization pipeline.
     pub fn mvp() -> Self {
         use super::{
+            add_rmsnorm_fusion::AddRmsNormFusion,
             attention_fusion::AttentionFusion, const_dedup::ConstantDeduplication,
             const_eval::ConstantEvaluation, constant_fold::ConstantFolding,
             data_prop::DataPropagation, dead_node::DeadNodeElimination,
             decompose::OpDecomposition, kv_slot_injection::KvSlotInjection,
             position_ids_injection::PositionIdsInjection,
             rmsnorm_fusion::RmsNormFusion, shape_prop::ShapePropagation,
+            swiglu_fusion::SwiGluFusion,
         };
         Self::new(vec![
             Box::new(ShapePropagation),
@@ -42,6 +44,14 @@ impl OptPipeline {
             // scalar epsilon and exponent params are already materialized as
             // AiParam::Inline (otherwise scalar_f32_param returns None).
             Box::new(RmsNormFusion),
+            // Fuse SiLU(gate) * up → FusedSwiGLU. Runs after RmsNormFusion
+            // so norm chains are already collapsed. Must run before
+            // AttentionFusion to avoid interfering with SDPA pattern matching.
+            Box::new(SwiGluFusion),
+            // Fuse Add(x, residual) → RmsNorm(sum, weight, eps) into
+            // FusedLayerNormResidual. Runs after RmsNormFusion (needs fused
+            // RmsNorm nodes) and before AttentionFusion.
+            Box::new(AddRmsNormFusion),
             // Replace Range(0, seq, 1) position generators with a position_ids
             // input. Enables KV cache decode at seq=1 by passing the correct
             // absolute position from the generation loop.

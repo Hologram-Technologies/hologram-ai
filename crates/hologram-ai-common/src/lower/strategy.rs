@@ -279,6 +279,14 @@ fn resolve_op(
                 }
             })
         }
+        AiOp::FusedLayerNormResidual { epsilon } => {
+            size_op!(inputs, tensor_info, dim_var_names, |size| {
+                FloatOp::AddRmsNorm {
+                    size,
+                    epsilon: f32_to_bits(*epsilon),
+                }
+            })
+        }
         AiOp::LayerNorm { epsilon, .. } => {
             size_op!(inputs, tensor_info, dim_var_names, |size| {
                 FloatOp::LayerNorm {

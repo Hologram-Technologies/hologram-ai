@@ -159,99 +159,9 @@ impl ModelCompiler {
         // bake in concrete values: Var dims → upper bounds, Dynamic → 1.
         let ai_graph = concretize_all_dims(ai_graph, self.seq_len_override).context("shape concretization failed")?;
 
-        // Step 2c — post-concretization shape repair.
-        // After Var→concrete substitution, most shapes are already correct.
-        // Only Dynamic dims remain (from broadcast_shape mismatches, etc.).
-        // Clear stale known_i64_values so DataProp re-evaluates with the
-        // now-concrete shapes, then run the aggressive pipeline to overwrite
-        // remaining Dynamic dims with correct concrete values.
-        let mut ai_graph = ai_graph;
-        for info in ai_graph.tensor_info.values_mut() {
-            info.known_i64_values = None;
-        }
-        // Run the pipeline in a fixpoint loop. Each iteration resolves more
-        // Reshape targets as DataProp traces through newly-resolved shapes.
-        // Shape-computation chains can be arbitrarily deep (e.g., Q/K/V each
-        // depend on different Reshape chains that themselves depend on DataProp).
-        // Post-concretization pipeline: uses AggressiveShapePropagation which
-        // always overwrites shapes with inferred values. This is safe because
-        // all dims are now concrete — no risk of overwriting good symbolic shapes
-        // with weaker inferences. Run twice to handle chains where Reshape A
-        // depends on DataProp, and Reshape B depends on Shape(A's output).
-        let aggressive_pipeline = {
-            use hologram_ai_common::{
-                AggressiveShapePropagation, ConstantDeduplication,
-                opt::{
-                    const_eval::ConstantEvaluation, constant_fold::ConstantFolding,
-                    data_prop::DataPropagation, dead_node::DeadNodeElimination,
-                },
-            };
-            // Two DataProp passes handle multi-level shape dependencies:
-            //
-            //   Pass 1 (DataProp #1): evaluates shape subgraphs like Expand
-            //     targets that depend on concrete input tensor shapes.
-            //   Pass 2 (AggressiveProp #2): propagates DataProp #1 results
-            //     to correctly shape intermediate tensors (e.g. K_intermediate).
-            //   Pass 3 (DataProp #2): re-evaluates shape subgraphs that depend
-            //     on K_intermediate's now-correct shape (e.g. K^T target).
-            //     DataProp's re-materialization logic (computed_tids) ensures
-            //     it overwrites any stale results from DataProp #1.
-            //   Pass 4 (AggressiveProp #3): applies DataProp #2 results.
-            OptPipeline::new(vec![
-                Box::new(AggressiveShapePropagation),
-                Box::new(DataPropagation),
-                Box::new(AggressiveShapePropagation),
-                Box::new(DataPropagation),
-                Box::new(AggressiveShapePropagation),
-                // Evaluate all-constant nodes (N-D broadcast, comparisons, etc.)
-                Box::new(ConstantEvaluation),
-                Box::new(ConstantFolding),
-                Box::new(ConstantDeduplication),
-                Box::new(DeadNodeElimination),
-            ])
-        };
-        let mut ai_graph = ai_graph;
-        for pass_num in 0..3 {
-            ai_graph = aggressive_pipeline
-                .run(ai_graph)
-                .with_context(|| format!("post-concretization repair pass {pass_num} failed"))?;
-            // Clear stale known_i64_values between iterations so DataProp
-            // re-evaluates with the freshly-inferred shapes.
-            for info in ai_graph.tensor_info.values_mut() {
-                info.known_i64_values = None;
-            }
-        }
-
-        // Replace any Dynamic or remaining Var dims introduced by the
-        // aggressive pipeline (e.g., broadcast_shape returns Dynamic for
-        // non-matching concrete dims).
-        // Use 0-sentinel (not 1) so the runtime knows to resolve these dims
-        // from actual buffer sizes rather than trusting stale compiled shapes.
-        {
-            use hologram_ai_common::Dim;
-            for info in ai_graph.tensor_info.values_mut() {
-                for dim in info.shape.iter_mut() {
-                    if matches!(dim, Dim::Dynamic | Dim::Var(_)) {
-                        // Use 1 as fallback for any remaining non-concrete dims.
-                        // concretize_all_dims already set seq-like dims to the
-                        // correct context_length; these are edge cases from the
-                        // aggressive pipeline introducing new Dynamic dims.
-                        *dim = Dim::Concrete(1);
-                    }
-                }
-            }
-        }
-
-        // Step 2d — convert Slice ops to Gather (hologram has no native Slice).
-        // Must run after concretization so dim values are known.
-        let ai_graph = hologram_ai_common::SliceToGather
-            .run(ai_graph)
-            .context("slice-to-gather conversion failed")?;
-
-        // Step 2e — shape healing: fill in any remaining empty shapes.
-        let ai_graph = hologram_ai_common::ShapeHealing
-            .run(ai_graph)
-            .context("shape healing failed")?;
+        // Step 2c — post-concretization shape repair (fixpoint loop with
+        // aggressive shape propagation, slice→gather, shape healing).
+        let ai_graph = post_concretization_repair(ai_graph)?;
 
         // Diagnostic: report empty shapes and attention-dim issues after repair.
         {
@@ -506,58 +416,7 @@ impl ModelCompiler {
         let ai_graph = concretize_all_dims(ai_graph, self.seq_len_override).context("shape concretization failed")?;
 
         // Post-concretization repair (same as compile()).
-        let mut ai_graph = ai_graph;
-        for info in ai_graph.tensor_info.values_mut() {
-            info.known_i64_values = None;
-        }
-        let aggressive_pipeline = {
-            use hologram_ai_common::{
-                AggressiveShapePropagation, ConstantDeduplication,
-                opt::{
-                    const_eval::ConstantEvaluation, constant_fold::ConstantFolding,
-                    data_prop::DataPropagation, dead_node::DeadNodeElimination,
-                },
-            };
-            OptPipeline::new(vec![
-                Box::new(AggressiveShapePropagation),
-                Box::new(DataPropagation),
-                Box::new(AggressiveShapePropagation),
-                Box::new(DataPropagation),
-                Box::new(AggressiveShapePropagation),
-                Box::new(ConstantEvaluation),
-                Box::new(ConstantFolding),
-                Box::new(ConstantDeduplication),
-                Box::new(DeadNodeElimination),
-            ])
-        };
-        for pass_num in 0..3 {
-            ai_graph = aggressive_pipeline
-                .run(ai_graph)
-                .with_context(|| format!("post-concretization repair pass {pass_num} failed"))?;
-            for info in ai_graph.tensor_info.values_mut() {
-                info.known_i64_values = None;
-            }
-        }
-        {
-            use hologram_ai_common::Dim;
-            for info in ai_graph.tensor_info.values_mut() {
-                for dim in info.shape.iter_mut() {
-                    if matches!(dim, Dim::Dynamic | Dim::Var(_)) {
-                        // Use 1 as fallback for any remaining non-concrete dims.
-                        // concretize_all_dims already set seq-like dims to the
-                        // correct context_length; these are edge cases from the
-                        // aggressive pipeline introducing new Dynamic dims.
-                        *dim = Dim::Concrete(1);
-                    }
-                }
-            }
-        }
-        let ai_graph = hologram_ai_common::SliceToGather
-            .run(ai_graph)
-            .context("slice-to-gather conversion failed")?;
-        let ai_graph = hologram_ai_common::ShapeHealing
-            .run(ai_graph)
-            .context("shape healing failed")?;
+        let ai_graph = post_concretization_repair(ai_graph)?;
 
         // Validate.
         let errs = ai_graph.validate();
@@ -643,58 +502,7 @@ impl ModelCompiler {
             .context("optimization pass failed")?;
         let ai_graph = concretize_all_dims(ai_graph, self.seq_len_override).context("shape concretization failed")?;
 
-        let mut ai_graph = ai_graph;
-        for info in ai_graph.tensor_info.values_mut() {
-            info.known_i64_values = None;
-        }
-        let aggressive_pipeline = {
-            use hologram_ai_common::{
-                AggressiveShapePropagation, ConstantDeduplication,
-                opt::{
-                    const_eval::ConstantEvaluation, constant_fold::ConstantFolding,
-                    data_prop::DataPropagation, dead_node::DeadNodeElimination,
-                },
-            };
-            OptPipeline::new(vec![
-                Box::new(AggressiveShapePropagation),
-                Box::new(DataPropagation),
-                Box::new(AggressiveShapePropagation),
-                Box::new(DataPropagation),
-                Box::new(AggressiveShapePropagation),
-                Box::new(ConstantEvaluation),
-                Box::new(ConstantFolding),
-                Box::new(ConstantDeduplication),
-                Box::new(DeadNodeElimination),
-            ])
-        };
-        for pass_num in 0..3 {
-            ai_graph = aggressive_pipeline
-                .run(ai_graph)
-                .with_context(|| format!("post-concretization repair pass {pass_num} failed"))?;
-            for info in ai_graph.tensor_info.values_mut() {
-                info.known_i64_values = None;
-            }
-        }
-        {
-            use hologram_ai_common::Dim;
-            for info in ai_graph.tensor_info.values_mut() {
-                for dim in info.shape.iter_mut() {
-                    if matches!(dim, Dim::Dynamic | Dim::Var(_)) {
-                        // Use 1 as fallback for any remaining non-concrete dims.
-                        // concretize_all_dims already set seq-like dims to the
-                        // correct context_length; these are edge cases from the
-                        // aggressive pipeline introducing new Dynamic dims.
-                        *dim = Dim::Concrete(1);
-                    }
-                }
-            }
-        }
-        let ai_graph = hologram_ai_common::SliceToGather
-            .run(ai_graph)
-            .context("slice-to-gather conversion failed")?;
-        let ai_graph = hologram_ai_common::ShapeHealing
-            .run(ai_graph)
-            .context("shape healing failed")?;
+        let ai_graph = post_concretization_repair(ai_graph)?;
 
         let errs = ai_graph.validate();
         if !errs.is_empty() {
@@ -1245,6 +1053,116 @@ fn infer_llm_metadata_from_graph(graph: &mut AiGraph) {
         "inferred LLM metadata from {} GQA nodes",
         gqa_params.len()
     );
+}
+
+/// Post-concretization shape repair.
+///
+/// After `concretize_all_dims`, most shapes are correct but some Dynamic dims
+/// remain (from `broadcast_shape` mismatches, etc.). This function:
+///
+/// 1. Clears stale `known_i64_values` so DataProp re-evaluates.
+/// 2. Runs the aggressive pipeline in a fixpoint loop (up to 3 iterations,
+///    with early exit when no more Dynamic dims are resolved).
+/// 3. Replaces any remaining Dynamic/Var dims with `Concrete(1)`.
+/// 4. Converts Slice→Gather (hologram has no native Slice).
+/// 5. Runs shape healing to fill any remaining empty shapes.
+fn post_concretization_repair(mut ai_graph: AiGraph) -> anyhow::Result<AiGraph> {
+    use hologram_ai_common::{
+        AggressiveShapePropagation, ConstantDeduplication, Dim,
+        opt::{
+            const_eval::ConstantEvaluation, constant_fold::ConstantFolding,
+            data_prop::DataPropagation, dead_node::DeadNodeElimination,
+        },
+    };
+
+    // Clear stale known_i64_values so DataProp re-evaluates with the
+    // now-concrete shapes.
+    for info in ai_graph.tensor_info.values_mut() {
+        info.known_i64_values = None;
+    }
+
+    // Post-concretization pipeline: uses AggressiveShapePropagation which
+    // always overwrites shapes with inferred values. This is safe because
+    // all dims are now concrete — no risk of overwriting good symbolic shapes
+    // with weaker inferences.
+    //
+    // Two DataProp passes handle multi-level shape dependencies:
+    //   Pass 1 (DataProp #1): evaluates shape subgraphs like Expand
+    //     targets that depend on concrete input tensor shapes.
+    //   Pass 2 (AggressiveProp #2): propagates DataProp #1 results
+    //     to correctly shape intermediate tensors (e.g. K_intermediate).
+    //   Pass 3 (DataProp #2): re-evaluates shape subgraphs that depend
+    //     on K_intermediate's now-correct shape (e.g. K^T target).
+    //   Pass 4 (AggressiveProp #3): applies DataProp #2 results.
+    let aggressive_pipeline = OptPipeline::new(vec![
+        Box::new(AggressiveShapePropagation),
+        Box::new(DataPropagation),
+        Box::new(AggressiveShapePropagation),
+        Box::new(DataPropagation),
+        Box::new(AggressiveShapePropagation),
+        Box::new(ConstantEvaluation),
+        Box::new(ConstantFolding),
+        Box::new(ConstantDeduplication),
+        Box::new(DeadNodeElimination),
+    ]);
+
+    // Fixpoint loop: each iteration resolves more Reshape targets as DataProp
+    // traces through newly-resolved shapes. Early exit when no progress is made.
+    let mut prev_dynamic_count = usize::MAX;
+    for pass_num in 0..3 {
+        ai_graph = aggressive_pipeline
+            .run(ai_graph)
+            .with_context(|| format!("post-concretization repair pass {pass_num} failed"))?;
+
+        // Count remaining non-concrete dims for convergence check.
+        let dynamic_count = ai_graph
+            .tensor_info
+            .values()
+            .flat_map(|info| info.shape.iter())
+            .filter(|dim| matches!(dim, Dim::Dynamic | Dim::Var(_)))
+            .count();
+
+        if dynamic_count >= prev_dynamic_count {
+            info!(
+                pass_num,
+                dynamic_count,
+                "post-concretization repair converged early"
+            );
+            break;
+        }
+        prev_dynamic_count = dynamic_count;
+
+        // Clear stale known_i64_values between iterations so DataProp
+        // re-evaluates with the freshly-inferred shapes.
+        for info in ai_graph.tensor_info.values_mut() {
+            info.known_i64_values = None;
+        }
+    }
+
+    // Replace any Dynamic or remaining Var dims with Concrete(1).
+    // concretize_all_dims already set seq-like dims to the correct
+    // context_length; these are edge cases from the aggressive pipeline
+    // introducing new Dynamic dims.
+    for info in ai_graph.tensor_info.values_mut() {
+        for dim in info.shape.iter_mut() {
+            if matches!(dim, Dim::Dynamic | Dim::Var(_)) {
+                *dim = Dim::Concrete(1);
+            }
+        }
+    }
+
+    // Convert Slice→Gather (hologram has no native Slice).
+    // Must run after concretization so dim values are known.
+    let ai_graph = hologram_ai_common::SliceToGather
+        .run(ai_graph)
+        .context("slice-to-gather conversion failed")?;
+
+    // Shape healing: fill in any remaining empty shapes.
+    let ai_graph = hologram_ai_common::ShapeHealing
+        .run(ai_graph)
+        .context("shape healing failed")?;
+
+    Ok(ai_graph)
 }
 
 /// Concretize all symbolic and dynamic dimensions in the graph.

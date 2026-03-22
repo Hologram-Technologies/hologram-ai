@@ -88,6 +88,9 @@ pub fn dispatch(op: &AiOp) -> DispatchTarget {
         // ── Native FloatOp: parameterless fused ops ──────────────────────
         FusedSwiGLU => D::GraphOp(GraphOp::Float(FloatOp::FusedSwiGLU)),
 
+        // ── Fused ops needing shape resolution ─────────────────────────
+        FusedLayerNormResidual { .. } => D::FloatNeedsShape,
+
         // ── Native FloatOp: params from AiOp (no shape resolution needed) ─
         RotaryEmbedding { .. } => D::FloatNeedsShape,
 

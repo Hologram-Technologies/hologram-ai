@@ -61,33 +61,46 @@ zero runtime code. All kernels belong in hologram base crate.
 - [x] Wire tape executor from `HoloRunner` — build tape at load time, use
   for inference with fallback to `execute_plan`
 
-#### P2d: Remaining decode optimizations
+#### P2d: Remaining decode optimizations (requires hologram base — Plan 020)
 - [ ] Wire `dispatch_float_into` — buffer reuse, eliminate ~1000 per-op
-  allocations per decode token
+  allocations per decode token (API exists in hologram base, not wired)
 - [ ] Wire `WeightCache` into tape executor — cache deserialized quantized
-  weights across dispatches (currently ~5-10x overhead for GGUF)
+  weights across dispatches (currently ~5-10x overhead for GGUF; impl exists
+  at `kv/weight_cache.rs`, not wired)
 - [ ] Level-aware tape execution for KV cache decode path — split tape
-  around KvWrite/KvRead ops per level
+  around KvWrite/KvRead ops per level (design only)
 - Note: f32 ONNX decode at 13.6 tok/s is near memory bandwidth ceiling
   (4.1 GB weights × ~60 GB/s DDR ≈ 15 tok/s theoretical max). Further
   speedup requires weight quantization — see GGUF models section.
 
-### P3: Compilation speed (Plan 017)
+### P3: Compiler fusion passes (Plan 019 — TensorBend-inspired)
+- [x] SwiGLU fusion pass — pattern-match `SiLU(gate) * up` into
+  `FusedSwiGLU`. Implemented in `swiglu_fusion.rs`, wired into MVP pipeline.
+  Eliminates 1 intermediate tensor + 1 dispatch per transformer layer.
+- [ ] Add+RMSNorm residual fusion — extend `rmsnorm_fusion.rs` to detect
+  `Add(x, residual) → RmsNorm` and emit `FusedAddRmsNorm`. Needs new
+  FloatOp + kernel in hologram base (cross-repo).
+- [ ] QK-Norm + RoPE + KV-Store pre-attention fusion — fuse 5-7 nodes
+  (Split/RmsNorm/RoPE/KvWrite) into extended `Attention` op. Design first,
+  implement after tape executor is stable.
 
+### P4: Compilation speed (Plans 017, 020)
 - [ ] Release profile with LTO (`codegen-units = 1, lto = "thin"`)
+- [ ] Extract shared `post_concretization_repair` (fixpoint code duplicated 3x)
 - [ ] Early convergence detection in fixpoint loop (break when dynamic dims
   stop decreasing, saves up to 9 pass invocations)
+- [ ] Cache `topo_order` on AiGraph (called ~40 times per compilation)
 - [ ] Avoid double LLM compilation (clone AiGraph after MVP, concretize
   twice instead of re-importing from disk)
-- [ ] Cache `topo_order` on AiGraph (called ~40 times per compilation)
 
-### P4: Variable-length prefill (deferred from P1)
+### P5: Variable-length prefill (deferred from P1 — BLOCKED)
 - [ ] Wire `ShapeContextGraph` into `HoloRunner.execute()` — project shapes
   at runtime from actual input dimensions instead of compiled seq_len
 - [ ] Add `SeqMode::Variable` — no padding, process actual prompt length
-- [ ] Requires hologram executor to resolve baked FloatOp params (m/k/n in
-  MatMul, size in Softmax) from runtime buffer sizes when they differ
-  from compiled values
+  (variant exists but disabled — see commit 07d6b40)
+- [ ] **Blocker:** hologram executor must resolve baked FloatOp params (m/k/n
+  in MatMul, size in Softmax) from runtime buffer sizes when they differ
+  from compiled values. Requires hologram base changes.
 - [ ] Expected: any prompt length without recompilation
 
 ---
@@ -119,6 +132,18 @@ zero runtime code. All kernels belong in hologram base crate.
 - [ ] Parallel dispatch (rayon level scheduling)
 - [ ] Memory-mapped weight loading
 - [ ] Multi-modal output trait (text, images, audio, etc.)
+- [ ] MatMul + Activation fusion (MatMulRelu, MatMulGelu — inline activation
+  in matmul output write, avoid intermediate buffer)
+- [ ] Concat + MatMul fusion (multi-head output projection — avoid
+  materializing concatenated heads buffer)
+- [ ] F16 compute kernels (most impactful with GPU backend; CPU uses mixed
+  precision with F16 storage, F32 compute)
+- [ ] Online softmax: benchmark vs BLAS for decode on macOS, make
+  path selection runtime-configurable
+- [ ] GPU backend: `trait Kernel` abstraction at tape level (Plan 019)
+- [ ] GPU backend: Metal MatMul + Attention kernels
+- [ ] GPU backend: CUDA MatMul + Attention kernels
+- [ ] GPU backend: WebGPU via wgpu crate
 
 ### Architecture
 - [ ] Simplify post-concretization pipeline (3 fixpoint iterations → 1)
@@ -152,6 +177,11 @@ zero runtime code. All kernels belong in hologram base crate.
 - [x] Mini vision classifier conformance test (Conv+Relu+GlobalAvgPool+Flatten+Gemm)
 - [x] `onnx_builder::conv2d()` and `mini_vision_classifier()` test builders
 - [x] `position_ids` injection pass for KV cache decode
+
+### SwiGLU fusion pass
+- [x] `SwiGluFusion` pass — fuses `SiLU(gate) * up` → `FusedSwiGLU`, wired
+  into MVP pipeline after RmsNormFusion. Eliminates 1 intermediate tensor +
+  1 dispatch per transformer layer (LLaMA, Qwen, Mistral, Gemma).
 
 ### Sprint 13 hologram correctness fixes
 - [x] **Softmax precision**: restored `f32::exp()` — Sprint 13's `fast_exp()`

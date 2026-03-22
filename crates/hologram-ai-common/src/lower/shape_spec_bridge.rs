@@ -75,6 +75,7 @@ impl ShapeProjection for FloatOp {
             FloatOp::Softmax { .. }
             | FloatOp::LogSoftmax { .. }
             | FloatOp::RmsNorm { .. }
+            | FloatOp::AddRmsNorm { .. }
             | FloatOp::LayerNorm { .. }
             | FloatOp::InstanceNorm { .. }
             | FloatOp::LRN { .. }
@@ -243,7 +244,7 @@ impl ShapeProjection for AiOp {
             | AiOp::BatchNorm { .. }
             | AiOp::RotaryEmbedding { .. }
             | AiOp::FusedSwiGLU
-            | AiOp::FusedLayerNormResidual
+            | AiOp::FusedLayerNormResidual { .. }
             | AiOp::KvSlotWrite { .. }
             | AiOp::KvSlotRead { .. }
             | AiOp::Quantize { .. }
