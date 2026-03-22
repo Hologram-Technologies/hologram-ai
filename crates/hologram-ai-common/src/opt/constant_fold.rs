@@ -67,6 +67,7 @@ impl Pass for ConstantFolding {
 
         // Remove folded nodes.
         graph.nodes.retain(|n| !removed_node_ids.contains(&n.id));
+        graph.invalidate_topo_cache();
 
         // Apply remaps to remaining node inputs/outputs.
         for node in &mut graph.nodes {
@@ -140,6 +141,7 @@ mod tests {
             shape_constraints: Default::default(),
             subgraphs: HashMap::new(),
             tensor_names: HashMap::new(),
+            topo_cache: Default::default(),
         }
     }
 

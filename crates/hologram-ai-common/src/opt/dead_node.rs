@@ -34,6 +34,7 @@ impl Pass for DeadNodeElimination {
             shape_constraints: graph.shape_constraints,
             subgraphs: graph.subgraphs,
             tensor_names: graph.tensor_names,
+            topo_cache: Default::default(),
         })
     }
 }
@@ -99,6 +100,7 @@ mod tests {
             shape_constraints: Default::default(),
             subgraphs: HashMap::new(),
             tensor_names: HashMap::new(),
+            topo_cache: Default::default(),
         }
     }
 

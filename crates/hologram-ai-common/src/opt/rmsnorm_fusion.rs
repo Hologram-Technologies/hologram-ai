@@ -141,6 +141,7 @@ impl Pass for RmsNormFusion {
             }
         }
         graph.nodes = new_nodes;
+        graph.invalidate_topo_cache();
 
         tracing::info!("RmsNormFusion: fused {fused_count} RmsNorm chain(s)");
         Ok(graph)
@@ -380,6 +381,7 @@ mod tests {
             shape_constraints: Default::default(),
             subgraphs: HashMap::new(),
             tensor_names: HashMap::new(),
+            topo_cache: Default::default(),
         }
     }
 
@@ -459,6 +461,7 @@ mod tests {
             shape_constraints: Default::default(),
             subgraphs: HashMap::new(),
             tensor_names: HashMap::new(),
+            topo_cache: Default::default(),
         }
     }
 

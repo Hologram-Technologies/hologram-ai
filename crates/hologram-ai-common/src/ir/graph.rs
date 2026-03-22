@@ -6,6 +6,7 @@ use super::{
     shape::{ConstraintStore, DimVarTable},
 };
 use hologram_ai_quant::QuantDescriptor;
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet, VecDeque};
 
 /// Full type + quantization information for a tensor.
@@ -62,6 +63,10 @@ pub struct ValidationError {
 /// The canonical semantic IR graph used by all importers and optimization passes.
 ///
 /// Nodes are stored in topological order (maintained by the importer and opt passes).
+///
+/// `Clone` is cheap: most weight data uses `AiParam::Mmap` (copies a path +
+/// offset, not the bytes). Only small inline constants are deep-copied.
+#[derive(Clone)]
 pub struct AiGraph {
     pub name: String,
     pub nodes: Vec<AiNode>,
@@ -88,6 +93,12 @@ pub struct AiGraph {
     /// Populated by importers, used by `compile_with_debug_info()` for conformance testing.
     /// Empty for models imported without name tracking — zero cost.
     pub tensor_names: HashMap<TensorId, String>,
+
+    /// Cached topological order. Invalidated by any structural graph mutation.
+    /// Uses `RefCell` for interior mutability so `topo_order(&self)` can populate the cache.
+    /// **Do not read or write directly** — use `topo_order()` and `invalidate_topo_cache()`.
+    #[doc(hidden)]
+    pub topo_cache: RefCell<Option<Vec<NodeId>>>,
 }
 
 impl AiGraph {
@@ -189,7 +200,33 @@ impl AiGraph {
     }
 
     /// Returns nodes in topological order (Kahn's algorithm on NodeIds).
+    ///
+    /// The result is cached internally. Call [`invalidate_topo_cache`] after
+    /// any structural graph mutation (add/remove nodes, rewire edges).
     pub fn topo_order(&self) -> Vec<NodeId> {
+        // Return cached order if available.
+        if let Some(cached) = self.topo_cache.borrow().as_ref() {
+            return cached.clone();
+        }
+
+        let order = self.compute_topo_order();
+
+        // Cache the result.
+        *self.topo_cache.borrow_mut() = Some(order.clone());
+        order
+    }
+
+    /// Invalidate the cached topological order.
+    ///
+    /// Must be called after any structural mutation: adding/removing nodes,
+    /// changing node inputs/outputs, etc. Optimization passes that rewrite
+    /// the `nodes` vec should call this.
+    pub fn invalidate_topo_cache(&self) {
+        *self.topo_cache.borrow_mut() = None;
+    }
+
+    /// Compute topological order from scratch (Kahn's algorithm).
+    fn compute_topo_order(&self) -> Vec<NodeId> {
         // Build producer map: TensorId → NodeId that produces it.
         let mut producer: HashMap<TensorId, NodeId> = HashMap::new();
         for node in &self.nodes {
@@ -228,7 +265,7 @@ impl AiGraph {
             order.push(nid);
             if let Some(succs) = adj.get(&nid) {
                 for &succ in succs {
-                    let deg = in_degree.get_mut(&succ).unwrap();
+                    let deg = in_degree.get_mut(&succ).expect("in_degree missing for successor");
                     *deg -= 1;
                     if *deg == 0 {
                         queue.push_back(succ);
@@ -277,6 +314,7 @@ mod tests {
             shape_constraints: ConstraintStore::default(),
             subgraphs: HashMap::new(),
             tensor_names: HashMap::new(),
+            topo_cache: Default::default(),
         }
     }
 

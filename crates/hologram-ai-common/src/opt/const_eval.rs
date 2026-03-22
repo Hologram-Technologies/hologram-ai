@@ -1137,6 +1137,7 @@ mod tests {
             shape_constraints: Default::default(),
             subgraphs: HashMap::new(),
             tensor_names: HashMap::new(),
+            topo_cache: Default::default(),
         }
     }
 

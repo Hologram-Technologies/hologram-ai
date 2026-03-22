@@ -182,6 +182,7 @@ impl Pass for AttentionFusion {
             }
         }
         graph.nodes = new_nodes;
+        graph.invalidate_topo_cache();
 
         tracing::info!("AttentionFusion: fused {fused_count} SDPA chain(s)");
         Ok(graph)
@@ -521,6 +522,7 @@ mod tests {
             shape_constraints: crate::ir::ConstraintStore::default(),
             subgraphs: HashMap::new(),
             tensor_names: HashMap::new(),
+            topo_cache: Default::default(),
         };
         let mut next_tid: TensorId = 0;
         let mut next_nid: u32 = 0;

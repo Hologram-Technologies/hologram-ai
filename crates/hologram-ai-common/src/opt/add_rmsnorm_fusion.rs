@@ -145,6 +145,7 @@ impl Pass for AddRmsNormFusion {
             }
         }
         graph.nodes = new_nodes;
+        graph.invalidate_topo_cache();
 
         Ok(graph)
     }
@@ -171,6 +172,7 @@ mod tests {
             shape_constraints: Default::default(),
             subgraphs: Default::default(),
             tensor_names: Default::default(),
+            topo_cache: Default::default(),
         }
     }
 

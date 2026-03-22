@@ -70,6 +70,7 @@ fn run_single_op(
         shape_constraints: Default::default(),
         subgraphs: HashMap::new(),
         tensor_names: HashMap::new(),
+            topo_cache: Default::default(),
     };
 
     OptPipeline::mvp().run(graph).expect("opt pipeline failed")
@@ -584,6 +585,7 @@ fn build_if_graph() -> AiGraph {
         shape_constraints: Default::default(),
         subgraphs: HashMap::new(),
         tensor_names: HashMap::new(),
+            topo_cache: Default::default(),
     };
 
     // Else branch: input(0) → Neg → output
@@ -606,6 +608,7 @@ fn build_if_graph() -> AiGraph {
         shape_constraints: Default::default(),
         subgraphs: HashMap::new(),
         tensor_names: HashMap::new(),
+            topo_cache: Default::default(),
     };
 
     let mut subgraphs = HashMap::new();
@@ -635,6 +638,7 @@ fn build_if_graph() -> AiGraph {
         shape_constraints: Default::default(),
         subgraphs,
         tensor_names: HashMap::new(),
+            topo_cache: Default::default(),
     }
 }
 
@@ -717,6 +721,7 @@ fn subgraph_loop_known_trip_count() {
         shape_constraints: Default::default(),
         subgraphs: HashMap::new(),
         tensor_names: HashMap::new(),
+            topo_cache: Default::default(),
     };
 
     let mut subgraphs = HashMap::new();
@@ -745,6 +750,7 @@ fn subgraph_loop_known_trip_count() {
         shape_constraints: Default::default(),
         subgraphs,
         tensor_names: HashMap::new(),
+            topo_cache: Default::default(),
     };
 
     let kv = KvCacheLayout::none();
@@ -799,6 +805,7 @@ fn subgraph_loop_zero_trip() {
         shape_constraints: Default::default(),
         subgraphs: HashMap::new(),
         tensor_names: HashMap::new(),
+            topo_cache: Default::default(),
     };
 
     let mut subgraphs = HashMap::new();
@@ -827,6 +834,7 @@ fn subgraph_loop_zero_trip() {
         shape_constraints: Default::default(),
         subgraphs,
         tensor_names: HashMap::new(),
+            topo_cache: Default::default(),
     };
 
     let kv = KvCacheLayout::none();

@@ -130,14 +130,6 @@ impl ModelCompiler {
     /// archive with named layer entrypoints. For simpler models (ONNX), produces
     /// a single-graph archive.
     pub fn compile(&self, source: ModelSource) -> anyhow::Result<HoloArchive> {
-        // Save the source path for decode re-import (LLM pipeline needs seq=1 decode graph).
-        let source_path = match &source {
-            ModelSource::OnnxPath(p) => Some(p.clone()),
-            ModelSource::GgufPath(p) => Some(p.clone()),
-            ModelSource::GgmlPath(p) => Some(p.clone()),
-            _ => None,
-        };
-
         // Step 1 — import.
         let ai_graph = self.import(source)?;
         info!(nodes = ai_graph.nodes.len(), params = ai_graph.params.len(), "import complete");
@@ -153,6 +145,11 @@ impl ModelCompiler {
         // After AttentionFusion, we can extract these from GroupedQueryAttention
         // nodes so the MemoryPlanner and LLM pipeline detection work correctly.
         infer_llm_metadata_from_graph(&mut ai_graph);
+
+        // Save the MVP-optimized graph before concretization so the LLM
+        // pipeline can re-concretize it at seq=1 for the decode graph,
+        // avoiding a full re-import + re-optimization from disk.
+        let pre_concretized = ai_graph.clone();
 
         // Step 2b — concretize all symbolic/dynamic dims for compilation.
         // The runtime doesn't yet support deferred shape resolution, so we
@@ -369,7 +366,7 @@ impl ModelCompiler {
         );
 
         let archive_bytes = if is_llm && !self.force_single_graph {
-            self.compile_llm_pipeline(&ai_graph, &mem_plan, source_path.as_deref())?
+            self.compile_llm_pipeline(&ai_graph, &mem_plan, pre_concretized)?
         } else {
             self.compile_single_graph(&ai_graph, &mem_plan)?
         };
@@ -618,7 +615,7 @@ impl ModelCompiler {
         &self,
         ai_graph: &AiGraph,
         mem_plan: &hologram_ai_common::MemoryPlan,
-        source_path: Option<&std::path::Path>,
+        pre_concretized: AiGraph,
     ) -> anyhow::Result<Vec<u8>> {
         use hologram::hologram_archive::writer::pipeline_writer::PipelineWriter;
 
@@ -658,50 +655,35 @@ impl ModelCompiler {
         info!(archive_bytes = prefill_archive.len(), "prefill archive assembled");
 
         // ── Decode graph: seq=1 ──
-        // Re-compile from source with seq=1 so all ops have single-token shapes.
-        // This is the correct approach: decode sees only 1 new token per step,
-        // with KV cache providing all previous K/V data.
-        let decode_archive = if let Some(path) = source_path {
-            info!("compiling decode graph (seq=1) from {}", path.display());
-            let decode_compiler = ModelCompiler {
-                seq_len_override: Some(1),
-                force_single_graph: true, // prevent recursive pipeline
-                ..ModelCompiler::default()
-            };
-            let source = if path.extension().map(|e| e == "onnx").unwrap_or(false) {
-                ModelSource::OnnxPath(path.to_path_buf())
-            } else {
-                ModelSource::GgufPath(path.to_path_buf())
-            };
-            let decode_archive_obj = decode_compiler.compile(source)
-                .context("compiling decode graph (seq=1) failed")?;
-            decode_archive_obj.bytes
+        // Re-concretize the pre-optimized graph with seq=1 instead of
+        // re-importing from disk. This skips ONNX/GGUF re-parse + 11 MVP
+        // optimization passes (~50% of total LLM compile time).
+        info!("compiling decode graph (seq=1) from pre-optimized graph");
+        let decode_graph = concretize_all_dims(pre_concretized, Some(1))
+            .context("concretizing decode graph (seq=1) failed")?;
+        let decode_graph = post_concretization_repair(decode_graph)?;
+        let decode_out = lower(
+            &decode_graph,
+            &mem_plan.kv_cache_layout,
+            &opts,
+            &LowerPhase::Decode,
+        )
+        .context("lowering decode graph failed")?;
+        let decode_compiled =
+            hologram::compile(decode_out.graph).context("compiling decode graph failed")?;
+        let decode_unpacked = unpack_archive(&decode_compiled.archive)?;
+        let decode_lh = build_tensor_port_header(&decode_unpacked.plan, &decode_graph);
+        let decode_bundle = if decode_out.context.is_empty() {
+            None
         } else {
-            // Fallback: use prefill graph for decode (same seq, less optimal).
-            warn!("no source path for decode re-import; using prefill graph for decode");
-            let decode_out = lower(
-                ai_graph,
-                &mem_plan.kv_cache_layout,
-                &opts,
-                &LowerPhase::Decode,
-            )
-            .context("lowering decode graph failed")?;
-            let decode_compiled =
-                hologram::compile(decode_out.graph).context("compiling decode graph failed")?;
-            let decode_unpacked = unpack_archive(&decode_compiled.archive)?;
-            let decode_lh = build_tensor_port_header(&decode_unpacked.plan, ai_graph);
-            let decode_bundle = if decode_out.context.is_empty() {
-                None
-            } else {
-                Some(&decode_out.context)
-            };
-            build_final_archive(
-                decode_unpacked,
-                extra_weights.clone(),
-                Some(decode_lh),
-                decode_bundle,
-            )?
+            Some(&decode_out.context)
         };
+        let decode_archive = build_final_archive(
+            decode_unpacked,
+            extra_weights.clone(),
+            Some(decode_lh),
+            decode_bundle,
+        )?;
         info!(archive_bytes = decode_archive.len(), "decode archive assembled");
 
         // Bundle into pipeline.

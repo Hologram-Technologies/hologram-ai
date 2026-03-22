@@ -2326,6 +2326,7 @@ fn build_gqa_aigraph(
         shape_constraints: Default::default(),
         subgraphs: HashMap::new(),
         tensor_names: HashMap::new(),
+            topo_cache: Default::default(),
     }
 }
 
@@ -2431,6 +2432,7 @@ fn build_swiglu_aigraph(rows: usize, cols: usize) -> hologram_ai_common::AiGraph
         shape_constraints: Default::default(),
         subgraphs: HashMap::new(),
         tensor_names: HashMap::new(),
+            topo_cache: Default::default(),
     }
 }
 

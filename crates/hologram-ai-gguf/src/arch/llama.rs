@@ -424,6 +424,7 @@ impl<'a> GraphAssembler<'a> {
             shape_constraints: ConstraintStore::default(),
             subgraphs: HashMap::new(),
             tensor_names: HashMap::new(),
+            topo_cache: Default::default(),
         })
     }
 }

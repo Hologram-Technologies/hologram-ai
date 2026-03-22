@@ -397,6 +397,7 @@ mod tests {
             dim_vars: Default::default(),
             shape_constraints: Default::default(),
             subgraphs: Default::default(),
+            topo_cache: Default::default(),
         };
 
         let result = inject_lm_head_if_needed(graph);
@@ -446,6 +447,7 @@ mod tests {
             dim_vars: Default::default(),
             shape_constraints: Default::default(),
             subgraphs: Default::default(),
+            topo_cache: Default::default(),
         };
 
         let result = inject_lm_head_if_needed(graph);
