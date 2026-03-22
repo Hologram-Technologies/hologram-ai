@@ -1,24 +1,23 @@
-The two versions are identical - there are no differences between the ARCH VERSION and the SUBPROJECT VERSION. The merged result is the same as both inputs:
-
 # hologram-ai — Project Overview
 
-`hologram-ai` is a Rust-first, inference-first compiler and runtime integration
-layer that imports AI model artifacts (ONNX, GGUF, GGML) and makes them
-executable on the Hologram architecture.
+`hologram-ai` is a Rust-first, inference-first **compiler** that imports AI
+model artifacts (ONNX, GGUF, GGML) and compiles them into `.holo` archives
+executable on the Hologram architecture. It is a compiler only — it ships
+zero runtime code (see ADR-0016).
 
 ---
 
 ## What it is
 
-A compiler pipeline and runtime session library. Its job is to:
+A compiler pipeline. Its job is to:
 
 1. **Ingest** foreign model artifacts (ONNX protobuf, GGUF binary, GGML checkpoint)
 2. **Normalize** them into a canonical `AiGraph` intermediate representation
 3. **Optimize** the graph via compile-time passes (fusion, folding, shape propagation)
 4. **Plan memory** — resolve tensor lifetimes, buffer aliasing, KV-cache sizing
-5. **Lower** the graph into a `hologram::Graph + ExecutionSchedule`
-6. **Execute** inference via the Hologram execution backend
-7. **Stream** autoregressive token output for LLM workloads
+5. **Lower** the graph into a `hologram::Graph` with `FloatOp` tensor operations
+6. **Compile** via `hologram::compile()` into an executable plan
+7. **Emit** `.holo` archives — single-graph or multi-component pipelines
 
 ---
 
@@ -51,6 +50,45 @@ hologram-ai specific boundary.
 
 ---
 
+## Multi-Component Pipeline Archives
+
+hologram-ai compiles multi-component models into a single `.holo` pipeline
+archive. Each component is independently compiled into a sub-archive, then
+bundled via `PipelineWriter` with a `MetaSection` describing component roles,
+weight groups, and data flow connections.
+
+**Supported model topologies:**
+
+| Topology | Components | Example |
+|----------|-----------|---------|
+| LLM (current) | prefill + decode | TinyLlama, Llama 3 |
+| Encoder-decoder | encoder + decoder | Whisper, T5 |
+| CALM | autoencoder + backbone + head + decoder | CALM (next-vector prediction) |
+| Stable Diffusion | VAE encoder + UNet + VAE decoder | SD 1.5, SDXL |
+| MoE | router + N experts | Mixtral |
+
+**Key types:**
+
+- `ComponentSpec` — specification for a single component (name, role, weight group,
+  graph, memory plan, lowering phase)
+- `MetaSection` — pipeline metadata section describing N components and their
+  connections (embedded in the `.holo` wrapper via `PipelineWriter::add_section`)
+- `ComponentRole` — Prefill, Decode, Encoder, Decoder, Backbone, GenerativeHead,
+  Forward, Custom
+- `OptProfile` — Llm (full MVP passes) or Generic (shape propagation + constant folding only)
+
+**Compilation flow:**
+
+```
+N × ModelSource → import → optimize (per OptProfile) → concretize → lower
+  → compile_one_component() → N sub-archives
+  → compile_components() → PipelineWriter + MetaSection → single .holo
+```
+
+See [Plan 021](../plans/021-multi-component-archives.md) for the full design.
+
+---
+
 ## Phases
 
 | Phase | Scope |
@@ -59,6 +97,7 @@ hologram-ai specific boundary.
 | **Phase 2** | ONNX encoder/decoder, streaming token generation, KV-cache |
 | **Phase 3** | Metal backend, quantized kernels, GGML migration path |
 | **Phase 4** | Multi-backend, CUDA, WebGPU, multi-GPU sharding |
+| **Phase 5** | Multi-component pipelines, weight deduplication, generic multi-ONNX |
 
 ---
 
@@ -68,16 +107,15 @@ hologram-ai specific boundary.
 |-------|------|
 | Full architecture | [architecture.md](architecture.md) |
 | CLI specification | [cli.md](cli.md) |
-| Crate layout | [crate-layout.md](crate-layout.md) |
 | Import pipeline | [import-pipeline.md](import-pipeline.md) |
 | Lowering design | [lowering.md](lowering.md) |
 | Tokenizer architecture | [tokenizer.md](tokenizer.md) |
 | Runtime model | [runtime-model.md](runtime-model.md) |
 | KV-cache & paged attention | [runtime-model.md — KV-Cache](runtime-model.md#kv-cache) |
-| Testing strategy | [testing-strategy.md](testing-strategy.md) |
+| Multi-component pipelines | [Plan 021](../plans/021-multi-component-archives.md) |
+| Repository layout | [repository-layout.md](repository-layout.md) |
+| Testing strategy | [testing.md](testing.md) |
 | Roadmap | [roadmap.md](roadmap.md) |
-| Risks | [risks.md](risks.md) |
-| Research baseline | [../../research/2026-03-06-hologram-ai-architecture.md](../../research/2026-03-06-hologram-ai-architecture.md) |
 
 ---
 

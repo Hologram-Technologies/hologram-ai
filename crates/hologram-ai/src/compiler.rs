@@ -104,6 +104,11 @@ impl CompiledModel {
 pub struct ComponentSpec<'a> {
     /// Pipeline key (e.g., "lm.prefill", "ae.encoder").
     pub name: String,
+    /// What role this component plays in the pipeline.
+    pub role: hologram_ai_common::sections::meta::ComponentRole,
+    /// Components sharing this value share weights. Used by weight
+    /// deduplication to avoid storing duplicate blobs.
+    pub weight_group: String,
     /// Which optimization passes to run.
     pub opt_profile: hologram_ai_common::OptProfile,
     /// The component's graph (already imported, possibly pre-optimized).
@@ -479,42 +484,81 @@ impl ModelCompiler {
             .context("concretizing decode graph (seq=1) failed")?;
         let decode_graph = post_concretization_repair(decode_graph)?;
 
-        self.compile_components(vec![
-            ComponentSpec {
-                name: "lm.prefill".into(),
-                opt_profile: hologram_ai_common::OptProfile::Llm,
-                graph: ai_graph,
-                mem_plan,
-                phase: LowerPhase::Prefill,
-                weights: extra_weights.clone(),
-            },
-            ComponentSpec {
-                name: "lm.decode".into(),
-                opt_profile: hologram_ai_common::OptProfile::Llm,
-                graph: &decode_graph,
-                mem_plan,
-                phase: LowerPhase::Decode,
-                weights: extra_weights,
-            },
-        ])
+        use hologram_ai_common::sections::meta::{ComponentConnection, ComponentRole};
+
+        self.compile_components(
+            vec![
+                ComponentSpec {
+                    name: "lm.prefill".into(),
+                    role: ComponentRole::Prefill,
+                    weight_group: "lm".into(),
+                    opt_profile: hologram_ai_common::OptProfile::Llm,
+                    graph: ai_graph,
+                    mem_plan,
+                    phase: LowerPhase::Prefill,
+                    weights: extra_weights.clone(),
+                },
+                ComponentSpec {
+                    name: "lm.decode".into(),
+                    role: ComponentRole::Decode,
+                    weight_group: "lm".into(),
+                    opt_profile: hologram_ai_common::OptProfile::Llm,
+                    graph: &decode_graph,
+                    mem_plan,
+                    phase: LowerPhase::Decode,
+                    weights: extra_weights,
+                },
+            ],
+            vec![ComponentConnection {
+                from_component: "lm.prefill".into(),
+                from_output: "kv_cache".into(),
+                to_component: "lm.decode".into(),
+                to_input: "kv_cache".into(),
+            }],
+        )
     }
 
     /// Compile N component specs into a single pipeline archive.
     ///
     /// Each component is independently lowered, compiled, and assembled into a
     /// sub-archive. All sub-archives are bundled via `PipelineWriter` into a
-    /// single `.holo` pipeline archive.
+    /// single `.holo` pipeline archive with a `MetaSection` describing
+    /// component roles, weight groups, and connections.
     pub fn compile_components(
         &self,
         specs: Vec<ComponentSpec<'_>>,
+        connections: Vec<hologram_ai_common::sections::meta::ComponentConnection>,
     ) -> anyhow::Result<Vec<u8>> {
+        use hologram::hologram_archive::section::EmbeddableSection;
         use hologram::hologram_archive::writer::pipeline_writer::PipelineWriter;
+        use hologram_ai_common::sections::meta::{ComponentDescriptor, MetaSection};
 
         let n = specs.len();
         info!(components = n, "compiling multi-component pipeline");
 
+        let mut descriptors = Vec::with_capacity(n);
         let mut writer = PipelineWriter::new();
+
+        // Track which weight groups have already been seen so we can
+        // record weight_source for deduplication hints.
+        let mut weight_group_owners: std::collections::HashMap<String, String> =
+            std::collections::HashMap::new();
+
         for spec in specs {
+            let weight_source = if let Some(owner) = weight_group_owners.get(&spec.weight_group) {
+                Some(owner.clone())
+            } else {
+                weight_group_owners.insert(spec.weight_group.clone(), spec.name.clone());
+                None
+            };
+
+            descriptors.push(ComponentDescriptor {
+                name: spec.name.clone(),
+                role: spec.role,
+                weight_group: spec.weight_group,
+                weight_source,
+            });
+
             let opts = LoweringOptions::default();
             let archive = compile_one_component(
                 spec.graph,
@@ -531,6 +575,11 @@ impl ModelCompiler {
             );
             writer = writer.add_model(&spec.name, archive);
         }
+
+        // Embed MetaSection in the pipeline wrapper archive.
+        let meta = MetaSection::new(descriptors, connections);
+        let meta_section = meta.to_bytes();
+        writer = writer.add_section(meta.section_kind(), meta_section);
 
         let pipeline = writer
             .build()

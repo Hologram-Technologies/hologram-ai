@@ -284,6 +284,46 @@ The compiled LLM produces a **pipeline archive** containing two sub-graphs:
 The runtime routes to the correct sub-graph based on `write_pos`:
 `write_pos == 0` → prefill graph, `write_pos > 0` → decode graph.
 
+### Multi-component pipeline archives (Plan 021)
+
+The 2-graph LLM pipeline is a specialization of a general N-component
+pipeline archive. `compile_components()` compiles any number of independent
+`AiGraph` instances into a single `.holo` file via `PipelineWriter`.
+
+**Archive structure:**
+
+```
+Wrapper .holo archive
+├─ Weights section: [sub-archive 0 | padding | sub-archive 1 | ... | sub-archive N]
+├─ SECTION_PIPELINE: PipelineHeader { models: [name, offset, size, crc32] }
+└─ SECTION_META: MetaSection { components: [...], connections: [...] }
+```
+
+**MetaSection** describes component roles and data flow:
+
+```rust
+pub struct MetaSection {
+    pub components: Vec<ComponentDescriptor>,  // name, role, weight_group, weight_source
+    pub connections: Vec<ComponentConnection>, // from_component.output → to_component.input
+}
+```
+
+For the LLM case, `MetaSection` contains 2 descriptors (Prefill + Decode,
+both in weight_group "lm") and 1 connection (shared KV-cache).
+
+For a CALM model, it would contain 4 descriptors (Encoder, Backbone,
+GenerativeHead, Decoder) and 3 connections describing data flow.
+
+Each component can specify an `OptProfile` to control which optimization
+passes run:
+- `Llm` — full MVP pipeline (attention fusion, KV injection, SwiGLU fusion)
+- `Generic` — shape/data propagation + constant folding only
+
+Components that don't use attention get `MemoryPlan::empty()` (no KV-cache
+allocation).
+
+See [Plan 021](../plans/021-multi-component-archives.md) for the full design.
+
 ---
 
 ## Token Generation
