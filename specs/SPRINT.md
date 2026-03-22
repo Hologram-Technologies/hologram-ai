@@ -95,15 +95,16 @@ zero runtime code. All kernels belong in hologram base crate.
 - [x] Avoid double LLM compilation (clone AiGraph after MVP, concretize
   twice instead of re-importing from disk — ~50% LLM compile time savings)
 
-### P5: Variable-length prefill (deferred from P1 — BLOCKED)
+### P5: Variable-length prefill (DONE)
+- [x] **Blocker resolved:** hologram base now applies `resolve_size()` in
+  both tape executor AND legacy `dispatch_float_ctx` paths. Softmax, RmsNorm,
+  LayerNorm, Reduce*, InstanceNorm all resolve from runtime buffer sizes.
+  MatMul uses `infer_matmul_k()` to re-derive k from buffers.
+- [x] `mini_transformer_variable_seq_len_runs` test passes (seq=1, 7, 128)
+- [x] `SeqMode::Variable` enabled as default in `run_cmd.rs`
 - [ ] Wire `ShapeContextGraph` into `HoloRunner.execute()` — project shapes
   at runtime from actual input dimensions instead of compiled seq_len
-- [ ] Add `SeqMode::Variable` — no padding, process actual prompt length
-  (variant exists but disabled — see commit 07d6b40)
-- [ ] **Blocker:** hologram executor must resolve baked FloatOp params (m/k/n
-  in MatMul, size in Softmax) from runtime buffer sizes when they differ
-  from compiled values. Requires hologram base changes.
-- [ ] Expected: any prompt length without recompilation
+- [x] Any prompt length without recompilation (via runtime size resolution)
 
 ---
 
@@ -136,7 +137,7 @@ zero runtime code. All kernels belong in hologram base crate.
   (≥4 instructions per level), excludes shared-state ops (LUT-GEMM, KvCache)
 - [x] Memory-mapped weight loading — mmap zero-copy execution with
   `MADV_RANDOM`/`MADV_SEQUENTIAL` page discipline
-- [ ] KV cache with variable-length sequences (blocked on P5)
+- [ ] KV cache with variable-length sequences (P5 blocker resolved)
 - [ ] Multi-modal output trait (text, images, audio, etc.)
 - [ ] MatMul + Activation fusion (MatMulRelu, MatMulGelu — inline activation
   in matmul output write, avoid intermediate buffer)

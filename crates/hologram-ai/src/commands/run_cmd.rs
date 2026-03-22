@@ -135,38 +135,21 @@ struct GenerationConfig {
 /// compiled seq_len, and the attention_mask handles which positions are real.
 enum SeqMode {
     /// Pad inputs to the compiled sequence length.
+    #[allow(dead_code)]
     FixedPad(usize),
     /// Variable-length: use actual prompt length (no padding).
-    /// Requires ShapeContextGraph for runtime shape projection.
-    #[allow(dead_code)]
+    /// Requires hologram executor to resolve baked FloatOp params from
+    /// runtime buffer sizes (resolve_size in dispatch_float_ctx/into).
     Variable { max_seq: usize },
 }
 
 fn resolve_seq_mode(runner: &HoloRunner) -> SeqMode {
     let max_seq = load_meta_seq_len(runner).unwrap_or(2048);
 
-    // TODO(variable-length): Variable mode requires hologram executor to resolve
-    // baked FloatOp params (m/k/n in MatMul, size in Softmax) from runtime buffer
-    // sizes when they differ from compiled values. Currently the executor only
-    // resolves 0-sentinel params, but concretize_all_dims bakes all dims to
-    // concrete values leaving no sentinels. Two paths forward:
-    //   1. Compile with 0-sentinels for seq dims (don't concretize seq_len)
-    //   2. Have the executor re-derive params when buffer sizes don't match
-    // Until then, use FixedPad with the compiled seq_len.
-
-    // Pad to compiled seq_len.
-    let compiled_seq = runner
-        .plan()
-        .layer_header()
-        .into_iter()
-        .flat_map(|lh| lh.layers.iter())
-        .flat_map(|l| l.inputs.iter())
-        .find(|p| p.name == "input_ids")
-        .and_then(|p| p.shape.get(1).copied())
-        .filter(|&s| s > 0)
-        .map(|s| s as usize);
-
-    SeqMode::FixedPad(compiled_seq.unwrap_or(max_seq))
+    // Variable mode: the hologram executor now resolves baked FloatOp params
+    // (size in Softmax/RmsNorm/etc.) from runtime buffer sizes via resolve_size(),
+    // and MatMul re-derives k via infer_matmul_k(). No padding needed.
+    SeqMode::Variable { max_seq }
 }
 
 /// Try to read max_seq_len from embedded ModelMetaSection.
