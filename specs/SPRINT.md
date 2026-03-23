@@ -138,8 +138,10 @@ zero runtime code. All kernels belong in hologram base crate.
   `ExecContext` impl. Embedded in pipeline archive via `PipelineWriter::add_section()`.
   LLM pipeline creates 2 descriptors (Prefill + Decode) + 1 KV-cache connection.
   Roundtrip tests pass (LLM + 4-component CALM).
-- [ ] Phase 3: Weight deduplication — `WeightStore` primitive in hologram-base
-  (follows `hologram-compression` pattern), `SECTION_WEIGHT_DEDUP`
+- [x] Phase 3: Weight deduplication — `WeightStore` primitive in hologram-base
+  (content-addressable, CRC32 + exact byte comparison), `SECTION_WEIGHT_DEDUP`,
+  `WeightDedupIndex` section. Compiler skips weight embedding for duplicate
+  components in same weight group (LLM decode no longer duplicates prefill weights).
 - [x] Phase 4: `ModelSource::MultiOnnx` + `OptPipeline::generic()` — generic
   multi-ONNX compilation with per-component import, optimization (MVP for
   transformers, generic for others), concretization, and weight group tracking.

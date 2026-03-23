@@ -557,6 +557,7 @@ impl ModelCompiler {
     ) -> anyhow::Result<Vec<u8>> {
         use hologram::hologram_archive::section::EmbeddableSection;
         use hologram::hologram_archive::writer::pipeline_writer::PipelineWriter;
+        use hologram::hologram_archive::WeightStore;
         use hologram_ai_common::sections::meta::{ComponentDescriptor, MetaSection};
 
         let n = specs.len();
@@ -564,19 +565,38 @@ impl ModelCompiler {
 
         let mut descriptors = Vec::with_capacity(n);
         let mut writer = PipelineWriter::new();
+        let mut weight_store = WeightStore::new();
 
         // Track which weight groups have already been seen so we can
-        // record weight_source for deduplication hints.
+        // record weight_source for deduplication hints and skip duplicate
+        // weight embedding.
         let mut weight_group_owners: std::collections::HashMap<String, String> =
             std::collections::HashMap::new();
 
+        let mut total_weight_bytes_before: u64 = 0;
+
         for spec in specs {
+            let is_duplicate = weight_group_owners.contains_key(&spec.weight_group);
             let weight_source = if let Some(owner) = weight_group_owners.get(&spec.weight_group) {
                 Some(owner.clone())
             } else {
                 weight_group_owners.insert(spec.weight_group.clone(), spec.name.clone());
                 None
             };
+
+            // Deduplicate: only pass weights to the first component in each
+            // weight group. Subsequent components in the same group get None
+            // (their weights are shared from the owner at load time).
+            let weights_for_component = if is_duplicate {
+                None
+            } else {
+                spec.weights.clone()
+            };
+
+            if let Some(ref w) = spec.weights {
+                total_weight_bytes_before += w.len() as u64;
+                weight_store.insert(w.clone());
+            }
 
             descriptors.push(ComponentDescriptor {
                 name: spec.name.clone(),
@@ -591,7 +611,7 @@ impl ModelCompiler {
                 &spec.mem_plan.kv_cache_layout,
                 &opts,
                 &spec.phase,
-                spec.weights,
+                weights_for_component,
             )
             .with_context(|| format!("compiling component '{}'", spec.name))?;
             info!(
@@ -606,6 +626,20 @@ impl ModelCompiler {
         let meta = MetaSection::new(descriptors, connections);
         let meta_section = meta.to_bytes();
         writer = writer.add_section(meta.section_kind(), meta_section);
+
+        // Embed WeightDedupIndex if deduplication saved any bytes.
+        let dedup_bytes = weight_store.total_bytes();
+        if dedup_bytes > 0 && dedup_bytes < total_weight_bytes_before {
+            let (_blob, dedup_index) = weight_store.build();
+            let dedup_section = dedup_index.to_bytes();
+            writer = writer.add_section(dedup_index.section_kind(), dedup_section);
+            info!(
+                before_mb = format_args!("{:.1}", total_weight_bytes_before as f64 / 1_048_576.0),
+                after_mb = format_args!("{:.1}", dedup_bytes as f64 / 1_048_576.0),
+                savings_pct = format_args!("{:.0}", (1.0 - dedup_bytes as f64 / total_weight_bytes_before as f64) * 100.0),
+                "weight deduplication active"
+            );
+        }
 
         let pipeline = writer
             .build()
