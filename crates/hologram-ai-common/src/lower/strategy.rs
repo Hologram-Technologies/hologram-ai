@@ -396,6 +396,9 @@ fn resolve_op(
             scale,
             causal,
             heads_first,
+            qk_norm,
+            rope,
+            rope_base,
         } => {
             let s = scale.unwrap_or((*head_dim as f32).sqrt().recip());
             (
@@ -406,9 +409,9 @@ fn resolve_op(
                     scale: f32_to_bits(s),
                     causal: *causal,
                     heads_first: *heads_first,
-                    qk_norm: false,
-                    rope: false,
-                    rope_base: 0,
+                    qk_norm: *qk_norm,
+                    rope: *rope,
+                    rope_base: f32_to_bits(*rope_base),
                 },
                 vec![],
             )

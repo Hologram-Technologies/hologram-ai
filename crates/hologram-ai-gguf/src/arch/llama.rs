@@ -132,6 +132,9 @@ pub fn build_llama_graph(
                 scale: None,
                 causal: true,
                 heads_first: false, // GGUF: inputs are [seq, n_heads, head_dim]
+                qk_norm: false,
+                rope: false, // RoPE already applied separately via RotaryEmbedding nodes
+                rope_base: 0.0,
             },
             vec![q_rope, k_cached, v_cached],
             DType::F32,

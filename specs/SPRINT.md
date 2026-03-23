@@ -80,10 +80,12 @@ zero runtime code. All kernels belong in hologram base crate.
 - [x] Add+RMSNorm residual fusion — `AddRmsNormFusion` pass in
   `add_rmsnorm_fusion.rs`, wired into MVP pipeline; lowering maps to
   `FloatOp::AddRmsNorm`; kernel implemented in hologram base.
-- [ ] QK-Norm + RoPE + KV-Store pre-attention fusion — fuse 5-7 nodes
-  (Split/RmsNorm/RoPE/KvWrite) into extended `Attention` op. Design in
-  Plan 019. Requires extending `FloatOp::Attention` with `qk_norm`, `rope`,
-  `rope_base` fields in hologram base, plus inline norm+rope in kernel.
+- [x] QK-Norm + RoPE pre-attention fusion — `PreAttentionFusion` pass in
+  `pre_attention_fusion.rs`, wired into MVP pipeline after AttentionFusion.
+  Peels single-consumer RoPE and RmsNorm off Q/K inputs and folds into
+  `GroupedQueryAttention` op with `qk_norm`, `rope`, `rope_base` fields.
+  Lowering propagates flags to `FloatOp::Attention`; tape executor dispatches
+  via GPU backend (Metal) or CPU inline path. 4 unit tests.
 
 ### P4: Compilation speed (DONE — Plans 017, 020)
 - [x] Release profile with LTO (`codegen-units = 1, lto = "thin"`)

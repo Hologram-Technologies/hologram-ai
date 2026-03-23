@@ -57,6 +57,10 @@ impl OptPipeline {
             // absolute position from the generation loop.
             Box::new(PositionIdsInjection),
             Box::new(AttentionFusion),
+            // Fold RoPE and QK-Norm (RmsNorm on Q/K) into the fused
+            // Attention op. Must run after AttentionFusion (needs GQA nodes)
+            // and before KvSlotInjection.
+            Box::new(super::pre_attention_fusion::PreAttentionFusion),
             Box::new(KvSlotInjection),
             // Decompose compound ops (ReduceL1/L2, DepthToSpace, SpaceToDepth)
             // into primitive ops before lowering.

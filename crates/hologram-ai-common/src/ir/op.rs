@@ -101,6 +101,14 @@ pub enum AiOp {
         /// If true, Q/K/V are `[n_heads, seq, head_dim]` (ONNX: pre-transposed).
         /// If false, Q/K/V are `[seq, n_heads, head_dim]` (GGUF: interleaved).
         heads_first: bool,
+        /// If true, apply RmsNorm to Q and K before computing attention scores.
+        /// Set by `PreAttentionFusion` pass; QK-norm weights are extra inputs.
+        qk_norm: bool,
+        /// If true, apply RoPE to Q and K before computing attention scores.
+        /// Set by `PreAttentionFusion` pass.
+        rope: bool,
+        /// RoPE base frequency (default 10000.0). Only used when `rope=true`.
+        rope_base: f32,
     },
     /// Hint from importer; lowering decides if flash attention is available.
     FlashAttentionHint,
