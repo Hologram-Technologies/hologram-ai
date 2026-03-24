@@ -153,10 +153,10 @@ zero runtime code. All kernels belong in hologram base crate.
   (single Conv2d, stride variants, Conv+Relu+GAP+Flatten+Gemm mini classifier).
 - [x] Test with BERT (encoder-only, bidirectional attention) — **compilation works**
   (507MB ONNX, bert-base-uncased). Non-causal attention detected correctly,
-  KV cache skipped, single-graph path used. Execution hits ShapeMismatch in
-  Gather — `concretize_all_dims` sets embedding vocabulary dim to 1 but token
-  IDs have values > 0. Needs fix: preserve Gather/Embed index dimensions during
-  concretization.
+  KV cache skipped, single-graph path used. Shape→Gather→Concat chains folded
+  at compile time via `ForceConcretize` + `ConstantEvaluation` Shape-node
+  evaluation. Execution hits hologram base `dispatch_inline_unary` panic
+  (non-unary kernel routed to unary path) — needs hologram base fix.
 - [ ] Test with Stable Diffusion UNet (vision + attention + cross-attention)
 - [ ] Test with Whisper (encoder-decoder, audio)
 - [ ] Fix any op dispatch failures discovered

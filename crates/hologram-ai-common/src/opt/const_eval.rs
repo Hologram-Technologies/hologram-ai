@@ -48,6 +48,19 @@ impl Pass for ConstantEvaluation {
                 continue;
             }
 
+            // Shape ops produce the shape of their input as an INT64 tensor.
+            // The input data is not needed — only the shape from tensor_info.
+            // Evaluate eagerly when the input shape is fully concrete.
+            if let Some(bytes) = try_eval_shape(&node.op, &node.inputs, &graph.tensor_info) {
+                let n_dims = bytes.len() / 8;
+                let out_shape = shape_from_concrete(&[n_dims as u64]);
+                let info = TensorInfo::new(DType::INT64, out_shape);
+                graph.params.insert(out_tid, AiParam::inline(bytes, info.clone()));
+                graph.tensor_info.insert(out_tid, info);
+                materialized += 1;
+                continue;
+            }
+
             // Check if ALL inputs are inline constants.
             let inputs: Vec<(&[u8], &TensorInfo)> = node
                 .inputs
@@ -121,6 +134,46 @@ impl Pass for ConstantEvaluation {
     }
 }
 
+
+/// Evaluate an `AiOp::Shape` node when the input has a fully-concrete shape.
+/// Returns the shape values serialized as little-endian INT64 bytes, or None
+/// if the op is not Shape or the input shape is not fully concrete.
+fn try_eval_shape(
+    op: &AiOp,
+    inputs: &[crate::ir::TensorId],
+    tensor_info: &HashMap<crate::ir::TensorId, TensorInfo>,
+) -> Option<Vec<u8>> {
+    let (start, end) = match op {
+        AiOp::Shape { start, end } => (*start, *end),
+        _ => return None,
+    };
+    let in_tid = *inputs.first()?;
+    let ti = tensor_info.get(&in_tid)?;
+    let shape = concrete_shape(&ti.shape)?;
+    let rank = shape.len() as i64;
+    let s = normalize_axis(start.unwrap_or(0), rank);
+    let e = normalize_axis(end.unwrap_or(rank), rank).min(shape.len());
+    if s > e {
+        return None;
+    }
+    let bytes: Vec<u8> = shape[s..e]
+        .iter()
+        .flat_map(|&d| (d as i64).to_le_bytes())
+        .collect();
+    if bytes.is_empty() {
+        return None;
+    }
+    Some(bytes)
+}
+
+/// Normalize a potentially-negative axis index to a non-negative usize.
+fn normalize_axis(axis: i64, rank: i64) -> usize {
+    if axis < 0 {
+        (rank + axis).max(0) as usize
+    } else {
+        axis as usize
+    }
+}
 
 /// Extract a fully-concrete shape from DimExpr slice.
 fn concrete_shape(shape: &[crate::ir::Dim]) -> Option<Vec<usize>> {

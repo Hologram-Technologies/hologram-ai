@@ -1353,12 +1353,38 @@ fn post_concretization_repair(mut ai_graph: AiGraph) -> anyhow::Result<AiGraph> 
     //   Pass 3 (DataProp #2): re-evaluates shape subgraphs that depend
     //     on K_intermediate's now-correct shape (e.g. K^T target).
     //   Pass 4 (AggressiveProp #3): applies DataProp #2 results.
+    // ForceConcretize: replaces any remaining Dynamic/Var dims with
+    // Concrete values. Inserted before ConstantEvaluation so that Shape
+    // nodes can be folded (they need fully-concrete input shapes).
+    struct ForceConcretize;
+    impl Pass for ForceConcretize {
+        fn name(&self) -> &str { "ForceConcretize" }
+        fn run(&self, mut graph: AiGraph) -> anyhow::Result<AiGraph> {
+            let subs = graph.dim_vars.fixed_substitutions();
+            for info in graph.tensor_info.values_mut() {
+                for dim in info.shape.iter_mut() {
+                    for (var_id, replacement) in &subs {
+                        *dim = dim.substitute(*var_id, replacement);
+                    }
+                    if let Some(v) = dim.evaluate() {
+                        *dim = Dim::Concrete(v);
+                    }
+                    if matches!(dim, Dim::Dynamic | Dim::Var(_)) {
+                        *dim = Dim::Concrete(1);
+                    }
+                }
+            }
+            Ok(graph)
+        }
+    }
+
     let aggressive_pipeline = OptPipeline::new(vec![
         Box::new(AggressiveShapePropagation),
         Box::new(DataPropagation),
         Box::new(AggressiveShapePropagation),
         Box::new(DataPropagation),
         Box::new(AggressiveShapePropagation),
+        Box::new(ForceConcretize),
         Box::new(ConstantEvaluation),
         Box::new(ConstantFolding),
         Box::new(ConstantDeduplication),
@@ -1451,9 +1477,10 @@ fn concretize_all_dims(mut graph: AiGraph, seq_len_override: Option<u64>) -> any
         }
         let name_lower = entry.name.to_lowercase();
         if name_lower.contains("seq") || name_lower.contains("length") || name_lower.contains("position") {
+            debug!(var = %entry.name, value = context_len, "concretizing seq-like dim");
             entry.fixed = Some(context_len);
         } else {
-            // Batch-like dims default to 1.
+            debug!(var = %entry.name, value = 1, "concretizing batch-like dim");
             entry.upper = Some(1u64);
         }
     }
