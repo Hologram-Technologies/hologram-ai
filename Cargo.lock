@@ -725,6 +725,7 @@ dependencies = [
  "hologram-ai-tokenizer",
  "indicatif",
  "memmap2",
+ "rayon",
  "reqwest",
  "rkyv",
  "serde",

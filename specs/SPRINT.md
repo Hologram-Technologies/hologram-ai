@@ -136,8 +136,9 @@ zero runtime code. All kernels belong in hologram base crate.
 - [x] Rayon parallelization — subgraph optimization via `into_par_iter()`,
   `Arc<Vec<NodeId>>` topo cache for Send compatibility
 - [x] `eprintln!` → `tracing::info!/warn!` in `run_cmd.rs` (20+ calls migrated)
-- [ ] Parallelization — rayon for multi-component compilation, weight I/O,
-  constant dedup hashing
+- [x] Parallelization — rayon `par_iter()` for multi-component compilation
+  (import → optimize → concretize → memory plan per component in parallel)
+- [ ] Parallelization — weight I/O, constant dedup hashing
 - [ ] Clone elimination — remaining `.clone()` calls via move semantics, `Cow`,
   shape reference folding
 - [ ] Worklist dtype fixpoint in shape_prop.rs

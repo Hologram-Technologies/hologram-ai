@@ -5,6 +5,7 @@
 //! sessions or runtime state (see ADR-0016).
 
 use anyhow::Context;
+use rayon::prelude::*;
 use hologram_ai_common::{
     exec_context::ShapeContextGraph, lower, AiGraph, AiParam, LowerPhase,
     LoweringOptions, MemoryPlanner, OptPipeline, Pass,
@@ -692,71 +693,80 @@ impl ModelCompiler {
             "compiling multi-ONNX pipeline"
         );
 
-        // Track first-seen weight groups for dedup.
+        // Track first-seen weight groups for dedup (computed from input order,
+        // does not depend on compilation results).
         let mut weight_group_first: std::collections::HashMap<String, usize> =
             std::collections::HashMap::new();
-
-        // Import, optimize, and build ComponentSpecs.
-        let mut graphs: Vec<AiGraph> = Vec::with_capacity(components.len());
-        let mut mem_plans: Vec<hologram_ai_common::MemoryPlan> = Vec::with_capacity(components.len());
-        let mut spec_data: Vec<(String, hologram_ai_common::sections::meta::ComponentRole, String, usize)> =
-            Vec::with_capacity(components.len());
-
         for (idx, comp) in components.iter().enumerate() {
-            // Import.
-            let ai_graph = hologram_ai_onnx::import_onnx_path(&comp.path, Default::default())
-                .with_context(|| format!("importing ONNX component '{}' from {:?}", comp.name, comp.path))?;
-            info!(
-                component = %comp.name,
-                nodes = ai_graph.nodes.len(),
-                "imported component"
-            );
-
-            // Optimize with appropriate profile.
-            let is_transformer = matches!(
-                comp.role,
-                ComponentRole::Prefill | ComponentRole::Decode | ComponentRole::Backbone
-            );
-            let ai_graph = if is_transformer {
-                OptPipeline::mvp().run(ai_graph).with_context(|| {
-                    format!("optimizing component '{}' (Llm profile)", comp.name)
-                })?
-            } else {
-                OptPipeline::generic().run(ai_graph).with_context(|| {
-                    format!("optimizing component '{}' (Generic profile)", comp.name)
-                })?
-            };
-
-            // Concretize.
-            let ai_graph = concretize_all_dims(ai_graph, self.seq_len_override)
-                .with_context(|| format!("concretizing component '{}'", comp.name))?;
-            let ai_graph = post_concretization_repair(ai_graph)?;
-
-            // Memory plan.
-            let mem_plan = if is_transformer {
-                hologram_ai_common::MemoryPlanner
-                    .plan(&ai_graph)
-                    .with_context(|| format!("planning memory for component '{}'", comp.name))?
-            } else {
-                hologram_ai_common::MemoryPlan::empty()
-            };
-
-            // Track weight group ownership.
             weight_group_first
                 .entry(comp.weight_group.clone())
                 .or_insert(idx);
+        }
 
-            spec_data.push((comp.name.clone(), comp.role.clone(), comp.weight_group.clone(), idx));
-            graphs.push(ai_graph);
+        // Import, optimize, concretize, and plan memory for each component
+        // in parallel. Each component is fully independent at this stage.
+        let seq_len = self.seq_len_override;
+        let results: Vec<anyhow::Result<(AiGraph, hologram_ai_common::MemoryPlan)>> = components
+            .par_iter()
+            .map(|comp| {
+                // Import.
+                let ai_graph = hologram_ai_onnx::import_onnx_path(&comp.path, Default::default())
+                    .with_context(|| format!("importing ONNX component '{}' from {:?}", comp.name, comp.path))?;
+                info!(
+                    component = %comp.name,
+                    nodes = ai_graph.nodes.len(),
+                    "imported component"
+                );
+
+                // Optimize with appropriate profile.
+                let is_transformer = matches!(
+                    comp.role,
+                    ComponentRole::Prefill | ComponentRole::Decode | ComponentRole::Backbone
+                );
+                let ai_graph = if is_transformer {
+                    OptPipeline::mvp().run(ai_graph).with_context(|| {
+                        format!("optimizing component '{}' (Llm profile)", comp.name)
+                    })?
+                } else {
+                    OptPipeline::generic().run(ai_graph).with_context(|| {
+                        format!("optimizing component '{}' (Generic profile)", comp.name)
+                    })?
+                };
+
+                // Concretize.
+                let ai_graph = concretize_all_dims(ai_graph, seq_len)
+                    .with_context(|| format!("concretizing component '{}'", comp.name))?;
+                let ai_graph = post_concretization_repair(ai_graph)?;
+
+                // Memory plan.
+                let mem_plan = if is_transformer {
+                    hologram_ai_common::MemoryPlanner
+                        .plan(&ai_graph)
+                        .with_context(|| format!("planning memory for component '{}'", comp.name))?
+                } else {
+                    hologram_ai_common::MemoryPlan::empty()
+                };
+
+                Ok((ai_graph, mem_plan))
+            })
+            .collect();
+
+        // Unpack parallel results, preserving original component order.
+        let mut graphs: Vec<AiGraph> = Vec::with_capacity(components.len());
+        let mut mem_plans: Vec<hologram_ai_common::MemoryPlan> = Vec::with_capacity(components.len());
+        for (idx, result) in results.into_iter().enumerate() {
+            let (graph, mem_plan) = result
+                .with_context(|| format!("compiling component '{}'", components[idx].name))?;
+            graphs.push(graph);
             mem_plans.push(mem_plan);
         }
 
         // Collect weights and build ComponentSpecs.
         let mut specs: Vec<ComponentSpec<'_>> = Vec::with_capacity(graphs.len());
 
-        for (i, (name, role, weight_group, idx)) in spec_data.iter().enumerate() {
+        for (i, comp) in components.iter().enumerate() {
             let graph = &graphs[i];
-            let is_first_in_group = weight_group_first.get(weight_group) == Some(idx);
+            let is_first_in_group = weight_group_first.get(&comp.weight_group) == Some(&i);
 
             // Only the first component in a weight group collects weights.
             // Subsequent components pass None — compile_components registers
@@ -769,13 +779,13 @@ impl ModelCompiler {
             };
 
             specs.push(ComponentSpec {
-                name: name.clone(),
-                role: role.clone(),
-                weight_group: weight_group.clone(),
+                name: comp.name.clone(),
+                role: comp.role.clone(),
+                weight_group: comp.weight_group.clone(),
                 opt_profile: hologram_ai_common::OptProfile::Generic,
                 graph,
                 mem_plan: &mem_plans[i],
-                phase: LowerPhase::Named(name.clone()),
+                phase: LowerPhase::Named(comp.name.clone()),
                 weights,
             });
         }

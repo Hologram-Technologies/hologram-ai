@@ -40,6 +40,7 @@ sha2.workspace       = true
 dirs.workspace       = true
 which.workspace      = true
 memmap2.workspace    = true
+rayon.workspace      = true
 rkyv.workspace       = true
 
 [dev-dependencies]
