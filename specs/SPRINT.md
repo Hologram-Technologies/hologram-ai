@@ -142,14 +142,17 @@ zero runtime code. All kernels belong in hologram base crate.
 - [ ] Clone elimination — remaining `.clone()` calls via move semantics, `Cow`,
   shape reference folding
 - [ ] Worklist dtype fixpoint in shape_prop.rs
-- [ ] **BLOCKER: TinyLlama produces gibberish** — two issues found:
+- [ ] **BLOCKER: TinyLlama produces gibberish** — hologram base runtime regression:
   1. `build_with_shared_weights` offset bug: embedding Gather reads wrong
-     data from shared weight blob → NaN. Workaround: embed weights directly
-     per sub-archive (doubles archive size). Root cause: `ConstantData::Deferred`
-     offsets don't match shared blob layout.
-  2. Gibberish output even without NaN: causal mask / RoPE may be affected
-     by `ForceConcretize` setting Dynamic dims to 1. Needs investigation
-     of mask shape and position embedding correctness.
+     data from shared weight blob → NaN. **Workaround in place**: embed
+     weights directly per sub-archive (doubles archive size).
+  2. Compute divergence: hologram's logits completely differ from ORT
+     (hologram top-1="wig" id=9192 vs ORT top-1=id=529 for BOS input).
+     Not caused by hologram-ai compiler changes (verified by reverting all
+     changes). Root cause is in hologram base's float dispatch — likely
+     introduced in Sprint 21 norm/attention refactoring.
+     **Next step**: add intermediate tensor capture to tape executor and
+     run node-by-node comparison against ORT to find first divergent op.
 
 ---
 
