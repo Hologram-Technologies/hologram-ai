@@ -151,14 +151,13 @@ zero runtime code. All kernels belong in hologram base crate.
 - [x] Test with ResNet-50 (vision, no attention) — **compilation works** (225 nodes
   after BatchNorm decomposition + constant folding). Conv2d conformance tests pass
   (single Conv2d, stride variants, Conv+Relu+GAP+Flatten+Gemm mini classifier).
-- [x] Test with BERT (encoder-only, bidirectional attention) — **compilation works**
-  (507MB ONNX, bert-base-uncased). Non-causal attention detected correctly,
+- [x] Test with BERT (encoder-only, bidirectional attention) — **compiles and executes**
+  (507MB ONNX, bert-base-uncased, seq=32). Non-causal attention detected correctly,
   KV cache skipped, single-graph path used. Shape→Gather→Concat chains folded
-  at compile time via `ForceConcretize` + `ConstantEvaluation` Shape-node
-  evaluation. hologram base `dispatch_inline_unary` fixed (9 missing inline
-  ops: Log, Sqrt, Cos, Sin, Sign, Floor, Ceil, Round, Erf). Execution now
-  hits MatMul shape mismatch in FFN layers — needs shape lowering investigation
-  for non-LLM MatMul patterns.
+  at compile time via `ForceConcretize` + `ConstantEvaluation` Shape-node eval.
+  hologram base inline dispatch fixed (9 missing ops). Shape propagation hardened:
+  never downgrade Concrete dims to Dynamic (prevents post-concretization shape
+  regression in intermediate attention tensors). Output: [1, 32, 768] all finite.
 - [ ] Test with Stable Diffusion UNet (vision + attention + cross-attention)
 - [ ] Test with Whisper (encoder-decoder, audio)
 - [ ] Fix any op dispatch failures discovered

@@ -163,6 +163,7 @@ fn matmul_recipes(
     let k = resolve_or_zero(&k_recipe) as u32;
     let n = resolve_or_zero(&n_recipe) as u32;
 
+
     let any_deferred = is_deferred(&m_recipe) || is_deferred(&k_recipe) || is_deferred(&n_recipe);
     let recipes = if any_deferred {
         vec![m_recipe, k_recipe, n_recipe]
@@ -510,6 +511,7 @@ fn resolve_op(
                     axis_from_end,
                     start: norm_start,
                     end: norm_end,
+                    axis_size: axis_size as u32,
                 },
                 vec![],
             )
