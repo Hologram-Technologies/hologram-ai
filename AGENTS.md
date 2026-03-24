@@ -37,9 +37,10 @@ models/         — test models for development (TinyLlama ONNX, etc.)
 8. **Prefer simpler code and smaller functions.** Functions should be short, focused, and easily testable. If a function is getting large, break it into smaller well-named helpers. Avoid complex nested logic when a flatter structure is clearer.
 9. **Never commit test modules or scratch files to this repo.** Use `/tmp` for any throwaway test scripts, one-off experiments, or scratch files. Do not leave `test_*.rs`, `scratch_*.rs`, or similar files in the source tree.
 10. **Clean up after yourself.** Before finishing a task, remove any scratch files, temporary debug files, and `dbg!`/`eprintln!` debugging output that were added during investigation and are not part of the final solution.
-11. **Never use `.unwrap()` in production code.** Use `.expect("descriptive message")` instead so that failures produce actionable context. This applies to all code — library and binary crates alike. The only exception is throwaway scratch files in `/tmp`.
-12. **Keep site docs up to date.** When making structural changes, adding new features, changing APIs, or modifying the compilation pipeline, update the relevant documentation in `specs/docs/` (e.g., `architecture.md`, `lowering.md`, `data-model.md`, `cli.md`). Docs must reflect the current state of the code — stale documentation is worse than no documentation.
-13. **Never suppress `clippy::too_many_arguments`.** If a function triggers this lint, refactor it to accept a params/config struct using the builder pattern. Do not add `#[allow(clippy::too_many_arguments)]`.
+11. **Never leave TODOs, placeholders, or stubs.** Do not commit `TODO`, `FIXME`, `HACK`, placeholder implementations, or stub functions. Either implement the feature fully or do not add it. If work is deferred, track it in `specs/SPRINT.md` — not in source code comments.
+12. **Never use `.unwrap()` in production code.** Use `.expect("descriptive message")` instead so that failures produce actionable context. This applies to all code — library and binary crates alike. The only exception is throwaway scratch files in `/tmp`.
+13. **Keep site docs up to date.** When making structural changes, adding new features, changing APIs, or modifying the compilation pipeline, update the relevant documentation in `specs/docs/` (e.g., `architecture.md`, `lowering.md`, `data-model.md`, `cli.md`). Docs must reflect the current state of the code — stale documentation is worse than no documentation.
+14. **Never suppress `clippy::too_many_arguments`.** If a function triggers this lint, refactor it to accept a params/config struct using the builder pattern. Do not add `#[allow(clippy::too_many_arguments)]`.
 
 ---
 

@@ -151,7 +151,12 @@ zero runtime code. All kernels belong in hologram base crate.
 - [x] Test with ResNet-50 (vision, no attention) — **compilation works** (225 nodes
   after BatchNorm decomposition + constant folding). Conv2d conformance tests pass
   (single Conv2d, stride variants, Conv+Relu+GAP+Flatten+Gemm mini classifier).
-- [ ] Test with BERT (encoder-only, bidirectional attention)
+- [x] Test with BERT (encoder-only, bidirectional attention) — **compilation works**
+  (507MB ONNX, bert-base-uncased). Non-causal attention detected correctly,
+  KV cache skipped, single-graph path used. Execution hits ShapeMismatch in
+  Gather — `concretize_all_dims` sets embedding vocabulary dim to 1 but token
+  IDs have values > 0. Needs fix: preserve Gather/Embed index dimensions during
+  concretization.
 - [ ] Test with Stable Diffusion UNet (vision + attention + cross-attention)
 - [ ] Test with Whisper (encoder-decoder, audio)
 - [ ] Fix any op dispatch failures discovered
