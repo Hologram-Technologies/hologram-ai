@@ -515,10 +515,8 @@ impl ModelCompiler {
 
         use hologram_ai_common::sections::meta::{ComponentConnection, ComponentRole};
 
-        // Both components share weight_group="lm". Prefill carries the weight
-        // blob; decode passes None — compile_components registers the decode
-        // component under the same group so the dedup index maps both to the
-        // shared blob. This avoids cloning the multi-GB weight data.
+        // Both components share weight_group="lm" — WeightStore deduplicates
+        // by group, so only one copy is stored in the shared blob.
         self.compile_components(
             vec![
                 ComponentSpec {
@@ -529,7 +527,7 @@ impl ModelCompiler {
                     graph: ai_graph,
                     mem_plan,
                     phase: LowerPhase::Prefill,
-                    weights: extra_weights,
+                    weights: extra_weights.clone(),
                 },
                 ComponentSpec {
                     name: "lm.decode".into(),
@@ -539,7 +537,7 @@ impl ModelCompiler {
                     graph: &decode_graph,
                     mem_plan,
                     phase: LowerPhase::Decode,
-                    weights: None,
+                    weights: extra_weights,
                 },
             ],
             vec![ComponentConnection {
@@ -598,18 +596,12 @@ impl ModelCompiler {
             if let Some(ref w) = spec.weights {
                 total_weight_bytes_before += w.len() as u64;
                 weight_store.insert(&spec.name, &spec.weight_group, w);
-            } else if weight_store.contains_group(&spec.weight_group) {
-                // Component shares a weight group already registered by a
-                // sibling. Register this component name under the same group
-                // so the dedup index maps it to the shared blob at load time.
-                // WeightStore's group-reuse fast path handles this: the 1-byte
-                // sentinel data is ignored — the group lookup returns the
-                // existing blob immediately.
-                weight_store.insert(&spec.name, &spec.weight_group, &[0]);
             }
-            // Sub-archives are graph-only (no embedded weights). Weights are
-            // stored once in the shared blob via build_with_shared_weights.
-            let weights_for_component: Option<Vec<u8>> = None;
+            // Embed weights directly in each sub-archive. Shared weight dedup
+            // via build_with_shared_weights has an offset alignment bug that
+            // causes NaN in the embedding layer. Until fixed, embed weights
+            // per-component (doubles archive size but produces correct output).
+            let weights_for_component = spec.weights.clone();
 
             descriptors.push(ComponentDescriptor {
                 name: spec.name.clone(),

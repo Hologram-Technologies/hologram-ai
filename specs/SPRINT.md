@@ -142,6 +142,14 @@ zero runtime code. All kernels belong in hologram base crate.
 - [ ] Clone elimination — remaining `.clone()` calls via move semantics, `Cow`,
   shape reference folding
 - [ ] Worklist dtype fixpoint in shape_prop.rs
+- [ ] **BLOCKER: TinyLlama produces gibberish** — two issues found:
+  1. `build_with_shared_weights` offset bug: embedding Gather reads wrong
+     data from shared weight blob → NaN. Workaround: embed weights directly
+     per sub-archive (doubles archive size). Root cause: `ConstantData::Deferred`
+     offsets don't match shared blob layout.
+  2. Gibberish output even without NaN: causal mask / RoPE may be affected
+     by `ForceConcretize` setting Dynamic dims to 1. Needs investigation
+     of mask shape and position embedding correctness.
 
 ---
 
