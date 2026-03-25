@@ -520,7 +520,7 @@ fn trace_past_expand(
         };
         let node = &graph.nodes[node_idx];
         match &node.op {
-            // These ops don't expand data at runtime — trace through them.
+            // These ops don't change data at runtime — trace through them.
             AiOp::Reshape { .. }
             | AiOp::Flatten { .. }
             | AiOp::Squeeze { .. }
