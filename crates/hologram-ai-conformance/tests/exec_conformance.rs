@@ -2438,6 +2438,127 @@ fn tinyllama_logit_conformance() {
     );
 }
 
+/// Decode step conformance: compare hologram's KV-cache decode logits
+/// against ORT's full-recomputation logits.
+///
+/// Verifies that after prefill (5 tokens), the first decode step produces
+/// the same logits as ORT running the full 6-token sequence.
+#[test]
+#[ignore]
+fn tinyllama_decode_conformance() {
+    use hologram_ai_conformance::ort_runner::runner::{run_onnx_file_typed, OrtInputTyped};
+
+    let model_path = workspace_path("models/TinyLlama-1.1B-Chat-v1.0/model_causal.onnx");
+    if !model_path.exists() {
+        eprintln!("SKIP: model not found");
+        return;
+    }
+
+    let prefill_seq = 5usize;
+    let prefill_ids: Vec<i64> = (1..=prefill_seq as i64).collect(); // [1,2,3,4,5]
+
+    // ORT reference: run 6 tokens (prefill + 1 decode token) in one shot.
+    // The 6th token is what ORT predicts as top-1 after the 5-token prefill.
+    let ort_prefill = run_onnx_file_typed(
+        &model_path,
+        vec![
+            OrtInputTyped::I64 { name: "input_ids".into(), shape: vec![1, prefill_seq], data: prefill_ids.clone() },
+            OrtInputTyped::I64 { name: "attention_mask".into(), shape: vec![1, prefill_seq], data: vec![1; prefill_seq] },
+        ],
+    ).expect("ORT prefill failed");
+    let ort_logits_prefill = &ort_prefill[0].data;
+    let vocab = 32000;
+    let ort_last = &ort_logits_prefill[(prefill_seq - 1) * vocab..prefill_seq * vocab];
+    let ort_top1_prefill = ort_last.iter().enumerate()
+        .max_by(|a, b| a.1.partial_cmp(b.1).unwrap()).unwrap().0;
+    eprintln!("ORT prefill top-1: id={ort_top1_prefill}");
+
+    // Now run ORT with 6 tokens (prefill + predicted token) to get decode reference.
+    let decode_token = ort_top1_prefill as i64;
+    let full_ids: Vec<i64> = prefill_ids.iter().copied().chain(std::iter::once(decode_token)).collect();
+    let full_seq = full_ids.len();
+    let ort_full = run_onnx_file_typed(
+        &model_path,
+        vec![
+            OrtInputTyped::I64 { name: "input_ids".into(), shape: vec![1, full_seq], data: full_ids },
+            OrtInputTyped::I64 { name: "attention_mask".into(), shape: vec![1, full_seq], data: vec![1; full_seq] },
+        ],
+    ).expect("ORT full failed");
+    let ort_logits_full = &ort_full[0].data;
+    let ort_decode_pos = &ort_logits_full[(full_seq - 1) * vocab..full_seq * vocab];
+    let ort_decode_top1 = ort_decode_pos.iter().enumerate()
+        .max_by(|a, b| a.1.partial_cmp(b.1).unwrap()).unwrap();
+    eprintln!("ORT decode reference: top-1={} val={:.4} range=[{:.4}, {:.4}]",
+        ort_decode_top1.0, ort_decode_top1.1,
+        ort_decode_pos.iter().cloned().fold(f32::INFINITY, f32::min),
+        ort_decode_pos.iter().cloned().fold(f32::NEG_INFINITY, f32::max));
+
+    // Hologram: compile as pipeline (prefill + decode), run with KV cache.
+    let compiler = ModelCompiler::default();
+    let archive = compiler.compile(ModelSource::OnnxPath(model_path))
+        .expect("compilation failed");
+
+    let runner = hologram_ai::compiler::HoloRunner::from_bytes(archive.bytes)
+        .expect("loading runner");
+
+    // Prefill step.
+    let position_ids: Vec<i64> = (0..prefill_seq as i64).collect();
+    let mut prefill_inputs = hologram::GraphInputs::new();
+    prefill_inputs.set_with_shape(0, bytemuck::cast_slice(&prefill_ids).to_vec(), vec![1, prefill_seq]);
+    prefill_inputs.set_with_shape(1, bytemuck::cast_slice(&vec![1i64; prefill_seq]).to_vec(), vec![1, prefill_seq]);
+    prefill_inputs.set_with_shape(2, bytemuck::cast_slice(&position_ids).to_vec(), vec![prefill_seq]);
+
+    let mut kv = hologram::KvCacheState::new(22, 4, 64, 64);
+    let prefill_out = runner.execute_with_kv(&prefill_inputs, &mut kv)
+        .expect("hologram prefill failed");
+
+    // Verify prefill matches.
+    let (_, prefill_bytes) = prefill_out.get(0).expect("no prefill output");
+    let holo_prefill_logits: Vec<f32> = prefill_bytes.chunks_exact(4)
+        .map(|c| f32::from_le_bytes(c.try_into().expect("4")))
+        .collect();
+    // Prefill outputs at compiled seq (2048), extract at position (prefill_seq - 1).
+    let holo_prefill_last = &holo_prefill_logits[(prefill_seq - 1) * vocab..prefill_seq * vocab];
+    let holo_prefill_top1 = holo_prefill_last.iter().enumerate()
+        .max_by(|a, b| a.1.partial_cmp(b.1).unwrap()).unwrap();
+    eprintln!("Hologram prefill: top-1={} val={:.4}", holo_prefill_top1.0, holo_prefill_top1.1);
+    assert_eq!(ort_top1_prefill, holo_prefill_top1.0, "prefill top-1 mismatch");
+
+    // Decode step: single token with KV cache via pipeline decode model.
+    let decode_ids = vec![decode_token];
+    let decode_pos = vec![prefill_seq as i64];
+    let mut decode_inputs = hologram::GraphInputs::new();
+    decode_inputs.set_with_shape(0, bytemuck::cast_slice(&decode_ids).to_vec(), vec![1, 1]);
+    decode_inputs.set_with_shape(1, bytemuck::cast_slice(&[1i64]).to_vec(), vec![1, 1]);
+    decode_inputs.set_with_shape(2, bytemuck::cast_slice(&decode_pos).to_vec(), vec![1]);
+
+    let decode_out = runner.execute_with_kv(&decode_inputs, &mut kv)
+        .expect("hologram decode failed");
+    let (_, decode_bytes) = decode_out.get(0).expect("no decode output");
+    let holo_decode_logits: Vec<f32> = decode_bytes.chunks_exact(4)
+        .map(|c| f32::from_le_bytes(c.try_into().expect("4")))
+        .collect();
+
+    // Decode model output is [1, 1, vocab]. Logits at position 0.
+    let holo_decode_pos = &holo_decode_logits[..vocab];
+    let holo_decode_top1 = holo_decode_pos.iter().enumerate()
+        .max_by(|a, b| a.1.partial_cmp(b.1).unwrap()).unwrap();
+    eprintln!("Hologram decode: top-1={} val={:.4} range=[{:.4}, {:.4}]",
+        holo_decode_top1.0, holo_decode_top1.1,
+        holo_decode_pos.iter().cloned().fold(f32::INFINITY, f32::min),
+        holo_decode_pos.iter().cloned().fold(f32::NEG_INFINITY, f32::max));
+
+    // Cosine similarity between decode logits.
+    let dot: f64 = ort_decode_pos.iter().zip(holo_decode_pos.iter())
+        .map(|(a, b)| *a as f64 * *b as f64).sum();
+    let n_ort: f64 = ort_decode_pos.iter().map(|v| (*v as f64).powi(2)).sum::<f64>().sqrt();
+    let n_holo: f64 = holo_decode_pos.iter().map(|v| (*v as f64).powi(2)).sum::<f64>().sqrt();
+    let cosine = if n_ort > 0.0 && n_holo > 0.0 { dot / (n_ort * n_holo) } else { 0.0 };
+    eprintln!("Decode cosine: {cosine:.6}");
+
+    assert!(cosine > 0.95, "Decode logits diverge: cosine={cosine:.6}");
+}
+
 /// Layer 0 sub-model conformance: compare hologram vs ORT for just the
 /// first transformer layer. Helps binary-search the divergent layer.
 ///

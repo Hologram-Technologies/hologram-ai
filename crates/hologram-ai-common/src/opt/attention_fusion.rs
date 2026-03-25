@@ -84,15 +84,15 @@ impl Pass for AttentionFusion {
                 let k_tid = node.inputs[1]; // K^T: [batch, heads, dim, seq] (pre-multiplied with scale)
                 let v_tid = chain.v_tid;    // V: [batch, heads, seq, dim] (expanded to num_q_heads)
 
-                // Infer head dimensions from Q's shape.
-                let (num_heads, head_dim) = {
+                // Infer head dimensions from Q's and K's shapes.
+                let (num_heads, num_kv_heads_inferred, head_dim) = {
                     let inferred = infer_all_head_params(q_tid, k_tid, chain.v_tid, &graph);
                     if inferred.0 > 0 && inferred.2 > 0 {
-                        (inferred.0, inferred.2)
+                        inferred
                     } else if let Some(cached) = cached_heads {
-                        (cached.0, cached.2)
+                        cached
                     } else {
-                        (inferred.0, inferred.2)
+                        inferred
                     }
                 };
 
@@ -101,28 +101,34 @@ impl Pass for AttentionFusion {
                     continue;
                 }
 
-                if cached_heads.is_none() {
-                    cached_heads = Some((num_heads, num_heads, head_dim));
-                }
-
-                // In ONNX exports, K and V are already expanded to num_q_heads
-                // via unsqueeze→expand→reshape before the SDPA MatMul. Scale is
-                // applied as Mul on K^T before the Q@K^T MatMul, or as Mul on the
-                // scores after. Either way, scale=1.0 for the kernel since it's
-                // already applied in the data or chain.
-                //
-                // The kernel receives Q and V in [heads, seq, dim] layout.
-                // K is in K^T layout [heads, dim, seq] — we trace back through
-                // the Transpose to get un-transposed K in [heads, seq, dim].
-                let (k_actual, effective_scale) = {
+                // Trace K back through Transpose and Scale to get un-transposed K.
+                let (k_pre_transpose, effective_scale) = {
                     let (k, k_scale) = find_pre_transpose_with_scale(k_tid, &tid_to_node, &graph);
-                    // Combine: scale from K path * scale from chain (Mul after Q@K^T).
                     let eff = k_scale.unwrap_or(1.0) * chain.scale;
                     (k, eff)
                 };
 
-                // All inputs use num_q_heads (K/V already expanded).
-                let num_kv_heads = num_heads;
+                // Trace K and V back past GQA expansion ops (Expand/Reshape/
+                // Unsqueeze) to find the un-expanded tensors. At runtime,
+                // Expand is a no-op so the data stays at num_kv_heads.
+                // The attention kernel handles GQA via group_size internally.
+                let k_actual = trace_past_expand(k_pre_transpose, &tid_to_node, &graph);
+                let v_actual = trace_past_expand(v_tid, &tid_to_node, &graph);
+
+                // Infer true num_kv_heads from the un-expanded K's shape.
+                // If the un-expanded K has a Dynamic heads dim, fall back to the
+                // cached corrected value from a prior layer (all layers share
+                // the same GQA config).
+                let k_actual_heads = extract_heads_dim(k_actual, &graph);
+                let num_kv_heads = k_actual_heads
+                    .map(|h| h as u32)
+                    .or_else(|| cached_heads.map(|(_, kv, _)| kv))
+                    .unwrap_or(num_kv_heads_inferred);
+
+                // Cache the corrected (num_heads, num_kv_heads, head_dim) so
+                // subsequent layers with Dynamic shape dims reuse the right
+                // GQA ratio instead of falling back to num_q_heads.
+                cached_heads = Some((num_heads, num_kv_heads, head_dim));
 
                 // Mark all chain nodes for removal.
                 for &idx in &chain.node_indices {
@@ -143,7 +149,7 @@ impl Pass for AttentionFusion {
                         rope: false,
                         rope_base: 0.0,
                     },
-                    vec![q_tid, k_actual, v_tid],
+                    vec![q_tid, k_actual, v_actual],
                     vec![chain.output_tid],
                 );
                 next_id += 1;
@@ -456,11 +462,13 @@ fn find_pre_transpose_with_scale(
                 let pre = node.inputs.first().copied().unwrap_or(tid);
                 return (pre, accumulated_scale);
             }
-            // Reshape/View/Unsqueeze don't change data layout — keep tracing.
+            // Reshape/View/Unsqueeze/Expand don't change data at runtime in
+            // hologram's tape executor — keep tracing through them.
             AiOp::Reshape { .. }
             | AiOp::Flatten { .. }
             | AiOp::Squeeze { .. }
             | AiOp::Unsqueeze { .. }
+            | AiOp::Expand
             | AiOp::Identity => {
                 current = match node.inputs.first() {
                     Some(&inp) => inp,
@@ -485,6 +493,47 @@ fn find_pre_transpose_with_scale(
         }
     }
     (tid, accumulated_scale)
+}
+
+/// Trace a tensor back past GQA expansion ops (Expand, Reshape, Unsqueeze)
+/// to find the un-expanded version with the true num_kv_heads.
+///
+/// In ONNX GQA models (e.g., TinyLlama), K/V are expanded from
+/// `[batch, num_kv_heads, seq, head_dim]` to `[batch, num_q_heads, seq, head_dim]`
+/// via Unsqueeze→Expand→Reshape before the SDPA MatMul. At runtime, Expand is
+/// a no-op (lowered to Reshape/identity), so the data stays at num_kv_heads.
+///
+/// Returns the tensor ID of the un-expanded K or V with the true head count.
+fn trace_past_expand(
+    tid: TensorId,
+    tid_to_node: &HashMap<TensorId, usize>,
+    graph: &AiGraph,
+) -> TensorId {
+    let mut current = tid;
+    for _ in 0..8 {
+        let node_idx = match tid_to_node.get(&current) {
+            Some(&idx) => idx,
+            None => return current,
+        };
+        let node = &graph.nodes[node_idx];
+        match &node.op {
+            // These ops don't expand data at runtime — trace through them.
+            AiOp::Reshape { .. }
+            | AiOp::Flatten { .. }
+            | AiOp::Squeeze { .. }
+            | AiOp::Unsqueeze { .. }
+            | AiOp::Expand
+            | AiOp::Identity => {
+                current = match node.inputs.first() {
+                    Some(&inp) => inp,
+                    None => return current,
+                };
+            }
+            // Stop at any "real" op (MatMul projection, Transpose, etc.)
+            _ => return current,
+        }
+    }
+    current
 }
 
 #[cfg(test)]

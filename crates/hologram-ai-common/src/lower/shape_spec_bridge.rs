@@ -128,7 +128,7 @@ impl ShapeProjection for FloatOp {
             FloatOp::Concat { .. } => (ShapeSpecRepr::Concat, None),
 
             // ── Slice — one-axis contiguous slice ─────────────────────────────
-            FloatOp::Slice { axis_from_end, start, end } => (
+            FloatOp::Slice { axis_from_end, start, end, .. } => (
                 ShapeSpecRepr::Slice {
                     axis_from_end: *axis_from_end,
                     start: *start,

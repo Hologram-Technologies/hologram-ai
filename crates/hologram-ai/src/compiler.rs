@@ -597,10 +597,8 @@ impl ModelCompiler {
                 total_weight_bytes_before += w.len() as u64;
                 weight_store.insert(&spec.name, &spec.weight_group, w);
             }
-            // Embed weights directly in each sub-archive. Shared weight dedup
-            // via build_with_shared_weights has an offset alignment bug that
-            // causes NaN in the embedding layer. Until fixed, embed weights
-            // per-component (doubles archive size but produces correct output).
+            // Embed weights directly in each sub-archive until shared weight
+            // offset alignment is fixed.
             let weights_for_component = spec.weights.clone();
 
             descriptors.push(ComponentDescriptor {

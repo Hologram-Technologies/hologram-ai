@@ -612,6 +612,8 @@ fn conformance_conv2d_simple() {
         dilation_h: 1,
         dilation_w: 1,
         group: 1,
+        input_h: in_h as u32,
+        input_w: in_w as u32,
     };
     let tol = tolerance_for(&op);
 
@@ -642,6 +644,8 @@ fn conformance_conv2d_with_padding() {
         dilation_h: 1,
         dilation_w: 1,
         group: 1,
+        input_h: in_h as u32,
+        input_w: in_w as u32,
     };
     let tol = tolerance_for(&op);
 
