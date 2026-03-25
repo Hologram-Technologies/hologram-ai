@@ -328,8 +328,8 @@ fn run_generation(
 
         let target_pos = actual_len.saturating_sub(1);
 
-        // Per-step diagnostics (step 0 always, others if --verbose).
-        if step == 0 || config.verbose {
+        // Per-step diagnostics (always for first 3 steps for debugging).
+        if step < 3 || config.verbose {
             print_logit_diagnostics(logit_data, target_pos, vocab_size, tok_section, step);
         }
 

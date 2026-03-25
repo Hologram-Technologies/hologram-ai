@@ -155,8 +155,11 @@ zero runtime code. All kernels belong in hologram base crate.
      (a) `FloatOp::Transpose` was a no-op passthrough (data never physically
      reordered). Added `InlineTranspose` TapeKernel with baked shapes.
      (b) Batched MatMul flattened all dims into single 2D multiply. Added
-     per-batch loop. TinyLlama logits now match ORT exactly (single-graph
-     conformance test passes). Pipeline path still needs shared-weight fix.
+     per-batch loop. **Prefill logits now match ORT exactly** (conformance
+     tests pass). Decode path produces gibberish — KV cache data is
+     correctly populated (verified non-zero) but attention output is
+     near-uniform (max logit 3.0 vs ORT's 22.7). Needs investigation
+     in how cached K/V is combined with current Q during decode.
 
 ---
 
