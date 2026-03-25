@@ -102,6 +102,9 @@ impl Pass for AttentionFusion {
                 }
 
                 // Trace K back through Transpose and Scale to get un-transposed K.
+                // The GQA kernel receives pre-Transpose K and handles layout
+                // via the heads_first flag. KvSlotInjection then inserts
+                // KvWrite on this same pre-Transpose K tensor.
                 let (k_pre_transpose, effective_scale) = {
                     let (k, k_scale) = find_pre_transpose_with_scale(k_tid, &tid_to_node, &graph);
                     let eff = k_scale.unwrap_or(1.0) * chain.scale;
