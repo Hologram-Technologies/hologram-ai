@@ -142,24 +142,15 @@ zero runtime code. All kernels belong in hologram base crate.
 - [ ] Clone elimination — remaining `.clone()` calls via move semantics, `Cow`,
   shape reference folding
 - [ ] Worklist dtype fixpoint in shape_prop.rs
-- [ ] **BLOCKER: TinyLlama produces gibberish** — hologram base runtime regression:
-  1. `build_with_shared_weights` offset bug: embedding Gather reads wrong
-     data from shared weight blob → NaN. **Workaround in place**: embed
-     weights directly per sub-archive (doubles archive size).
-  2. Compute divergence: hologram's logits completely differ from ORT
-     (hologram top-1="wig" id=9192 vs ORT top-1=id=529 for BOS input).
-     Not caused by hologram-ai compiler changes (verified by reverting all
-     changes). Root cause is in hologram base's float dispatch — likely
-     introduced in Sprint 21 norm/attention refactoring.
-     **Root cause FIXED** in hologram base: two bugs —
-     (a) `FloatOp::Transpose` was a no-op passthrough (data never physically
-     reordered). Added `InlineTranspose` TapeKernel with baked shapes.
-     (b) Batched MatMul flattened all dims into single 2D multiply. Added
-     per-batch loop. **Prefill logits now match ORT exactly** (conformance
-     tests pass). Decode path produces gibberish — KV cache data is
-     correctly populated (verified non-zero) but attention output is
-     near-uniform (max logit 3.0 vs ORT's 22.7). Needs investigation
-     in how cached K/V is combined with current Q during decode.
+- [x] **Prefill fixed**: Transpose no-op and batched MatMul bugs fixed in
+  hologram base. Prefill logits match ORT exactly (conformance tests pass).
+- [ ] **BLOCKER: Decode produces gibberish** — KV cache data layout mismatch.
+  Root cause: tensor buffers carry no shape/layout metadata. Kernels infer
+  shapes from buffer sizes via stride division, which fails when the data
+  layout doesn't match assumptions. **Solution: Plan 025 — TensorMeta
+  headers** (self-describing tensors, like TCP headers). Also: remove
+  `force_single_graph` (dead path, decode at compiled seq=2048 is ~2000x
+  slower).
 
 ---
 
