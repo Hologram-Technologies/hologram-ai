@@ -2863,3 +2863,220 @@ fn workspace_path(rel: &str) -> std::path::PathBuf {
     p.push(rel);
     p
 }
+
+// ── Full-model conformance tests ─────────────────────────────────────────────
+//
+// These compare hologram executor output against ORT on real model files.
+// They validate the FULL pipeline: import → optimize → lower → compile → execute.
+// Skipped if model files are not present.
+
+/// Helper: compile an ONNX file and execute through HoloRunner.
+fn compile_and_execute_file(
+    model_path: &std::path::Path,
+    inputs: &hologram::GraphInputs,
+    seq_len_override: Option<u64>,
+) -> Vec<f32> {
+    let compiler = ModelCompiler {
+        seq_len_override,
+        ..ModelCompiler::default()
+    };
+    let archive = compiler
+        .compile(ModelSource::OnnxPath(model_path.to_path_buf()))
+        .expect("compilation failed");
+    let runner = hologram_ai::compiler::HoloRunner::from_bytes(archive.bytes)
+        .expect("loading runner failed");
+    let outputs = runner.execute(inputs).expect("execution failed");
+    let (_, out_bytes) = outputs.get(0).expect("no output");
+    out_bytes
+        .chunks_exact(4)
+        .map(|c| f32::from_le_bytes(c.try_into().expect("4 bytes")))
+        .collect()
+}
+
+/// ResNet-50 conformance: hologram output matches ORT on a deterministic input.
+///
+/// Currently diverges from ORT — pre-existing issue with vision model pipeline.
+/// BatchNorm decomposition and Conv2d dispatch need investigation.
+#[test]
+#[ignore]
+fn resnet50_matches_ort() {
+    let model = workspace_path("models/resnet50-v2-7.onnx");
+    if !model.exists() {
+        eprintln!("SKIP: resnet50 model not found at {model:?}");
+        return;
+    }
+
+    // Deterministic input: [1, 3, 224, 224]
+    let input_len = 1 * 3 * 224 * 224;
+    let input_data: Vec<f32> = (0..input_len).map(|i| ((i as f32) * 0.001).sin()).collect();
+
+    // ORT reference.
+    let ort_out = run_onnx_file_typed(
+        &model,
+        vec![OrtInputTyped::F32 {
+            name: "data".into(),
+            shape: vec![1, 3, 224, 224],
+            data: input_data.clone(),
+        }],
+    )
+    .expect("ORT failed");
+    assert!(!ort_out.is_empty(), "ORT produced no outputs");
+
+    // Hologram.
+    let mut inputs = hologram::GraphInputs::new();
+    inputs.set_with_shape(0, bytemuck::cast_slice(&input_data).to_vec(), vec![1, 3, 224, 224]);
+    let holo_out = compile_and_execute_file(&model, &inputs, None);
+
+    // Compare.
+    let tol = Tolerance { atol: 1e-3, rtol: 5e-3 }; // vision models accumulate error
+    let cmp = hologram_ai_conformance::tolerance::compare_outputs(&holo_out, &ort_out[0].data, tol);
+    assert!(cmp.passed, "ResNet-50 mismatch: {}", cmp.message);
+    eprintln!("ResNet-50 conformance PASSED: {} outputs, max_diff={:.6}", holo_out.len(), cmp.max_abs_error);
+}
+
+/// BERT-base conformance: hologram output matches ORT on synthetic token IDs.
+///
+/// Currently diverges from ORT — pre-existing issue with encoder-only transformer.
+/// BERT uses bidirectional attention (non-causal), LayerNorm, and GELU which
+/// may have different error accumulation characteristics than the LLM path.
+#[test]
+#[ignore]
+fn bert_matches_ort() {
+    let model = workspace_path("models/bert-base-uncased/model.onnx");
+    if !model.exists() {
+        eprintln!("SKIP: BERT model not found at {model:?}");
+        return;
+    }
+
+    let seq_len = 16usize;
+    let input_ids: Vec<i64> = (0..seq_len as i64).map(|i| 1000 + i).collect();
+    let attention_mask: Vec<i64> = vec![1i64; seq_len];
+    let token_type_ids: Vec<i64> = vec![0i64; seq_len];
+
+    // ORT reference.
+    let ort_out = run_onnx_file_typed(
+        &model,
+        vec![
+            OrtInputTyped::I64 { name: "input_ids".into(), shape: vec![1, seq_len], data: input_ids.clone() },
+            OrtInputTyped::I64 { name: "attention_mask".into(), shape: vec![1, seq_len], data: attention_mask.clone() },
+            OrtInputTyped::I64 { name: "token_type_ids".into(), shape: vec![1, seq_len], data: token_type_ids.clone() },
+        ],
+    )
+    .expect("ORT failed");
+    assert!(!ort_out.is_empty(), "ORT produced no outputs");
+
+    // Hologram.
+    let mut inputs = hologram::GraphInputs::new();
+    inputs.set_with_shape(0, bytemuck::cast_slice(&input_ids).to_vec(), vec![1, seq_len]);
+    inputs.set_with_shape(1, bytemuck::cast_slice(&attention_mask).to_vec(), vec![1, seq_len]);
+    inputs.set_with_shape(2, bytemuck::cast_slice(&token_type_ids).to_vec(), vec![1, seq_len]);
+    let holo_out = compile_and_execute_file(&model, &inputs, Some(seq_len as u64));
+
+    // BERT-base hidden_dim = 768. Output: [1, seq_len, 768].
+    let expected_len = seq_len * 768;
+    assert!(
+        holo_out.len() >= expected_len,
+        "BERT output too small: {} < {expected_len}", holo_out.len()
+    );
+
+    // Compare first output (last_hidden_state). Truncate to matching length.
+    let ort_data = &ort_out[0].data;
+    let compare_len = holo_out.len().min(ort_data.len());
+    let tol = Tolerance { atol: 1e-3, rtol: 5e-3 };
+    let cmp = hologram_ai_conformance::tolerance::compare_outputs(
+        &holo_out[..compare_len], &ort_data[..compare_len], tol,
+    );
+    assert!(cmp.passed, "BERT mismatch: {}", cmp.message);
+    eprintln!("BERT conformance PASSED: {} outputs, max_diff={:.6}", compare_len, cmp.max_abs_error);
+}
+
+/// TinyLlama prefill conformance: logits at last position match ORT.
+///
+/// This validates the complete LLM pipeline: embedding → 22 transformer layers
+/// (attention + MLP + RmsNorm) → LM head → logits. Uses the causal ONNX variant
+/// with a short prompt.
+#[test]
+fn tinyllama_prefill_matches_ort() {
+    let model = workspace_path("models/TinyLlama-1.1B-Chat-v1.0/model_causal.onnx");
+    if !model.exists() {
+        eprintln!("SKIP: TinyLlama causal model not found at {model:?}");
+        return;
+    }
+
+    let seq_len = 8usize;
+    // Simple token IDs (deterministic, no padding).
+    let input_ids: Vec<i64> = vec![1, 4071, 338, 278, 7483, 310, 3444, 29973]; // "What is the capital of France?"
+    let attention_mask: Vec<i64> = vec![1i64; seq_len];
+
+    // ORT reference (model_causal.onnx has 2 inputs: input_ids + attention_mask).
+    let ort_out = run_onnx_file_typed(
+        &model,
+        vec![
+            OrtInputTyped::I64 { name: "input_ids".into(), shape: vec![1, seq_len], data: input_ids.clone() },
+            OrtInputTyped::I64 { name: "attention_mask".into(), shape: vec![1, seq_len], data: attention_mask.clone() },
+        ],
+    )
+    .expect("ORT failed");
+    assert!(!ort_out.is_empty(), "ORT produced no outputs");
+
+    // Hologram — compiled model has 3 inputs (input_ids, attention_mask, position_ids)
+    // and requires KV cache for LLM execution.
+    let position_ids: Vec<i64> = (0..seq_len as i64).collect();
+    let mut inputs = hologram::GraphInputs::new();
+    inputs.set_with_shape(0, bytemuck::cast_slice(&input_ids).to_vec(), vec![1, seq_len]);
+    inputs.set_with_shape(1, bytemuck::cast_slice(&attention_mask).to_vec(), vec![1, seq_len]);
+    inputs.set_with_shape(2, bytemuck::cast_slice(&position_ids).to_vec(), vec![1, seq_len]);
+
+    // Compile and execute with KV cache (required for LLM models).
+    let compiler = ModelCompiler {
+        seq_len_override: Some(seq_len as u64),
+        ..ModelCompiler::default()
+    };
+    let archive = compiler
+        .compile(ModelSource::OnnxPath(model.to_path_buf()))
+        .expect("compilation failed");
+    let runner = hologram_ai::compiler::HoloRunner::from_bytes(archive.bytes)
+        .expect("loading runner failed");
+
+    // Read n_layers, n_kv_heads, head_dim from model metadata.
+    let meta = &archive.metadata;
+    let n_layers = if meta.n_layers > 0 { meta.n_layers } else { 22 };
+    let n_kv_heads = if meta.n_kv_heads > 0 { meta.n_kv_heads } else { 4 };
+    let head_dim = if meta.head_dim > 0 { meta.head_dim } else { 64 };
+    let max_seq = 2048usize;
+
+    let mut kv = hologram::KvCacheState::new(n_layers, n_kv_heads, head_dim, max_seq);
+    let outputs = runner.execute_with_kv(&inputs, &mut kv).expect("execution failed");
+    let (_, out_bytes) = outputs.get(0).expect("no output");
+    let holo_out: Vec<f32> = out_bytes
+        .chunks_exact(4)
+        .map(|c| f32::from_le_bytes(c.try_into().expect("4 bytes")))
+        .collect();
+
+    // Output: [1, seq_len, 32000] logits. Extract last position.
+    let vocab = 32000usize;
+    let expected_len = seq_len * vocab;
+    assert!(
+        holo_out.len() >= expected_len,
+        "TinyLlama output too small: {} < {expected_len}", holo_out.len()
+    );
+
+    // Compare logits at last position (most meaningful for autoregressive).
+    let last_pos = seq_len - 1;
+    let holo_logits = &holo_out[last_pos * vocab..(last_pos + 1) * vocab];
+    let ort_logits = &ort_out[0].data[last_pos * vocab..(last_pos + 1) * vocab];
+
+    // Cosine similarity — more robust than element-wise for high-dimensional logits.
+    let dot: f64 = holo_logits.iter().zip(ort_logits).map(|(&a, &b)| a as f64 * b as f64).sum();
+    let norm_h: f64 = holo_logits.iter().map(|&v| (v as f64).powi(2)).sum::<f64>().sqrt();
+    let norm_o: f64 = ort_logits.iter().map(|&v| (v as f64).powi(2)).sum::<f64>().sqrt();
+    let cosine = if norm_h > 0.0 && norm_o > 0.0 { dot / (norm_h * norm_o) } else { 0.0 };
+
+    // Also check argmax (top prediction).
+    let holo_argmax = holo_logits.iter().enumerate().max_by(|a, b| a.1.partial_cmp(b.1).unwrap()).map(|(i, _)| i).unwrap_or(0);
+    let ort_argmax = ort_logits.iter().enumerate().max_by(|a, b| a.1.partial_cmp(b.1).unwrap()).map(|(i, _)| i).unwrap_or(0);
+
+    eprintln!("TinyLlama prefill conformance: cosine={cosine:.6}, holo_argmax={holo_argmax}, ort_argmax={ort_argmax}");
+    assert!(cosine > 0.99, "TinyLlama logit cosine too low: {cosine:.6}");
+    assert_eq!(holo_argmax, ort_argmax, "TinyLlama top prediction differs: holo={holo_argmax} ort={ort_argmax}");
+}

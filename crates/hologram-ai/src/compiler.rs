@@ -138,9 +138,9 @@ pub struct ComponentSpec<'a> {
     pub mem_plan: &'a hologram_ai_common::MemoryPlan,
     /// Lowering phase — determines layer name in the archive.
     pub phase: LowerPhase,
-    /// Weight bytes. Components sharing a weight group should pass the same
-    /// blob to the first component and `None` to the rest.
-    pub weights: Option<Vec<u8>>,
+    /// Weight bytes (borrowed). Components sharing a weight group should pass
+    /// the same slice to the first component and `None` to the rest.
+    pub weights: Option<&'a [u8]>,
 }
 
 // ── Model compiler ────────────────────────────────────────────────────────────
@@ -258,7 +258,8 @@ impl ModelCompiler {
         use hologram_ai_common::sections::meta::ComponentRole;
 
         let weights = collect_weight_bytes(&ai_graph)?;
-        let extra_weights = if weights.is_empty() { None } else { Some(weights) };
+        let total_weight_bytes = weights.len() as u64;
+        let extra_weights: Option<&[u8]> = if weights.is_empty() { None } else { Some(&weights) };
 
         let archive_bytes = self.compile_components(
             vec![ComponentSpec {
@@ -277,10 +278,6 @@ impl ModelCompiler {
             }],
             vec![], // no inter-component connections for single model
         )?;
-
-        // Collect total weight bytes for stats.
-        let weight_blob = collect_weight_bytes(&ai_graph)?;
-        let total_weight_bytes = weight_blob.len() as u64;
 
         Ok(HoloArchive {
             bytes: archive_bytes,
@@ -366,9 +363,10 @@ impl ModelCompiler {
         } else {
             Some(&lower_out.context)
         };
+        let total_weight_bytes = weights.len() as u64;
         let archive_bytes = build_final_archive(
             unpacked,
-            if weights.is_empty() { None } else { Some(weights.clone()) },
+            if weights.is_empty() { None } else { Some(&weights) },
             Some(layer_header),
             bundle,
         )?;
@@ -379,7 +377,7 @@ impl ModelCompiler {
             stats: CompileStats {
                 import_warnings,
                 validation_errors: 0,
-                total_weight_bytes: weights.len() as u64,
+                total_weight_bytes,
                 node_count,
             },
         };
@@ -456,9 +454,10 @@ impl ModelCompiler {
         } else {
             Some(&lower_out.context)
         };
+        let total_weight_bytes = weights.len() as u64;
         let archive_bytes = build_final_archive(
             unpacked,
-            if weights.is_empty() { None } else { Some(weights.clone()) },
+            if weights.is_empty() { None } else { Some(&weights) },
             Some(layer_header),
             bundle,
         )?;
@@ -469,7 +468,7 @@ impl ModelCompiler {
             stats: CompileStats {
                 import_warnings,
                 validation_errors: 0,
-                total_weight_bytes: weights.len() as u64,
+                total_weight_bytes,
                 node_count,
             },
         };
@@ -525,15 +524,17 @@ impl ModelCompiler {
             // The shared blob is built later — sub-archives embed NO weights.
             // At load time, the pipeline loader resolves each component's
             // weights from the shared blob via WeightDedupIndex.
-            if let Some(ref w) = spec.weights {
+            if let Some(w) = spec.weights {
                 total_weight_bytes_before += w.len() as u64;
                 weight_store.insert(&spec.name, &spec.weight_group, w);
             }
             // For single-component models: embed weights in the sub-archive
             // directly (no shared weight blob overhead).
             // For multi-component: weights resolve from shared blob via WeightDedupIndex.
-            let weights_for_component = if n == 1 {
-                spec.weights.clone()
+            // For single-component: pass weight reference (no clone).
+            // For multi-component: None (resolved from shared blob at load time).
+            let weights_for_component: Option<&[u8]> = if n == 1 {
+                spec.weights
             } else {
                 None
             };
@@ -691,19 +692,31 @@ impl ModelCompiler {
         // Collect weights and build ComponentSpecs.
         let mut specs: Vec<ComponentSpec<'_>> = Vec::with_capacity(graphs.len());
 
+        // Collect weight blobs for each weight group (stored in Vec for lifetime).
+        let mut weight_blobs: Vec<Vec<u8>> = Vec::new();
+        let mut weight_blob_indices: Vec<Option<usize>> = Vec::new();
+
         for (i, comp) in components.iter().enumerate() {
             let graph = &graphs[i];
             let is_first_in_group = weight_group_first.get(&comp.weight_group) == Some(&i);
 
-            // Only the first component in a weight group collects weights.
-            // Subsequent components pass None — compile_components registers
-            // them under the same group via WeightStore's group-reuse path.
-            let weights = if is_first_in_group {
+            if is_first_in_group {
                 let w = collect_weight_bytes(graph)?;
-                if !w.is_empty() { Some(w) } else { None }
+                if !w.is_empty() {
+                    weight_blob_indices.push(Some(weight_blobs.len()));
+                    weight_blobs.push(w);
+                } else {
+                    weight_blob_indices.push(None);
+                }
             } else {
-                None
-            };
+                weight_blob_indices.push(None);
+            }
+        }
+
+        for (i, comp) in components.iter().enumerate() {
+            let graph = &graphs[i];
+            let weights: Option<&[u8]> = weight_blob_indices[i]
+                .map(|idx| weight_blobs[idx].as_slice());
 
             specs.push(ComponentSpec {
                 name: comp.name.clone(),
@@ -838,13 +851,16 @@ fn unpack_archive(archive: &[u8]) -> anyhow::Result<UnpackedArchive> {
 /// - `bundle`: if `Some`, merges bundle sections (replacing matching kinds).
 fn build_final_archive(
     unpacked: UnpackedArchive,
-    extra_weights: Option<Vec<u8>>,
+    extra_weights: Option<&[u8]>,
     layer_header: Option<hologram::hologram_archive::entrypoint::schedule::LayerHeader>,
     bundle: Option<&hologram_ai_common::ContextBundle>,
 ) -> anyhow::Result<Vec<u8>> {
     use hologram::hologram_archive::section::{EmbeddableSection, SECTION_LAYER_HEADER};
 
-    let weights = extra_weights.unwrap_or(unpacked.weight_bytes);
+    let weights = match extra_weights {
+        Some(w) => w.to_vec(),
+        None => unpacked.weight_bytes,
+    };
     // Uncompressed by default — enables zero-copy mmap via
     // `load_from_bytes_zero_copy()` at runtime. Compression can be
     // opted in via HologramConfig for distribution builds.
@@ -898,7 +914,7 @@ fn compile_one_component(
     kv_layout: &hologram_ai_common::mem::KvCacheLayout,
     opts: &LoweringOptions,
     phase: &LowerPhase,
-    extra_weights: Option<Vec<u8>>,
+    extra_weights: Option<&[u8]>,
 ) -> anyhow::Result<Vec<u8>> {
     let phase_name = phase.layer_name();
 
