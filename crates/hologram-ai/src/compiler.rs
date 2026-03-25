@@ -1863,17 +1863,15 @@ impl HoloRunner {
         inputs: &hologram::GraphInputs,
         kv_state: &mut hologram::KvCacheState,
     ) -> anyhow::Result<hologram::GraphOutputs> {
-        let (tape, plan) = if kv_state.write_pos() > 0 {
-            (
-                self.decode_tape
-                    .as_ref()
-                    .expect("pipeline archive must have decode tape"),
-                self.decode_plan
-                    .as_ref()
-                    .expect("pipeline archive must have decode plan"),
-            )
-        } else {
-            (&self.tape, &self.plan)
+        let (tape, plan) = match (&self.decode_tape, &self.decode_plan) {
+            (Some(dt), Some(dp)) if kv_state.write_pos() > 0 => {
+                // Pipeline archive: use specialized decode model for steps 1+.
+                (dt, dp)
+            }
+            _ => {
+                // Single-graph or prefill step: use the main model.
+                (&self.tape, &self.plan)
+            }
         };
         hologram::execute_tape_with_kv(tape, plan, inputs, kv_state)
             .map_err(|e| anyhow::anyhow!("{e}"))

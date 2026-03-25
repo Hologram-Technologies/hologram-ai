@@ -231,12 +231,13 @@ fn run_generation(
     let bytes_per_pos = vocab_size * 4;
     let start = std::time::Instant::now();
 
-    // KV cache state for pipeline archives.
-    // Created on first use with architecture params from the compiled model.
+    // KV cache state — used for any model with attention layers (pipeline
+    // or single-graph). Detected from ModelMetaSection: if n_layers > 0,
+    // the model has KvWrite/KvRead ops that require cache state.
     let mut kv_state: Option<hologram::KvCacheState> = None;
-    let use_kv_cache = runner.is_pipeline();
+    let use_kv_cache = model_meta.as_ref().is_some_and(|m| m.n_layers > 0);
     if use_kv_cache {
-        info!("kv_cache: enabled (pipeline archive)");
+        info!("kv_cache: enabled ({})", if runner.is_pipeline() { "pipeline archive" } else { "single-graph" });
     }
 
     let mut decode_start: Option<std::time::Instant> = None;

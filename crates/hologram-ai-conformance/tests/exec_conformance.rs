@@ -2711,6 +2711,22 @@ fn tinyllama_probe_compare(fixture: &str, needs_mask: bool, needs_kv: bool) -> (
     (cosine, max_diff)
 }
 
+/// Q Reshape (MatMul → Reshape [1,5,32,64], before Transpose).
+#[test]
+#[ignore]
+fn tinyllama_qview0_conformance() {
+    let (cosine, diff) = tinyllama_probe_compare("tinyllama_qview0.onnx", true, false);
+    assert!(cosine > 0.999, "Q Reshape diverges: cosine={cosine:.6} diff={diff}");
+}
+
+/// Q MatMul only (before reshape/transpose).
+#[test]
+#[ignore]
+fn tinyllama_qmatmul0_conformance() {
+    let (cosine, diff) = tinyllama_probe_compare("tinyllama_qmatmul0.onnx", false, false);
+    assert!(cosine > 0.999, "Q MatMul diverges: cosine={cosine:.6} diff={diff}");
+}
+
 /// Q-projection (MatMul + Reshape + Transpose, before RoPE).
 #[test]
 #[ignore]
