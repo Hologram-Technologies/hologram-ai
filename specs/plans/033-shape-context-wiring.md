@@ -191,6 +191,52 @@ Recommended: **Option A** — it aligns with the principle that the compiler
 knows everything. The shape recipes should be computed on the graph the
 runtime actually executes.
 
+## Root Cause Update: Every Op Must Carry Shape
+
+Investigation confirmed:
+- The Slice ops in TinyLlama are all on the head_dim axis (fixed), not seq (variable)
+- `resolve_matmul_dims` correctly resolves m/k/n from input metas
+- `compute_output_meta` correctly scales compiled shapes for variable-length
+- Disabling `InOutBufWithMeta` has no effect on the output
+- The bug is NOT in any single op's dispatch — it's that the meta propagation
+  chain breaks wherever an op returns `InOutBuf` without explicit meta
+
+**The systemic fix: every TapeKernel variant must return `InOutBufWithMeta`.**
+
+Currently only 8 of ~103 ops return explicit meta. The remaining ~95 rely
+on `compute_output_meta` fallback, which can produce wrong shapes when:
+- No input meta is available (chain is broken)
+- Multiple shapes have the same element count (ambiguous)
+- Compiled meta scaling has multiple valid solutions
+
+The production-ready solution is not to fix individual ops or heuristics.
+It's to ensure shape information flows forward through EVERY node, just
+like data flows forward through buffers.
+
+### Implementation: Make Every Op Shape-Aware
+
+For each op category, the meta computation follows a pattern:
+
+**Element-preserving (unary, binary, norms, softmax, activations):**
+```rust
+// Output shape = input[0] shape
+return Ok(DispatchResult::InOutBufWithMeta(*input_meta));
+```
+
+**Shape-changing (MatMul, Gather, Concat, Reshape, Transpose, Slice, Conv, Pool):**
+Already return `InOutBufWithMeta` or need op-specific logic.
+
+**Reductions (ReduceSum, ReduceMean, etc.):**
+```rust
+// Output shape = input shape with last dim dropped
+let mut meta = *input_meta;
+meta.ndim -= 1;
+return Ok(DispatchResult::InOutBufWithMeta(meta));
+```
+
+The unary/binary ops are the bulk (~60 variants). They can share a single
+helper: `fn preserve_input_meta(input_metas) -> DispatchResult`.
+
 Phases 1+2 are implemented (API surface ready). Phase 3 is blocked on
 the node ID mapping issue. Phase 4 is architectural. Phase 5 already exists.
 
