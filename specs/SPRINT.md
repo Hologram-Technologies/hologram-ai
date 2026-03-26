@@ -168,9 +168,15 @@ zero runtime code. All kernels belong in hologram base crate.
 - [x] E2E validation: compile with `--quantize q4_0` fires `MatMulLut4` conversions
   (26 weight matrices quantized). f32 baseline verified correct: logits match ORT
   to 5 decimal places (top-5 token IDs identical, max Δ=2.1e-5).
-- [ ] BLOCKER: prefill produces wrong predictions with chat template — model
-  previously produced coherent English ("I'm not a joke teller..."). Regression
-  is in hologram base (same on main). Need to bisect hologram base commits.
+- [ ] **BLOCKER: Variable-length execution broken** — when compiled seq differs
+  from actual seq, ALL output is wrong (prefill + decode, ONNX + GGUF).
+  Exact-seq execution is correct (cos_sim=1.0). Root cause: ops like
+  `Slice` in hologram base use compiled `axis_size` when it divides the
+  buffer cleanly (`n_elems % compiled_as == 0`), even when the actual
+  axis dimension is different. Fix: resolve axis_size from `input_metas`
+  (actual tensor shapes) instead of compiled constants. See Plan 033.
+  Conformance test: `onnx_kv_decode_variable_length` (fails at cos=0.076).
+  Conformance test: `gguf_causal_logit_consistency` (also fails).
 - [ ] Q4_0 output quality: verify quantized logits are close to f32 baseline
 - [ ] Q4_0 performance: measure tok/s improvement over f32 path
 - [ ] Wire epilogue fusion: `MatMulRelu`/`MatMulGelu`/`MatMulSilu` AiOp variants
