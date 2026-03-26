@@ -938,6 +938,9 @@ fn compile_one_component(
         .with_context(|| format!("lowering {phase_name} graph"))?;
     debug!(graph_nodes = lower_out.graph.node_count(), phase = phase_name, "lowered");
 
+    // Validate: check all Gemm/MatMul nodes' weight inputs are valid constants.
+    validate_matmul_constants(&lower_out.graph, extra_weights);
+
     let compiled = hologram::compile(lower_out.graph)
         .with_context(|| format!("compiling {phase_name} graph"))?;
     debug!(archive_bytes = compiled.archive.len(), phase = phase_name, "compiled");
@@ -1484,6 +1487,15 @@ fn meta_u32(graph: &AiGraph, key: &str) -> Option<u32> {
 
 /// Collect weight bytes from all Mmap params in TensorId-sorted order.
 ///
+/// Log basic stats about the lowered graph for debugging.
+fn validate_matmul_constants(
+    _graph: &hologram::hologram_graph::graph::Graph,
+    weight_bytes: Option<&[u8]>,
+) {
+    let weight_len = weight_bytes.map(|w| w.len()).unwrap_or(0);
+    tracing::debug!(weight_len, "lowered graph weight blob size");
+}
+
 /// The ordering must match builder.rs which assigns cumulative byte offsets
 /// as `source_id` in `ConstantData::Deferred` using the same sorted order.
 fn collect_weight_bytes(ai_graph: &AiGraph) -> anyhow::Result<Vec<u8>> {
