@@ -188,6 +188,7 @@ fn run_generation(
 
     let mut token_ids = encoder.encode(prompt);
     let prompt_len = token_ids.len();
+    info!("token_ids: {:?}", &token_ids);
 
     // Startup diagnostics.
     info!(

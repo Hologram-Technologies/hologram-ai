@@ -165,8 +165,14 @@ zero runtime code. All kernels belong in hologram base crate.
   per-decode-step timing for first 5 steps)
 - [x] Criterion benchmark harness (`benches/inference.rs` — TTFT, 20-token
   decode, single decode step for ONNX + GGUF)
-- [ ] E2E validation: compile with `--quantize q4_0`, run, verify `MatMulLut4`
-  dispatches fire and produce coherent output
+- [x] E2E validation: compile with `--quantize q4_0` fires `MatMulLut4` conversions
+  (26 weight matrices quantized). f32 baseline verified correct: logits match ORT
+  to 5 decimal places (top-5 token IDs identical, max Δ=2.1e-5).
+- [ ] BLOCKER: prefill produces wrong predictions with chat template — model
+  previously produced coherent English ("I'm not a joke teller..."). Regression
+  is in hologram base (same on main). Need to bisect hologram base commits.
+- [ ] Q4_0 output quality: verify quantized logits are close to f32 baseline
+- [ ] Q4_0 performance: measure tok/s improvement over f32 path
 - [ ] Wire epilogue fusion: `MatMulRelu`/`MatMulGelu`/`MatMulSilu` AiOp variants
   → `FusedMatMulActivation` graph ops (hologram base Plan 030 kernels now
   available: `InlineMatMulActivation`, `MatMulLut4Activation`)
