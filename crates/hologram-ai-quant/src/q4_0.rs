@@ -90,11 +90,11 @@ mod tests {
         data[1] = 0x40; // f16(2.0) LE
         data[18] = 0x00;
         data[19] = 0x40;
-        for i in 2..18 {
-            data[i] = 0x88;
+        for b in &mut data[2..18] {
+            *b = 0x88;
         }
-        for i in 20..36 {
-            data[i] = 0x88;
+        for b in &mut data[20..36] {
+            *b = 0x88;
         }
         let out = dequant_q4_0(&data);
         assert_eq!(out.len(), 64);

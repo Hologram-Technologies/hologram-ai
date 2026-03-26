@@ -1241,7 +1241,7 @@ mod tests {
     fn resolve_reshape_from_bytes() {
         let shape_vals: Vec<i64> = vec![1, 7, 32, 64];
         let shape_bytes: Vec<u8> = shape_vals.iter().flat_map(|v| v.to_le_bytes()).collect();
-        let input_elems = 1 * 7 * 32 * 64;
+        let input_elems = 7 * 32 * 64;
         let shapes = vec![vec![input_elems]];
         let result =
             resolve_spec(&ShapeSpecRepr::Reshape, &shapes, Some(&shape_bytes), input_elems);

@@ -544,7 +544,6 @@ mod tests {
     use super::*;
     use crate::ir::{AiParam, DType, TensorInfo};
     use crate::opt::pipeline::Pass;
-    use hologram_ai_quant::QuantDescriptor;
 
     fn shape_4d(b: u64, h: u64, s: u64, d: u64) -> crate::ir::Shape {
         crate::shape_from_concrete(&[b, h, s, d])

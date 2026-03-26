@@ -471,7 +471,7 @@ mod tests {
         let mut buf = make_gguf_header(3, 0, 1);
         append_kv_string(&mut buf, "general.architecture", "llama");
         // Pad to alignment
-        while buf.len() % 32 != 0 {
+        while !buf.len().is_multiple_of(32) {
             buf.push(0);
         }
         let gguf = parse_gguf(&buf).unwrap();
