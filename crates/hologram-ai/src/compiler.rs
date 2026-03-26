@@ -1598,7 +1598,7 @@ pub struct HoloRunner {
     /// The model plan (loaded from the first component in the pipeline archive).
     plan: hologram::LoadedPlan,
     shape_ctx: Option<ShapeContextGraph>,
-    /// Pre-compiled execution tape.
+    /// Pre-compiled execution tape (compiled seq_len shapes).
     tape: hologram::hologram_exec::tape::EnumTape,
 }
 
@@ -1757,12 +1757,10 @@ impl HoloRunner {
 
     /// Execute the compiled graph with the given inputs.
     ///
-    /// If the archive contains a `ShapeContextGraph`, resolves all node shapes
-    /// from compiler recipes + actual input dimensions before dispatch. This
-    /// eliminates heuristic shape inference and enables shape-polymorphic execution.
+    /// Variable-length execution is handled by the runtime's per-op dimension
+    /// resolution from actual buffer sizes.
     pub fn execute(&self, inputs: &hologram::GraphInputs) -> anyhow::Result<hologram::GraphOutputs> {
-        let shapes = self.resolve_shapes(inputs);
-        hologram::execute_tape_with_shapes(&self.tape, &self.plan, inputs, &shapes)
+        hologram::execute_tape(&self.tape, &self.plan, inputs)
             .map_err(|e| anyhow::anyhow!("{e}"))
     }
 
@@ -1795,61 +1793,16 @@ impl HoloRunner {
     ///
     /// Uses the SAME model for both prefill and decode. The KV cache
     /// distinguishes the two modes at runtime via `write_pos`.
-    /// Shapes are resolved from the `ShapeContextGraph` if available.
+    /// Decode steps skip arena pre-warming for smaller buffer allocations.
     pub fn execute_with_kv(
         &self,
         inputs: &hologram::GraphInputs,
         kv_state: &mut hologram::KvCacheState,
     ) -> anyhow::Result<hologram::GraphOutputs> {
-        let shapes = self.resolve_shapes(inputs);
-        hologram::execute_tape_with_kv_and_shapes(
-            &self.tape, &self.plan, inputs, kv_state, &shapes,
-        )
-        .map_err(|e| anyhow::anyhow!("{e}"))
+        hologram::execute_tape_with_kv(&self.tape, &self.plan, inputs, kv_state)
+            .map_err(|e| anyhow::anyhow!("{e}"))
     }
 
-    /// Resolve all node output shapes from the `ShapeContextGraph` + actual inputs.
-    ///
-    /// Single topological pass through the compiler's shape recipes. Returns a
-    /// map from node ID → resolved output shape. Empty if no shape context.
-    fn resolve_shapes(&self, inputs: &hologram::GraphInputs) -> std::collections::HashMap<u32, Vec<usize>> {
-        use hologram_ai_common::lower::shape_spec_bridge::walk_shape_context;
-
-        let Some(ctx) = &self.shape_ctx else {
-            return std::collections::HashMap::new();
-        };
-
-        // Collect runtime input shapes: graph input node_id → shape.
-        let graph = self.plan.graph();
-        let mut runtime_inputs = std::collections::HashMap::new();
-        let mut input_idx = 0u32;
-        for node in &graph.nodes {
-            if matches!(node.op, hologram::GraphOp::Input) {
-                if let Some(shape) = inputs.shape(input_idx) {
-                    runtime_inputs.insert(node.id.index(), shape.to_vec());
-                }
-                input_idx += 1;
-            }
-        }
-
-        let mut shape_map = std::collections::HashMap::new();
-        walk_shape_context(ctx, &runtime_inputs, &std::collections::HashMap::new(), &mut shape_map);
-
-        // NOTE: The ShapeContextGraph is computed on the pre-fusion graph during
-        // lowering, but hologram::compile() runs fusion passes that modify the
-        // graph (add/remove nodes). The node IDs in shape_map refer to the
-        // pre-fusion topology and may not match the post-fusion serialized graph.
-        //
-        // Until the shape context is computed post-compilation (or a pre→post
-        // node ID mapping is maintained), the overrides can set wrong shapes on
-        // nodes that were renumbered by fusion.
-        //
-        // For now, return an empty map to avoid incorrect shape overrides.
-        // The heuristic shape resolution path remains the active code path.
-        // TODO(Plan 033): compute ShapeContextGraph from post-compilation graph.
-        let _ = shape_map;
-        std::collections::HashMap::new()
-    }
 
 }
 
