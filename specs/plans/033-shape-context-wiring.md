@@ -157,8 +157,42 @@ logits against KV-decode logits.
 | 4 | Unify position encoding | both | M | Phase 2 |
 | 5 | Conformance gate | hologram-ai | S | Phase 2 |
 
-Phases 1+2 are the critical path: ~40 lines of new code total.
-Phase 3 is cleanup. Phase 4 is architectural. Phase 5 already exists.
+## Blocker Found: Pre-Fusion vs Post-Fusion Node IDs
+
+The ShapeContextGraph is computed during lowering (pre-fusion graph).
+`hologram::compile()` runs fusion passes (constant folding, unary chain
+fusion, MatMul+Activation fusion, bias fusion) that ADD and REMOVE nodes,
+changing the graph topology. The serialized (post-fusion) graph has
+different node IDs than the pre-fusion graph.
+
+Consequence: shape_map keys from `walk_shape_context` refer to pre-fusion
+node indices. The tape executor's `instr.output_idx` uses post-fusion
+indices. **They don't match.** Shape overrides are applied to wrong nodes.
+
+### Solutions (in order of design quality):
+
+**A. Compute ShapeContextGraph post-compilation** (best)
+Move shape projection computation into hologram base's compiler, after
+fusion. The `SerializedGraph` already carries `constant_shapes` and
+`node_shapes` — extend with `ShapeProjectionEntry` per node. The
+`ShapeProjection` trait would need to move to hologram base (or the
+projection logic duplicated for `FloatOp` + fused ops).
+
+**B. Maintain a pre→post node ID mapping** (moderate)
+During `hologram::compile()`, track which pre-fusion node maps to which
+post-fusion node. Pass this mapping through the compilation output.
+`HoloRunner` applies the mapping before using shape overrides.
+
+**C. Disable fusion when shape context is present** (stopgap)
+If the archive has a ShapeContextGraph, skip the fusion stage. This
+preserves node ID correspondence but loses fusion benefits.
+
+Recommended: **Option A** — it aligns with the principle that the compiler
+knows everything. The shape recipes should be computed on the graph the
+runtime actually executes.
+
+Phases 1+2 are implemented (API surface ready). Phase 3 is blocked on
+the node ID mapping issue. Phase 4 is architectural. Phase 5 already exists.
 
 ## Verification
 

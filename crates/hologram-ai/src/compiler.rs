@@ -1834,14 +1834,21 @@ impl HoloRunner {
 
         let mut shape_map = std::collections::HashMap::new();
         walk_shape_context(ctx, &runtime_inputs, &std::collections::HashMap::new(), &mut shape_map);
-        if !shape_map.is_empty() {
-            info!(
-                resolved = shape_map.len(),
-                inputs = runtime_inputs.len(),
-                "shape context: resolved node shapes from compiler recipes"
-            );
-        }
-        shape_map
+
+        // NOTE: The ShapeContextGraph is computed on the pre-fusion graph during
+        // lowering, but hologram::compile() runs fusion passes that modify the
+        // graph (add/remove nodes). The node IDs in shape_map refer to the
+        // pre-fusion topology and may not match the post-fusion serialized graph.
+        //
+        // Until the shape context is computed post-compilation (or a pre→post
+        // node ID mapping is maintained), the overrides can set wrong shapes on
+        // nodes that were renumbered by fusion.
+        //
+        // For now, return an empty map to avoid incorrect shape overrides.
+        // The heuristic shape resolution path remains the active code path.
+        // TODO(Plan 033): compute ShapeContextGraph from post-compilation graph.
+        let _ = shape_map;
+        std::collections::HashMap::new()
     }
 
 }
