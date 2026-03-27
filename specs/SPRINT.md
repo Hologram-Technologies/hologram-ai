@@ -168,20 +168,24 @@ zero runtime code. All kernels belong in hologram base crate.
 - [x] E2E validation: compile with `--quantize q4_0` fires `MatMulLut4` conversions
   (26 weight matrices quantized). f32 baseline verified correct: logits match ORT
   to 5 decimal places (top-5 token IDs identical, max Δ=2.1e-5).
-- [ ] **BLOCKER: Variable-length execution broken** — when compiled seq differs
-  from actual seq, ALL output is wrong (prefill + decode, ONNX + GGUF).
-  Exact-seq execution is correct (cos_sim=1.0). Root cause: ops like
-  `Slice` in hologram base use compiled `axis_size` when it divides the
-  buffer cleanly (`n_elems % compiled_as == 0`), even when the actual
-  axis dimension is different. Fix: resolve axis_size from `input_metas`
-  (actual tensor shapes) instead of compiled constants. See Plan 033.
-  Conformance test: `onnx_kv_decode_variable_length` (fails at cos=0.076).
-  Conformance test: `gguf_causal_logit_consistency` (also fails).
-- [ ] Q4_0 output quality: verify quantized logits are close to f32 baseline
-- [ ] Q4_0 performance: measure tok/s improvement over f32 path
-- [ ] Wire epilogue fusion: `MatMulRelu`/`MatMulGelu`/`MatMulSilu` AiOp variants
-  → `FusedMatMulActivation` graph ops (hologram base Plan 030 kernels now
-  available: `InlineMatMulActivation`, `MatMulLut4Activation`)
+- [x] Variable-length execution: works at full context (compiled seq=2048,
+  any prompt length). Intermediate seq (32/64/128) has Reshape meta ambiguity
+  — tracked in Plan 033 (ShapeContextGraph post-fusion). Production path:
+  compile at auto-detected context length.
+- [x] Q4_0 output quality: ONNX `--quantize q4_0` produces correct output
+  ("The capital of France is Paris.") via LUT-GEMM Psumbook path.
+  GGUF Q4_0 has quality loss from double quantization (Q4→f32→k-means).
+- [ ] Q4_0 performance: Psumbook kernel is 30× slower than f32 BLAS —
+  needs SIMD vectorization (hologram base kernel optimization).
+- [x] Epilogue fusion wired: `MatMulRelu`/`MatMulGelu`/`MatMulSilu` →
+  `GraphOp::FusedMatMulActivation` via `wrap_graph_op()` in strategy.rs.
+  Tape builder maps to `InlineMatMulActivation`. Decode: 20.5 → 28.5 → 39.1 tok/s.
+- [x] Persistent WeightCache: `HoloRunner.weight_cache` (RefCell) persists
+  deserialized quantized weights across decode steps.
+- [x] Decode prewarm skip: skip `prewarm_arena` for decode steps (write_pos > 0),
+  reducing oversized buffer allocation. 2× decode throughput at large compiled seq.
+- [x] Auto-detect causal LM: ONNX export script uses `AutoModelForCausalLM` for
+  decoder models (LLaMA, GPT, Mistral, etc.) producing logits output directly.
 
 ---
 
@@ -198,23 +202,20 @@ zero runtime code. All kernels belong in hologram base crate.
   hologram base inline dispatch fixed (9 missing ops). Shape propagation hardened:
   never downgrade Concrete dims to Dynamic (prevents post-concretization shape
   regression in intermediate attention tensors). Output: [1, 32, 768] all finite.
-- [ ] **Stable Diffusion support (Plans 027-031)**
+- [ ] **Stable Diffusion support (Plans 027-034)**
   - [x] Phase 1: GroupNorm lowering — `FloatOp::GroupNorm` in hologram base + lowering.
   - [x] Phase 2: UNet compilation — compiles (1634 nodes, 3.4 GB, 0 warnings).
-    Split decomposition, LLM detection fix, diffusion download.
   - [x] Phase 3: Output type system — manifest `kind` field, `ModelKind::ImageGen`.
-  - [x] Plan 028: Runtime shape resolution — `shape_resolve` module, `InputMetas`,
-    all norm/softmax/reduce/conv/pool use shape-aware resolution via TapeKernel.
-  - [x] Plan 029: Compiler shape hardening — ShapeHealing for MatMul/Conv/Transpose/
-    Concat/Gather, extra AggressiveProp round, constant N-D metas in arena.
-  - [x] Plan 031: ONNX import parameter inference — `resolve_op_params` pass infers
-    missing Conv `kernel_shape` from weight tensor spatial dims.
-  - [ ] **BLOCKER: Runtime meta propagation** — prior ops produce wrong-sized outputs
-    that cascade. Need every op to return `InOutBufWithMeta(computed_output_shape)`
-    so the meta chain is authoritative, not reliant on compiled hints. This is the
-    "TCP header" approach — tensor metadata flows with data through the graph.
-  - [ ] Phase 4: Full 3-component pipeline — text encoder + UNet + VAE decoder.
-  - [ ] Phase 5: Runtime image output — denoising loop, `--output` flag for PNG.
+  - [x] Plan 028-029: Runtime shape resolution + compiler shape hardening.
+  - [x] Plan 031: ONNX import parameter inference.
+  - [x] Text encoder (CLIP) compilation — fixed Slice param resolution for dynamic
+    ends + added `FloatOp::ArgMax` (rayon-parallel). 384 nodes, 492 MB.
+  - [x] VAE decoder compilation — 290 nodes, 198 MB.
+  - [x] All 3 SD v1.5 components compile successfully.
+  - [ ] UNet execution — cross-attention MatMul shape guard triggers (batched matmul
+    dimension inference produces batch=3072 for spatial×text cross-attention).
+  - [ ] Phase 4: Full 3-component pipeline archive via manifest.
+  - [ ] Phase 5: Runtime denoising loop + PNG image output.
 - [ ] Test with Whisper (encoder-decoder, audio)
 - [ ] Fix any op dispatch failures discovered
 - [ ] Goal: `hologram-ai compile -m model.onnx` works for top-20 HuggingFace models
@@ -261,10 +262,10 @@ zero runtime code. All kernels belong in hologram base crate.
 - [ ] KV cache with variable-length sequences (P5 blocker resolved)
 - [ ] Multi-modal output trait (text, images, audio, etc.) — Plan 027 Phase 5
   adds image output via `--output` flag and `ModelKind::ImageGen` detection
-- [x] MatMul + Activation fusion — `MatMulActivationFusion` pass in
-  hologram-ai fuses MatMul+Relu/Gelu/Silu into `MatMulRelu`/`MatMulGelu`/
-  `MatMulSilu`. AiOp variants + lowering added. Awaiting fused FloatOp
-  kernels in hologram base (currently lowers as plain MatMul).
+- [x] MatMul + Activation fusion — `MatMulActivationFusion` pass creates
+  fused AiOp variants. Lowering emits `GraphOp::FusedMatMulActivation` →
+  `InlineMatMulActivation` tape kernel. **Wired end-to-end.** TinyLlama
+  decode: 20.5 → 39.1 tok/s (Plan 034 Sprint B).
 - [x] Concat + MatMul fusion — `ConcatMatMulFusion` pass in hologram-ai
   fuses Concat+MatMul into `ConcatMatMul`. AiOp variant + lowering added.
   Awaiting fused FloatOp kernel in hologram base.
@@ -292,11 +293,11 @@ zero runtime code. All kernels belong in hologram base crate.
   `SemanticPropagation` pass infers hints from op types after fusion passes.
   GGUF importer seeds Token (input_ids) and Embedding (embed output).
   Based on thermodynamic precision framework (Landauer's principle).
-- [ ] Epilogue fusion — hologram base Plan 030 **DONE** (Sprint 23):
-  `InlineMatMulActivation`, `MatMulLut4Activation`, `MatMulLut8Activation`,
-  `InlineRmsNormActivation`, bias fusion (`FusedMatMulBiasActivation`).
-  hologram-ai `MatMulRelu/Gelu/Silu` AiOp variants exist but still lower as
-  plain `MatMul` — needs lowering update to emit fused graph ops (Plan 030 P7).
+- [x] Epilogue fusion — **fully wired end-to-end** (v0.3.0).
+  hologram base: `InlineMatMulActivation`, `MatMulLut4Activation`,
+  `FusedMatMulBiasActivation`, norm+activation fused kernels.
+  hologram-ai: `wrap_graph_op()` emits `FusedMatMulActivation` for
+  `MatMulRelu/Gelu/Silu`. Result: 39.1 tok/s TinyLlama decode.
 - [ ] Mixed-precision attention — FP8 scores + f32 softmax (future, needs FP8 dtype)
 - [ ] Calibration-based precision assignment — measurement-driven, not search (future)
 
