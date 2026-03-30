@@ -177,6 +177,9 @@ zero runtime code. All kernels belong in hologram base crate.
   GGUF Q4_0 has quality loss from double quantization (Q4→f32→k-means).
 - [ ] Q4_0 performance: Psumbook kernel is 30× slower than f32 BLAS —
   needs SIMD vectorization (hologram base kernel optimization).
+  **Plan 037**: fused Q4_0 dequant-matmul eliminates full-matrix
+  dequantization; adaptive remainder micro-kernels; SIMD Psumbook dot;
+  page-aligned tensors in HoloArchive.
 - [x] Epilogue fusion wired: `MatMulRelu`/`MatMulGelu`/`MatMulSilu` →
   `GraphOp::FusedMatMulActivation` via `wrap_graph_op()` in strategy.rs.
   Tape builder maps to `InlineMatMulActivation`. Decode: 20.5 → 28.5 → 39.1 tok/s.
