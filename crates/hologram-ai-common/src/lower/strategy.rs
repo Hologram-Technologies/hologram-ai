@@ -691,12 +691,32 @@ fn resolve_op(
             (FloatOp::PadOp { mode: mode_u8 }, vec![])
         }
         AiOp::InstanceNorm { epsilon } => {
-            size_op!(inputs, tensor_info, dim_var_names, |size| {
+            // InstanceNorm normalizes across ALL spatial dims (H×W), not just the
+            // last dim. Compute size = product of dims[2..] for NCHW tensors.
+            let size = inputs
+                .first()
+                .and_then(|tid| tensor_info.get(tid))
+                .map(|info| {
+                    if info.shape.len() >= 3 {
+                        info.shape[2..]
+                            .iter()
+                            .filter_map(|d| d.as_concrete())
+                            .product::<u64>() as u32
+                    } else {
+                        info.shape
+                            .last()
+                            .and_then(|d| d.as_concrete())
+                            .unwrap_or(0) as u32
+                    }
+                })
+                .unwrap_or(0);
+            (
                 FloatOp::InstanceNorm {
                     size,
                     epsilon: f32_to_bits(*epsilon),
-                }
-            })
+                },
+                vec![],
+            )
         }
         AiOp::GroupNorm { num_groups, epsilon } => {
             (FloatOp::GroupNorm { num_groups: *num_groups, epsilon: f32_to_bits(*epsilon) }, vec![])

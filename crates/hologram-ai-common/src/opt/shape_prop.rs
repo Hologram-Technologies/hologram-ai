@@ -162,10 +162,12 @@ fn propagate_shapes(mut graph: AiGraph, protect_settled: bool) -> anyhow::Result
                             && !info.shape.is_empty()
                             && info.shape.iter().all(|d| matches!(d, DimExpr::Concrete(_)));
                         if !is_settled && !shape.is_empty() {
-                            // Never downgrade a Concrete dim to Dynamic/Var.
-                            // This prevents AggressiveShapePropagation from
-                            // losing concrete values that concretize_all_dims
-                            // established (e.g., seq=32 becoming Dynamic).
+                            // Never downgrade a Concrete dim to Dynamic/Var, and
+                            // never shrink a Concrete dim to a smaller Concrete value.
+                            // This prevents AggressiveShapePropagation from overwriting
+                            // correct shapes with force-concretized inputs (e.g., Resize
+                            // output [1,512,128,128] shrunk to [1,512,2,2] because
+                            // ForceConcretize set the input spatial dims to 1).
                             if info.shape.len() == shape.len() {
                                 let mut merged = shape.clone();
                                 for (new_dim, old_dim) in merged.iter_mut().zip(info.shape.iter()) {

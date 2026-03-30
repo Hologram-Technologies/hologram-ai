@@ -75,6 +75,67 @@ fn sd_vae_decoder_compiles() {
     assert!(ensure_compiled());
 }
 
+/// Full-resolution VAE with zero input — for debugging spatial artifacts.
+/// Saves raw output to /tmp/hologram_vae_zero.bin for ORT comparison.
+#[test]
+fn sd_vae_decoder_zero_input() {
+    if !vae_onnx_path().exists() {
+        eprintln!("skipping: VAE model not found");
+        return;
+    }
+    assert!(ensure_compiled(), "compilation failed");
+
+    let holo_path = vae_holo_path();
+    let loader = hologram::HoloLoader::open(&holo_path).expect("mmap open failed");
+    let pipeline = unsafe {
+        hologram::LoadedPipeline::from_bytes_zero_copy(loader.as_bytes())
+    }
+    .expect("loading pipeline failed");
+    let plan = pipeline.into_first_model().expect("no model in pipeline");
+    let tape = hologram::build_tape_from_plan(&plan).expect("building tape");
+
+    // Zero input [1, 4, 64, 64]
+    let input_data = vec![0.0f32; 1 * 4 * 64 * 64];
+    let mut inputs = hologram::GraphInputs::new();
+    inputs.set_with_shape(0, bytemuck::cast_slice(&input_data).to_vec(), vec![1, 4, 64, 64]);
+
+    let start = std::time::Instant::now();
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        hologram::execute_tape(&tape, &plan, &inputs)
+    }));
+    eprintln!("execution took: {:.2?}", start.elapsed());
+
+    match result {
+        Ok(Ok(outputs)) => {
+            let (_, out_bytes) = outputs.get(0).expect("no output");
+            std::fs::write("/tmp/hologram_vae_zero.bin", out_bytes).expect("writing output");
+            eprintln!("wrote {} bytes to /tmp/hologram_vae_zero.bin", out_bytes.len());
+
+            let floats: Vec<f32> = out_bytes
+                .chunks_exact(4)
+                .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+                .collect();
+            let n = floats.len() / 3;
+            let side = (n as f64).sqrt() as usize;
+            eprintln!("output: {} floats = 3 × {} × {}", floats.len(), side, side);
+            if side > 0 {
+                // R channel stats
+                let r_row0: Vec<f32> = (0..side.min(8)).map(|x| floats[x]).collect();
+                let r_col0: Vec<f32> = (0..side.min(8)).map(|y| floats[y * side]).collect();
+                eprintln!("  R row0[:8] = {:?}", r_row0);
+                eprintln!("  R col0[:8] = {:?}", r_col0);
+            }
+        }
+        Ok(Err(e)) => eprintln!("execution error: {e}"),
+        Err(p) => {
+            let msg = p.downcast_ref::<String>().map(|s| s.as_str())
+                .or_else(|| p.downcast_ref::<&str>().copied())
+                .unwrap_or("unknown");
+            eprintln!("panicked: {msg}");
+        }
+    }
+}
+
 /// Reduced-resolution VAE execution test.
 ///
 /// Compiles at 1/4 spatial scale (16×16 latent → 128×128 output) to keep
