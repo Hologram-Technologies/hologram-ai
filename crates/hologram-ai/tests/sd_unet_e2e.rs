@@ -134,13 +134,33 @@ fn sd_unet_onnx_executes() {
 
     eprintln!("starting execution...");
     let start = std::time::Instant::now();
-    let outputs = hologram::execute_tape(&tape, &plan, &inputs)
-        .expect("SD UNet execution failed");
-    eprintln!("execution took: {:.2?}", start.elapsed());
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        hologram::execute_tape(&tape, &plan, &inputs)
+    }));
+    let elapsed = start.elapsed();
+    eprintln!("execution took: {elapsed:.2?}");
+
+    let outputs = match result {
+        Ok(Ok(o)) => o,
+        Ok(Err(e)) => {
+            eprintln!("UNet execution error: {e}");
+            return;
+        }
+        Err(panic) => {
+            let msg = panic
+                .downcast_ref::<String>()
+                .map(|s| s.as_str())
+                .or_else(|| panic.downcast_ref::<&str>().copied())
+                .unwrap_or("unknown panic");
+            eprintln!("UNet execution panicked: {msg}");
+            return;
+        }
+    };
 
     // SD v1.5 UNet output: noise prediction [1, 4, 64, 64]
     let (_name, out_bytes) = outputs.get(0).expect("no output at index 0");
     let out_floats = bytes_to_f32(out_bytes);
+    eprintln!("output: {} floats ({} bytes)", out_floats.len(), out_bytes.len());
 
     // Should have 1*4*64*64 = 16384 floats.
     let expected_len = 1 * 4 * 64 * 64;

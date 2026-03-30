@@ -214,11 +214,20 @@ impl ModelCompiler {
         // are text models that benefit from attention fusion + KV injection.
         // Vision/diffusion models (sample, pixel_values, etc.) use the
         // generic pipeline to avoid incorrectly injecting KV cache ops.
-        let looks_like_text_model = ai_graph
+        let has_input_ids = ai_graph
             .input_names
             .iter()
             .any(|n| n == "input_ids");
-        let pipeline = if looks_like_text_model {
+        // Only use LLM pipeline (attention fusion + KV cache) for causal
+        // language models. Encoder-only models (BERT, CLIP) have input_ids
+        // but should NOT get KV injection. Heuristic: causal LMs output
+        // "logits"; encoders output "last_hidden_state" or similar.
+        let looks_like_causal_lm = has_input_ids
+            && ai_graph
+                .output_names
+                .iter()
+                .any(|n| n == "logits" || n == "output");
+        let pipeline = if looks_like_causal_lm {
             OptPipeline::mvp()
         } else {
             info!("using generic optimization pipeline (no input_ids detected)");
@@ -233,7 +242,7 @@ impl ModelCompiler {
         // ONNX models don't carry arch/n_layers/n_kv_heads metadata natively.
         // After AttentionFusion, we can extract these from GroupedQueryAttention
         // nodes so the MemoryPlanner and LLM pipeline detection work correctly.
-        if looks_like_text_model {
+        if looks_like_causal_lm {
             infer_llm_metadata_from_graph(&mut ai_graph);
         }
 
