@@ -392,22 +392,30 @@ zero runtime code. All kernels belong in hologram base crate.
 - [ ] **Proper fix**: hologram base `resolve_size()` + lowering should use 0-sentinels
   for all seq-dependent dimensions, resolving consistently at runtime.
 
-#### IMMEDIATE: Fix archive bloat + restore performance (next session)
-- [ ] **Archive weight dedup** — weights appear once, not duplicated across
-  sub-archives + shared blob. Prefill+decode share weights via zero-copy borrow
-  at load time. Target: Q4 archive ~0.5 GB, f32 archive ~4.1 GB.
-- [ ] **MatMulActivationFusion pass** — re-add optimization pass that fuses
-  MatMul + SiLU/GeLU/ReLU into single ops. This was the key to 20.5 → 39.1
-  tok/s. Needs: pass in `opt/pipeline.rs`, pattern match MatMul → Activation
-  chains, emit `AiOp::MatMulSilu` etc. The lowering (`wrap_graph_op`) already
-  handles the fused variants.
-- [ ] **Q4 kernel performance** — current LUT-GEMM psumbook kernel is 2.5x
-  slower than Accelerate BLAS on Apple Silicon (no AMX). Options:
-  (a) AMX/BLAS hybrid: dequant Q4 per tile → cblas_hgemm (f16 AMX)
-  (b) Keep large MatMuls at f32 BLAS, only quantize small MatMuls
-  (c) Use Apple BNNS quantized matmul primitives
-- [ ] **Compressed archives** — explore `hologram-compression` for on-disk
-  archive compression. Decompress at load time or stream decompression.
+#### Path to 100-200 tok/s (Plan 042) — 5 phases
+
+**Phase 1: Archive dedup + MatMulActivationFusion (→ ~5 tok/s)**
+- [ ] 1A. Fix archive weight duplication — skip shared blob for same-weight-group
+  LLM pipeline. Target: Q4 ~0.5 GB, f32 ~4.4 GB (from 9.4 GB).
+- [ ] 1B. MatMulActivationFusion pass — pattern-match MatMul → SiLU/GeLU/ReLU,
+  emit fused AiOp variants. Lowering + kernel already exist; just the pass is
+  missing. Expected: ~2x decode speedup.
+
+**Phase 2: Q4 AMX/BLAS hybrid kernel (→ ~40 tok/s)**
+- [ ] 2A. Dequant-per-tile AMX hybrid — dequant Q4 to f16, call cblas_hgemm
+  (Accelerate → AMX). Gets both Q4 compression AND AMX speed. Hologram base.
+
+**Phase 3: Variable-length execution fix (→ any prompt length)**
+- [ ] 3A. Fix resolve_size() + 0-sentinels for seq-dependent dims. Compile once
+  at max seq_len, run with any prompt length. Both repos.
+
+**Phase 4: Speculative decoding (→ 100-200 tok/s)**
+- [ ] 4A. SpeculativeDecoder — draft model + batched verification. 2-4x
+  throughput multiplier. New module in hologram-ai.
+
+**Phase 5: Archive compression**
+- [ ] 5A. Wire hologram-compression for --compress on compile. Decompress to
+  cache at load time (already implemented in HoloRunner).
 
 #### Tier 2: Compute kernel optimizations (hologram base + hologram-ai)
 - [ ] 2.1 Speculative decoding — draft model + batched verification (2-4x throughput)

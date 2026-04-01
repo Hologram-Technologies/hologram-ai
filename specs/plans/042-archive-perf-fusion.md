@@ -1,133 +1,325 @@
-# Plan 042: Archive Size Fix + MatMulActivationFusion + Q4 Performance
+# Plan 042: Path to 100-200 tok/s — Archive + Fusion + Kernels + Variable-Length + Speculative + Compression
 
 **Status:** Open
 **Created:** 2026-04-01
-**Branch:** `feat/cpu-inference-perf`
-**Depends on:** Plan 040 (performance), Plan 041 (ONNX correctness)
+**Branch:** `feat/cpu-inference-perf` in both repos
+**Target:** 100-200+ effective tok/s for TinyLlama 1.1B ONNX on Apple Silicon
 
-## Problem
+## Current State
 
-Three blockers preventing 39.1+ tok/s on TinyLlama ONNX:
+- TinyLlama ONNX f32: **2.5 tok/s** (bandwidth-limited, decode graph at seq=1 working)
+- TinyLlama ONNX Q4: **1.0 tok/s** (LUT-GEMM psumbook slower than BLAS, no AMX)
+- Archive size: **9.4 GB** for Q4 (weights duplicated in sub-archive + shared blob)
+- Correctness: ✅ "The capital of France is Paris." (matches ORT, KV cache decode works)
+- Known broken: variable-length execution (must compile at exact prompt length)
 
-1. **Archive bloat** — 9.4 GB for a 1.1B Q4 model (should be ~0.5 GB).
-   Weights duplicated in sub-archive + shared blob.
-2. **Missing MatMulActivationFusion** — the pass that fuses MatMul + SiLU/GeLU
-   was removed. This was responsible for 20.5 → 39.1 tok/s (2x).
-3. **Q4 LUT-GEMM slower than BLAS** — psumbook kernel doesn't use AMX on
-   Apple Silicon. Q4 runs at 1.0 tok/s vs f32 BLAS at 2.5 tok/s.
+## Performance Math
 
-## Fix 1: Archive Weight Deduplication
+```
+Current:               2.5 tok/s (f32, BLAS)
+× MatMulActivation:    2x → 5 tok/s
+× Q4 + AMX hybrid:    8x → 40 tok/s
+× Speculative decode:  2.5x → 100 tok/s
+= Target:              ~100 tok/s effective
+```
 
-**Root cause:** `compile_components` embeds weights in the first sub-archive (4.4 GB)
-AND adds them to the shared WeightStore blob (4.4 GB more). The decode sub-archive
-(~450 KB) shares weights via zero-copy borrow at load time.
+---
 
-**Fix:** For LLM pipeline (prefill+decode with same weight_group), skip the
-shared WeightStore entirely. Embed weights ONLY in the first sub-archive.
-The decode component resolves weights from the prefill component at load time
-(already working via `set_weights_borrowed`).
+## Phase 1: Archive Dedup + MatMulActivationFusion (→ ~5 tok/s)
+
+### 1A. Fix Archive Weight Duplication
+
+**Problem:** `compile_components()` embeds weights in the first sub-archive (4.4 GB)
+AND inserts them into the shared `WeightStore` blob (4.4 GB more). Total: 2× weights.
+
+**Fix:** Skip `weight_store.insert()` for LLM pipeline components that share the
+same `weight_group` as an already-embedded component. The shared blob is only needed
+for multi-component models with DIFFERENT weight groups (e.g., Stable Diffusion
+text_encoder + unet with separate weights).
 
 **Files:**
-- `crates/hologram-ai/src/compiler.rs` — `compile_components()`: skip `weight_store.insert()`
-  for components that share the same weight_group as an already-embedded component.
+- `crates/hologram-ai/src/compiler.rs` — `compile_components()`:
+  ```rust
+  // Only insert into shared store if weight_group has multiple distinct
+  // weight sources. For LLM pipeline (prefill+decode), same weights → skip.
+  if n > 1 && is_first_in_group {
+      weight_store.insert(&spec.name, &spec.weight_group, w);
+  }
+  ```
+  Also: skip `build_with_shared_weights()` when shared blob is empty.
 
-**Expected result:** Q4 archive = ~0.5 GB (quantized weights only + graph).
-F32 archive = ~4.1 GB (weights + graph). No duplication.
+**Expected:** F32 archive: ~4.4 GB. Q4 archive: ~0.5 GB.
 
-## Fix 2: MatMulActivationFusion Pass
+**Tests:**
+- Archive size assertion in conformance test
+- Verify both prefill and decode sub-archives load and execute correctly
 
-**What it does:** Pattern-matches chains of `MatMul → Activation` (SiLU, GeLU, ReLU)
-in the AiGraph and fuses them into `AiOp::MatMulSilu`, `AiOp::MatMulGelu`,
-`AiOp::MatMulRelu`. The lowering (`wrap_graph_op` in `strategy.rs`) already handles
-these fused variants, emitting `GraphOp::FusedMatMulActivation` which maps to the
-`InlineMatMulActivation` tape kernel that applies activation in-register.
+### 1B. MatMulActivationFusion Pass
+
+**Problem:** The optimization pass that fuses `MatMul → Activation` was never
+created (the SPRINT says "wired end-to-end" but only the lowering + kernel exist,
+not the pass that creates the fused AiOp variants).
 
 **Implementation:**
-1. Create `crates/hologram-ai-common/src/opt/matmul_activation_fusion.rs`
-2. Pattern: find MatMul node → single consumer is Activation (SiLU/GeLU/ReLU) →
-   replace with fused variant, bypass the activation node.
-3. Wire into `OptPipeline::mvp()` in `pipeline.rs` (after AttentionFusion, before
-   lowering).
 
-**Where the fused variants already exist:**
-- `AiOp::MatMulSilu`, `AiOp::MatMulGelu`, `AiOp::MatMulRelu` — defined in ir/op.rs
-- `wrap_graph_op()` in `strategy.rs` — maps them to `GraphOp::FusedMatMulActivation`
-- `InlineMatMulActivation` tape kernel — applies activation in-register
+File: `crates/hologram-ai-common/src/opt/matmul_activation_fusion.rs`
 
-**What's missing:** The optimization PASS that creates the fused AiOp variants.
-The lowering and kernel are wired; only the pass is missing.
+```rust
+pub struct MatMulActivationFusion;
 
-**Files:**
-- NEW: `crates/hologram-ai-common/src/opt/matmul_activation_fusion.rs`
-- `crates/hologram-ai-common/src/opt/pipeline.rs` — add to MVP pipeline
+impl OptPass for MatMulActivationFusion {
+    fn run(&self, mut graph: AiGraph) -> Result<AiGraph> {
+        // For each node: if it's a MatMul whose SOLE consumer is
+        // SiLU/GeLU/ReLU, replace MatMul with the fused variant
+        // and mark the activation node as Passthrough.
+        //
+        // Pattern: MatMul(A, W) → SiLU(x) becomes MatMulSilu(A, W)
+        //
+        // Constraints:
+        // - MatMul must have exactly ONE consumer
+        // - Consumer must be a supported activation (SiLU, GeLU, ReLU)
+        // - MatMul must not already be fused
+        // - Skip if MatMul feeds into attention (already handled by GQA)
+    }
+}
+```
+
+Wire into pipeline:
+- `crates/hologram-ai-common/src/opt/pipeline.rs` — add after SwiGluFusion
 - `crates/hologram-ai-common/src/opt/mod.rs` — register module
 
-**Expected result:** ~2x decode speedup (MatMul + activation eliminated intermediate
-buffer + apply activation in-register during matmul writeback).
+**Existing infrastructure that already works:**
+- `AiOp::MatMulSilu`, `AiOp::MatMulGelu`, `AiOp::MatMulRelu` in `ir/op.rs`
+- `wrap_graph_op()` in `strategy.rs` → `GraphOp::FusedMatMulActivation`
+- `InlineMatMulActivation` tape kernel in hologram base
 
-## Fix 3: Q4 Kernel Performance (AMX Hybrid)
+**Expected:** ~2x decode speedup (eliminates intermediate buffer, applies activation
+in-register during matmul writeback).
 
-**Root cause:** The LUT-GEMM psumbook kernel accumulates Q4 dot products using scalar
-code. On Apple Silicon, Accelerate BLAS dispatches to the AMX coprocessor for matrix
-multiply, achieving ~2 TFLOPS. The psumbook kernel achieves ~0.1 TFLOPS.
+**Tests:**
+- Unit test: synthetic MatMul → SiLU graph → verify fused to MatMulSilu
+- Conformance: TinyLlama before/after fusion produces same top-5 tokens
+- Performance: decode step time halved
 
-**Options (pick one):**
+---
 
-### Option A: Dequant-per-tile → cblas_hgemm (recommended)
-- During matmul, dequant each KC×NR tile from Q4 to f16
-- Call `cblas_hgemm` (Accelerate half-precision GEMM → AMX)
-- Gets both Q4 compression (reduced archive + bandwidth) AND AMX speed
-- **File:** hologram-exec `float_dispatch/matmul.rs` (hologram base)
+## Phase 2: Q4 AMX/BLAS Hybrid Kernel (→ ~40 tok/s)
 
-### Option B: Fused dequant + sgemm
-- Dequant full Q4 weight matrix to f32 once, cache the result
-- Use cblas_sgemm (f32 AMX) on the dequantized weights
-- Simpler but loses memory savings (weights expand to f32 at runtime)
-- **File:** hologram-exec `float_dispatch/matmul.rs` (hologram base)
+### 2A. Dequant-per-tile AMX Hybrid (hologram base)
 
-### Option C: Keep BLAS for large MatMuls, Q4 for small
-- Only quantize MatMuls below a size threshold where psumbook is competitive
-- Large MatMuls (>256K elements) stay at f32 BLAS
-- Compromise: some bandwidth savings, full AMX speed for large ops
-- **File:** hologram-ai-common `lower/builder.rs` (size gate)
+**Problem:** LUT-GEMM psumbook kernel is scalar — ~0.1 TFLOPS on Apple Silicon vs
+~2 TFLOPS with Accelerate AMX. Q4 is slower than f32 because it skips BLAS.
 
-## Fix 4: Archive Compression
+**Fix:** During Q4 matmul dispatch, dequant each KC-blocked tile from Q4 centroids
+back to f16, then call `cblas_hgemm` (Accelerate half-precision GEMM → AMX hardware).
+This gets BOTH Q4 compression (4× smaller archive, 4× less bandwidth) AND AMX speed.
 
-**Explore:** `hologram-compression` crate for on-disk compression. Two strategies:
+**Implementation:**
 
-### Strategy A: Compress-at-write, decompress-at-load
-- `HoloWriter::compress_weights()` — compress weight section with zstd/lz4
-- `HoloLoader::from_path()` — detect compression flag, decompress to cache file
-- Already partially implemented in HoloRunner (`is_compressed`, `decompress_archive`)
+File: `hologram-exec/src/float_dispatch/matmul.rs` (hologram base)
 
-### Strategy B: Streaming decompression
-- Decompress weight pages on-demand during execution
-- Requires changes to mmap loader — read compressed, decompress per-page
-- More complex but avoids full decompression at load time
+```rust
+#[cfg(all(feature = "accelerate", target_os = "macos"))]
+fn matmul_q4_amx_hybrid(
+    q4_weights: &QuantizedWeights4,
+    activations: &[f32],
+    output: &mut [f32],
+    m: usize, k: usize, n: usize,
+) {
+    // For each KC×NR tile:
+    //   1. Dequant Q4 indices → f16 using centroid lookup
+    //   2. Convert activations to f16
+    //   3. Call cblas_hgemm(m_tile, n_tile, k_tile, ...)
+    //   4. Accumulate f32 output
+}
+```
+
+Also add dispatch routing: when platform has Accelerate AND op is MatMulLut4,
+use AMX hybrid instead of psumbook.
+
+**File:** `hologram-exec/src/tape.rs` — `InlineMatMulLut4` dispatch:
+```rust
+// Before: always psumbook
+// After: if cfg!(accelerate) { amx_hybrid } else { psumbook }
+```
+
+**Fallback:** Non-macOS platforms continue using psumbook (pure Rust, works on WASM).
+
+**Expected:** Q4 matmul at ~80% of f32 BLAS speed (dequant overhead ~20%).
+TinyLlama Q4: ~32-40 tok/s (vs 2.5 f32 / 1.0 Q4 current).
+
+**Tests:**
+- Unit test: Q4 AMX hybrid matches psumbook output within tolerance
+- Benchmark: Q4 AMX vs f32 BLAS vs psumbook at representative sizes
+- E2E: TinyLlama Q4 correct output + tok/s measurement
+
+---
+
+## Phase 3: Variable-Length Execution Fix (→ any prompt length)
+
+### 3A. Fix resolve_size() for Seq-Dependent Ops (hologram base)
+
+**Problem:** When compiled seq_len (e.g., 32) differs from runtime input (e.g., 24),
+ops like Reshape/Expand use compiled values while Softmax/RmsNorm infer from buffer
+lengths. This inconsistency corrupts shapes and produces garbage.
+
+**Root cause:** `resolve_size()` in `float_dispatch/mod.rs` falls back to `n_floats`
+when `n_floats % compiled_size != 0`. But the compiled_size is an axis dimension (e.g.,
+hidden_dim=2048), not a total element count. The fallback is usually correct for
+hidden-dim-dependent ops but wrong for seq-dependent ops.
+
+**Fix strategy:** Use 0-sentinels for ALL seq-dependent dimensions during lowering.
+The executor already resolves 0 → infer from buffer. Currently only some ops use
+0-sentinels; extend to Reshape, Expand, and all ops that embed seq_len in parameters.
+
+**Files:**
+- `hologram-exec/src/float_dispatch/mod.rs` — improve `resolve_size()` heuristics
+- `hologram-ai-common/src/lower/strategy.rs` — emit 0 for seq-dependent dims in
+  Reshape, Expand, Slice target shapes
+- `hologram-ai-common/src/lower/builder.rs` — track which dims are seq-dependent
+
+**Tests:**
+- Compile TinyLlama at seq=64, run with 24-token prompt → correct output
+- Compile at seq=128, run with 10 tokens → correct output
+- KV cache decode still works (seq=1)
+
+---
+
+## Phase 4: Speculative Decoding (→ 100-200 tok/s)
+
+### 4A. Draft Model + Batched Verification
+
+**Impact:** 2-4x effective throughput — the ONLY way past the memory bandwidth wall.
+
+**How:** Small draft model (Llama 3.2 1B or TinyLlama for testing) generates N
+candidate tokens at ~4x speed. Large model verifies all N in one batched forward
+pass. 60-70% acceptance rate → 2-3x net speedup.
+
+**Key insight:** Verification of N tokens costs ~same as generating 1 token (weights
+read once regardless of batch size).
+
+**Implementation:**
+
+File: `crates/hologram-ai/src/speculative.rs` (new)
+
+```rust
+pub struct SpeculativeDecoder {
+    target: HoloRunner,      // large model
+    draft: HoloRunner,       // small model
+    draft_steps: usize,      // candidates per batch (4-8)
+}
+
+impl SpeculativeDecoder {
+    pub fn generate(&mut self, prompt: &[u32], max_tokens: usize) -> Vec<u32> {
+        // 1. Draft: generate N candidate tokens with draft model
+        // 2. Build batched input: [prompt + candidates]
+        // 3. Verify: run target model on full sequence (1 forward pass)
+        // 4. Accept/reject: compare draft vs target distributions
+        // 5. Accept first K matching tokens, reject rest, repeat
+    }
+}
+```
+
+CLI: `--draft-model <path>` flag on `hologram-ai run`.
+
+**Prerequisites:**
+- Variable-length fix (Phase 3) — verification pass processes variable-length input
+- Batched matmul (M > 1 during verification) — already supported
+- Draft/target tokenizer compatibility check at load time
+
+**Memory budget:** Target Q4 (~0.5 GB) + draft Q4 (~0.1 GB) = ~0.6 GB total.
+
+**Expected:** 2.5x effective throughput multiplier. With Q4+AMX at 40 tok/s base,
+speculative gives **~100 tok/s effective**.
+
+**Tests:**
+- Unit test: acceptance/rejection logic matches reference implementation
+- Test: speculative output matches greedy decode for deterministic case
+- Benchmark: effective tok/s vs non-speculative
+
+---
+
+## Phase 5: Archive Compression
+
+### 5A. Wire hologram-compression
+
+**Implementation:**
+- At compile time: optionally compress the archive with `HoloWriter::compress_weights()`
+- At load time: `HoloRunner::from_path()` already detects compression via
+  `is_compressed()` and decompresses to a cache file for instant mmap on re-runs
+- CLI: `--compress` flag on `hologram-ai compile`
+
+**Files:**
+- `crates/hologram-ai/src/compiler.rs` — add compression after `build_final_archive()`
+- `crates/hologram-ai/src/cli.rs` — `--compress` flag
+- (HoloRunner decompression already implemented)
+
+**Expected:** Q4 archive: ~0.5 GB → ~0.2 GB compressed. F32: ~4.1 GB → ~2.5 GB.
+
+**Tests:**
+- Compile with --compress, run → correct output
+- Second run uses cache (instant load)
+
+---
 
 ## Implementation Order
 
 ```
-Session N+1:
-  [1] Archive dedup — fix compile_components weight_store for LLM pipeline
-  [2] MatMulActivationFusion pass — pattern match + wire into pipeline
-  [3] Test: TinyLlama f32 with fusion → target 5-10 tok/s
-  [4] Test: TinyLlama Q4 → verify archive <1 GB, correct output
+Phase 1 (session N+1): Foundation — ~5 tok/s
+  [1A] Archive weight dedup (compiler.rs, ~30 min)
+  [1B] MatMulActivationFusion pass (new file + pipeline, ~1 hr)
+  [--] Test: TinyLlama f32 → 5+ tok/s, archive < 4.5 GB
+  [--] Test: TinyLlama Q4 → archive < 1 GB, correct output
 
-Session N+2:
-  [5] Q4 AMX hybrid (Option A or B) — hologram base matmul.rs
-  [6] Test: TinyLlama Q4 with AMX → target 20-40 tok/s
-  [7] Compression — wire hologram-compression for on-disk archives
+Phase 2 (session N+2): Kernel acceleration — ~40 tok/s
+  [2A] Q4 AMX/BLAS hybrid in hologram base (matmul.rs + tape.rs, ~2 hr)
+  [--] Test: TinyLlama Q4 → 20-40 tok/s
 
-Session N+3:
-  [8] Variable-length execution fix (Plan 041) — resolve_size for all seq-dependent ops
-  [9] Speculative decoding (Plan 040 Tier 2.1) → target 60-100 tok/s
+Phase 3 (session N+3): Flexibility — any prompt length
+  [3A] Variable-length fix (resolve_size + 0-sentinels, ~2 hr)
+  [--] Test: compile at seq=64, run with 24 tokens → correct
+
+Phase 4 (session N+4): Speculative decoding — ~100 tok/s
+  [4A] SpeculativeDecoder (new module, ~3 hr)
+  [--] Test: TinyLlama + TinyLlama-draft → 60-100 tok/s
+
+Phase 5 (session N+5): Polish
+  [5A] Archive compression (compiler + CLI, ~1 hr)
+  [--] Test: compressed archives load and execute correctly
 ```
 
-## Verification
+## Performance Checkpoints
 
-- TinyLlama ONNX: "The capital of France is Paris." (greedy, correct)
-- Archive size: Q4 < 1 GB, f32 < 4.5 GB
-- tok/s checkpoints: f32 ~5-10, Q4+AMX ~20-40, Q4+AMX+spec ~60-100
-- All conformance tests pass
-- No regression in non-LLM models (BERT, ResNet, SD)
+| Phase | tok/s | Archive Size | Prompt Flexibility |
+|-------|-------|-------------|-------------------|
+| Current | 2.5 (f32) / 1.0 (Q4) | 9.4 GB (Q4) | exact seq_len only |
+| Phase 1 | ~5 (f32+fusion) | ~4.4 GB (f32), ~0.5 GB (Q4) | exact seq_len only |
+| Phase 2 | ~40 (Q4+AMX) | ~0.5 GB (Q4) | exact seq_len only |
+| Phase 3 | ~40 | ~0.5 GB | any prompt length |
+| Phase 4 | ~100 | ~0.6 GB (target+draft) | any prompt length |
+| Phase 5 | ~100 | ~0.2 GB compressed | any prompt length |
+
+## Verification (every phase)
+
+- `cargo test --release -p hologram-ai --features e2e -- tinyllama`
+- Manual: `hologram-ai run model.holo --prompt "..." → "Paris"`
+- `cargo clippy -- -D warnings` clean
+- No regression in non-LLM models (BERT, ResNet)
+- Archive size check
+- tok/s measurement vs checkpoint target
+
+## Key Files
+
+### hologram-ai
+- `crates/hologram-ai/src/compiler.rs` — compile_components, archive assembly
+- `crates/hologram-ai/src/commands/run_cmd.rs` — execution, KV cache, CLI
+- `crates/hologram-ai-common/src/opt/pipeline.rs` — optimization pass ordering
+- `crates/hologram-ai-common/src/opt/matmul_activation_fusion.rs` — NEW
+- `crates/hologram-ai-common/src/lower/builder.rs` — Q4 quantization gating
+- `crates/hologram-ai-common/src/lower/strategy.rs` — 0-sentinel lowering
+- `crates/hologram-ai/src/speculative.rs` — NEW
+
+### hologram base
+- `hologram-exec/src/float_dispatch/matmul.rs` — AMX hybrid kernel
+- `hologram-exec/src/float_dispatch/mod.rs` — resolve_size() fix
+- `hologram-exec/src/tape.rs` — Q4 dispatch routing
