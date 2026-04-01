@@ -392,6 +392,23 @@ zero runtime code. All kernels belong in hologram base crate.
 - [ ] **Proper fix**: hologram base `resolve_size()` + lowering should use 0-sentinels
   for all seq-dependent dimensions, resolving consistently at runtime.
 
+#### IMMEDIATE: Fix archive bloat + restore performance (next session)
+- [ ] **Archive weight dedup** — weights appear once, not duplicated across
+  sub-archives + shared blob. Prefill+decode share weights via zero-copy borrow
+  at load time. Target: Q4 archive ~0.5 GB, f32 archive ~4.1 GB.
+- [ ] **MatMulActivationFusion pass** — re-add optimization pass that fuses
+  MatMul + SiLU/GeLU/ReLU into single ops. This was the key to 20.5 → 39.1
+  tok/s. Needs: pass in `opt/pipeline.rs`, pattern match MatMul → Activation
+  chains, emit `AiOp::MatMulSilu` etc. The lowering (`wrap_graph_op`) already
+  handles the fused variants.
+- [ ] **Q4 kernel performance** — current LUT-GEMM psumbook kernel is 2.5x
+  slower than Accelerate BLAS on Apple Silicon (no AMX). Options:
+  (a) AMX/BLAS hybrid: dequant Q4 per tile → cblas_hgemm (f16 AMX)
+  (b) Keep large MatMuls at f32 BLAS, only quantize small MatMuls
+  (c) Use Apple BNNS quantized matmul primitives
+- [ ] **Compressed archives** — explore `hologram-compression` for on-disk
+  archive compression. Decompress at load time or stream decompression.
+
 #### Tier 2: Compute kernel optimizations (hologram base + hologram-ai)
 - [ ] 2.1 Speculative decoding — draft model + batched verification (2-4x throughput)
 - [x] 2.2 Flash attention SIMD — NEON `vfmaq_f32` / AVX2 `_mm256_fmadd_ps`
