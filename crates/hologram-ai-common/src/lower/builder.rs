@@ -382,8 +382,33 @@ pub fn lower(
                 // Fused variants (FusedMatMulActivation) keep their f32 fused kernel
                 // which already eliminates the intermediate buffer. Only plain MatMul
                 // benefits from LUT-GEMM quantization.
+                // Skip MatMuls that feed into attention (Q/K/V projections) — the
+                // fused attention kernel expects f32 inputs.
+                // Skip Q/K/V/O projection MatMuls — their output feeds into the
+                // fused attention kernel which expects f32 input. Detect by checking
+                // if the MatMul's output dimension matches an attention head size.
+                // Q/O projections: output = n_q_heads * head_dim (e.g., 2048)
+                // K/V projections: output = n_kv_heads * head_dim (e.g., 256)
+                let attn_dims: Vec<usize> = ai_graph.nodes.iter()
+                    .filter_map(|n| match &n.op {
+                        AiOp::GroupedQueryAttention { num_heads, num_kv_heads, head_dim, .. } => {
+                            Some(vec![
+                                *num_heads as usize * *head_dim as usize,
+                                *num_kv_heads as usize * *head_dim as usize,
+                            ])
+                        }
+                        _ => None,
+                    })
+                    .flatten()
+                    .collect();
+                let feeds_attention = if let GraphOp::Float(FloatOp::MatMul { n, .. }) = &result.graph_op {
+                    attn_dims.contains(&(*n as usize))
+                } else {
+                    false
+                };
                 if matches!(opts.quant_strategy, QuantStrategy::Q4_0)
                     && matches!(result.graph_op, GraphOp::Float(FloatOp::MatMul { .. }))
+                    && !feeds_attention
                 {
                     if let Some(lut_result) = try_convert_f32_to_lut4(
                         node,
@@ -417,6 +442,7 @@ pub fn lower(
                 // ── LUT-GEMM Q8_0 interception for plain f32 MatMul ──
                 if matches!(opts.quant_strategy, QuantStrategy::Q8_0)
                     && matches!(result.graph_op, GraphOp::Float(FloatOp::MatMul { .. }))
+                    && !feeds_attention
                 {
                     if let Some(lut_result) = try_convert_f32_to_lut8(
                         node,
