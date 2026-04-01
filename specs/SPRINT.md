@@ -382,6 +382,14 @@ zero runtime code. All kernels belong in hologram base crate.
   `GraphOp::FusedMatMulActivation` for MatMulRelu/Gelu/Silu (39.1 tok/s result)
 - [x] 1.3 Sparse V decode active — `sparse_v: true` in all attention lowering paths
 
+#### BLOCKER: ONNX execution correctness
+- [ ] **TinyLlama ONNX produces gibberish** — prefill step 0 top-1 token is
+  "(" instead of contextual response. Logits are numerically valid (no NaN/inf)
+  but semantically wrong. Both opset 14 and 18 exports produce same result.
+  Root cause: hologram-ai compiler needs updates to match current hologram base
+  APIs (tape executor, shape resolution, KV cache). Must fix before measuring
+  real performance.
+
 #### Tier 2: Compute kernel optimizations (hologram base + hologram-ai)
 - [ ] 2.1 Speculative decoding — draft model + batched verification (2-4x throughput)
 - [x] 2.2 Flash attention SIMD — NEON `vfmaq_f32` / AVX2 `_mm256_fmadd_ps`
