@@ -150,6 +150,10 @@ fn main() -> anyhow::Result<()> {
                 n_layers: compiled.metadata.n_layers,
                 n_kv_heads: compiled.metadata.n_kv_heads,
                 head_dim: compiled.metadata.head_dim,
+                kv_k_bits: 0,
+                kv_v_bits: 0,
+                kv_boundary_layers: 2,
+                kv_wht: false,
             };
             let mut final_bytes =
                 hologram_ai::compiler::rebuild_archive_with_section(&compiled.bytes, &model_meta)?;

@@ -270,6 +270,25 @@ zero runtime code. All kernels belong in hologram base crate.
   - [ ] Phase 4: Multi-component pipeline archive via manifest (currently
     each component compiled separately).
   - [ ] Phase 5: Classifier-free guidance, proper scheduler, PNG output.
+  - [x] **SD Performance (Plan 039)**
+    - [x] Phase 1: GroupNorm `_into` + fused activation kernel — `dispatch_group_norm_into`
+      and `dispatch_group_norm_activation_into` in hologram base. Fuses activation into
+      normalize loop (1 pass instead of 3). `InlineGroupNormActivation` tape dispatch updated.
+    - [x] Phase 2: Depthwise Conv2d fast path — `conv2d_depthwise` in hologram base.
+      Auto-detected via `ic_per_group == 1 && oc_per_group == 1`. Direct nested loop.
+    - [x] Phase 3: Winograd F(2,3) for 3×3 convolutions — `conv2d_winograd_f23` in
+      hologram base. Weight transform + input tile transform + batched BLAS GEMM + output
+      transform. Gated on `3×3, stride=1, dilation=1, pad=1, ic_per_group >= 16`.
+    - [x] Phase 4: CLIP weight quantization — `try_convert_f32_to_lut8` + `QuantStrategy::Q8_0`
+      wired in lowering. `--quantize q8_0` works for any model (not just LLMs).
+      SD E2E test compiles Q8 CLIP variant and prefers it at runtime.
+    - [x] Phase 5: Activation checkpointing — `checkpoint_enabled` flag on `EnumTape`.
+      Force-evicts skip-connection buffers after first consumer; recomputes on demand.
+      SD E2E test enables checkpointing for VAE decoder.
+    - [x] Conv2d + activation epilogue fusion — `FusedConv2dActivation` / `FusedConv2dBiasActivation`
+      GraphOps + `InlineConv2dActivation` / `InlineConv2dBiasActivation` TapeKernels in
+      hologram base. Fusion pass fires automatically during `hologram::compile()`.
+      Eliminates 335MB memory traffic per Conv2d+SiLU block at 512×512.
 - [ ] Test with Whisper (encoder-decoder, audio)
 - [ ] Fix any op dispatch failures discovered
 - [ ] Goal: `hologram-ai compile -m model.onnx` works for top-20 HuggingFace models
@@ -339,6 +358,17 @@ zero runtime code. All kernels belong in hologram base crate.
 - [ ] GPU backend: Metal Attention kernel (fused QKV on GPU)
 - [ ] GPU backend: CUDA kernel implementations
 - [ ] GPU backend: WebGPU command encoder batching + buffer reuse (Phase 8.3d)
+
+### P8: KV Cache Compression & Attention-Gated Decode (Plan 038)
+- [ ] Phase 1: Sparse V decode — skip V accumulation for negligible attention weights
+  (τ=1e-6) in hologram base attention kernel. Format-agnostic, works with f32/Q8/Q4
+  KV cache. Expected +22.8% decode at 32K context, zero quality loss.
+- [ ] Phase 2: Wire KV config — hologram base already has `KvCacheConfig` with
+  asymmetric K/V bits (`Q8`/`Q4`), boundary-layer protection, and Walsh-Hadamard
+  rotation for V. hologram-ai never uses it. Add `--kv-cache`, `--kv-boundary-layers`,
+  `--kv-wht` CLI flags + `ModelMetaSection` KV fields + compiler threading.
+- [ ] Phase 3: E2E validation — TinyLlama with q8, q4, asymmetric q8:q4, boundary
+  layers, WHT, and sparse V. Quality + memory + performance benchmarks.
 
 ### Precision & Information Theory (Plan 032)
 - [x] `SemanticHint` enum on `TensorInfo` — classifies tensors by information

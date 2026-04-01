@@ -9,6 +9,7 @@
 #![cfg(feature = "e2e")]
 
 use hologram_ai::compiler::{ModelCompiler, ModelSource};
+use hologram_ai_common::lower::QuantStrategy;
 use std::path::PathBuf;
 
 fn workspace_path(rel: &str) -> PathBuf {
@@ -24,11 +25,14 @@ fn workspace_path(rel: &str) -> PathBuf {
 fn text_encoder_holo() -> PathBuf {
     workspace_path("models/stable-diffusion-v1-5/text_encoder/model.holo")
 }
+fn text_encoder_q8_holo() -> PathBuf {
+    workspace_path("models/stable-diffusion-v1-5/text_encoder/model_q8.holo")
+}
 fn unet_holo() -> PathBuf {
     workspace_path("models/stable-diffusion-v1-5/unet/model.holo")
 }
 fn vae_holo() -> PathBuf {
-    workspace_path("models/stable-diffusion-v1-5/vae_decoder/model.holo")
+    workspace_path("models/stable-diffusion-v1-5/vae_decoder/model_pipeline.holo")
 }
 
 fn text_encoder_onnx() -> PathBuf {
@@ -48,13 +52,24 @@ fn output_path() -> PathBuf {
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
 fn ensure_compiled(onnx: &std::path::Path, holo: &std::path::Path) -> bool {
-    ensure_compiled_with(onnx, holo, None)
+    ensure_compiled_with(onnx, holo, None, None)
 }
 
 fn ensure_compiled_with(
     onnx: &std::path::Path,
     holo: &std::path::Path,
     seq_len: Option<u64>,
+    spatial_scale: Option<u32>,
+) -> bool {
+    ensure_compiled_full(onnx, holo, seq_len, spatial_scale, None)
+}
+
+fn ensure_compiled_full(
+    onnx: &std::path::Path,
+    holo: &std::path::Path,
+    seq_len: Option<u64>,
+    spatial_scale: Option<u32>,
+    quant: Option<hologram_ai_common::lower::QuantStrategy>,
 ) -> bool {
     if holo.exists() {
         return true;
@@ -64,6 +79,10 @@ fn ensure_compiled_with(
     }
     let mut compiler = ModelCompiler::default();
     compiler.seq_len_override = seq_len;
+    compiler.spatial_scale = spatial_scale;
+    if let Some(q) = quant {
+        compiler.quant_strategy = q;
+    }
     let archive = compiler
         .compile(ModelSource::OnnxPath(onnx.to_path_buf()))
         .expect("compilation failed");
@@ -217,9 +236,19 @@ fn sd_pipeline_generates_image() {
         &text_encoder_onnx(),
         &text_encoder_holo(),
         Some(77),
+        None,
     ));
+    // Also compile a Q8 variant for ~2× faster CLIP inference.
+    let _ = ensure_compiled_full(
+        &text_encoder_onnx(),
+        &text_encoder_q8_holo(),
+        Some(77),
+        None,
+        Some(QuantStrategy::Q8_0),
+    );
     assert!(ensure_compiled(&unet_onnx(), &unet_holo()));
-    assert!(ensure_compiled(&vae_onnx(), &vae_holo()));
+    // VAE at spatial_scale=2: 256×256 output, ~3GB peak memory.
+    assert!(ensure_compiled_with(&vae_onnx(), &vae_holo(), None, Some(2)));
     eprintln!("all 3 components compiled");
 
     let total_start = std::time::Instant::now();
@@ -231,7 +260,14 @@ fn sd_pipeline_generates_image() {
     eprintln!("tokenized: {} tokens", token_ids.len());
 
     // ── Step 2: Text Encoder ──────────────────────────────────────────────
-    let (_te_loader, te_plan, te_tape) = load_model(&text_encoder_holo());
+    // Prefer Q8 variant if available (faster via fused dequant-matmul).
+    let te_path = if text_encoder_q8_holo().exists() {
+        eprintln!("using Q8 text encoder");
+        text_encoder_q8_holo()
+    } else {
+        text_encoder_holo()
+    };
+    let (_te_loader, te_plan, te_tape) = load_model(&te_path);
     let mut te_inputs = hologram::GraphInputs::new();
     te_inputs.set_with_shape(0, token_bytes, vec![1, 77]);
 
@@ -254,7 +290,7 @@ fn sd_pipeline_generates_image() {
     // ── Step 3: UNet Denoising Loop ───────────────────────────────────────
     let (_unet_loader, unet_plan, unet_tape) = load_model(&unet_holo());
 
-    let n_steps = 5; // Quick iteration — increase to 20+ for quality.
+    let n_steps = 10; // 10 DDIM steps — balance between quality and speed.
     let alpha_bars = ddpm_alpha_bars();
     let timesteps = ddpm_timesteps(n_steps);
 
@@ -343,7 +379,11 @@ fn sd_pipeline_generates_image() {
     let scaling_factor = 1.0 / 0.18215;
     let scaled_latent: Vec<f32> = latent.iter().map(|v| v * scaling_factor).collect();
 
-    let (_vae_loader, vae_plan, vae_tape) = load_model(&vae_holo());
+    let (_vae_loader, vae_plan, mut vae_tape) = load_model(&vae_holo());
+    // Enable activation checkpointing: force-evict skip-connection buffers
+    // after first consumer and recompute when distant consumers need them.
+    // Trades ~30% extra compute for dramatically lower peak memory (51GB → ~2-3GB).
+    vae_tape.checkpoint_enabled = true;
     let mut vae_inputs = hologram::GraphInputs::new();
     vae_inputs.set_with_shape(0, f32_to_bytes(&scaled_latent), vec![1, 4, 64, 64]);
 

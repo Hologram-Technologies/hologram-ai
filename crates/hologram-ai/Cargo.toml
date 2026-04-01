@@ -42,6 +42,7 @@ which.workspace      = true
 memmap2.workspace    = true
 rayon.workspace      = true
 rkyv.workspace       = true
+parking_lot.workspace = true
 
 [dev-dependencies]
 # Provides onnx_builder (pure Rust, no ORT) for mini fixture tests.

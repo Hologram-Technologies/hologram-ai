@@ -57,6 +57,55 @@ pub struct RunArgs {
     /// config search (~/.hologram/config.toml, .hologram/config.toml).
     #[arg(long, value_name = "FILE")]
     pub config: Option<PathBuf>,
+    /// KV cache quantization: `f32` (default), `q8`, `q4`, or `q8:q4` for
+    /// asymmetric K:V precision. V compression is nearly free; K precision
+    /// dominates quality.
+    #[arg(long, value_name = "TYPE", default_value = "f32")]
+    pub kv_cache: String,
+    /// Number of boundary layers (at start and end) kept at f32 regardless
+    /// of `--kv-cache` setting. Default: 2.
+    #[arg(long, default_value = "2")]
+    pub kv_boundary_layers: usize,
+    /// Enable Walsh-Hadamard rotation before V quantization. Gaussianizes
+    /// the distribution for better quantization efficiency.
+    #[arg(long)]
+    pub kv_wht: bool,
+}
+
+// ── KV cache config parsing ───────────────────────────────────────────────
+
+/// Parse a `--kv-cache` string into a `KvCacheConfig`.
+///
+/// Accepted formats: `f32`, `q8`, `q4`, `q8:q4` (asymmetric K:V).
+pub fn parse_kv_cache_config(
+    kv_cache: &str,
+    boundary_layers: usize,
+    wht: bool,
+) -> anyhow::Result<hologram::kv_cache::KvCacheConfig> {
+    use hologram::kv_cache::{KvBits, KvCacheConfig};
+
+    let parse_bits = |s: &str| -> anyhow::Result<KvBits> {
+        match s.trim() {
+            "f32" => Ok(KvBits::F32),
+            "q8" => Ok(KvBits::Q8),
+            "q4" => Ok(KvBits::Q4),
+            other => anyhow::bail!("unknown KV cache type '{other}', expected f32/q8/q4"),
+        }
+    };
+
+    let (k_bits, v_bits) = if let Some((k, v)) = kv_cache.split_once(':') {
+        (parse_bits(k)?, parse_bits(v)?)
+    } else {
+        let bits = parse_bits(kv_cache)?;
+        (bits, bits)
+    };
+
+    Ok(KvCacheConfig {
+        k_bits,
+        v_bits,
+        boundary_layers,
+        wht_rotation: wht,
+    })
 }
 
 // ── Entry point ────────────────────────────────────────────────────────────
@@ -100,6 +149,9 @@ pub fn execute(args: RunArgs) -> anyhow::Result<()> {
             temperature: args.temperature,
             top_k: args.top_k,
             verbose: args.verbose,
+            kv_cache: args.kv_cache.clone(),
+            kv_boundary_layers: args.kv_boundary_layers,
+            kv_wht: args.kv_wht,
         };
         run_generation(&runner, tok, prompt, &gen_config, model_meta.as_ref())?;
     } else {
@@ -135,6 +187,9 @@ struct GenerationConfig {
     temperature: f32,
     top_k: usize,
     verbose: bool,
+    kv_cache: String,
+    kv_boundary_layers: usize,
+    kv_wht: bool,
 }
 
 // ── Sequence mode ─────────────────────────────────────────────────────────
@@ -319,8 +374,14 @@ fn run_generation(
                 info!(
                     "kv_cache: n_layers={n_layers} n_kv_heads={n_kv_heads} head_dim={head_dim} max_seq={max_seq}"
                 );
-                kv_state = Some(hologram::KvCacheState::new(
-                    n_layers, n_kv_heads, head_dim, max_seq,
+                let kv_config = parse_kv_cache_config(
+                    &config.kv_cache, config.kv_boundary_layers, config.kv_wht,
+                ).expect("invalid --kv-cache value");
+                info!("kv_config: k={:?} v={:?} boundary={} wht={}",
+                    kv_config.k_bits, kv_config.v_bits,
+                    kv_config.boundary_layers, kv_config.wht_rotation);
+                kv_state = Some(hologram::KvCacheState::with_config(
+                    n_layers, n_kv_heads, head_dim, max_seq, kv_config,
                 ));
             }
             let kv = kv_state.as_mut().expect("kv_state initialized above");

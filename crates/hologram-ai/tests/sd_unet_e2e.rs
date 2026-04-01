@@ -115,17 +115,10 @@ fn sd_unet_onnx_executes() {
     //   sample:                  [1, 4, 64, 64]  (f32) — noisy latent
     //   timestep:                [1]              (f32) — diffusion timestep
     //   encoder_hidden_states:   [1, 77, 768]     (f32) — text conditioning
-    let sample_len = 1 * 4 * 64 * 64; // 16384 floats
-    let sample_data: Vec<f32> = (0..sample_len)
-        .map(|i| ((i as f32) * 0.01).sin() * 0.1)
-        .collect();
-
-    let timestep_data: Vec<f32> = vec![500.0]; // mid-range timestep
-
-    let encoder_len = 1 * 77 * 768; // 59136 floats
-    let encoder_data: Vec<f32> = (0..encoder_len)
-        .map(|i| ((i as f32) * 0.001).cos() * 0.1)
-        .collect();
+    // Zero inputs — easy to compare with ORT reference.
+    let sample_data = vec![0.0f32; 1 * 4 * 64 * 64];
+    let timestep_data: Vec<f32> = vec![500.0];
+    let encoder_data = vec![0.0f32; 1 * 77 * 768];
 
     let mut inputs = hologram::GraphInputs::new();
     inputs.set_with_shape(0, bytemuck::cast_slice(&sample_data).to_vec(), vec![1, 4, 64, 64]);
@@ -178,4 +171,14 @@ fn sd_unet_onnx_executes() {
         out_floats.len() - finite_count,
         out_floats.len()
     );
+
+    // Stats for comparison with ORT.
+    let min = out_floats.iter().cloned().fold(f32::MAX, f32::min);
+    let max = out_floats.iter().cloned().fold(f32::MIN, f32::max);
+    let mean = out_floats.iter().sum::<f32>() / out_floats.len() as f32;
+    let variance = out_floats.iter().map(|v| (v - mean).powi(2)).sum::<f32>() / out_floats.len() as f32;
+    eprintln!("output: min={min:.4} max={max:.4} mean={mean:.6} std={:.4}", variance.sqrt());
+
+    // Save for ORT comparison.
+    std::fs::write("/tmp/hologram_unet_out.bin", out_bytes).expect("saving output");
 }

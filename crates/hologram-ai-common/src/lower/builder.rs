@@ -414,6 +414,39 @@ pub fn lower(
                     }
                 }
 
+                // ── LUT-GEMM Q8_0 interception for plain f32 MatMul ──
+                if matches!(opts.quant_strategy, QuantStrategy::Q8_0)
+                    && matches!(result.graph_op, GraphOp::Float(FloatOp::MatMul { .. }))
+                {
+                    if let Some(lut_result) = try_convert_f32_to_lut8(
+                        node,
+                        ai_graph,
+                        &input_idxs,
+                    )? {
+                        builder = builder.matmul_lut_8bit(
+                            ConstantData::Bytes(lut_result.serialized_weights),
+                            &[input_idxs[0]],
+                        );
+                        let idx = builder.len() - 1;
+                        if let Some(&tid) = node.outputs.first() {
+                            let out_shape = output_shape(Some(&tid), &ai_graph.tensor_info);
+                            if let Some(ref s) = out_shape {
+                                builder = builder.set_node_shape(idx, s.clone());
+                            }
+                            let dtype = input_float_dtype(Some(&tid), &ai_graph.tensor_info);
+                            builder = builder.set_node_dtype(idx, dtype);
+                            tid_to_idx.insert(tid, idx);
+                        }
+                        tracing::info!(
+                            node_id = node.id,
+                            rows = lut_result.rows,
+                            cols = lut_result.cols,
+                            "LUT-GEMM: quantized f32 MatMul → MatMulLut8"
+                        );
+                        continue;
+                    }
+                }
+
                 // ── Conv2d LUT-GEMM interception ─────────────────────────────
                 // Pre-quantize Conv2d weights at compile time for zero runtime overhead.
                 if let GraphOp::Float(FloatOp::Conv2d {
@@ -1416,6 +1449,76 @@ fn try_convert_f32_to_lut4(
     // Serialize via rkyv.
     let serialized = rkyv::to_bytes::<rkyv::rancor::Error>(&qw4)
         .map_err(|e| anyhow::anyhow!("rkyv serialize QuantizedWeights4: {e}"))?
+        .to_vec();
+
+    Ok(Some(Lut4ConversionResult {
+        serialized_weights: serialized,
+        rows: rows as u32,
+        cols: cols as u32,
+    }))
+}
+
+/// Try to convert an f32 MatMul weight to LUT-GEMM Q8_0 format.
+///
+/// Similar to `try_convert_f32_to_lut4` but uses 256-level uniform quantization
+/// for higher quality at the cost of larger quantized weights.
+fn try_convert_f32_to_lut8(
+    node: &AiNode,
+    ai_graph: &AiGraph,
+    _input_idxs: &[usize],
+) -> anyhow::Result<Option<Lut4ConversionResult>> {
+    use hologram::hologram_exec::lut_gemm::quantize::quantize_8bit;
+
+    let weight_tid = match node.inputs.get(1) {
+        Some(&tid) => tid,
+        None => return Ok(None),
+    };
+    let param = match ai_graph.params.get(&weight_tid) {
+        Some(p) => p,
+        None => return Ok(None),
+    };
+    let info = match ai_graph.tensor_info.get(&weight_tid) {
+        Some(info) => info,
+        None => return Ok(None),
+    };
+    let dims: Vec<usize> = info
+        .shape
+        .iter()
+        .filter_map(|d| match d {
+            Dim::Concrete(n) => Some(*n as usize),
+            _ => None,
+        })
+        .collect();
+    if dims.len() != 2 {
+        return Ok(None);
+    }
+    let (rows, cols) = (dims[0], dims[1]);
+
+    // Skip tiny weights — only quantize matrices with >= 256 elements per dimension.
+    if rows < 256 || cols < 256 {
+        return Ok(None);
+    }
+
+    let raw_bytes = param_bytes_owned(param)?;
+    let expected_bytes = rows * cols * 4;
+    if raw_bytes.len() != expected_bytes {
+        tracing::warn!(
+            got = raw_bytes.len(),
+            expected = expected_bytes,
+            "f32 weight size mismatch, skipping Q8 LUT quantization"
+        );
+        return Ok(None);
+    }
+
+    let f32_weights: Vec<f32> = raw_bytes
+        .chunks_exact(4)
+        .map(|c| f32::from_le_bytes(c.try_into().expect("4 bytes")))
+        .collect();
+
+    let qw8 = quantize_8bit(&f32_weights, rows as u32, cols as u32);
+
+    let serialized = rkyv::to_bytes::<rkyv::rancor::Error>(&qw8)
+        .map_err(|e| anyhow::anyhow!("rkyv serialize QuantizedWeights8: {e}"))?
         .to_vec();
 
     Ok(Some(Lut4ConversionResult {

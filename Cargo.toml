@@ -50,6 +50,7 @@ dirs          = "5"
 which         = "7"
 rayon         = "1"
 rkyv          = "0.8"
+parking_lot   = "0.12"
 
 # Keep debug symbols but optimize enough for usable LLM inference (~10-50x faster).
 [profile.dev]

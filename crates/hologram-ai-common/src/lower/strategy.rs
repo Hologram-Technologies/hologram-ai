@@ -428,6 +428,7 @@ fn resolve_op(
                     qk_norm: false,
                     rope: false,
                     rope_base: 0,
+                    sparse_v: true,
                 },
                 vec![],
             )
@@ -455,6 +456,7 @@ fn resolve_op(
                     qk_norm: *qk_norm,
                     rope: *rope,
                     rope_base: f32_to_bits(*rope_base),
+                    sparse_v: true,
                 },
                 vec![],
             )
@@ -470,6 +472,7 @@ fn resolve_op(
                 qk_norm: false,
                 rope: false,
                 rope_base: 0,
+                sparse_v: true,
             },
             vec![],
         ),

@@ -1737,7 +1737,7 @@ pub struct HoloRunner {
     tape: hologram::hologram_exec::tape::EnumTape,
     /// Persistent weight cache for LUT-GEMM. Deserialized quantized weights
     /// are cached here across execution calls, avoiding per-step rkyv overhead.
-    weight_cache: std::cell::RefCell<hologram::WeightCache>,
+    weight_cache: parking_lot::RwLock<hologram::WeightCache>,
 }
 
 impl HoloRunner {
@@ -1882,7 +1882,7 @@ impl HoloRunner {
                 plan,
                 shape_ctx,
                 tape,
-                weight_cache: std::cell::RefCell::new(hologram::WeightCache::new()),
+                weight_cache: parking_lot::RwLock::new(hologram::WeightCache::new()),
             })
         } else {
             // Legacy single-graph archive (backward compat).
@@ -1895,7 +1895,7 @@ impl HoloRunner {
                 plan: probe,
                 shape_ctx,
                 tape,
-                weight_cache: std::cell::RefCell::new(hologram::WeightCache::new()),
+                weight_cache: parking_lot::RwLock::new(hologram::WeightCache::new()),
             })
         }
     }

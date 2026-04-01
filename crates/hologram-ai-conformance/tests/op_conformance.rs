@@ -547,6 +547,7 @@ fn run_attention_test(
         qk_norm: false,
         rope: false,
         rope_base: 0,
+        sparse_v: true,
     };
     let tol = tolerance_for(&op);
 
