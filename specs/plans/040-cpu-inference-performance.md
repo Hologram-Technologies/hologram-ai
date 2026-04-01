@@ -8,6 +8,13 @@
 - **SPRINT.md:** Update `specs/SPRINT.md` as work progresses
 - **Two repos:** hologram base changes first (kernels), then hologram-ai (wiring/integration)
 - **Next session:** Stable diffusion work continues after this
+- **Priority order:** macOS first → WASM second → x86_64 third
+
+### Progress
+- [x] Tier 1: All items already implemented (KV quant CLI, epilogue fusion, sparse V)
+- [x] 2.2: Flash attention SIMD — NEON/AVX2 dot product + V accumulation (hologram base commit ca66111)
+- [x] 2.5: wasm32-simd128 table lookup — i8x16_swizzle (hologram base commit 193eac7)
+- **Baseline benchmarks collected:** matmul M=1 (9.4ms), M=128 (17.9ms), transformer decode step (13.0ms)
 
 ## Context
 

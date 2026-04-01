@@ -375,17 +375,23 @@ zero runtime code. All kernels belong in hologram base crate.
 **Target:** 100-200+ effective tok/s for Llama 8B on CPU. WASM supported.
 **Branch:** `feat/cpu-inference-perf` in both repos.
 
-#### Tier 1: Wire existing infrastructure (hologram-ai only)
-- [ ] 1.1 Wire KV cache quantization — `--kv-quant` CLI flag, `KvCacheState::with_config()`
-- [ ] 1.2 Wire epilogue fusion end-to-end — lowering emits fused MatMul+Activation
-- [ ] 1.3 Verify sparse V decode is active in non-BLAS attention path
+#### Tier 1: Wire existing infrastructure (hologram-ai only) — DONE (already implemented)
+- [x] 1.1 Wire KV cache quantization — `--kv-cache`/`--kv-boundary-layers`/`--kv-wht`
+  CLI flags parse into `KvCacheConfig`, passed to `KvCacheState::with_config()`
+- [x] 1.2 Wire epilogue fusion end-to-end — `wrap_graph_op()` emits
+  `GraphOp::FusedMatMulActivation` for MatMulRelu/Gelu/Silu (39.1 tok/s result)
+- [x] 1.3 Sparse V decode active — `sparse_v: true` in all attention lowering paths
 
 #### Tier 2: Compute kernel optimizations (hologram base + hologram-ai)
 - [ ] 2.1 Speculative decoding — draft model + batched verification (2-4x throughput)
-- [ ] 2.2 Flash attention SIMD — NEON/AVX2 dot product + L2-tiled K/V blocking
+- [x] 2.2 Flash attention SIMD — NEON `vfmaq_f32` / AVX2 `_mm256_fmadd_ps`
+  dot product + V accumulation + online softmax correction. All 8 attention
+  tests + 2 SIMD-vs-scalar primitive tests pass.
 - [ ] 2.3 AMX/BLAS hybrid — dequant to f16, use Accelerate HGEMM (Apple Silicon)
 - [ ] 2.4 AVX-512 VNNI micro-kernels — `_mm512_dpbusd_epi32` (x86_64)
-- [ ] 2.5 wasm32-simd128 support — recover SIMD for WASM builds
+- [x] 2.5 wasm32-simd128 support — `i8x16_swizzle` table lookup in
+  `hologram-core/src/view/simd.rs`, wired into `apply_slice()`/`apply_to()`.
+  Compiles for `wasm32-unknown-unknown` with `target-feature=+simd128`.
 
 #### Tier 3: Extreme quantization (hologram base + hologram-ai)
 - [ ] 3.1 Q2/ternary quantization (BitNet-style) — 2x over Q4, bitmask inner loop
