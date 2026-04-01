@@ -382,13 +382,15 @@ zero runtime code. All kernels belong in hologram base crate.
   `GraphOp::FusedMatMulActivation` for MatMulRelu/Gelu/Silu (39.1 tok/s result)
 - [x] 1.3 Sparse V decode active — `sparse_v: true` in all attention lowering paths
 
-#### BLOCKER: ONNX execution correctness
-- [ ] **TinyLlama ONNX produces gibberish** — prefill step 0 top-1 token is
-  "(" instead of contextual response. Logits are numerically valid (no NaN/inf)
-  but semantically wrong. Both opset 14 and 18 exports produce same result.
-  Root cause: hologram-ai compiler needs updates to match current hologram base
-  APIs (tape executor, shape resolution, KV cache). Must fix before measuring
-  real performance.
+#### ONNX execution correctness (Plan 041)
+- [x] **Root cause identified**: variable-length shape resolution. When compiled
+  seq_len differs from runtime input length, ops like Reshape/Expand use compiled
+  values while Softmax/RmsNorm infer from buffer lengths → shape corruption.
+- [x] **Workaround**: compile with `--seq-len N` matching prompt token count.
+  TinyLlama at seq_len=24: "The capital of France is Paris." — matches ORT exactly.
+  KV cache decode (seq=1) works correctly regardless.
+- [ ] **Proper fix**: hologram base `resolve_size()` + lowering should use 0-sentinels
+  for all seq-dependent dimensions, resolving consistently at runtime.
 
 #### Tier 2: Compute kernel optimizations (hologram base + hologram-ai)
 - [ ] 2.1 Speculative decoding — draft model + batched verification (2-4x throughput)
