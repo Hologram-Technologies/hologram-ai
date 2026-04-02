@@ -419,6 +419,12 @@ zero runtime code. All kernels belong in hologram base crate.
 - [ ] 5A. Wire hologram-compression for --compress on compile. Decompress to
   cache at load time (already implemented in HoloRunner).
 
+**Backlog: Layer-level parallelism**
+- [ ] Parallel attention heads — compute Q*K^T and score*V independently per head
+- [ ] Parallel FFN up/gate projections — gate and up MatMuls are independent
+- [ ] Implement at the layer level, not instruction level (removed execute_parallel)
+- [ ] Use rayon for inter-head parallelism when n_heads >= 4
+
 #### Tier 2: Compute kernel optimizations (hologram base + hologram-ai)
 - [ ] 2.1 Speculative decoding — draft model + batched verification (2-4x throughput)
 - [x] 2.2 Flash attention SIMD — NEON `vfmaq_f32` / AVX2 `_mm256_fmadd_ps`
