@@ -413,35 +413,36 @@ zero runtime code. All kernels belong in hologram base crate.
   → f32 (cached in WeightCache), then cblas_sgemm. 870ms → 22ms/step.
 - **Result: 2.4 → 40.9 tok/s (17x speedup), TinyLlama f32 + Q4, M4 Max.**
 
-**Phase 3: Path to 100+ tok/s**
+**Phase 3: Path to 100+ tok/s** — 3 feature branches, execute in order
 
-3A. **Speculative decoding** (→ 100 tok/s effective)
-- Draft model (e.g., TinyLlama 1B Q4) generates N candidate tokens at ~4x speed
-- Target model verifies all N in one batched forward pass (1 weight read for N tokens)
-- 60-70% acceptance rate → 2-3x effective throughput multiplier
-- At 40 tok/s base: **80-120 tok/s effective**
-- New module: `crates/hologram-ai/src/speculative.rs`
-- CLI: `--draft-model <path>` flag
+3A. **Speculative decoding (Plan 043)** → 80-120 tok/s effective
+- Branch: `feat/speculative-decoding`
+- Draft model generates N candidates, target verifies in one batch
+- 2-3x effective throughput at 40 tok/s base
+- New: `crates/hologram-ai/src/speculative.rs`, CLI `--draft-model`
+- [ ] SpeculativeDecoder struct + acceptance/rejection
+- [ ] CLI wiring + draft model validation
+- [ ] Tests: effective tok/s > 2x base
 
-3B. **Layer-level parallelism** (→ ~2x per-step speedup)
-- Parallel attention heads — Q*K^T and score*V independently per head
-- Parallel FFN up/gate projections — gate and up MatMuls are independent
-- Use rayon at layer level, not instruction level
-- At 40 tok/s base: **~60-80 tok/s**
+3B. **Layer-level parallelism (Plan 044)** → 60-80 tok/s
+- Branch: `feat/layer-parallelism`
+- Parallel attention heads (32 heads on 12 cores via rayon)
+- Parallel FFN gate+up projections
+- [ ] Parallel head loop in `dispatch_attention`
+- [ ] Parallel group dispatch in `execute_direct`
+- [ ] Tests: output matches sequential, tok/s improvement
 
-3C. **Variable-length execution fix** (→ any prompt length)
-- Fix resolve_size() + 0-sentinels for seq-dependent dims
-- Compile once at max seq_len, run with any prompt length
-- Unblocks arbitrary prompt lengths without recompilation
+3C. **Variable-length execution fix (Plan 045)** → any prompt length
+- Branch: `feat/variable-length-fix`
+- 0-sentinels for seq-dependent dims in lowering
+- Wire ShapeContextGraph into `execute_direct`
+- [ ] Compile at seq=64, run with 24 tokens → correct
+- [ ] Non-LLM models unaffected
 
-3D. **Archive compression** (→ smaller files)
+3D. **Archive compression + Q4 size** (backlog)
 - Wire hologram-compression for --compress on compile
-- Decompress to cache at load time (already implemented in HoloRunner)
-- Q4 archive ~0.5 GB → ~0.2 GB compressed
-
-3E. **Q4 archive size optimization** (→ ~0.5 GB)
-- Strip f32 originals from Q4 archive (requires constant offset remapping)
-- Infrastructure ready (predict_quantized_weight_tids)
+- Strip f32 originals from Q4 archive (constant offset remapping)
+- Q4 archive: 5 GB → ~0.5 GB → ~0.2 GB compressed
 
 #### Tier 2: Compute kernel optimizations (hologram base + hologram-ai)
 - [ ] 2.1 Speculative decoding — draft model + batched verification (2-4x throughput)
