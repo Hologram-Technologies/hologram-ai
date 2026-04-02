@@ -394,12 +394,14 @@ zero runtime code. All kernels belong in hologram base crate.
 
 #### Path to 100-200 tok/s (Plan 042) — 5 phases
 
-**Phase 1: Archive dedup + MatMulActivationFusion (→ ~5 tok/s)**
-- [ ] 1A. Fix archive weight duplication — skip shared blob for same-weight-group
-  LLM pipeline. Target: Q4 ~0.5 GB, f32 ~4.4 GB (from 9.4 GB).
-- [ ] 1B. MatMulActivationFusion pass — pattern-match MatMul → SiLU/GeLU/ReLU,
-  emit fused AiOp variants. Lowering + kernel already exist; just the pass is
-  missing. Expected: ~2x decode speedup.
+**Phase 1: Archive dedup + MatMulActivationFusion (→ ~5 tok/s)** — DONE
+- [x] 1A. Archive weight dedup — skip shared blob for same-weight-group LLM
+  pipeline. F32 archive: 9.4 → 4.4 GB. Q4: 9.8 → 5.0 GB (f32 originals still
+  embedded alongside Q4 constants — further optimization needed).
+- [x] 1B. MatMulActivationFusion pass — pattern-matches MatMul → SiLU/GeLU/ReLU
+  into fused AiOp variants. Wired into MVP pipeline. No matches on TinyLlama
+  (uses SwiGLU), but ready for GPT-2/BERT (GeLU). Lowering + kernel already
+  handle fused variants.
 
 **Phase 2: Q4 AMX/BLAS hybrid kernel (→ ~40 tok/s)**
 - [ ] 2A. Dequant-per-tile AMX hybrid — dequant Q4 to f16, call cblas_hgemm
