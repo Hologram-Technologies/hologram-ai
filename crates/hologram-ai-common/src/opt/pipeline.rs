@@ -25,6 +25,7 @@ impl OptPipeline {
             const_eval::ConstantEvaluation, constant_fold::ConstantFolding,
             data_prop::DataPropagation, dead_node::DeadNodeElimination,
             decompose::OpDecomposition, kv_slot_injection::KvSlotInjection,
+            matmul_activation_fusion::MatMulActivationFusion,
             position_ids_injection::PositionIdsInjection,
             resolve_slice_params::ResolveSliceParams,
             rmsnorm_fusion::RmsNormFusion, semantic_prop::SemanticPropagation,
@@ -53,6 +54,10 @@ impl OptPipeline {
             // so norm chains are already collapsed. Must run before
             // AttentionFusion to avoid interfering with SDPA pattern matching.
             Box::new(SwiGluFusion),
+            // Fuse MatMul → SiLU/GeLU/ReLU into MatMulSilu/Gelu/Relu.
+            // Eliminates intermediate activation buffer; the tape kernel
+            // applies activation in-register during matmul writeback.
+            Box::new(MatMulActivationFusion),
             // Fuse Add(x, residual) → RmsNorm(sum, weight, eps) into
             // FusedLayerNormResidual. Runs after RmsNormFusion (needs fused
             // RmsNorm nodes) and before AttentionFusion.

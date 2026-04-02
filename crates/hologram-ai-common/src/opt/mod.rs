@@ -17,9 +17,11 @@ pub mod shape_heal;
 pub mod semantic_prop;
 pub mod shape_prop;
 pub mod slice_to_gather;
+pub mod matmul_activation_fusion;
 pub mod swiglu_fusion;
 
 pub use add_rmsnorm_fusion::AddRmsNormFusion;
+pub use matmul_activation_fusion::MatMulActivationFusion;
 pub use attention_fusion::AttentionFusion;
 pub use const_dedup::ConstantDeduplication;
 pub use decompose::OpDecomposition;
