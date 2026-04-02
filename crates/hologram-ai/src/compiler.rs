@@ -621,12 +621,11 @@ impl ModelCompiler {
                 None
             };
 
-            // Register weights in the content-addressable store for dedup.
-            // The shared blob is built later — sub-archives embed NO weights.
-            // At load time, the pipeline loader resolves each component's
-            // weights from the shared blob via WeightDedupIndex.
             if let Some(w) = spec.weights {
                 total_weight_bytes_before += w.len() as u64;
+                // Weights go into the shared store for later dedup.
+                // We'll skip building the shared blob if all components share
+                // the same weight_group (checked after the loop).
                 weight_store.insert(&spec.name, &spec.weight_group, w);
             }
             // For single-component: embed weights in the sub-archive directly.
@@ -676,10 +675,15 @@ impl ModelCompiler {
         let meta_section = meta.to_bytes();
         writer = writer.add_section(meta.section_kind(), meta_section);
 
-        // Build shared weight blob + dedup index for multi-component models.
-        // Single-component models embed weights in the sub-archive directly.
+        // Build shared weight blob + dedup index for multi-component models
+        // with DIFFERENT weight groups (e.g., SD text_encoder + unet).
+        // For LLM pipeline (prefill+decode sharing one weight_group), skip the
+        // shared blob — weights are embedded in the first sub-archive and the
+        // decode component borrows them at load time via set_weights_borrowed().
+        let distinct_groups = weight_group_owners.len();
         let dedup_bytes = weight_store.total_bytes();
-        let pipeline = if dedup_bytes > 0 && n > 1 {
+        let needs_shared_blob = dedup_bytes > 0 && n > 1 && distinct_groups > 1;
+        let pipeline = if needs_shared_blob {
             let savings = if total_weight_bytes_before > 0 && dedup_bytes < total_weight_bytes_before {
                 (1.0 - dedup_bytes as f64 / total_weight_bytes_before as f64) * 100.0
             } else {
