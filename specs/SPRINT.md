@@ -557,8 +557,32 @@ reduction, fuse them.
   5-20% decode speedup at 32K+ context. (Plan 039 #10)
 - [ ] wasm32 SIMD128 micro-kernels — MR=4, NR=4. 3-4x wasm GEMM. (Plan 039 #11)
 
+#### Path to 60+ tok/s (Plan 055) — 3 phases
+
+**Phase 1: Strip f32 from Q4 archives (hologram-ai) — BLOCKER**
+- [ ] Pre-scan Q4 eligibility before parameter registration in builder.rs
+- [ ] Skip f32 bytes for Q4-eligible weights (register empty placeholder)
+- [ ] Test: ONNX Q4 archive < 1 GB, tok/s matches GGUF Q4 (38-43)
+- Currently ONNX `--quantize q4_0` produces 4.5 GB (f32 not stripped)
+
+**Phase 2: Speculative decoding (hologram-ai + hologram base)**
+- [ ] 3-component compilation: prefill (seq=N) + decode (seq=1) + verify (seq=8)
+- [ ] HoloRunner 3-tape loading with shared WeightCache
+- [ ] `SpeculativeDecoder` struct: draft N tokens → verify batch → accept/reject
+- [ ] Acceptance/rejection sampling (Leviathan et al. 2023)
+- [ ] `--speculative` + `--draft-steps N` CLI flags
+- Target: 2x effective throughput → 76+ effective tok/s
+
+**Phase 3: Q2 quantization (hologram base + hologram-ai)**
+- [ ] `QuantizedWeights2` (4 centroids, 2-bit indices) + `quantize_2bit()`
+- [ ] `lut_gemm_2bit()` kernel (NEON/AVX2) + `MatMulLut2` graph/tape ops
+- [ ] `--quantize q2_0` CLI flag + compiler integration + quality gate
+- Target: base tok/s 50-60 (half weight reads vs Q4)
+
+**Combined:** Phase 1+2 = 76+ tok/s. Phase 1+2+3 = 100+ tok/s.
+
 #### Tier 2: Compute kernel optimizations (hologram base + hologram-ai)
-- [ ] 2.1 Speculative decoding — draft model + batched verification (2-4x throughput)
+- [ ] 2.1 Speculative decoding — see Plan 055 Phase 2 above
 - [x] 2.2 Flash attention SIMD — NEON `vfmaq_f32` / AVX2 `_mm256_fmadd_ps`
   dot product + V accumulation + online softmax correction. All 8 attention
   tests + 2 SIMD-vs-scalar primitive tests pass.
