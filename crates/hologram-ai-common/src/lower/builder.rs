@@ -601,8 +601,84 @@ pub fn lower(
                 }
             }
             DispatchTarget::MultiOutput => {
+                // FusedNormProjection → 1 norm node + N MatMul nodes.
+                // Each projection weight is a separate input; the norm output
+                // lives in the arena and is shared by all N projections.
+                if let AiOp::FusedNormProjection { epsilon, split_sizes, has_residual_add } = &node.op {
+                    let eps_bits = hologram::f32_to_bits(*epsilon as f32);
+
+                    // Input layout:
+                    //   has_residual_add=false: [x, norm_weight, W_0, W_1, ...]
+                    //   has_residual_add=true:  [x, residual, norm_weight, W_0, W_1, ...]
+                    let weight_start = if *has_residual_add { 3 } else { 2 };
+                    let n_projections = split_sizes.len();
+
+                    // Step 1: Emit the norm node.
+                    let norm_size = node.inputs.first()
+                        .and_then(|tid| ai_graph.tensor_info.get(tid))
+                        .and_then(|info| info.shape.last())
+                        .and_then(|d| d.evaluate())
+                        .unwrap_or(0) as u32;
+
+                    let norm_op = if *has_residual_add {
+                        GraphOp::Float(FloatOp::AddRmsNorm { size: norm_size, epsilon: eps_bits })
+                    } else {
+                        GraphOp::Float(FloatOp::RmsNorm { size: norm_size, epsilon: eps_bits })
+                    };
+                    let norm_inputs: Vec<usize> = if *has_residual_add {
+                        // [x, residual, norm_weight]
+                        vec![input_idxs[0], input_idxs[1], input_idxs[2]]
+                    } else {
+                        // [x, norm_weight]
+                        vec![input_idxs[0], input_idxs[1]]
+                    };
+                    builder = builder.node_with_inputs(norm_op, &norm_inputs);
+                    let norm_idx = builder.len() - 1;
+
+                    // Set norm output shape (same as x).
+                    if let Some(x_shape) = output_shape(node.inputs.first(), &ai_graph.tensor_info) {
+                        builder = builder.set_node_shape(norm_idx, x_shape);
+                    }
+                    let norm_dtype = input_float_dtype(node.inputs.first(), &ai_graph.tensor_info);
+                    builder = builder.set_node_dtype(norm_idx, norm_dtype);
+
+                    // Step 2: Emit N MatMul nodes, one per projection.
+                    for (i, &out_tid) in node.outputs.iter().enumerate() {
+                        if i >= n_projections { break; }
+                        let weight_input_pos = weight_start + i;
+                        if weight_input_pos >= input_idxs.len() { break; }
+
+                        let n_val = split_sizes[i] as u32;
+                        let matmul_op = GraphOp::Float(FloatOp::MatMul {
+                            m: 0, // runtime-inferred
+                            k: norm_size,
+                            n: n_val,
+                        });
+                        builder = builder.node_with_inputs(
+                            matmul_op,
+                            &[norm_idx, input_idxs[weight_input_pos]],
+                        );
+                        let proj_idx = builder.len() - 1;
+
+                        let out_shape = output_shape(Some(&out_tid), &ai_graph.tensor_info);
+                        if let Some(ref s) = out_shape {
+                            builder = builder.set_node_shape(proj_idx, s.clone());
+                        }
+                        let dtype = input_float_dtype(Some(&out_tid), &ai_graph.tensor_info);
+                        builder = builder.set_node_dtype(proj_idx, dtype);
+                        tid_to_idx.insert(out_tid, proj_idx);
+                    }
+
+                    tracing::info!(
+                        node_id = node.id,
+                        n_projections,
+                        has_residual_add,
+                        "lowered FusedNormProjection as 1 norm + {} MatMul nodes",
+                        n_projections,
+                    );
+                }
                 // Split → N Slice nodes, one per output tensor.
-                if let AiOp::Split { axis, sizes } = &node.op {
+                else if let AiOp::Split { axis, sizes } = &node.op {
                     tracing::info!(
                         node_id = node.id,
                         axis,

@@ -26,6 +26,7 @@ impl OptPipeline {
             data_prop::DataPropagation, dead_node::DeadNodeElimination,
             decompose::OpDecomposition, kv_slot_injection::KvSlotInjection,
             matmul_activation_fusion::MatMulActivationFusion,
+            norm_projection_fusion::NormProjectionFusion,
             scalar_absorption::ScalarAbsorption,
             shared_input_projection_fusion::SharedInputProjectionFusion,
             swiglu_projection_fusion::SwiGluProjectionFusion,
@@ -75,11 +76,10 @@ impl OptPipeline {
             // RmsNorm nodes) and before AttentionFusion.
             Box::new(AddRmsNormFusion),
             // Deep decode fusions (Plan 054):
-            // NormProjectionFusion: disabled — multi-output lowering not yet
-            // supported. The fused node produces N outputs but the builder
-            // expects single-output ops. Needs MultiOutput dispatch path or
-            // Slice-based approach with deferred (not inline) weight storage.
-            // Box::new(NormProjectionFusion),
+            // Fuse [Add+]RmsNorm → multi-way MatMul projection.
+            // Lowered as MultiOutput: 1 norm node + N MatMul nodes sharing
+            // the norm output. No weight concatenation — original params reused.
+            Box::new(NormProjectionFusion),
             // Fuse FusedSwiGLU → MatMul (down projection).
             // Runs after SwiGluFusion (consumes FusedSwiGLU nodes).
             Box::new(SwiGluProjectionFusion),
