@@ -14,3 +14,6 @@ specs/scratch.md
 !crates/hologram-ai-conformance/fixtures/*
 # Generated TinyLlama probe fixtures (250MB+ each)
 crates/hologram-ai-conformance/fixtures/tinyllama_*.onnx
+**/.hypergrep
+**/.gitignore
+!/.gitignore

@@ -9,6 +9,7 @@
 pub mod commands;
 pub mod compiler;
 pub mod download;
+pub mod speculative;
 pub mod validate;
 
 // Flat re-exports.

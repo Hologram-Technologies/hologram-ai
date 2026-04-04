@@ -102,6 +102,22 @@ impl Pass for SwiGluFusion {
             // (The Mul output TensorId is reused, so existing info carries over.)
 
             to_remove.insert(silu_idx);
+            // For decomposed SiLU (Mul(x, Sigmoid(x))), also remove the
+            // Sigmoid node if it has only one consumer (the inner Mul).
+            let silu_node = &graph.nodes[silu_idx];
+            if matches!(silu_node.op, AiOp::Mul) && silu_node.inputs.len() == 2 {
+                for &inp_tid in &silu_node.inputs {
+                    if let Some(&sig_idx) = tid_to_node.get(&inp_tid) {
+                        if matches!(graph.nodes[sig_idx].op, AiOp::Sigmoid) {
+                            let sig_out = graph.nodes[sig_idx].outputs[0];
+                            let sig_consumers = consumers.get(&sig_out).map_or(0, |c| c.len());
+                            if sig_consumers == 1 {
+                                to_remove.insert(sig_idx);
+                            }
+                        }
+                    }
+                }
+            }
             replacements.insert(mul_idx, fused);
             fused_count += 1;
 
@@ -138,27 +154,66 @@ impl Pass for SwiGluFusion {
     }
 }
 
-/// Check if either `a` or `b` is produced by a `SiLU` node.
+/// Check if either `a` or `b` is produced by a `SiLU` node (or decomposed SiLU).
 /// Returns `(silu_node_idx, gate_tid, up_tid)` where `gate_tid` is the
 /// input to SiLU and `up_tid` is the other Mul operand.
+///
+/// Handles both:
+/// - `AiOp::Silu(x)` → silu_out
+/// - Decomposed: `Sigmoid(x)` → `Mul(x, sigmoid_out)` → silu_out
+///   (torch 2.11+ ONNX exports decompose SiLU this way)
 fn try_find_silu(
     tid_to_node: &HashMap<TensorId, usize>,
     graph: &AiGraph,
     a: TensorId,
     b: TensorId,
 ) -> Option<(usize, TensorId, TensorId)> {
-    // Try a = SiLU output, b = up
-    if let Some(&silu_idx) = tid_to_node.get(&a) {
-        let silu_node = &graph.nodes[silu_idx];
-        if matches!(silu_node.op, AiOp::Silu) && !silu_node.inputs.is_empty() {
-            return Some((silu_idx, silu_node.inputs[0], b));
+    for &(candidate, other) in &[(a, b), (b, a)] {
+        if let Some(&idx) = tid_to_node.get(&candidate) {
+            let node = &graph.nodes[idx];
+            // Direct SiLU node.
+            if matches!(node.op, AiOp::Silu) && !node.inputs.is_empty() {
+                return Some((idx, node.inputs[0], other));
+            }
+            // Decomposed SiLU: Mul(x, Sigmoid(x)).
+            // The Mul has two inputs — one is x, the other is Sigmoid(x).
+            if matches!(node.op, AiOp::Mul) && node.inputs.len() == 2 {
+                let mul_a = node.inputs[0];
+                let mul_b = node.inputs[1];
+                // Check if one input is Sigmoid and the other is the same
+                // tensor that Sigmoid consumes (i.e., Mul(x, sigmoid(x))).
+                if let Some(result) = try_match_decomposed_silu(
+                    tid_to_node, graph, idx, mul_a, mul_b, other,
+                ) {
+                    return Some(result);
+                }
+            }
         }
     }
-    // Try b = SiLU output, a = up
-    if let Some(&silu_idx) = tid_to_node.get(&b) {
-        let silu_node = &graph.nodes[silu_idx];
-        if matches!(silu_node.op, AiOp::Silu) && !silu_node.inputs.is_empty() {
-            return Some((silu_idx, silu_node.inputs[0], a));
+    None
+}
+
+/// Check if `Mul(mul_a, mul_b)` is a decomposed SiLU: `Mul(x, Sigmoid(x))`.
+/// Returns `(mul_node_idx, gate_tid, up_tid)` if matched.
+fn try_match_decomposed_silu(
+    tid_to_node: &HashMap<TensorId, usize>,
+    graph: &AiGraph,
+    mul_idx: usize,
+    mul_a: TensorId,
+    mul_b: TensorId,
+    up_tid: TensorId,
+) -> Option<(usize, TensorId, TensorId)> {
+    for &(sig_candidate, x_candidate) in &[(mul_a, mul_b), (mul_b, mul_a)] {
+        if let Some(&sig_idx) = tid_to_node.get(&sig_candidate) {
+            let sig_node = &graph.nodes[sig_idx];
+            if matches!(sig_node.op, AiOp::Sigmoid)
+                && sig_node.inputs.len() == 1
+                && sig_node.inputs[0] == x_candidate
+            {
+                // Mul(x, Sigmoid(x)) = SiLU(x). The "silu node" is the Mul.
+                // gate_tid = x (the input to the decomposed SiLU).
+                return Some((mul_idx, x_candidate, up_tid));
+            }
         }
     }
     None

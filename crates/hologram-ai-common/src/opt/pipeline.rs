@@ -25,6 +25,12 @@ impl OptPipeline {
             const_eval::ConstantEvaluation, constant_fold::ConstantFolding,
             data_prop::DataPropagation, dead_node::DeadNodeElimination,
             decompose::OpDecomposition, kv_slot_injection::KvSlotInjection,
+            matmul_activation_fusion::MatMulActivationFusion,
+            norm_projection_fusion::NormProjectionFusion,
+            scalar_absorption::ScalarAbsorption,
+            shared_input_projection_fusion::SharedInputProjectionFusion,
+            swiglu_projection_fusion::SwiGluProjectionFusion,
+            transpose_matmul_fusion::TransposeMatMulFusion,
             position_ids_injection::PositionIdsInjection,
             resolve_slice_params::ResolveSliceParams,
             rmsnorm_fusion::RmsNormFusion, semantic_prop::SemanticPropagation,
@@ -53,10 +59,33 @@ impl OptPipeline {
             // so norm chains are already collapsed. Must run before
             // AttentionFusion to avoid interfering with SDPA pattern matching.
             Box::new(SwiGluFusion),
+            // Absorb Transpose(swap-last-2) → MatMul into Gemm { trans_a/trans_b }.
+            // Eliminates intermediate transposed buffer. Must run before
+            // MatMulActivationFusion (which matches on MatMul nodes).
+            Box::new(TransposeMatMulFusion),
+            // Absorb MatMul → Mul(scalar) into Gemm { alpha }.
+            // Eliminates full-tensor scalar multiply. Must run before other
+            // matmul fusions to simplify the graph.
+            Box::new(ScalarAbsorption),
+            // Fuse MatMul → SiLU/GeLU/ReLU into MatMulSilu/Gelu/Relu.
+            // Eliminates intermediate activation buffer; the tape kernel
+            // applies activation in-register during matmul writeback.
+            Box::new(MatMulActivationFusion),
             // Fuse Add(x, residual) → RmsNorm(sum, weight, eps) into
             // FusedLayerNormResidual. Runs after RmsNormFusion (needs fused
             // RmsNorm nodes) and before AttentionFusion.
             Box::new(AddRmsNormFusion),
+            // Deep decode fusions (Plan 054):
+            // Fuse [Add+]RmsNorm → multi-way MatMul projection.
+            // Lowered as MultiOutput: 1 norm node + N MatMul nodes sharing
+            // the norm output. No weight concatenation — original params reused.
+            Box::new(NormProjectionFusion),
+            // Fuse FusedSwiGLU → MatMul (down projection).
+            Box::new(SwiGluProjectionFusion),
+            // Fuse shared-input MatMul projections:
+            // QKV: 3 MatMuls → 1 MatMul + 3 Slices (saves 44 BLAS calls)
+            // Gate+Up: 2 MatMuls → 1 MatMul + 2 Slices (saves 22 BLAS calls)
+            Box::new(SharedInputProjectionFusion),
             // Replace Range(0, seq, 1) position generators with a position_ids
             // input. Enables KV cache decode at seq=1 by passing the correct
             // absolute position from the generation loop.

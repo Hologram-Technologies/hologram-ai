@@ -798,6 +798,51 @@ fn resolve_op(
             vec![],
         ),
 
+        // ── Deep decode fusions (Plan 054) ─────────────────────────────
+        AiOp::FusedNormProjection {
+            epsilon,
+            split_sizes,
+            has_residual_add,
+        } => {
+            // Input layout depends on has_residual_add:
+            //   false: [x, norm_weight, proj_weight]
+            //   true:  [x, residual, norm_weight, proj_weight]
+            let norm_size = concrete_last_dim(inputs.first(), tensor_info).unwrap_or(0) as u32;
+            let n_total: u32 = split_sizes.iter().sum::<usize>() as u32;
+            // k = norm_size (hidden dim = projection input dim)
+            let k = norm_size;
+            let eps_bits = f32_to_bits(*epsilon as f32);
+            if *has_residual_add {
+                (
+                    FloatOp::AddNormProjectionGemv {
+                        norm_size,
+                        epsilon: eps_bits,
+                        k,
+                        n_total,
+                    },
+                    vec![],
+                )
+            } else {
+                (
+                    FloatOp::NormProjectionGemv {
+                        norm_size,
+                        epsilon: eps_bits,
+                        k,
+                        n_total,
+                    },
+                    vec![],
+                )
+            }
+        }
+        AiOp::FusedSwiGluProjection => {
+            // Inputs: [gate, up, W_down]
+            // k = last_dim(gate) = FFN intermediate dim
+            // n = last_dim(W_down) = hidden dim
+            let k = concrete_last_dim(inputs.first(), tensor_info).unwrap_or(0) as u32;
+            let n = concrete_last_dim(inputs.get(2), tensor_info).unwrap_or(0) as u32;
+            (FloatOp::SwiGluProjectionGemv { k, n }, vec![])
+        }
+
         _ => return Ok(None),
     };
 

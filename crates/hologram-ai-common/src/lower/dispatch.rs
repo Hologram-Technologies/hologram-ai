@@ -93,6 +93,8 @@ pub fn dispatch(op: &AiOp) -> DispatchTarget {
 
         // ── Fused ops needing shape resolution ─────────────────────────
         FusedLayerNormResidual { .. } => D::FloatNeedsShape,
+        FusedNormProjection { .. } => D::MultiOutput,
+        FusedSwiGluProjection => D::FloatNeedsShape,
 
         // ── Native FloatOp: params from AiOp (no shape resolution needed) ─
         RotaryEmbedding { .. } => D::FloatNeedsShape,
@@ -123,7 +125,7 @@ pub fn dispatch(op: &AiOp) -> DispatchTarget {
         // ── Identity pass-through ────────────────────────────────────────
         Squeeze { .. } => D::Identity,
         Unsqueeze { .. } => D::Identity,
-        Expand => D::GraphOp(GraphOp::Float(FloatOp::Reshape)),
+        Expand => D::Identity,
         Slice { .. } => D::FloatNeedsShape,
         Split { .. } => D::MultiOutput,
         Tile { .. } => D::Identity,

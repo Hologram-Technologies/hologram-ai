@@ -68,9 +68,13 @@ impl ContextBundle {
     }
 
     /// Insert or replace a section. Serializes immediately.
+    /// Skips insertion if serialization produces empty bytes.
     pub fn insert(&mut self, section: &dyn EmbeddableSection) {
-        self.sections
-            .insert(section.section_kind(), section.to_bytes());
+        let bytes = section.to_bytes();
+        if bytes.is_empty() {
+            return;
+        }
+        self.sections.insert(section.section_kind(), bytes);
     }
 
     /// Insert a pre-serialized section by kind.
@@ -342,9 +346,27 @@ impl EmbeddableSection for ShapeContextGraph {
     }
 
     fn to_bytes(&self) -> Vec<u8> {
-        rkyv::to_bytes::<rkyv::rancor::Error>(self)
-            .expect("ShapeContextGraph serialization")
-            .to_vec()
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            rkyv::to_bytes::<rkyv::rancor::Error>(self)
+                .map(|b| b.to_vec())
+        })) {
+            Ok(Ok(bytes)) => bytes,
+            Ok(Err(e)) => {
+                tracing::warn!(
+                    "ShapeContextGraph serialization failed ({}), skipping section — \
+                     runtime shape projection will not be available",
+                    e
+                );
+                Vec::new()
+            }
+            Err(_) => {
+                tracing::warn!(
+                    "ShapeContextGraph serialization panicked (overflow), skipping section — \
+                     runtime shape projection will not be available"
+                );
+                Vec::new()
+            }
+        }
     }
 }
 

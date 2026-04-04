@@ -182,6 +182,11 @@ impl ShapeProjection for FloatOp {
             // ── KV cache ────────────────────────────────────────────────────
             FloatOp::KvWrite { .. } => (ShapeSpecRepr::SameAs(0), None),
             FloatOp::KvRead { .. } => (ShapeSpecRepr::Unknown, None),
+
+            // ── Deep decode fusions (Plan 054) ─────────────────────────────
+            FloatOp::NormProjectionGemv { .. }
+            | FloatOp::AddNormProjectionGemv { .. }
+            | FloatOp::SwiGluProjectionGemv { .. } => (ShapeSpecRepr::Unknown, None),
         })
     }
 }
@@ -372,6 +377,10 @@ impl ShapeProjection for AiOp {
             AiOp::If { .. } | AiOp::Loop { .. } | AiOp::Scan { .. } => {
                 return None;
             }
+
+            // ── Deep decode fusions (Plan 054) ─────────────────────────────
+            AiOp::FusedNormProjection { .. }
+            | AiOp::FusedSwiGluProjection => (ShapeSpecRepr::Unknown, None),
 
             // ── Constant / Opaque (seeded directly, not projected) ────────
             AiOp::Constant { .. } | AiOp::Opaque { .. } => return None,

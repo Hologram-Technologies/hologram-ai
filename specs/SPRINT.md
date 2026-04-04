@@ -370,6 +370,248 @@ zero runtime code. All kernels belong in hologram base crate.
 - [ ] Phase 3: E2E validation — TinyLlama with q8, q4, asymmetric q8:q4, boundary
   layers, WHT, and sparse V. Quality + memory + performance benchmarks.
 
+### P9: CPU Inference Performance — 100-200+ tok/s (Plan 040)
+
+**Target:** 100-200+ effective tok/s for Llama 8B on CPU. WASM supported.
+**Branch:** `feat/cpu-inference-perf` in both repos.
+
+#### Tier 1: Wire existing infrastructure (hologram-ai only) — DONE (already implemented)
+- [x] 1.1 Wire KV cache quantization — `--kv-cache`/`--kv-boundary-layers`/`--kv-wht`
+  CLI flags parse into `KvCacheConfig`, passed to `KvCacheState::with_config()`
+- [x] 1.2 Wire epilogue fusion end-to-end — `wrap_graph_op()` emits
+  `GraphOp::FusedMatMulActivation` for MatMulRelu/Gelu/Silu (39.1 tok/s result)
+- [x] 1.3 Sparse V decode active — `sparse_v: true` in all attention lowering paths
+
+#### ONNX execution correctness (Plan 041)
+- [x] **Root cause identified**: variable-length shape resolution. When compiled
+  seq_len differs from runtime input length, ops like Reshape/Expand use compiled
+  values while Softmax/RmsNorm infer from buffer lengths → shape corruption.
+- [x] **Workaround**: compile with `--seq-len N` matching prompt token count.
+  TinyLlama at seq_len=24: "The capital of France is Paris." — matches ORT exactly.
+  KV cache decode (seq=1) works correctly regardless.
+- [ ] **Proper fix**: hologram base `resolve_size()` + lowering should use 0-sentinels
+  for all seq-dependent dimensions, resolving consistently at runtime.
+
+#### Path to 100-200 tok/s (Plan 042) — 5 phases
+
+**Phase 1: Archive dedup + MatMulActivationFusion (→ ~5 tok/s)** — DONE
+- [x] 1A. Archive weight dedup — skip shared blob for same-weight-group LLM
+  pipeline. F32 archive: 9.4 → 4.4 GB. Q4: 9.8 → 5.0 GB (f32 originals still
+  embedded alongside Q4 constants — further optimization needed).
+- [x] 1B. MatMulActivationFusion pass — pattern-matches MatMul → SiLU/GeLU/ReLU
+  into fused AiOp variants. Wired into MVP pipeline. No matches on TinyLlama
+  (uses SwiGLU), but ready for GPT-2/BERT (GeLU). Lowering + kernel already
+  handle fused variants.
+
+**Phase 2: Single-path executor + zero-copy (→ 40 tok/s)** — DONE
+- [x] 2A. `execute_direct` — single execution path, pre-allocated buffers, one
+  dispatch match per instruction. Eliminated execute_inner, dispatch_kernel_par,
+  execute_parallel. tape.rs: 5,829 → 4,188 lines (-28%).
+- [x] 2B. Zero-copy input gathering — unsafe raw pointer aliasing for input slots,
+  mutable output slot. No per-instruction clone. 370ms → 21.5ms/step.
+- [x] 2C. Q4 BLAS hybrid in single path — `dispatch_lut_gemm_4` dequants centroids
+  → f32 (cached in WeightCache), then cblas_sgemm. 870ms → 22ms/step.
+- **Result: 2.4 → 40.9 tok/s (17x speedup), TinyLlama f32 + Q4, M4 Max.**
+
+**Phase 3: Path to 100+ tok/s** — 3 feature branches, execute in order
+
+3A. **Speculative decoding (Plan 043)** → 80-120 tok/s effective
+- Branch: `feat/speculative-decoding`
+- Draft model generates N candidates, target verifies in one batch
+- 2-3x effective throughput at 40 tok/s base
+- New: `crates/hologram-ai/src/speculative.rs`, CLI `--draft-model`
+- [ ] SpeculativeDecoder struct + acceptance/rejection
+- [ ] CLI wiring + draft model validation
+- [ ] Tests: effective tok/s > 2x base
+
+3B. **Layer-level parallelism (Plan 044)** → 60-80 tok/s
+- Branch: `feat/layer-parallelism`
+- Parallel attention heads (32 heads on 12 cores via rayon)
+- Parallel FFN gate+up projections
+- [ ] Parallel head loop in `dispatch_attention`
+- [ ] Parallel group dispatch in `execute_direct`
+- [ ] Tests: output matches sequential, tok/s improvement
+
+3C. **Variable-length execution fix (Plan 045)** → any prompt length
+- Branch: `feat/variable-length-fix`
+- 0-sentinels for seq-dependent dims in lowering
+- Wire ShapeContextGraph into `execute_direct`
+- [ ] Compile at seq=64, run with 24 tokens → correct
+- [ ] Non-LLM models unaffected
+
+3D. **Archive compression + Q4 size** (backlog)
+- Wire hologram-compression for --compress on compile
+- Strip f32 originals from Q4 archive (constant offset remapping)
+- Q4 archive: 5 GB → ~0.5 GB → ~0.2 GB compressed
+
+#### Plan 051: Full Byte-Domain Q4 MatMul — 60+ tok/s
+- Branch: `feat/hologram-lut-q4`
+- **Core idea:** Quantize activations to int8 at runtime, making the entire
+  Q4 matmul inner loop pure integer (int8×int8→int16→int32). f32 conversion
+  happens ONCE per output element instead of per K-row.
+- Strategy A: `vmull_s8` (int8×int8→int16) + `vaddw_s16` (int16→int32 accumulate)
+- 18 NEON ops per 32 columns vs current 36 → 2x inner-loop reduction
+- K-unroll by 4 for ILP → projected 2.6x total speedup
+- [ ] Phase 1: `quantize_activation_row` helper (NEON-vectorized)
+- [ ] Phase 2: `lut_gemm_4bit_neon_int8` kernel (replaces nibbleview)
+- [ ] Phase 3: K-unroll by 4 + N-chunk 64
+- [ ] Phase 4: Profile vs BLAS, lower/remove hybrid threshold
+- [ ] Phase 5: Update scalar fallback + WASM path
+- **Result: 43-44 tok/s — near Q4 bandwidth ceiling on Apple Silicon**
+- [x] Phase 1-2: int8 activation quantization + NEON vmull/vaddw kernel
+  - Pure LUT: 12.5 → 20 tok/s (1.6x from int8 activations)
+  - Compile-time int8 centroid table, K-unrolled by 4 for ILP
+- [x] Phase 3: Unified LUT+BLAS pipeline (no threshold branching)
+  - LUT handles Q4 storage + dequant (hologram's core value)
+  - BLAS/AMX handles matmul compute (hardware acceleration)
+  - Single path: LUT dequant → BLAS sgemm on macOS; int8 LUT kernel on non-BLAS
+- [x] NEON f32 vecmat for M=1 — **tested, AMX faster** (10 vs 43 tok/s)
+  - Apple AMX hardware outperforms software NEON even for M=1 vecmat
+  - Kept as fallback for non-BLAS platforms (WASM, Linux without Accelerate)
+- [x] Profiling infrastructure (`HOLOGRAM_PROFILE=1`, per-kernel-type timing)
+- [x] SharedInputProjectionFusion pass (Plan 052)
+  - QKV: 3 MatMuls → 1 MatMul + 3 Slices (22 fusions fire on TinyLlama)
+  - Gate+Up: 2 MatMuls → 1 MatMul + 2 Slices (22 fusions fire)
+  - **Tested, currently slower on Apple Silicon** — AMX handles small matmuls
+    efficiently; fused larger matmul + Slice overhead is net slower
+  - Disabled for now; useful on non-AMX platforms where BLAS overhead is higher
+  - Gate+Up fusion hits rkyv serialization overflow for large Q4 weights (11264 cols)
+- **Profiling findings (21ms/step at 43 tok/s):**
+  - MatMulLut4 (Q4 dequant→BLAS): 10ms/48% (45 calls)
+  - MatMul f32 (down_proj+attn): 9.4ms/45% (110 calls)
+  - Transpose: 0.3ms/1.5% (89 calls)
+  - Everything else: 1.3ms/5%
+  - **96% of time is in matmul** — AMX is at hardware throughput limit
+- **Path to 60+ tok/s requires reducing data per step (Tier 3):**
+  - Q2/ternary quantization — half the weight reads (2x bandwidth ceiling)
+  - Speculative decoding — multiple effective tokens per forward pass
+  - Sliding window attention — reduce KV cache reads at long context
+
+#### Deep Decode Fusion (Plan 054) — eliminate intermediate buffers
+
+Today's fusions are shallow (2-op chains). Deep fusion chains 3-4 ops into
+single dispatches, eliminating all intermediate buffers through transformer
+blocks. Decode-only (M=1); prefill falls back to separate BLAS calls. The
+general fusion rule: if an op's output has exactly one consumer and no global
+reduction, fuse them.
+
+**Wave 1: Core deep fusions (hologram base + hologram-ai) — DONE**
+- [x] `FloatOp::NormProjectionGemv` / `AddNormProjectionGemv` / `SwiGluProjectionGemv`
+- [x] TapeKernel variants + tape_builder + dispatch_kernel wiring
+- [x] M=1 fast path: normalize into caller Vec, skip arena allocation
+- [x] `FusedNormProjection` + `FusedSwiGluProjection` AiOp variants
+- [x] `NormProjectionFusion` (44 fusions on TinyLlama ONNX) — multi-output lowering:
+  1 norm node + N MatMul nodes sharing norm output. No weight concatenation.
+- [x] `SwiGluProjectionFusion` (22 fusions on TinyLlama ONNX)
+- [x] Lowering + pipeline ordering
+- [x] ShapeContextGraph serialization panic fixed (graceful fallback)
+- [x] Fusion metrics: 6 → 2 nodes per FFN layer (67% reduction in unit tests)
+- [x] TinyLlama ONNX E2E: compiles + generates "The capital of France is Paris."
+
+**Wave 2: Shape chain elimination + GEMM absorption — DONE**
+- [x] GQA Expand chain — already eliminated by DeadNodeElimination after AttentionFusion
+- [x] `TransposeMatMulFusion` — absorb Transpose(swap-last-2) → MatMul into Gemm trans_b
+- [x] `ScalarAbsorption` — fold MatMul → Mul(scalar) into Gemm alpha
+- [x] Expand → Identity lowering (zero-copy pass-through instead of Reshape)
+- [ ] Q/K/V Reshape+Transpose absorption into attention (future)
+
+**Wave 3: Extended patterns (all model types)**
+- [ ] Embed + Norm fusion (post-embedding normalization: Qwen, Gemma)
+- [ ] Final Norm + LM Head fusion (single-consumer logit projection)
+- [ ] LayerNorm + Projection (BERT, GPT-2, CLIP encoder models)
+- [ ] Attention → Residual Add fusion (Plan 039 #5)
+- [ ] Conv2d + GroupNorm + Activation chain (SD UNet)
+- [ ] LUT4 variants (dequant preamble first, inline if profiling demands)
+
+**Wave 4: General rule-based fusion walker**
+- [ ] Replace individual fusion passes with single configurable walker
+- [ ] Rules: elementwise fuse freely, norm fuses with Add or projection,
+  max 1 GEMM per group, Softmax/Attention are barriers
+
+#### Runtime Performance (Plan 039 — hologram base)
+
+**Phase 1: Multi-core unlock (highest impact — 2-3x decode throughput)**
+- [ ] Fix `dispatch_kernel_par` bug — missing arms for MatMulLut4/8, Conv2d*
+  in parallel dispatch. Blocks all multi-core quantized inference. (Plan 039 #1)
+- [ ] N-dimension parallelism for M=1 GEMM — partition n_tiles across rayon
+  threads. Each thread writes non-overlapping output columns. (Plan 039 #2)
+
+**Phase 2: Memory bandwidth**
+- [x] Multi-level weight prefetch — madvise(WILLNEED/DONTNEED) wired in execute_direct
+- [ ] Shared B-panel packing — restructure GEMM loop (Plan 039 #6)
+
+**Phase 3: Fusion gaps (hologram base graph-level)**
+- [x] AddRmsNorm + Activation fusion — already in hologram base
+- [ ] SwiGLU fusion from Split → Silu → Mul pattern (Plan 039 #7)
+- [ ] Attention + Residual Add fusion (Plan 039 #5)
+
+**Phase 4: Memory & platform**
+- [ ] Wire workspace buffer reuse (Plan 039 #8)
+- [x] Adaptive sparse_v threshold — HOLOGRAM_SPARSE_V_THRESHOLD env var
+- [ ] wasm32 SIMD128 micro-kernels (Plan 039 #11)
+
+#### Path to 60+ tok/s (Plans 055-057) — RESULTS
+
+**Achieved: 43.0 tok/s** on ONNX TinyLlama `--quantize q4_0` (from 2.7 f32 baseline).
+This is the AMX hardware ceiling for TinyLlama 1.1B on Apple Silicon CPU.
+See Plan 057 for full session summary.
+
+**Phase 1: Per-row Q4 + early-quant + prewarm — DONE (43 tok/s)**
+- [x] Per-row symmetric linear Q4 quantization (replaced global k-means)
+- [x] Early weight quantization at param registration (before graph optimization)
+- [x] Dequant cache prewarm at model load (zero warmup penalty)
+- [x] SwiGluProjectionGemv decompose to FusedSwiGLU + MatMulLut4 for Q4 weights
+- [x] `feeds_attention` fix: check K == hidden_size (not just N)
+- Steady-state: 21ms/step, 93% in BLAS sgemm (AMX hardware ceiling)
+
+**Phase 2: Speculative decoding infrastructure — DONE (needs draft model)**
+- [x] 3-component pipeline: prefill (seq=N) + decode (seq=1) + verify (seq=8)
+- [x] HoloRunner 3-tape loading with shared WeightCache + prewarm
+- [x] Batch verify via execute_verify() — ONE forward pass for N tokens
+- [x] `--speculative` + `--draft-steps N` CLI flags
+- [x] KvCacheState.truncate_to() for draft rollback
+- ⚠ Self-speculative: 0% acceptance (M=1 vs M=N numerical divergence)
+- Needs: separate draft model or exact numerical agreement
+
+**Phase 3: Q2 quantization — DONE (infrastructure only)**
+- [x] Full Q2 stack: QuantizedWeights2, quantize_2bit, lut_gemm_2bit, MatMulLut2
+- [x] `--quantize q2_0` CLI flag + compiler integration
+- ⚠ Pure integer Q2 kernel slower than AMX BLAS (tested: 400ms vs 21ms)
+- ⚠ Bandwidth reduction doesn't help when AMX uses cached f32 dequant
+
+**What doesn't work for 60+ on CPU (Apple Silicon):**
+- Any software kernel (NEON/scalar/int8) is 8-20x slower than AMX BLAS
+- Bandwidth reduction doesn't help (AMX uses cached f32 regardless of Q level)
+- Self-speculative fails (numerical divergence between M=1 and M=N)
+- Level-parallel: BLAS already uses multi-core AMX internally
+
+**Viable paths to 60+ (future work):**
+- Separate draft model for speculative decoding (60-80 effective tok/s)
+- Metal GPU (100+ tok/s, deferred per user preference)
+- Smaller models (Phi-2, Gemma-2B — same architecture, fewer parameters)
+
+#### Tier 2: Compute kernel optimizations (hologram base + hologram-ai)
+- [ ] 2.1 Speculative decoding — see Plan 055 Phase 2 above
+- [x] 2.2 Flash attention SIMD — NEON `vfmaq_f32` / AVX2 `_mm256_fmadd_ps`
+  dot product + V accumulation + online softmax correction. All 8 attention
+  tests + 2 SIMD-vs-scalar primitive tests pass.
+- [ ] 2.3 AMX/BLAS hybrid — dequant to f16, use Accelerate HGEMM (Apple Silicon)
+- [ ] 2.4 AVX-512 VNNI micro-kernels — `_mm512_dpbusd_epi32` (x86_64)
+- [x] 2.5 wasm32-simd128 support — `i8x16_swizzle` table lookup in
+  `hologram-core/src/view/simd.rs`, wired into `apply_slice()`/`apply_to()`.
+  Compiles for `wasm32-unknown-unknown` with `target-feature=+simd128`.
+
+#### Tier 3: Extreme quantization (hologram base + hologram-ai)
+- [ ] 3.1 Q2/ternary quantization (BitNet-style) — 2x over Q4, bitmask inner loop
+- [ ] 3.2 Continuous batching — amortize weight reads across N concurrent users
+- [ ] 3.3 Sliding window attention — O(n*w) instead of O(n²)
+
+#### Tier 4: System-level + archive streaming (hologram base)
+- [ ] 4.1 Huge pages for weight buffers
+- [ ] 4.2 Compile-time weight reordering (pre-packed layout)
+- [ ] 4.3 Multi-level prefetch enhancement
+- [ ] 5.1-5.5 Layer-by-layer streaming (lazy constant seeding, per-instruction eviction)
+
 ### Precision & Information Theory (Plan 032)
 - [x] `SemanticHint` enum on `TensorInfo` — classifies tensors by information
   content (Pixel ~24 bits, Latent ~4 bits, Token ~16 bits, Embedding ~12 bits,

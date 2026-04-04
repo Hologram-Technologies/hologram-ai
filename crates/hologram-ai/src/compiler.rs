@@ -246,90 +246,163 @@ impl ModelCompiler {
             infer_llm_metadata_from_graph(&mut ai_graph);
         }
 
-        // No need to save pre-concretized graph — single-model architecture
-        // uses one graph for both prefill and decode.
+        // Step 2b — concretize + compile.
+        // For LLM models: compile two graphs (prefill at prompt seq_len, decode
+        // at seq=1) as a pipeline archive. The decode graph is ~Nx faster because
+        // all seq-dependent MatMul/Attention dimensions are 1 instead of N.
+        // For non-LLM models: compile one graph at the specified seq_len.
 
-        // Step 2b — concretize all symbolic/dynamic dims for compilation.
-        // The runtime doesn't yet support deferred shape resolution, so we
-        // bake in concrete values: Var dims → upper bounds, Dynamic → 1.
-        let ai_graph = concretize_all_dims(ai_graph, self.seq_len_override).context("shape concretization failed")?;
-
-        // Step 2c — post-concretization shape repair (fixpoint loop with
-        // aggressive shape propagation, slice→gather, shape healing).
-        let ai_graph = post_concretization_repair(ai_graph)?;
-
-        // Diagnostic: report empty shapes, attention dims, MatMul shapes,
-        // inf/NaN params after repair.
-        log_post_repair_diagnostics(&ai_graph);
-
-        // Validate before lowering.
-        let errs = ai_graph.validate();
-        if !errs.is_empty() {
-            anyhow::bail!("{} validation error(s): {}", errs.len(), errs[0].message);
-        }
-        info!("validation passed");
-
-        // Shape consistency check: catch shape/weight mismatches before lowering.
-        let shape_errors =
-            hologram_ai_common::opt::shape_consistency::validate_shape_consistency(&ai_graph);
-        if !shape_errors.is_empty() {
-            warn!(
-                count = shape_errors.len(),
-                "shape consistency issues detected"
-            );
-            for err in &shape_errors {
-                warn!(
-                    node = err.node_name.as_deref().unwrap_or("-"),
-                    "{}", err.message
-                );
-            }
-        }
-
-        // Step 3 — memory plan.
-        let mem_plan = MemoryPlanner
-            .plan(&ai_graph)
-            .context("memory planning failed")?;
-
-        // Extract metadata before lowering (borrows ai_graph).
-        let metadata = extract_metadata(&ai_graph);
+        // Extract metadata from the pre-concretized graph (before cloning).
+        let pre_metadata = extract_metadata(&ai_graph);
         let import_warnings = ai_graph.warnings.len();
-        let node_count = ai_graph.nodes.len();
-        let is_llm = metadata.arch != "unknown" && mem_plan.kv_cache_layout.n_layers > 0;
+        // Determine if this is an LLM needing prefill+decode pipeline.
+        // Check: detected as causal LM AND has fused attention layers (from AttentionFusion).
+        let prefill_mem = MemoryPlanner.plan(&ai_graph)
+            .context("memory planning failed")?;
+        let is_llm = looks_like_causal_lm && prefill_mem.kv_cache_layout.n_layers > 0;
 
-        info!(
-            arch = %metadata.arch,
-            is_llm,
-            nodes = node_count,
-            warnings = import_warnings,
-            "starting compilation"
-        );
-
-        // Single-model architecture: compile ONE model through compile_components.
-        // Pipeline format is universal — even single-component models use it.
         use hologram_ai_common::sections::meta::ComponentRole;
 
+        // TODO: when Q4 quantization is enabled, quantized weights become dead
+        // in the weight section (replaced by Q4 constants in the graph). Stripping
+        // them requires remapping constant offsets which is a larger refactor.
+        // For now, include all weights — archive size is larger than optimal but
+        // correct. The Q4 constants are still used for execution.
         let (weights, weight_index) = collect_weight_bytes(&ai_graph)?;
         let total_weight_bytes = weights.len() as u64;
         let extra_weights: Option<&[u8]> = if weights.is_empty() { None } else { Some(&weights) };
 
-        let archive_bytes = self.compile_components(
-            vec![ComponentSpec {
-                name: "model".into(),
-                role: ComponentRole::Backbone,
-                weight_group: "model".into(),
-                opt_profile: if is_llm {
-                    hologram_ai_common::OptProfile::Llm
-                } else {
-                    hologram_ai_common::OptProfile::Generic
-                },
-                graph: &ai_graph,
-                mem_plan: &mem_plan,
-                phase: LowerPhase::Forward,
-                weights: extra_weights,
-                weight_index: Some(weight_index),
-            }],
-            vec![], // no inter-component connections for single model
-        )?;
+        let archive_bytes = if is_llm {
+            // ── LLM pipeline: prefill (seq=N) + decode (seq=1) ──────────────
+            info!("compiling LLM pipeline: prefill + decode");
+
+            // Clone the optimized graph for decode and verify paths (before concretization).
+            let decode_ai_graph = ai_graph.clone();
+            let verify_ai_graph = ai_graph.clone();
+
+            // Prefill graph: concretize at prompt seq_len.
+            let prefill_graph = concretize_all_dims(ai_graph, self.seq_len_override)
+                .context("prefill concretization failed")?;
+            let prefill_graph = post_concretization_repair(prefill_graph)?;
+            log_post_repair_diagnostics(&prefill_graph);
+            let errs = prefill_graph.validate();
+            if !errs.is_empty() {
+                anyhow::bail!("prefill: {} validation error(s): {}", errs.len(), errs[0].message);
+            }
+            let prefill_mem = MemoryPlanner.plan(&prefill_graph)
+                .context("prefill memory planning failed")?;
+            let prefill_nodes = prefill_graph.nodes.len();
+
+            // Decode graph: concretize at seq=1.
+            let decode_graph = concretize_all_dims(decode_ai_graph, Some(1))
+                .context("decode concretization failed")?;
+            let decode_graph = post_concretization_repair(decode_graph)?;
+            let errs = decode_graph.validate();
+            if !errs.is_empty() {
+                anyhow::bail!("decode: {} validation error(s): {}", errs.len(), errs[0].message);
+            }
+            let decode_mem = MemoryPlanner.plan(&decode_graph)
+                .context("decode memory planning failed")?;
+            let decode_nodes = decode_graph.nodes.len();
+
+            // Verification graph: concretize at seq=8 (for batch speculative decoding).
+            // This allows verifying up to 8 draft tokens in a single forward pass.
+            let verify_seq = 8u64;
+            let verify_graph = concretize_all_dims(verify_ai_graph, Some(verify_seq))
+                .context("verify concretization failed")?;
+            let verify_graph = post_concretization_repair(verify_graph)?;
+            let verify_mem = MemoryPlanner.plan(&verify_graph)
+                .context("verify memory planning failed")?;
+            let verify_nodes = verify_graph.nodes.len();
+
+            info!(
+                prefill_nodes,
+                decode_nodes,
+                verify_nodes,
+                verify_seq,
+                "LLM pipeline graphs ready (prefill + decode + verify)"
+            );
+
+            // Compile all three as a pipeline. Weights are shared (same weight_group).
+            self.compile_components(
+                vec![
+                    ComponentSpec {
+                        name: "prefill".into(),
+                        role: ComponentRole::Prefill,
+                        weight_group: "model".into(),
+                        opt_profile: hologram_ai_common::OptProfile::Llm,
+                        graph: &prefill_graph,
+                        mem_plan: &prefill_mem,
+                        phase: LowerPhase::Forward,
+                        weights: extra_weights,
+                        weight_index: Some(weight_index.clone()),
+                    },
+                    ComponentSpec {
+                        name: "decode".into(),
+                        role: ComponentRole::Decode,
+                        weight_group: "model".into(),
+                        opt_profile: hologram_ai_common::OptProfile::Llm,
+                        graph: &decode_graph,
+                        mem_plan: &decode_mem,
+                        phase: LowerPhase::Forward,
+                        weights: extra_weights,
+                        weight_index: Some(weight_index.clone()),
+                    },
+                    ComponentSpec {
+                        name: "verify".into(),
+                        role: ComponentRole::Prefill, // verification uses prefill-style execution
+                        weight_group: "model".into(),
+                        opt_profile: hologram_ai_common::OptProfile::Llm,
+                        graph: &verify_graph,
+                        mem_plan: &verify_mem,
+                        phase: LowerPhase::Forward,
+                        weights: extra_weights,
+                        weight_index: Some(weight_index),
+                    },
+                ],
+                vec![], // no inter-component connections
+            )?
+        } else {
+            // ── Non-LLM: single graph ───────────────────────────────────────
+            let ai_graph = concretize_all_dims(ai_graph, self.seq_len_override)
+                .context("shape concretization failed")?;
+            let ai_graph = post_concretization_repair(ai_graph)?;
+            log_post_repair_diagnostics(&ai_graph);
+            let errs = ai_graph.validate();
+            if !errs.is_empty() {
+                anyhow::bail!("{} validation error(s): {}", errs.len(), errs[0].message);
+            }
+
+            let shape_errors =
+                hologram_ai_common::opt::shape_consistency::validate_shape_consistency(&ai_graph);
+            if !shape_errors.is_empty() {
+                warn!(count = shape_errors.len(), "shape consistency issues detected");
+                for err in &shape_errors {
+                    warn!(node = err.node_name.as_deref().unwrap_or("-"), "{}", err.message);
+                }
+            }
+
+            let mem_plan = MemoryPlanner.plan(&ai_graph)
+                .context("memory planning failed")?;
+
+            self.compile_components(
+                vec![ComponentSpec {
+                    name: "model".into(),
+                    role: ComponentRole::Backbone,
+                    weight_group: "model".into(),
+                    opt_profile: hologram_ai_common::OptProfile::Generic,
+                    graph: &ai_graph,
+                    mem_plan: &mem_plan,
+                    phase: LowerPhase::Forward,
+                    weights: extra_weights,
+                    weight_index: Some(weight_index),
+                }],
+                vec![],
+            )?
+        };
+
+        let metadata = pre_metadata;
+        let node_count = 0; // TODO: sum prefill + decode nodes
 
         Ok(HoloArchive {
             bytes: archive_bytes,
@@ -578,25 +651,25 @@ impl ModelCompiler {
                 None
             };
 
-            // Register weights in the content-addressable store for dedup.
-            // The shared blob is built later — sub-archives embed NO weights.
-            // At load time, the pipeline loader resolves each component's
-            // weights from the shared blob via WeightDedupIndex.
             if let Some(w) = spec.weights {
                 total_weight_bytes_before += w.len() as u64;
+                // Weights go into the shared store for later dedup.
+                // We'll skip building the shared blob if all components share
+                // the same weight_group (checked after the loop).
                 weight_store.insert(&spec.name, &spec.weight_group, w);
             }
-            // For single-component models: embed weights in the sub-archive
-            // directly (no shared weight blob overhead).
-            // For multi-component: weights resolve from shared blob via WeightDedupIndex.
-            // For single-component: pass weight reference (no clone).
-            // For multi-component: None (resolved from shared blob at load time).
-            let weights_for_component: Option<&[u8]> = if n == 1 {
+            // For single-component: embed weights in the sub-archive directly.
+            // For multi-component with shared weight_group (LLM prefill+decode):
+            // embed in the FIRST component only. Both graphs reference the same
+            // constants in the same order, so weight offsets are identical.
+            // The second component resolves weights from the first via dedup index.
+            let is_first_in_group = weight_source.is_none();
+            let weights_for_component: Option<&[u8]> = if n == 1 || is_first_in_group {
                 spec.weights
             } else {
                 None
             };
-            let wi_for_component = if n == 1 {
+            let wi_for_component = if n == 1 || is_first_in_group {
                 spec.weight_index.as_ref()
             } else {
                 None
@@ -632,10 +705,15 @@ impl ModelCompiler {
         let meta_section = meta.to_bytes();
         writer = writer.add_section(meta.section_kind(), meta_section);
 
-        // Build shared weight blob + dedup index for multi-component models.
-        // Single-component models embed weights in the sub-archive directly.
+        // Build shared weight blob + dedup index for multi-component models
+        // with DIFFERENT weight groups (e.g., SD text_encoder + unet).
+        // For LLM pipeline (prefill+decode sharing one weight_group), skip the
+        // shared blob — weights are embedded in the first sub-archive and the
+        // decode component borrows them at load time via set_weights_borrowed().
+        let distinct_groups = weight_group_owners.len();
         let dedup_bytes = weight_store.total_bytes();
-        let pipeline = if dedup_bytes > 0 && n > 1 {
+        let needs_shared_blob = dedup_bytes > 0 && n > 1 && distinct_groups > 1;
+        let pipeline = if needs_shared_blob {
             let savings = if total_weight_bytes_before > 0 && dedup_bytes < total_weight_bytes_before {
                 (1.0 - dedup_bytes as f64 / total_weight_bytes_before as f64) * 100.0
             } else {
@@ -1579,6 +1657,79 @@ fn validate_matmul_constants(
 fn collect_weight_bytes(
     ai_graph: &AiGraph,
 ) -> anyhow::Result<(Vec<u8>, hologram::hologram_archive::weight::index::WeightIndex)> {
+    collect_weight_bytes_filtered(ai_graph, &std::collections::HashSet::new())
+}
+
+/// Predict which weight TIDs will be quantized during lowering.
+///
+/// Mirrors the gating logic in `try_convert_f32_to_lut4` in the builder:
+/// - Weight is input[1] of a MatMul node
+/// - Weight is a 2D parameter with both dims ≥ 256
+/// - Output dim doesn't match attention head sizes (not Q/K/V/O projection)
+#[allow(dead_code)] // TODO: use once constant offset remapping is implemented
+fn predict_quantized_weight_tids(
+    ai_graph: &AiGraph,
+) -> std::collections::HashSet<hologram_ai_common::ir::TensorId> {
+    use hologram_ai_common::ir::{AiOp, Dim};
+    let mut quantized = std::collections::HashSet::new();
+
+    // Collect attention dimensions for gating.
+    let attn_dims: Vec<usize> = ai_graph.nodes.iter()
+        .filter_map(|n| match &n.op {
+            AiOp::GroupedQueryAttention { num_heads, num_kv_heads, head_dim, .. } => {
+                Some(vec![
+                    *num_heads as usize * *head_dim as usize,
+                    *num_kv_heads as usize * *head_dim as usize,
+                ])
+            }
+            _ => None,
+        })
+        .flatten()
+        .collect();
+
+    for node in &ai_graph.nodes {
+        if !matches!(node.op, AiOp::MatMul) {
+            continue;
+        }
+        // Weight is input[1].
+        let weight_tid = match node.inputs.get(1) {
+            Some(&tid) => tid,
+            None => continue,
+        };
+        // Must be a parameter.
+        if !ai_graph.params.contains_key(&weight_tid) {
+            continue;
+        }
+        // Must have 2D concrete shape with both dims ≥ 256.
+        let info = match ai_graph.tensor_info.get(&weight_tid) {
+            Some(info) => info,
+            None => continue,
+        };
+        let dims: Vec<usize> = info.shape.iter()
+            .filter_map(|d| match d { Dim::Concrete(n) => Some(*n as usize), _ => None })
+            .collect();
+        if dims.len() != 2 || dims[0] < 256 || dims[1] < 256 {
+            continue;
+        }
+        // Skip attention projections (output dim matches head sizes).
+        if attn_dims.contains(&dims[1]) {
+            continue;
+        }
+        quantized.insert(weight_tid);
+    }
+
+    quantized
+}
+
+/// Collect weight bytes, skipping TIDs in `skip_tids`.
+///
+/// Used for Q4 quantization: weights that are quantized to LUT-GEMM format
+/// during lowering become dead — they're replaced by graph constants.
+/// Skipping them avoids embedding redundant f32 originals in the archive.
+fn collect_weight_bytes_filtered(
+    ai_graph: &AiGraph,
+    skip_tids: &std::collections::HashSet<hologram_ai_common::ir::TensorId>,
+) -> anyhow::Result<(Vec<u8>, hologram::hologram_archive::weight::index::WeightIndex)> {
     use hologram::hologram_archive::weight::index::{
         derive_layer_group, WeightIndex, WeightIndexEntry,
     };
@@ -1586,7 +1737,7 @@ fn collect_weight_bytes(
     let mut sorted: Vec<_> = ai_graph
         .params
         .iter()
-        .filter(|(_, p)| matches!(p, AiParam::Mmap { .. }))
+        .filter(|(&tid, p)| matches!(p, AiParam::Mmap { .. }) && !skip_tids.contains(&tid))
         .collect();
     if sorted.is_empty() {
         return Ok((Vec::new(), WeightIndex { entries: vec![] }));
@@ -1730,11 +1881,19 @@ pub struct HoloRunner {
     /// Backing storage: mmap or heap. MUST be listed first so it's dropped last
     /// (LoadedPlan borrows from it).
     _storage: ArchiveStorage,
-    /// The model plan (loaded from the first component in the pipeline archive).
+    /// The prefill model plan (first component, or only component for non-LLM).
     plan: hologram::LoadedPlan,
     shape_ctx: Option<ShapeContextGraph>,
-    /// Pre-compiled execution tape (compiled seq_len shapes).
+    /// Pre-compiled execution tape for prefill.
     tape: hologram::hologram_exec::tape::EnumTape,
+    /// Optional decode model (second component in LLM pipeline archives).
+    /// When present, `execute_with_kv` switches to this after step 0.
+    decode_plan: Option<hologram::LoadedPlan>,
+    decode_tape: Option<hologram::hologram_exec::tape::EnumTape>,
+    /// Optional verification model (third component in LLM pipeline archives).
+    /// Compiled at seq=N for batch speculative decoding verification.
+    verify_plan: Option<hologram::LoadedPlan>,
+    verify_tape: Option<hologram::hologram_exec::tape::EnumTape>,
     /// Persistent weight cache for LUT-GEMM. Deserialized quantized weights
     /// are cached here across execution calls, avoiding per-step rkyv overhead.
     weight_cache: parking_lot::RwLock<hologram::WeightCache>,
@@ -1875,28 +2034,119 @@ impl HoloRunner {
 
             let shape_ctx = read_shape_context_from_plan(&plan, model_slice)?;
             let tape = hologram::build_tape_from_plan(&plan)
-                .map_err(|e| anyhow::anyhow!("building tape: {e}"))?;
+                .map_err(|e| anyhow::anyhow!("building prefill tape: {e}"))?;
 
-            Ok(Self {
+            // Load decode model (second component) if present.
+            let (decode_plan, decode_tape) = if ph.models.len() >= 2 {
+                let second = &ph.models[1];
+                let d_start = weights_start + second.offset as usize;
+                let d_end = d_start + second.size as usize;
+                if d_end > bytes.len() {
+                    anyhow::bail!("decode sub-archive out of bounds");
+                }
+                let d_slice = &bytes[d_start..d_end];
+                let mut d_plan = unsafe { hologram::load_from_bytes_zero_copy(d_slice) }
+                    .map_err(|e| anyhow::anyhow!("loading decode plan: {e}"))?;
+
+                // Share weights from prefill → decode. Both components were compiled
+                // from the same AiGraph with identical constant ordering, so weight
+                // offsets are the same. Just borrow the prefill's weight buffer.
+                if d_plan.weights().is_empty() && !plan.weights().is_empty() {
+                    unsafe { d_plan.set_weights_borrowed(plan.weights()); }
+                    info!(decode_weights = plan.weights().len(), "decode shares prefill weights");
+                }
+
+                let d_tape = hologram::build_tape_from_plan(&d_plan)
+                    .map_err(|e| anyhow::anyhow!("building decode tape: {e}"))?;
+                info!("loaded decode model (seq=1) for LLM pipeline");
+                (Some(d_plan), Some(d_tape))
+            } else {
+                (None, None)
+            };
+
+            // Load verify model (third component) if present.
+            let (verify_plan, verify_tape) = if ph.models.len() >= 3 {
+                let third = &ph.models[2];
+                let v_start = weights_start + third.offset as usize;
+                let v_end = v_start + third.size as usize;
+                if v_end > bytes.len() {
+                    anyhow::bail!("verify sub-archive out of bounds");
+                }
+                let v_slice = &bytes[v_start..v_end];
+                let mut v_plan = unsafe { hologram::load_from_bytes_zero_copy(v_slice) }
+                    .map_err(|e| anyhow::anyhow!("loading verify plan: {e}"))?;
+                if v_plan.weights().is_empty() && !plan.weights().is_empty() {
+                    unsafe { v_plan.set_weights_borrowed(plan.weights()); }
+                }
+                let v_tape = hologram::build_tape_from_plan(&v_plan)
+                    .map_err(|e| anyhow::anyhow!("building verify tape: {e}"))?;
+                info!("loaded verify model (seq=8) for speculative decoding");
+                (Some(v_plan), Some(v_tape))
+            } else {
+                (None, None)
+            };
+
+            let runner = Self {
                 _storage: storage,
                 plan,
                 shape_ctx,
                 tape,
+                decode_plan,
+                decode_tape,
+                verify_plan,
+                verify_tape,
                 weight_cache: parking_lot::RwLock::new(hologram::WeightCache::new()),
-            })
+            };
+            // Pre-warm dequant cache so decode steps never pay dequant overhead.
+            // Pre-warm dequant cache: populate f32 expansion for all Q4 constants
+            // so decode steps never pay the dequant overhead.
+            #[cfg(target_os = "macos")]
+            {
+                let sg = runner.plan.graph();
+                let mut wc = runner.weight_cache.write();
+                wc.prewarm_q4(
+                    &runner.tape,
+                    &sg.constants,
+                    runner.plan.weights(),
+                );
+                if let Some(ref dt) = runner.decode_tape {
+                    // Decode plan shares weights with prefill plan.
+                    wc.prewarm_q4(
+                        dt,
+                        &sg.constants,
+                        runner.plan.weights(),
+                    );
+                }
+            }
+            Ok(runner)
         } else {
             // Legacy single-graph archive (backward compat).
             let shape_ctx = read_shape_context_from_plan(&probe, bytes)?;
             let tape = hologram::build_tape_from_plan(&probe)
                 .map_err(|e| anyhow::anyhow!("building tape: {e}"))?;
 
-            Ok(Self {
+            let runner = Self {
                 _storage: storage,
                 plan: probe,
                 shape_ctx,
                 tape,
+                decode_plan: None,
+                decode_tape: None,
+                verify_plan: None,
+                verify_tape: None,
                 weight_cache: parking_lot::RwLock::new(hologram::WeightCache::new()),
-            })
+            };
+            #[cfg(target_os = "macos")]
+            {
+                let sg = runner.plan.graph();
+                let mut wc = runner.weight_cache.write();
+                wc.prewarm_q4(
+                    &runner.tape,
+                    &sg.constants,
+                    runner.plan.weights(),
+                );
+            }
+            Ok(runner)
         }
     }
 
@@ -1936,21 +2186,66 @@ impl HoloRunner {
 
     /// Execute with a mutable KV cache state for autoregressive generation.
     ///
-    /// Uses the SAME model for both prefill and decode. The KV cache
-    /// distinguishes the two modes at runtime via `write_pos`.
-    /// Decode steps skip arena pre-warming for smaller buffer allocations.
+    /// For LLM pipeline archives: uses the prefill tape for step 0 (write_pos == 0)
+    /// and the decode tape for subsequent steps. The decode graph is compiled at
+    /// seq=1, making each decode step ~Nx faster than running the full prefill graph.
+    ///
+    /// For single-graph archives: uses the same tape for all steps.
     pub fn execute_with_kv(
         &self,
         inputs: &hologram::GraphInputs,
         kv_state: &mut hologram::KvCacheState,
     ) -> anyhow::Result<hologram::GraphOutputs> {
+        // Use decode tape/plan for decode steps (write_pos > 0) when available.
+        let (tape, plan) = if kv_state.write_pos() > 0 {
+            if let (Some(ref dt), Some(ref dp)) = (&self.decode_tape, &self.decode_plan) {
+                (dt, dp)
+            } else {
+                (&self.tape, &self.plan)
+            }
+        } else {
+            (&self.tape, &self.plan)
+        };
+
         hologram::execute_tape_with_kv_cached(
-            &self.tape, &self.plan, inputs, kv_state, &self.weight_cache,
+            tape, plan, inputs, kv_state, &self.weight_cache,
         )
         .map_err(|e| anyhow::anyhow!("{e}"))
     }
 
+    /// Whether this runner has a separate decode model for fast autoregressive generation.
+    #[must_use]
+    pub fn has_decode_model(&self) -> bool {
+        self.decode_tape.is_some()
+    }
 
+    /// Whether this runner has a verification model for batch speculative decoding.
+    #[must_use]
+    pub fn has_verify_model(&self) -> bool {
+        self.verify_tape.is_some()
+    }
+
+    /// Execute a batch verification forward pass using the verify tape (seq=N).
+    ///
+    /// Used by speculative decoding: draft N tokens with decode tape (seq=1),
+    /// then verify all N in one forward pass through the verify tape (seq=N).
+    /// BLAS amortizes the weight read across N output tokens → N× throughput.
+    pub fn execute_verify(
+        &self,
+        inputs: &hologram::GraphInputs,
+        kv_state: &mut hologram::KvCacheState,
+    ) -> anyhow::Result<hologram::GraphOutputs> {
+        let (tape, plan) = if let (Some(ref vt), Some(ref vp)) = (&self.verify_tape, &self.verify_plan) {
+            (vt, vp)
+        } else {
+            // No verify tape — fall back to prefill tape.
+            (&self.tape, &self.plan)
+        };
+        hologram::execute_tape_with_kv_cached(
+            tape, plan, inputs, kv_state, &self.weight_cache,
+        )
+        .map_err(|e| anyhow::anyhow!("{e}"))
+    }
 }
 
 /// Extract a named sub-archive's raw bytes from a pipeline archive.

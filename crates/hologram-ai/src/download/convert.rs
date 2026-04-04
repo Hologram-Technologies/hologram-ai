@@ -75,7 +75,8 @@ dynamic_axes = {
 onnx_path = os.path.join(output_dir, "model.onnx")
 print(f"Exporting to {onnx_path}...", file=sys.stderr)
 
-model.eval()
+model.requires_grad_(False)
+model.train(False)
 with torch.no_grad():
     torch.onnx.export(
         model,
@@ -85,6 +86,8 @@ with torch.no_grad():
         output_names=output_names,
         dynamic_axes=dynamic_axes,
         opset_version=18,
+        export_params=True,
+        do_constant_folding=True,
     )
 
 print(f"Exported ONNX model to {onnx_path}", file=sys.stderr)

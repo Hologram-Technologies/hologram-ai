@@ -425,6 +425,22 @@ pub enum AiOp {
     /// Inputs: [h1, h2, ..., hN, W]. Last input is the weight matrix.
     ConcatMatMul { n_concat_inputs: u32 },
 
+    // ── Deep decode fusions (Plan 054) ─────────────────────────────────────
+    /// Fused: [Add +] RmsNorm → multi-output projection.
+    /// When `has_residual_add` is false: inputs = [x, norm_weight, proj_weight].
+    /// When `has_residual_add` is true:  inputs = [x, residual, norm_weight, proj_weight].
+    /// Output: concatenated projection [M, sum(split_sizes)].
+    /// Downstream Slice nodes split the output into individual projections.
+    FusedNormProjection {
+        epsilon: f64,
+        split_sizes: Vec<usize>,
+        has_residual_add: bool,
+    },
+    /// Fused: SwiGLU (silu(gate) * up) → down projection.
+    /// Inputs: [gate, up, W_down].
+    /// Output: [M, n] — activated values computed in-register, never materialized.
+    FusedSwiGluProjection,
+
     // ── Control flow (subgraph ops) ────────────────────────────────────────
     /// Conditional: execute then_branch or else_branch subgraph based on
     /// condition input. Subgraph names reference `AiGraph.subgraphs` keys.
@@ -541,6 +557,8 @@ impl AiOp {
             | AiOp::MatMulGelu
             | AiOp::MatMulSilu
             | AiOp::ConcatMatMul { .. }
+            | AiOp::FusedNormProjection { .. }
+            | AiOp::FusedSwiGluProjection
             | AiOp::Gemm { .. }
             | AiOp::Einsum { .. }
             | AiOp::MultiHeadAttention { .. }
