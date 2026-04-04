@@ -105,10 +105,5 @@ jobs:
           tar xzf onnxruntime-linux-x64-1.18.1.tgz
           echo "ORT_DYLIB_PATH=$(pwd)/onnxruntime-linux-x64-1.18.1/lib/libonnxruntime.so" >> "$GITHUB_ENV"
 
-      - name: Generate quant fixtures
-        run: |
-          pip3 install numpy --break-system-packages 2>/dev/null || pip install numpy
-          python3 scripts/gen-quant-vectors.py
-
       - name: Run conformance tests (Tier 2)
         run: cargo test -p hologram-ai-conformance --features=conformance
