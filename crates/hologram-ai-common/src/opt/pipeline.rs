@@ -24,7 +24,9 @@ impl OptPipeline {
             const_dedup::ConstantDeduplication, const_eval::ConstantEvaluation,
             constant_fold::ConstantFolding, data_prop::DataPropagation,
             dead_node::DeadNodeElimination, decompose::OpDecomposition,
-            kv_slot_injection::KvSlotInjection, matmul_activation_fusion::MatMulActivationFusion,
+            kv_slot_injection::KvSlotInjection,
+            layernorm_fusion::LayerNormFusion,
+            matmul_activation_fusion::MatMulActivationFusion,
             norm_projection_fusion::NormProjectionFusion,
             position_ids_injection::PositionIdsInjection, resolve_slice_params::ResolveSliceParams,
             rmsnorm_fusion::RmsNormFusion, scalar_absorption::ScalarAbsorption,
@@ -51,6 +53,11 @@ impl OptPipeline {
             // into AiOp::RmsNorm. Must run after ConstantFolding so that the
             // scalar epsilon and exponent params are already materialized as
             // AiParam::Inline (otherwise scalar_f32_param returns None).
+            // Fuse explicit ReduceMean→Sub→Pow→ReduceMean→Add→Sqrt→Div→Mul→Add
+            // chains into AiOp::LayerNorm. Runs BEFORE RmsNormFusion because
+            // LayerNorm is a superset pattern — RmsNormFusion would otherwise
+            // consume the inner Pow→ReduceMean→Sqrt→Div subchain.
+            Box::new(LayerNormFusion),
             Box::new(RmsNormFusion),
             // Fuse SiLU(gate) * up → FusedSwiGLU. Runs after RmsNormFusion
             // so norm chains are already collapsed. Must run before

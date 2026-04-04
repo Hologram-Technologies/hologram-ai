@@ -238,7 +238,6 @@ fn gemm_trans_b_matches_ort() {
 
 /// Test: LayerNorm composite model (9 nodes) matches ORT.
 #[test]
-#[ignore] // TODO(conformance): numerical mismatch 32/32 elements, abs_err=2.69
 fn layernorm_composite_matches_ort() {
     let rows = 2;
     let size = 16;

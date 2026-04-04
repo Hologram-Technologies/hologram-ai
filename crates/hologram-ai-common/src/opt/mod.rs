@@ -7,6 +7,7 @@ pub mod data_prop;
 pub mod dead_node;
 pub mod decompose;
 pub mod kv_slot_injection;
+pub mod layernorm_fusion;
 pub mod matmul_activation_fusion;
 pub mod norm_projection_fusion;
 pub mod oracle;
