@@ -151,14 +151,14 @@ pub fn lower(
     );
     // Collect attention dimensions to skip attention-sensitive weights.
     let mut attn_n_dims: Vec<usize> = Vec::new();
-    let mut hidden_size: usize = 0;
+    let mut _hidden_size: usize = 0;
     if do_early_quant {
         for n in &ai_graph.nodes {
             if let AiOp::GroupedQueryAttention { num_heads, num_kv_heads, head_dim, .. } = &n.op {
                 let q_dim = *num_heads as usize * *head_dim as usize;
                 let kv_dim = *num_kv_heads as usize * *head_dim as usize;
                 attn_n_dims.extend_from_slice(&[q_dim, kv_dim, q_dim + 2 * kv_dim]);
-                hidden_size = q_dim;
+                _hidden_size = q_dim;
             }
         }
     }
@@ -1803,37 +1803,6 @@ fn try_convert_f32_to_lut4(
         rows: rows as u32,
         cols: cols as u32,
     }))
-}
-
-/// Check if a weight tensor is eligible for Q4 quantization.
-fn is_q4_eligible_weight(
-    weight_tid: TensorId,
-    ai_graph: &AiGraph,
-    attn_dims: &[usize],
-    hidden_size: usize,
-) -> bool {
-    if !ai_graph.params.contains_key(&weight_tid) {
-        return false;
-    }
-    let info = match ai_graph.tensor_info.get(&weight_tid) {
-        Some(i) => i,
-        None => return false,
-    };
-    let dims: Vec<usize> = info
-        .shape
-        .iter()
-        .filter_map(|d| d.as_concrete().map(|c| c as usize))
-        .collect();
-    if dims.len() != 2 || dims[0] < 256 || dims[1] < 256 {
-        return false;
-    }
-    // feeds_attention: N ∈ attn_dims AND K == hidden_size → skip.
-    let k_val = dims[0];
-    let n_val = dims[1];
-    if attn_dims.contains(&n_val) && k_val == hidden_size {
-        return false;
-    }
-    true
 }
 
 /// Simplified Q4 conversion from a param + known dimensions.
