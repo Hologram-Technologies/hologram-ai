@@ -81,7 +81,6 @@ impl OptPipeline {
             // the norm output. No weight concatenation — original params reused.
             Box::new(NormProjectionFusion),
             // Fuse FusedSwiGLU → MatMul (down projection).
-            // Runs after SwiGluFusion (consumes FusedSwiGLU nodes).
             Box::new(SwiGluProjectionFusion),
             // Fuse shared-input MatMul projections:
             // QKV: 3 MatMuls → 1 MatMul + 3 Slices (saves 44 BLAS calls)
