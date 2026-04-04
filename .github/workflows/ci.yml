@@ -13,22 +13,13 @@ jobs:
         os: [ubuntu-latest, macos-latest]
     runs-on: ${{ matrix.os }}
     steps:
-      - name: Generate GitHub App token
-        id: app-token
-        uses: actions/create-github-app-token@v1
-        with:
-          app-id: ${{ secrets.APP_ID }}
-          private-key: ${{ secrets.APP_PRIVATE_KEY }}
-          owner: Hologram-Technologies
-          repositories: hologram
-
       - uses: actions/checkout@v4
 
       - name: Checkout hologram (sibling dependency)
         uses: actions/checkout@v4
         with:
           repository: Hologram-Technologies/hologram
-          token: ${{ steps.app-token.outputs.token }}
+          token: ${{ secrets.HOLOGRAM_PAT }}
           path: ../hologram
 
       - name: Install Rust toolchain
@@ -71,22 +62,13 @@ jobs:
     name: ORT Conformance
     runs-on: ubuntu-latest
     steps:
-      - name: Generate GitHub App token
-        id: app-token
-        uses: actions/create-github-app-token@v1
-        with:
-          app-id: ${{ secrets.APP_ID }}
-          private-key: ${{ secrets.APP_PRIVATE_KEY }}
-          owner: Hologram-Technologies
-          repositories: hologram
-
       - uses: actions/checkout@v4
 
       - name: Checkout hologram (sibling dependency)
         uses: actions/checkout@v4
         with:
           repository: Hologram-Technologies/hologram
-          token: ${{ steps.app-token.outputs.token }}
+          token: ${{ secrets.HOLOGRAM_PAT }}
           path: ../hologram
 
       - name: Install Rust toolchain
