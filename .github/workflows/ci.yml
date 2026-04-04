@@ -15,10 +15,19 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Generate GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.APP_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+          owner: Hologram-Technologies
+          repositories: hologram
+
       - name: Checkout hologram (sibling dependency)
-        run: git clone --depth 1 "https://x-access-token:${HOLOGRAM_PAT}@github.com/Hologram-Technologies/hologram.git" ../hologram
+        run: git clone --depth 1 "https://x-access-token:${TOKEN}@github.com/Hologram-Technologies/hologram.git" ../hologram
         env:
-          HOLOGRAM_PAT: ${{ secrets.HOLOGRAM_PAT }}
+          TOKEN: ${{ steps.app-token.outputs.token }}
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -62,10 +71,19 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Generate GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.APP_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+          owner: Hologram-Technologies
+          repositories: hologram
+
       - name: Checkout hologram (sibling dependency)
-        run: git clone --depth 1 "https://x-access-token:${HOLOGRAM_PAT}@github.com/Hologram-Technologies/hologram.git" ../hologram
+        run: git clone --depth 1 "https://x-access-token:${TOKEN}@github.com/Hologram-Technologies/hologram.git" ../hologram
         env:
-          HOLOGRAM_PAT: ${{ secrets.HOLOGRAM_PAT }}
+          TOKEN: ${{ steps.app-token.outputs.token }}
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
