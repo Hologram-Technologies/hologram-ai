@@ -50,6 +50,9 @@ pub enum QuantStrategy {
     Q4_0,
     /// Quantize f32 weights to Q8_0 at compile time → LUT-GEMM.
     Q8_0,
+    /// Quantize f32 weights to Q2_0 at compile time → pure integer LUT-GEMM.
+    /// 4 centroids, 2 bits per weight. Half the bandwidth of Q4. No BLAS.
+    Q2_0,
 }
 
 /// Output of the lowering pass.
@@ -135,7 +138,7 @@ pub fn lower(
     // Their f32 bytes are not needed in the archive — the Q4 interception
     // later creates a separate Q4 constant via matmul_lut_4bit().
     // Skipping their f32 registration saves ~4 GB for TinyLlama-class models.
-    let q4_skip_tids: std::collections::HashSet<TensorId> = if matches!(opts.quant_strategy, QuantStrategy::Q4_0 | QuantStrategy::Q8_0) {
+    let q4_skip_tids: std::collections::HashSet<TensorId> = if matches!(opts.quant_strategy, QuantStrategy::Q2_0 | QuantStrategy::Q4_0 | QuantStrategy::Q8_0) {
         let mut attn_dims: Vec<usize> = Vec::new();
         let mut hidden_size: Option<usize> = None;
         for n in &ai_graph.nodes {
@@ -482,6 +485,41 @@ pub fn lower(
                             rows = lut_result.rows,
                             cols = lut_result.cols,
                             "LUT-GEMM: quantized f32 MatMul → MatMulLut4"
+                        );
+                        continue;
+                    }
+                }
+
+                // ── LUT-GEMM Q2_0 interception for plain f32 MatMul ──
+                // Pure integer kernel, no BLAS. Half the bandwidth of Q4.
+                if matches!(opts.quant_strategy, QuantStrategy::Q2_0)
+                    && matches!(result.graph_op, GraphOp::Float(FloatOp::MatMul { .. }))
+                    && !feeds_attention
+                {
+                    if let Some(lut_result) = try_convert_f32_to_lut2(
+                        node,
+                        ai_graph,
+                        &input_idxs,
+                    )? {
+                        builder = builder.matmul_lut_2bit(
+                            ConstantData::Bytes(lut_result.serialized_weights),
+                            &[input_idxs[0]],
+                        );
+                        let idx = builder.len() - 1;
+                        if let Some(&tid) = node.outputs.first() {
+                            let out_shape = output_shape(Some(&tid), &ai_graph.tensor_info);
+                            if let Some(ref s) = out_shape {
+                                builder = builder.set_node_shape(idx, s.clone());
+                            }
+                            let dtype = input_float_dtype(Some(&tid), &ai_graph.tensor_info);
+                            builder = builder.set_node_dtype(idx, dtype);
+                            tid_to_idx.insert(tid, idx);
+                        }
+                        tracing::info!(
+                            node_id = node.id,
+                            rows = lut_result.rows,
+                            cols = lut_result.cols,
+                            "LUT-GEMM: quantized f32 MatMul → MatMulLut2"
                         );
                         continue;
                     }
@@ -1878,4 +1916,71 @@ fn param_bytes_owned(param: &crate::ir::AiParam) -> anyhow::Result<Vec<u8>> {
             Ok(buf)
         }
     }
+}
+
+/// Try to convert f32 weights to Q2_0 LUT-GEMM format (4 centroids, 2-bit indices).
+///
+/// Same flow as `try_convert_f32_to_lut4` but uses `quantize_2bit` and
+/// produces `QuantizedWeights2`. Pure integer kernel at runtime.
+fn try_convert_f32_to_lut2(
+    node: &AiNode,
+    ai_graph: &AiGraph,
+    _input_idxs: &[usize],
+) -> anyhow::Result<Option<Lut4ConversionResult>> {
+    use hologram::hologram_exec::lut_gemm::quantize::quantize_2bit;
+
+    let weight_tid = match node.inputs.get(1) {
+        Some(&tid) => tid,
+        None => return Ok(None),
+    };
+    let param = match ai_graph.params.get(&weight_tid) {
+        Some(p) => p,
+        None => return Ok(None),
+    };
+    let info = match ai_graph.tensor_info.get(&weight_tid) {
+        Some(info) => info,
+        None => return Ok(None),
+    };
+    let dims: Vec<usize> = info
+        .shape
+        .iter()
+        .filter_map(|d| match d {
+            Dim::Concrete(n) => Some(*n as usize),
+            _ => None,
+        })
+        .collect();
+    if dims.len() != 2 {
+        return Ok(None);
+    }
+    let (rows, cols) = (dims[0], dims[1]);
+    if rows < 256 || cols < 256 {
+        return Ok(None);
+    }
+
+    let raw_bytes = param_bytes_owned(param)?;
+    let expected_bytes = rows * cols * 4;
+    if raw_bytes.len() != expected_bytes {
+        tracing::warn!(
+            got = raw_bytes.len(),
+            expected = expected_bytes,
+            "f32 weight size mismatch, skipping Q2 quantization"
+        );
+        return Ok(None);
+    }
+
+    let f32_weights: Vec<f32> = raw_bytes
+        .chunks_exact(4)
+        .map(|c| f32::from_le_bytes(c.try_into().expect("4 bytes")))
+        .collect();
+
+    let qw2 = quantize_2bit(&f32_weights, rows as u32, cols as u32);
+    let serialized = rkyv::to_bytes::<rkyv::rancor::Error>(&qw2)
+        .map_err(|e| anyhow::anyhow!("rkyv serialize QuantizedWeights2: {e}"))?
+        .to_vec();
+
+    Ok(Some(Lut4ConversionResult {
+        serialized_weights: serialized,
+        rows: rows as u32,
+        cols: cols as u32,
+    }))
 }

@@ -45,7 +45,7 @@ enum Command {
         #[arg(long, value_name = "N")]
         seq_len: Option<u64>,
         /// Quantize f32 weights at compile time for LUT-GEMM acceleration.
-        /// Supported: q4_0 (4-bit, 16 centroids), q8_0 (8-bit, 256 centroids).
+        /// Supported: q2_0 (2-bit, 4 centroids), q4_0 (4-bit, 16 centroids), q8_0 (8-bit, 256 centroids).
         #[arg(long, value_name = "SCHEME")]
         quantize: Option<String>,
     },
@@ -95,9 +95,10 @@ fn main() -> anyhow::Result<()> {
             };
 
             let quant_strategy = match quantize.as_deref() {
+                Some("q2_0" | "Q2_0") => hologram_ai_common::lower::QuantStrategy::Q2_0,
                 Some("q4_0" | "Q4_0") => hologram_ai_common::lower::QuantStrategy::Q4_0,
                 Some("q8_0" | "Q8_0") => hologram_ai_common::lower::QuantStrategy::Q8_0,
-                Some(other) => anyhow::bail!("unsupported quantization scheme '{other}' (supported: q4_0, q8_0)"),
+                Some(other) => anyhow::bail!("unsupported quantization scheme '{other}' (supported: q2_0, q4_0, q8_0)"),
                 None => hologram_ai_common::lower::QuantStrategy::Auto,
             };
             let compiler = ModelCompiler {
