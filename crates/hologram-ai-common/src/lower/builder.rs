@@ -221,13 +221,15 @@ pub fn lower(
                                     "early-quant: f32 weight → Q4 ({} bytes)",
                                     serialized.len(),
                                 );
-                                // Don't skip f32 registration — the f32 constant
-                                // is still needed as a fallback for non-MatMul consumers
-                                // and for ops that reference this weight but weren't
-                                // caught by the early-quant interception.
-                                // The Q4 bytes are stored in early_quant_bytes for
-                                // MatMul nodes to use via matmul_lut_4bit().
-                                // Fall through to normal f32 registration below.
+                                // Register minimal placeholder (0 bytes) so
+                                // tid_to_idx has an entry. The actual Q4 data is
+                                // in early_quant_bytes, used by matmul_lut_4bit().
+                                // The placeholder constant takes no archive space.
+                                let placeholder = ConstantData::Bytes(vec![]);
+                                builder = builder.constant_with_shape(placeholder, vec![dims[0], dims[1]]);
+                                let builder_idx = builder.len() - 1;
+                                tid_to_idx.insert(tid, builder_idx);
+                                continue;
                             }
                         }
                     }
