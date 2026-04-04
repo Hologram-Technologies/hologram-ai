@@ -29,6 +29,9 @@ jobs:
         env:
           TOKEN: ${{ steps.app-token.outputs.token }}
 
+      - name: Install protoc
+        uses: arduino/setup-protoc@v3
+
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -84,6 +87,9 @@ jobs:
         run: git clone --depth 1 "https://x-access-token:${TOKEN}@github.com/Hologram-Technologies/hologram.git" ../hologram
         env:
           TOKEN: ${{ steps.app-token.outputs.token }}
+
+      - name: Install protoc
+        uses: arduino/setup-protoc@v3
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
