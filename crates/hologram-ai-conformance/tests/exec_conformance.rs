@@ -2524,7 +2524,6 @@ fn conv2d_stride2_matches_ort() {
 
 /// Test: Conv+Relu+GlobalAvgPool matches ORT (no FC layer).
 #[test]
-#[ignore] // TODO(conformance): empty output (missing Conv2D/GAP dispatch)
 fn conv_relu_gap_matches_ort() {
     let (ic, h, w) = (3, 8, 8);
     let oc = 4;
@@ -2563,7 +2562,6 @@ fn conv_relu_gap_matches_ort() {
 
 /// Test: mini vision classifier (Conv+Relu+GlobalAvgPool+Flatten+Gemm) matches ORT.
 #[test]
-#[ignore] // TODO(conformance): empty output (missing Conv2D/GAP dispatch)
 fn mini_vision_classifier_matches_ort() {
     let (ic, h, w) = (3, 8, 8);
     let oc = 4;
