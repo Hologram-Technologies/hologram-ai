@@ -145,11 +145,10 @@ pub fn lower(
     //
     // We track which TIDs became Q4 constants so node lowering emits
     // MatMulLut4 instead of FloatOp::MatMul.
-    // Early quantization disabled — k-means Q4 on raw f32 ONNX weights
-    // degrades output quality. Per-group quantization (GGUF-style) needed.
-    // The dequant→BLAS path (Q4 FloatNeedsShape interception) still works
-    // for weights that pass the feeds_attention guard.
-    let do_early_quant = false;
+    let do_early_quant = matches!(
+        opts.quant_strategy,
+        QuantStrategy::Q4_0 | QuantStrategy::Q2_0
+    );
     // Collect attention dimensions to skip attention-sensitive weights.
     let mut attn_n_dims: Vec<usize> = Vec::new();
     let mut hidden_size: usize = 0;
