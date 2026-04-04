@@ -849,7 +849,6 @@ fn expand_with_dynamic_shape_tensor_matches_ort() {
 /// expand to [1,32,40,128] (head_dim doubled) instead of [1,32,40,64], which
 /// propagates to A=[40,4096] at the output-projection MatMul (NodeId 336).
 #[test]
-#[ignore] // TODO(conformance): length mismatch: actual=96 expected=384
 fn gqa_k_expand_with_dynamic_shape_matches_ort() {
     let batch = 1usize;
     let n_heads = 8usize;
@@ -959,7 +958,6 @@ fn shape_with_start_end_attrs_matches_ort() {
 /// the Concat) and the Expand produces a wrong-count tensor, causing `K_exp`
 /// to have 163,840 elements instead of 384 — the TinyLlama NodeId(336) error.
 #[test]
-#[ignore] // TODO(conformance): length mismatch: actual=96 expected=384
 fn gqa_k_expand_with_shape_start_end_matches_ort() {
     let batch = 1usize;
     let n_heads = 8usize;

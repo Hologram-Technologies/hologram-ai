@@ -937,6 +937,62 @@ fn resolve_op(
             (FloatOp::SwiGluProjectionGemv { k, n }, vec![])
         }
 
+        AiOp::Expand => {
+            // Expand physically broadcasts data. The second input is a shape tensor
+            // whose known_i64_values give us the target shape. If the output shape
+            // is already propagated in tensor_info, we can also read it from there.
+            //
+            // We try: (1) second input's known_i64_values, (2) output tensor shape.
+            let target_dims: Option<Vec<u32>> = inputs
+                .get(1)
+                .and_then(|tid| tensor_info.get(tid))
+                .and_then(|info| info.known_i64_values.as_ref())
+                .and_then(|vals| {
+                    let concrete: Vec<u32> = vals
+                        .iter()
+                        .filter_map(|v| v.map(|x| x as u32))
+                        .collect();
+                    if concrete.len() == vals.len() {
+                        Some(concrete)
+                    } else {
+                        None
+                    }
+                });
+
+            let target_dims = match target_dims {
+                Some(d) => d,
+                None => {
+                    // Fall back: try the input data shape (when Expand is identity).
+                    let in_shape = inputs
+                        .first()
+                        .and_then(|tid| tensor_info.get(tid))
+                        .map(|info| &info.shape);
+                    match in_shape {
+                        Some(s) => {
+                            let concrete: Vec<u32> = s
+                                .iter()
+                                .filter_map(|d| d.as_concrete().map(|c| c as u32))
+                                .collect();
+                            if concrete.len() == s.len() {
+                                concrete
+                            } else {
+                                return Ok(None);
+                            }
+                        }
+                        None => return Ok(None),
+                    }
+                }
+            };
+
+            let ndim = target_dims.len().min(8) as u8;
+            let mut target_shape = [0u32; 8];
+            for (i, &d) in target_dims.iter().take(8).enumerate() {
+                target_shape[i] = d;
+            }
+
+            (FloatOp::Expand { ndim, target_shape }, vec![])
+        }
+
         _ => return Ok(None),
     };
 

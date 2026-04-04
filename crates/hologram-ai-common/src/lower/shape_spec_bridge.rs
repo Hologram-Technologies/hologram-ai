@@ -198,6 +198,9 @@ impl ShapeProjection for FloatOp {
             FloatOp::NormProjectionGemv { .. }
             | FloatOp::AddNormProjectionGemv { .. }
             | FloatOp::SwiGluProjectionGemv { .. } => (ShapeSpecRepr::Unknown, None),
+
+            // ── Expand ──────────────────────────────────��──────────────────
+            FloatOp::Expand { .. } => (ShapeSpecRepr::Unknown, None),
         })
     }
 }
