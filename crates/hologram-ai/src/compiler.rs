@@ -2036,7 +2036,7 @@ impl HoloRunner {
                 (None, None)
             };
 
-            Ok(Self {
+            let runner = Self {
                 _storage: storage,
                 plan,
                 shape_ctx,
@@ -2044,14 +2044,36 @@ impl HoloRunner {
                 decode_plan,
                 decode_tape,
                 weight_cache: parking_lot::RwLock::new(hologram::WeightCache::new()),
-            })
+            };
+            // Pre-warm dequant cache so decode steps never pay dequant overhead.
+            // Pre-warm dequant cache: populate f32 expansion for all Q4 constants
+            // so decode steps never pay the dequant overhead.
+            #[cfg(target_os = "macos")]
+            {
+                let sg = runner.plan.graph();
+                let mut wc = runner.weight_cache.write();
+                wc.prewarm_q4(
+                    &runner.tape,
+                    &sg.constants,
+                    runner.plan.weights(),
+                );
+                if let Some(ref dt) = runner.decode_tape {
+                    // Decode plan shares weights with prefill plan.
+                    wc.prewarm_q4(
+                        dt,
+                        &sg.constants,
+                        runner.plan.weights(),
+                    );
+                }
+            }
+            Ok(runner)
         } else {
             // Legacy single-graph archive (backward compat).
             let shape_ctx = read_shape_context_from_plan(&probe, bytes)?;
             let tape = hologram::build_tape_from_plan(&probe)
                 .map_err(|e| anyhow::anyhow!("building tape: {e}"))?;
 
-            Ok(Self {
+            let runner = Self {
                 _storage: storage,
                 plan: probe,
                 shape_ctx,
@@ -2059,7 +2081,18 @@ impl HoloRunner {
                 decode_plan: None,
                 decode_tape: None,
                 weight_cache: parking_lot::RwLock::new(hologram::WeightCache::new()),
-            })
+            };
+            #[cfg(target_os = "macos")]
+            {
+                let sg = runner.plan.graph();
+                let mut wc = runner.weight_cache.write();
+                wc.prewarm_q4(
+                    &runner.tape,
+                    &sg.constants,
+                    runner.plan.weights(),
+                );
+            }
+            Ok(runner)
         }
     }
 
