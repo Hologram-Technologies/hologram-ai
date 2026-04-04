@@ -145,10 +145,24 @@ pub fn lower(
     //
     // We track which TIDs became Q4 constants so node lowering emits
     // MatMulLut4 instead of FloatOp::MatMul.
-    let do_early_quant = matches!(
-        opts.quant_strategy,
-        QuantStrategy::Q4_0 | QuantStrategy::Q2_0
-    );
+    // Early quantization disabled — k-means Q4 on raw f32 ONNX weights
+    // degrades output quality. Per-group quantization (GGUF-style) needed.
+    // The dequant→BLAS path (Q4 FloatNeedsShape interception) still works
+    // for weights that pass the feeds_attention guard.
+    let do_early_quant = false;
+    // Collect attention dimensions to skip attention-sensitive weights.
+    let mut attn_n_dims: Vec<usize> = Vec::new();
+    let mut hidden_size: usize = 0;
+    if do_early_quant {
+        for n in &ai_graph.nodes {
+            if let AiOp::GroupedQueryAttention { num_heads, num_kv_heads, head_dim, .. } = &n.op {
+                let q_dim = *num_heads as usize * *head_dim as usize;
+                let kv_dim = *num_kv_heads as usize * *head_dim as usize;
+                attn_n_dims.extend_from_slice(&[q_dim, kv_dim, q_dim + 2 * kv_dim]);
+                hidden_size = q_dim;
+            }
+        }
+    }
     // Store serialized Q4 bytes for weights quantized at registration time.
     // During node lowering, any MatMul referencing a TID in this map will
     // be emitted as MatMulLut4 using the stored bytes (via builder.matmul_lut_4bit).
