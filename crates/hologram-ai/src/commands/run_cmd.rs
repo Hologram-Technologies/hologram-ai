@@ -251,6 +251,9 @@ fn resolve_seq_mode(runner: &HoloRunner, prompt_len: Option<usize>) -> SeqMode {
 
     // When a ShapeContextGraph is available AND the prompt fits within the
     // compiled seq_len, use variable-length mode (no padding waste).
+    //
+    // Prompts exceeding compiled seq_len require 0-sentinel op parameters
+    // (Plan 045) — shape metadata overrides alone can't fix baked op params.
     if runner.has_shape_context() {
         let prompt = prompt_len.unwrap_or(0);
         let fits = compiled_seq.is_none_or(|c| prompt <= c);
