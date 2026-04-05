@@ -1,6 +1,6 @@
-# Plan 058: ShapeContextGraph Node-ID Alignment
+# Plan 058: ShapeContextGraph Node-ID Alignment + Variable-Length Prefill
 
-**Status:** Open
+**Status:** Partial — pruning done, prompt>compiled still broken
 **Created:** 2026-04-05
 **Supersedes:** Plan 033 (Phase 3 blocker), Plan 045 (Option B)
 
@@ -168,6 +168,33 @@ RUST_LOG=info cargo run --release -- run /tmp/tinyllama-prewarm/model.holo \
 
 # Verify: "shape context available" in logs, coherent output, no garbage
 ```
+
+## Status Update (2026-04-05)
+
+**Phases 1-3 implemented.** Post-compilation pruning is in place:
+`retain_live_nodes()` added, wired into both `compile_with_debug_map`
+and `compile_one_component` paths.
+
+**Phase 4 BLOCKED.** E2E testing revealed that pruning alone is
+insufficient for prompt > compiled seq_len. The problem is deeper:
+
+- Ops like `FloatOp::Reshape` embed the compiled seq dimension (e.g., 24)
+  directly in their target shape parameters
+- ShapeContextGraph can project correct *output shapes*, but the op
+  *parameters* themselves contain the wrong dimensions
+- When prompt=36 and compiled_seq=24, Reshape tries to reshape to a
+  buffer with dimension 24, not 36
+
+**Working case:** prompt << compiled seq_len (large ratio). Shape context
+works when the prompt is much smaller than compiled (e.g., 36 tokens on
+a seq=2048 model) because `resolve_size` heuristics succeed. But for
+prompts close to compiled seq_len (e.g., 18 tokens on seq=24), even
+the heuristics break — producing garbage output.
+
+**Remaining fix:** Plan 045 Option A (0-sentinels for seq-dependent dims).
+During lowering, emit `0` for all dimensions that depend on sequence
+length. The executor's `resolve_size()` infers from buffer length. This
+is the only way to support prompt > compiled seq_len without recompilation.
 
 ## Risks
 

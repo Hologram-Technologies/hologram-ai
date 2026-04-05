@@ -325,6 +325,20 @@ impl ShapeContextGraph {
         self.seeds.is_empty() && self.projections.is_empty()
     }
 
+    /// Remove entries referencing nodes eliminated by fusion.
+    ///
+    /// After `hologram::compile()` runs fusion passes, some nodes are removed
+    /// from the graph. Their IDs become stale — shape overrides for them would
+    /// never match any tape instruction. This method prunes those dead entries
+    /// so `walk_shape_context` only produces shapes for live nodes.
+    pub fn retain_live_nodes(&mut self, live_ids: &std::collections::HashSet<u32>) {
+        self.seeds.retain(|s| live_ids.contains(&s.node_id));
+        self.projections.retain(|p| {
+            live_ids.contains(&p.node_id)
+                && p.input_node_ids.iter().all(|id| live_ids.contains(id))
+        });
+    }
+
     /// Zero-copy access from raw archive bytes.
     pub fn from_bytes(bytes: &[u8]) -> Result<&ArchivedShapeContextGraph, rkyv::rancor::Error> {
         rkyv::access::<ArchivedShapeContextGraph, rkyv::rancor::Error>(bytes)

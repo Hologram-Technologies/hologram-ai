@@ -588,7 +588,7 @@ impl ModelCompiler {
         let node_count = ai_graph.nodes.len();
 
         let lowering_opts = self.lowering_options();
-        let lower_out = lower(
+        let mut lower_out = lower(
             &ai_graph,
             &mem_plan.kv_cache_layout,
             &lowering_opts,
@@ -597,7 +597,7 @@ impl ModelCompiler {
         .context("lowering failed")?;
 
         // Extract ShapeContextGraph before the context is consumed.
-        let shape_ctx = lower_out.context.get::<ShapeContextGraph>().ok().flatten();
+        let mut shape_ctx = lower_out.context.get::<ShapeContextGraph>().ok().flatten();
 
         // Build debug map.
         let mut name_to_idx = std::collections::HashMap::new();
@@ -611,6 +611,20 @@ impl ModelCompiler {
         // Compile and assemble archive.
         let compilation = hologram::compile(lower_out.graph).context("hologram::compile failed")?;
         let unpacked = unpack_archive(&compilation.archive)?;
+
+        // Prune shape context entries referencing nodes removed by fusion,
+        // then update the context bundle so the archive embeds the pruned version.
+        if let Some(ref mut ctx) = shape_ctx {
+            let live_ids: std::collections::HashSet<u32> = unpacked
+                .plan
+                .graph()
+                .nodes
+                .iter()
+                .map(|n| n.id.index())
+                .collect();
+            ctx.retain_live_nodes(&live_ids);
+            lower_out.context.insert(ctx);
+        }
         let layer_header = build_tensor_port_header(&unpacked.plan, &ai_graph);
         let (weights, weight_index) = collect_weight_bytes(&ai_graph)?;
         let bundle = if lower_out.context.is_empty() {
@@ -1129,7 +1143,7 @@ fn compile_one_component(
 ) -> anyhow::Result<Vec<u8>> {
     let phase_name = phase.layer_name();
 
-    let lower_out = lower(ai_graph, kv_layout, opts, phase)
+    let mut lower_out = lower(ai_graph, kv_layout, opts, phase)
         .with_context(|| format!("lowering {phase_name} graph"))?;
     debug!(
         graph_nodes = lower_out.graph.node_count(),
@@ -1149,6 +1163,25 @@ fn compile_one_component(
     );
 
     let unpacked = unpack_archive(&compiled.archive)?;
+
+    // Prune shape context entries referencing nodes removed by fusion.
+    if let Some(mut ctx) = lower_out
+        .context
+        .get::<ShapeContextGraph>()
+        .ok()
+        .flatten()
+    {
+        let live_ids: std::collections::HashSet<u32> = unpacked
+            .plan
+            .graph()
+            .nodes
+            .iter()
+            .map(|n| n.id.index())
+            .collect();
+        ctx.retain_live_nodes(&live_ids);
+        lower_out.context.insert(&ctx);
+    }
+
     let layer_header = build_tensor_port_header(&unpacked.plan, ai_graph);
     let bundle = if lower_out.context.is_empty() {
         None
