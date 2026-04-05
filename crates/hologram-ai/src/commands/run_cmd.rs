@@ -241,13 +241,6 @@ enum SeqMode {
 fn resolve_seq_mode(runner: &HoloRunner, prompt_len: Option<usize>) -> SeqMode {
     let max_seq = load_meta_seq_len(runner).unwrap_or(2048);
 
-    // When a ShapeContextGraph is available, the executor can resolve shapes
-    // at runtime for any sequence length. Use variable-length mode.
-    if runner.has_shape_context() {
-        info!("shape context available — using variable-length execution");
-        return SeqMode::Variable { max_seq };
-    }
-
     // Detect compiled seq_len from the graph's first 2D input shape [1, seq].
     let graph = runner.plan().graph();
     let compiled_seq: Option<usize> = graph
@@ -256,8 +249,29 @@ fn resolve_seq_mode(runner: &HoloRunner, prompt_len: Option<usize>) -> SeqMode {
         .find(|(_, shape)| shape.len() == 2 && shape[0] == 1 && shape[1] > 1)
         .map(|(_, shape)| shape[1]);
 
+    // When a ShapeContextGraph is available AND the prompt fits within the
+    // compiled seq_len, use variable-length mode. This avoids unnecessary
+    // padding while keeping shapes consistent.
+    //
+    // For prompts LONGER than compiled seq_len, shape overrides can't fix the
+    // node-ID mismatch between the pre-compilation ShapeContextGraph and the
+    // post-compilation tape — fall back to FixedPad with truncation.
+    if runner.has_shape_context() {
+        let prompt = prompt_len.unwrap_or(0);
+        let fits = compiled_seq.is_none_or(|c| prompt <= c);
+        if fits {
+            info!("shape context available — using variable-length execution");
+            return SeqMode::Variable { max_seq };
+        }
+        warn!(
+            "prompt length={prompt} exceeds compiled seq_len={}. \
+             Recompile with `--seq-len {prompt}` for correct results.",
+            compiled_seq.unwrap_or(0),
+        );
+    }
+
     if let (Some(compiled), Some(prompt)) = (compiled_seq, prompt_len) {
-        if compiled != prompt {
+        if compiled != prompt && !runner.has_shape_context() {
             warn!(
                 "compiled seq_len={compiled} does not match prompt length={prompt}. \
                  Recompile with `--seq-len {prompt}` for correct results. \
@@ -266,9 +280,6 @@ fn resolve_seq_mode(runner: &HoloRunner, prompt_len: Option<usize>) -> SeqMode {
         }
     }
 
-    // Use FixedPad matching compiled seq_len when known. Without shape context,
-    // variable-length has known shape resolution bugs when compiled_seq != runtime_seq.
-    // KV cache decode (seq=1) works correctly in both modes.
     if let Some(seq) = compiled_seq {
         SeqMode::FixedPad(seq)
     } else {
