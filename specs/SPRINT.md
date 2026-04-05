@@ -101,7 +101,7 @@ zero runtime code. All kernels belong in hologram base crate.
 - [x] Avoid double LLM compilation (clone AiGraph after MVP, concretize
   twice instead of re-importing from disk — ~50% LLM compile time savings)
 
-### P5: Variable-length prefill (active — Plan 058)
+### P5: Variable-length prefill (active — Plans 045 + 058)
 - [x] **Blocker resolved:** hologram base now applies `resolve_size()` in
   both tape executor AND legacy `dispatch_float_ctx` paths. Softmax, RmsNorm,
   LayerNorm, Reduce*, InstanceNorm all resolve from runtime buffer sizes.
@@ -113,12 +113,22 @@ zero runtime code. All kernels belong in hologram base crate.
   hologram base `execute_direct` populates `input_metas` from `shape_overrides`.
 - [x] `execute_tape_with_kv_shapes_cached` — combines KV cache + shape overrides
   + persistent weight cache in single execution path.
-- [x] Variable-length works for prompts <= compiled seq_len (shape context active)
-- [ ] **BLOCKER: Node-ID mismatch** — ShapeContextGraph uses pre-fusion node IDs;
-  `hologram::compile()` fusion removes nodes, creating gaps. Shape overrides for
-  removed nodes are lost. Fix: prune dead entries after compilation (Plan 058).
-- [ ] Conformance test: compile at seq=16, run at seq=8 and seq=24 → correct output
-- [x] Any prompt length without recompilation (via runtime size resolution)
+- [x] Prune dead ShapeContextGraph entries after fusion (`retain_live_nodes`)
+- [x] Persistent WeightCache in CLI `run` — eliminate per-step Q4 rkyv overhead
+- [x] `concretize_all_dims` returns `seq_dim_positions: HashSet<(TensorId, axis)>`
+  identifying seq-dependent dims before concretization (infrastructure for Plan 045)
+- [ ] **0-sentinel for Reshape/Expand shape constants (Plan 045)** — trace
+  Shape→Gather→Concat→Reshape chains to find shape tensor constants that
+  contain seq-dependent values, zero those specific elements. Current
+  approach (skipping concretization or zeroing by axis) breaks because
+  shape tensor element indices ≠ target tensor axis indices.
+  - [ ] Graph analysis: find Reshape nodes, trace shape tensor inputs,
+    identify which i64 elements are seq-dependent
+  - [ ] Zero those elements in shape tensor `known_i64_values`
+  - [ ] Handle Expand target_shape similarly
+  - [ ] Runtime Reshape: infer 0-element dims from total buffer size
+  - [ ] Remove prompt-length guard in `resolve_seq_mode()`
+  - [ ] Conformance test: compile at seq=24, run with 18 and 36 token prompts
 
 ### P6: Performance deep clean (Plan 024 — active)
 - [x] Remove `hologram-ai-ggml` stub crate (entire crate was unimplemented)

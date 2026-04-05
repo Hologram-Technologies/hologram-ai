@@ -289,9 +289,13 @@ impl ModelCompiler {
             let verify_ai_graph = ai_graph.clone();
 
             // Prefill graph: concretize at prompt seq_len.
-            let prefill_graph = concretize_all_dims(ai_graph, self.seq_len_override)
-                .context("prefill concretization failed")?;
+            let (prefill_graph, seq_dim_positions) =
+                concretize_all_dims(ai_graph, self.seq_len_override)
+                    .context("prefill concretization failed")?;
             let prefill_graph = post_concretization_repair(prefill_graph)?;
+            // TODO(Plan 045): zero seq-dependent i64 values in shape constants
+            // for Reshape/Expand to support prompt > compiled seq_len.
+            let _ = &seq_dim_positions;
             log_post_repair_diagnostics(&prefill_graph);
             let errs = prefill_graph.validate();
             if !errs.is_empty() {
@@ -307,7 +311,7 @@ impl ModelCompiler {
             let prefill_nodes = prefill_graph.nodes.len();
 
             // Decode graph: concretize at seq=1.
-            let decode_graph = concretize_all_dims(decode_ai_graph, Some(1))
+            let (decode_graph, _) = concretize_all_dims(decode_ai_graph, Some(1))
                 .context("decode concretization failed")?;
             let decode_graph = post_concretization_repair(decode_graph)?;
             let errs = decode_graph.validate();
@@ -326,7 +330,7 @@ impl ModelCompiler {
             // Verification graph: concretize at seq=8 (for batch speculative decoding).
             // This allows verifying up to 8 draft tokens in a single forward pass.
             let verify_seq = 8u64;
-            let verify_graph = concretize_all_dims(verify_ai_graph, Some(verify_seq))
+            let (verify_graph, _) = concretize_all_dims(verify_ai_graph, Some(verify_seq))
                 .context("verify concretization failed")?;
             let verify_graph = post_concretization_repair(verify_graph)?;
             let verify_mem = MemoryPlanner
@@ -383,9 +387,13 @@ impl ModelCompiler {
             )?
         } else {
             // ── Non-LLM: single graph ───────────────────────────────────────
-            let ai_graph = concretize_all_dims(ai_graph, self.seq_len_override)
-                .context("shape concretization failed")?;
+            let (ai_graph, seq_dim_positions) =
+                concretize_all_dims(ai_graph, self.seq_len_override)
+                    .context("shape concretization failed")?;
             let ai_graph = post_concretization_repair(ai_graph)?;
+            // TODO(Plan 045): zero seq-dependent i64 values in shape constants
+            // for Reshape/Expand to support prompt > compiled seq_len.
+            let _ = &seq_dim_positions;
             log_post_repair_diagnostics(&ai_graph);
             let errs = ai_graph.validate();
             if !errs.is_empty() {
@@ -469,11 +477,14 @@ impl ModelCompiler {
         // Infer LLM metadata from GQA nodes (same as compile()).
         infer_llm_metadata_from_graph(&mut ai_graph);
 
-        let ai_graph = concretize_all_dims(ai_graph, self.seq_len_override)
-            .context("shape concretization failed")?;
+        let (ai_graph, seq_dim_positions) =
+            concretize_all_dims(ai_graph, self.seq_len_override)
+                .context("shape concretization failed")?;
 
         // Post-concretization repair (same as compile()).
         let ai_graph = post_concretization_repair(ai_graph)?;
+        // TODO(Plan 045): zero seq-dependent i64 values in shape constants
+        let _ = &seq_dim_positions;
 
         // Validate.
         let errs = ai_graph.validate();
@@ -569,8 +580,10 @@ impl ModelCompiler {
         let ai_graph = OptPipeline::mvp()
             .run(ai_graph)
             .context("optimization pass failed")?;
-        let ai_graph = concretize_all_dims(ai_graph, self.seq_len_override)
-            .context("shape concretization failed")?;
+        let (ai_graph, seq_dim_positions) =
+            concretize_all_dims(ai_graph, self.seq_len_override)
+                .context("shape concretization failed")?;
+        let _ = &seq_dim_positions; // used only in main compile path
 
         let ai_graph = post_concretization_repair(ai_graph)?;
 
@@ -867,9 +880,11 @@ impl ModelCompiler {
                 };
 
                 // Concretize.
-                let ai_graph = concretize_all_dims(ai_graph, seq_len)
+                let (ai_graph, seq_dim_positions) = concretize_all_dims(ai_graph, seq_len)
                     .with_context(|| format!("concretizing component '{}'", comp.name))?;
                 let ai_graph = post_concretization_repair(ai_graph)?;
+                // TODO(Plan 045): zero seq-dependent i64 values in shape constants
+                let _ = &seq_dim_positions;
 
                 // Memory plan.
                 let mem_plan = if is_transformer {
@@ -1697,10 +1712,15 @@ fn post_concretization_repair(mut ai_graph: AiGraph) -> anyhow::Result<AiGraph> 
 ///
 /// For LLM pipeline archives, the caller compiles prefill (seq=context_len)
 /// and decode (seq=1) as separate graphs — both fully concrete.
+///
+/// Returns the concretized graph and a set of `(TensorId, axis_index)` pairs
+/// identifying which tensor dimensions were originally seq-dependent DimVars.
+/// The lowering pass uses this to emit 0-sentinels for those dims so the
+/// runtime can resolve them from actual buffer sizes.
 fn concretize_all_dims(
     mut graph: AiGraph,
     seq_len_override: Option<u64>,
-) -> anyhow::Result<AiGraph> {
+) -> anyhow::Result<(AiGraph, std::collections::HashSet<(hologram_ai_common::TensorId, usize)>)> {
     use hologram_ai_common::Dim;
 
     // Use override if provided, otherwise extract from model metadata.
@@ -1708,8 +1728,38 @@ fn concretize_all_dims(
         .unwrap_or_else(|| meta_u32(&graph, "context_length").unwrap_or(2048) as u64);
     info!(context_len, "concretizing all dims (fully static shapes)");
 
+    // Identify seq-like DimVarIds BEFORE concretization.
+    let mut seq_var_ids = std::collections::HashSet::new();
+    for (id, entry) in graph.dim_vars.iter() {
+        if entry.fixed.is_some() {
+            continue;
+        }
+        let name_lower = entry.name.to_lowercase();
+        if name_lower.contains("seq")
+            || name_lower.contains("length")
+            || name_lower.contains("position")
+        {
+            seq_var_ids.insert(id);
+        }
+    }
+
+    // Scan tensor shapes to find which (TensorId, axis) pairs reference
+    // a seq-dependent DimVar. This must happen BEFORE substitution.
+    let mut seq_dim_positions = std::collections::HashSet::new();
+    for (&tid, info) in &graph.tensor_info {
+        for (axis, dim) in info.shape.iter().enumerate() {
+            let is_seq = dim.free_vars().iter().any(|v| seq_var_ids.contains(v));
+            if is_seq {
+                seq_dim_positions.insert((tid, axis));
+            }
+        }
+    }
+    debug!(
+        n_seq_positions = seq_dim_positions.len(),
+        "tagged seq-dependent tensor dimensions"
+    );
+
     // Set concrete values for all dim vars based on their name.
-    // Sequence-like dims get context_length; batch-like dims get 1.
     for (_, entry) in graph.dim_vars.iter_mut() {
         if entry.fixed.is_some() {
             continue;
@@ -1748,7 +1798,7 @@ fn concretize_all_dims(
         }
     }
 
-    Ok(graph)
+    Ok((graph, seq_dim_positions))
 }
 
 fn meta_u32(graph: &AiGraph, key: &str) -> Option<u32> {
