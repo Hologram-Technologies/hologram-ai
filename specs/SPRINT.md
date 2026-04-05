@@ -101,15 +101,23 @@ zero runtime code. All kernels belong in hologram base crate.
 - [x] Avoid double LLM compilation (clone AiGraph after MVP, concretize
   twice instead of re-importing from disk — ~50% LLM compile time savings)
 
-### P5: Variable-length prefill (DONE)
+### P5: Variable-length prefill (active — Plan 058)
 - [x] **Blocker resolved:** hologram base now applies `resolve_size()` in
   both tape executor AND legacy `dispatch_float_ctx` paths. Softmax, RmsNorm,
   LayerNorm, Reduce*, InstanceNorm all resolve from runtime buffer sizes.
   MatMul uses `infer_matmul_k()` to re-derive k from buffers.
 - [x] `mini_transformer_variable_seq_len_runs` test passes (seq=1, 7, 128)
 - [x] `SeqMode::Variable` enabled as default in `run_cmd.rs`
-- [ ] Wire `ShapeContextGraph` into `HoloRunner.execute()` — project shapes
-  at runtime from actual input dimensions instead of compiled seq_len
+- [x] Wire `ShapeContextGraph` into `HoloRunner.execute()` — `resolve_shapes()`
+  calls `walk_shape_context()` and passes result to `execute_tape_with_shapes()`.
+  hologram base `execute_direct` populates `input_metas` from `shape_overrides`.
+- [x] `execute_tape_with_kv_shapes_cached` — combines KV cache + shape overrides
+  + persistent weight cache in single execution path.
+- [x] Variable-length works for prompts <= compiled seq_len (shape context active)
+- [ ] **BLOCKER: Node-ID mismatch** — ShapeContextGraph uses pre-fusion node IDs;
+  `hologram::compile()` fusion removes nodes, creating gaps. Shape overrides for
+  removed nodes are lost. Fix: prune dead entries after compilation (Plan 058).
+- [ ] Conformance test: compile at seq=16, run at seq=8 and seq=24 → correct output
 - [x] Any prompt length without recompilation (via runtime size resolution)
 
 ### P6: Performance deep clean (Plan 024 — active)
