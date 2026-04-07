@@ -1685,20 +1685,61 @@ pub mod onnx_builder {
 
     // ── Vision op builders ──────────────────────────────────────────────────
 
+    /// Shape and strides for [`conv2d`] model builder.
+    #[derive(Debug, Clone, Copy)]
+    pub struct Conv2dSpec {
+        pub n: usize,
+        pub ic: usize,
+        pub h: usize,
+        pub w: usize,
+        pub oc: usize,
+        pub kh: usize,
+        pub kw: usize,
+        pub stride: usize,
+        pub pad: usize,
+    }
+
+    impl Conv2dSpec {
+        /// New spec with default `stride = 1` and `pad = 0`.
+        pub fn new(n: usize, ic: usize, h: usize, w: usize, oc: usize, kh: usize, kw: usize) -> Self {
+            Self {
+                n,
+                ic,
+                h,
+                w,
+                oc,
+                kh,
+                kw,
+                stride: 1,
+                pad: 0,
+            }
+        }
+
+        pub fn with_stride(mut self, stride: usize) -> Self {
+            self.stride = stride;
+            self
+        }
+
+        pub fn with_pad(mut self, pad: usize) -> Self {
+            self.pad = pad;
+            self
+        }
+    }
+
     /// Build a Conv ONNX model with initializer weights.
     /// Graph: input "X" [n, ic, h, w] + initializer "W" [oc, ic, kh, kw] → Conv → "Y"
-    #[allow(clippy::too_many_arguments)]
-    pub fn conv2d(
-        n: usize,
-        ic: usize,
-        h: usize,
-        w: usize,
-        oc: usize,
-        kh: usize,
-        kw: usize,
-        stride: usize,
-        pad: usize,
-    ) -> Vec<u8> {
+    pub fn conv2d(spec: Conv2dSpec) -> Vec<u8> {
+        let Conv2dSpec {
+            n,
+            ic,
+            h,
+            w,
+            oc,
+            kh,
+            kw,
+            stride,
+            pad,
+        } = spec;
         let h_out = (h + 2 * pad - kh) / stride + 1;
         let w_out = (w + 2 * pad - kw) / stride + 1;
         let weight_len = oc * ic * kh * kw;

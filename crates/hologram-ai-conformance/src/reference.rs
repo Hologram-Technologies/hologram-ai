@@ -4,9 +4,119 @@
 //! hand-computed expected values. Each function implements the math
 //! spec for an op without any optimization tricks — correctness over speed.
 
-#![allow(clippy::too_many_arguments)]
-
 use std::f32::consts::PI;
+
+/// Parameters for [`gemm`].
+///
+/// Builder defaults: `c = None`, `alpha = 1.0`, `beta = 0.0`, `trans_a = trans_b = false`.
+/// Use [`GemmParams::new`] for the four required dimensions/buffers, then chain
+/// `with_*` setters for the optional knobs.
+#[derive(Debug, Clone, Copy)]
+pub struct GemmParams<'a> {
+    pub a: &'a [f32],
+    pub b: &'a [f32],
+    pub c: Option<&'a [f32]>,
+    pub m: usize,
+    pub k: usize,
+    pub n: usize,
+    pub alpha: f32,
+    pub beta: f32,
+    pub trans_a: bool,
+    pub trans_b: bool,
+}
+
+impl<'a> GemmParams<'a> {
+    /// New params with the four required inputs and identity defaults
+    /// (`c = None`, `alpha = 1.0`, `beta = 0.0`, no transpose).
+    pub fn new(a: &'a [f32], b: &'a [f32], m: usize, k: usize, n: usize) -> Self {
+        Self {
+            a,
+            b,
+            c: None,
+            m,
+            k,
+            n,
+            alpha: 1.0,
+            beta: 0.0,
+            trans_a: false,
+            trans_b: false,
+        }
+    }
+
+    pub fn with_c(mut self, c: &'a [f32]) -> Self {
+        self.c = Some(c);
+        self
+    }
+
+    pub fn with_alpha(mut self, alpha: f32) -> Self {
+        self.alpha = alpha;
+        self
+    }
+
+    pub fn with_beta(mut self, beta: f32) -> Self {
+        self.beta = beta;
+        self
+    }
+
+    pub fn with_trans_a(mut self, trans_a: bool) -> Self {
+        self.trans_a = trans_a;
+        self
+    }
+
+    pub fn with_trans_b(mut self, trans_b: bool) -> Self {
+        self.trans_b = trans_b;
+        self
+    }
+}
+
+/// Parameters for [`attention`].
+///
+/// Use [`AttentionParams::new`] for the required QKV / shape inputs, then
+/// chain `.with_scale(..)` / `.with_causal(..)` for the optional knobs.
+#[derive(Debug, Clone, Copy)]
+pub struct AttentionParams<'a> {
+    pub q: &'a [f32],
+    pub k: &'a [f32],
+    pub v: &'a [f32],
+    pub head_dim: usize,
+    pub num_q_heads: usize,
+    pub num_kv_heads: usize,
+    pub scale: f32,
+    pub causal: bool,
+}
+
+impl<'a> AttentionParams<'a> {
+    /// New params with default `scale = 1.0 / sqrt(head_dim)` and `causal = true`.
+    pub fn new(
+        q: &'a [f32],
+        k: &'a [f32],
+        v: &'a [f32],
+        head_dim: usize,
+        num_q_heads: usize,
+        num_kv_heads: usize,
+    ) -> Self {
+        Self {
+            q,
+            k,
+            v,
+            head_dim,
+            num_q_heads,
+            num_kv_heads,
+            scale: 1.0 / (head_dim as f32).sqrt(),
+            causal: true,
+        }
+    }
+
+    pub fn with_scale(mut self, scale: f32) -> Self {
+        self.scale = scale;
+        self
+    }
+
+    pub fn with_causal(mut self, causal: bool) -> Self {
+        self.causal = causal;
+        self
+    }
+}
 
 /// Reference Softmax: exp(x_i - max) / sum(exp(x_j - max))
 pub fn softmax(input: &[f32], size: usize) -> Vec<f32> {
@@ -87,18 +197,19 @@ pub fn matmul(a: &[f32], b: &[f32], m: usize, k: usize, n: usize) -> Vec<f32> {
 }
 
 /// Reference Gemm: alpha * op(A) @ op(B) + beta * C
-pub fn gemm(
-    a: &[f32],
-    b: &[f32],
-    c: Option<&[f32]>,
-    m: usize,
-    k: usize,
-    n: usize,
-    alpha: f32,
-    beta: f32,
-    trans_a: bool,
-    trans_b: bool,
-) -> Vec<f32> {
+pub fn gemm(params: GemmParams<'_>) -> Vec<f32> {
+    let GemmParams {
+        a,
+        b,
+        c,
+        m,
+        k,
+        n,
+        alpha,
+        beta,
+        trans_a,
+        trans_b,
+    } = params;
     let mut out = vec![0.0f32; m * n];
     for i in 0..m {
         for j in 0..n {
@@ -170,16 +281,17 @@ pub fn rotary_embedding(
 }
 
 /// Reference Attention: Q @ K^T * scale -> softmax -> @ V
-pub fn attention(
-    q: &[f32],
-    k: &[f32],
-    v: &[f32],
-    head_dim: usize,
-    num_q_heads: usize,
-    num_kv_heads: usize,
-    scale: f32,
-    causal: bool,
-) -> Vec<f32> {
+pub fn attention(params: AttentionParams<'_>) -> Vec<f32> {
+    let AttentionParams {
+        q,
+        k,
+        v,
+        head_dim,
+        num_q_heads,
+        num_kv_heads,
+        scale,
+        causal,
+    } = params;
     let total_q = q.len() / head_dim;
     let seq_q = total_q / num_q_heads;
     let total_kv = k.len() / head_dim;
@@ -272,19 +384,73 @@ pub fn reduce_prod(input: &[f32], size: usize) -> Vec<f32> {
         .collect()
 }
 
+/// Parameters for [`conv2d_simple`]. Default stride is `(1, 1)` and default
+/// padding is `(0, 0)`.
+#[derive(Debug, Clone, Copy)]
+pub struct Conv2dSimpleParams<'a> {
+    pub input: &'a [f32],
+    pub kernel: &'a [f32],
+    pub in_h: usize,
+    pub in_w: usize,
+    pub k_h: usize,
+    pub k_w: usize,
+    pub stride_h: usize,
+    pub stride_w: usize,
+    pub pad_h: usize,
+    pub pad_w: usize,
+}
+
+impl<'a> Conv2dSimpleParams<'a> {
+    /// New params for a stride-1, unpadded convolution.
+    pub fn new(
+        input: &'a [f32],
+        kernel: &'a [f32],
+        in_h: usize,
+        in_w: usize,
+        k_h: usize,
+        k_w: usize,
+    ) -> Self {
+        Self {
+            input,
+            kernel,
+            in_h,
+            in_w,
+            k_h,
+            k_w,
+            stride_h: 1,
+            stride_w: 1,
+            pad_h: 0,
+            pad_w: 0,
+        }
+    }
+
+    pub fn with_stride(mut self, stride_h: usize, stride_w: usize) -> Self {
+        self.stride_h = stride_h;
+        self.stride_w = stride_w;
+        self
+    }
+
+    pub fn with_padding(mut self, pad_h: usize, pad_w: usize) -> Self {
+        self.pad_h = pad_h;
+        self.pad_w = pad_w;
+        self
+    }
+}
+
 /// Reference Conv2d (NCHW format, no dilation, no groups).
-pub fn conv2d_simple(
-    input: &[f32],
-    kernel: &[f32],
-    in_h: usize,
-    in_w: usize,
-    k_h: usize,
-    k_w: usize,
-    stride_h: usize,
-    stride_w: usize,
-    pad_h: usize,
-    pad_w: usize,
-) -> Vec<f32> {
+pub fn conv2d_simple(params: Conv2dSimpleParams<'_>) -> Vec<f32> {
+    let Conv2dSimpleParams {
+        input,
+        kernel,
+        in_h,
+        in_w,
+        k_h,
+        k_w,
+        stride_h,
+        stride_w,
+        pad_h,
+        pad_w,
+    } = params;
     let out_h = (in_h + 2 * pad_h - k_h) / stride_h + 1;
     let out_w = (in_w + 2 * pad_w - k_w) / stride_w + 1;
     let mut output = vec![0.0f32; out_h * out_w];

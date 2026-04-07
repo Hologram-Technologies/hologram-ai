@@ -86,23 +86,40 @@ fn op_counts(graph: &AiGraph) -> HashMap<String, usize> {
     counts
 }
 
-/// Build a single transformer FFN block:
-///   hidden → RmsNorm → MatMul(W_gate) → SiLU → Mul(up) → MatMul(W_down) → out
-///                     → MatMul(W_up)   ──────↗
-///
-/// With f32 weights so NormProjectionFusion and SwiGluProjectionFusion can fire.
-fn build_ffn_block(
-    graph: &mut AiGraph,
+/// Tensor IDs and dimensions for a single FFN block, grouped into one struct
+/// so the test helper doesn't trip `clippy::too_many_arguments`.
+struct FfnBlockSpec {
     hidden_tid: u32,
     norm_weight_tid: u32,
     w_gate_tid: u32,
     w_up_tid: u32,
     w_down_tid: u32,
+    /// First tensor ID to allocate for intermediates — the helper claims
+    /// `base_tid..base_tid + 6`.
     base_tid: u32,
+    /// First node ID to assign to the 6 emitted nodes.
     base_node_id: u32,
     hidden_dim: usize,
     ffn_dim: usize,
-) -> (u32, u32) {
+}
+
+/// Build a single transformer FFN block:
+///   hidden → RmsNorm → MatMul(W_gate) → SiLU → Mul(up) → MatMul(W_down) → out
+///                     → MatMul(W_up)   ──────↗
+///
+/// With f32 weights so NormProjectionFusion and SwiGluProjectionFusion can fire.
+fn build_ffn_block(graph: &mut AiGraph, spec: FfnBlockSpec) -> (u32, u32) {
+    let FfnBlockSpec {
+        hidden_tid,
+        norm_weight_tid,
+        w_gate_tid,
+        w_up_tid,
+        w_down_tid,
+        base_tid,
+        base_node_id,
+        hidden_dim,
+        ffn_dim,
+    } = spec;
     // tid allocation
     let normed = base_tid;
     let gate_out = base_tid + 1;
@@ -236,8 +253,18 @@ fn ffn_block_swiglu_projection_fusion() {
     }
 
     let (ffn_out, _) = build_ffn_block(
-        &mut g, hidden_tid, norm_w_tid, w_gate_tid, w_up_tid, w_down_tid, 100, 0, hidden_dim,
-        ffn_dim,
+        &mut g,
+        FfnBlockSpec {
+            hidden_tid,
+            norm_weight_tid: norm_w_tid,
+            w_gate_tid,
+            w_up_tid,
+            w_down_tid,
+            base_tid: 100,
+            base_node_id: 0,
+            hidden_dim,
+            ffn_dim,
+        },
     );
     g.outputs = vec![ffn_out];
 
@@ -381,15 +408,17 @@ fn multi_layer_ffn_fusion_scaling() {
 
         let (out, nid) = build_ffn_block(
             &mut g,
-            current_hidden,
-            norm_w,
-            w_gate,
-            w_up,
-            w_down,
-            next_tid,
-            next_nid,
-            hidden_dim,
-            ffn_dim,
+            FfnBlockSpec {
+                hidden_tid: current_hidden,
+                norm_weight_tid: norm_w,
+                w_gate_tid: w_gate,
+                w_up_tid: w_up,
+                w_down_tid: w_down,
+                base_tid: next_tid,
+                base_node_id: next_nid,
+                hidden_dim,
+                ffn_dim,
+            },
         );
         next_tid += 10;
         next_nid = nid;

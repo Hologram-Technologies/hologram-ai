@@ -1063,16 +1063,15 @@ pub fn lower(
                 }
             }
             DispatchTarget::Subgraph => {
-                lower_subgraph_op(
-                    node,
-                    &input_idxs,
+                let mut ctx = SubgraphCtx {
                     ai_graph,
-                    &mut builder,
-                    &mut tid_to_idx,
-                    _kv_layout,
+                    builder: &mut builder,
+                    tid_to_idx: &mut tid_to_idx,
+                    kv_layout: _kv_layout,
                     opts,
                     phase,
-                )?;
+                };
+                lower_subgraph_op(node, &input_idxs, &mut ctx)?;
             }
             DispatchTarget::Unsupported { reason } => {
                 anyhow::bail!("cannot lower op {:?}: {reason}", node.op);
@@ -1127,25 +1126,14 @@ struct SubgraphCtx<'a> {
 
 /// Lower a control flow op (If/Loop/Scan) by recursively lowering its
 /// child subgraphs and flattening them into the parent graph.
-#[allow(clippy::too_many_arguments)]
+///
+/// Takes a [`SubgraphCtx`] directly so the caller can share one context across
+/// multiple subgraph ops without re-wiring six individual mutable borrows.
 fn lower_subgraph_op(
     node: &AiNode,
     input_idxs: &[usize],
-    ai_graph: &AiGraph,
-    builder: &mut GraphBuilder,
-    tid_to_idx: &mut HashMap<TensorId, usize>,
-    kv_layout: &KvCacheLayout,
-    opts: &LoweringOptions,
-    phase: &LowerPhase,
+    ctx: &mut SubgraphCtx<'_>,
 ) -> anyhow::Result<()> {
-    let mut ctx = SubgraphCtx {
-        ai_graph,
-        builder,
-        tid_to_idx,
-        kv_layout,
-        opts,
-        phase,
-    };
     match &node.op {
         AiOp::If {
             then_branch,
@@ -1155,12 +1143,12 @@ fn lower_subgraph_op(
             input_idxs,
             then_branch,
             else_branch.as_deref(),
-            &mut ctx,
+            ctx,
         ),
         AiOp::Loop {
             body,
             max_trip_count,
-        } => lower_loop_op(node, input_idxs, body, *max_trip_count, &mut ctx),
+        } => lower_loop_op(node, input_idxs, body, *max_trip_count, ctx),
         AiOp::Scan {
             body,
             num_scan_inputs,
