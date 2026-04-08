@@ -18,6 +18,5 @@ pub use compiler::{
     HoloArchive, HoloRunner, ModelCompiler, ModelMetadata, ModelSource,
 };
 pub use hologram_ai_common::{AiGraph, AiNode, AiOp, DType, NodeId, Shape, TensorId, TensorInfo};
-pub use hologram_ai_gguf::{import_gguf, GgufImportOptions};
 pub use hologram_ai_onnx::{import_onnx, import_onnx_path, OnnxImportOptions};
 pub use hologram_ai_quant::{QuantDescriptor, QuantScheme};

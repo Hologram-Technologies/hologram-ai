@@ -127,16 +127,25 @@ fn bytes_to_f32(data: &[u8]) -> Vec<f32> {
 
 /// Compute DDPM alpha_bar schedule for SD v1.5 (1000 timesteps).
 ///
-/// SD v1.5 uses a linear beta schedule: beta_0=0.00085, beta_T=0.012.
-/// alpha_bar_t = product(1 - beta_i for i=0..t)
+/// SD v1.5's `scheduler_config.json` specifies `beta_schedule: "scaled_linear"`,
+/// which interpolates the *square roots* of beta and squares the result. This
+/// matches `diffusers.DDIMScheduler` exactly and is **not** the same as a plain
+/// linear schedule — using plain linear here produces wrong alpha_bar values
+/// (compounding error at high t) and a washed-out final image.
+///
+/// betas[i] = (sqrt(beta_start) + (sqrt(beta_end) - sqrt(beta_start)) * i / (n - 1))^2
+/// alpha_bar[t] = product(1 - beta_i for i=0..=t)
 fn ddpm_alpha_bars() -> Vec<f32> {
     let n = 1000;
     let beta_start = 0.00085f32;
     let beta_end = 0.012f32;
+    let s_start = beta_start.sqrt();
+    let s_end = beta_end.sqrt();
     let mut alpha_bar = Vec::with_capacity(n);
     let mut cumulative = 1.0f32;
     for i in 0..n {
-        let beta = beta_start + (beta_end - beta_start) * i as f32 / (n - 1) as f32;
+        let s = s_start + (s_end - s_start) * i as f32 / (n - 1) as f32;
+        let beta = s * s;
         cumulative *= 1.0 - beta;
         alpha_bar.push(cumulative);
     }
@@ -146,7 +155,7 @@ fn ddpm_alpha_bars() -> Vec<f32> {
 /// Select timesteps for n_steps evenly spaced from 999 to 0.
 fn ddpm_timesteps(n_steps: usize) -> Vec<usize> {
     (0..n_steps)
-        .map(|i| ((n_steps - 1 - i) * 999 / (n_steps - 1).max(1)))
+        .map(|i| (n_steps - 1 - i) * 999 / (n_steps - 1).max(1))
         .collect()
 }
 

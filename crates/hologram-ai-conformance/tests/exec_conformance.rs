@@ -640,8 +640,6 @@ fn gqa_tinyllama_dims_seq1_and_seq2_match_ort() {
 /// Isolates the first 3 ops of the GQA pattern to find where seq>1 diverges.
 #[test]
 fn kv_expand_tinyllama_dims_matches_ort() {
-    use hologram_ai_conformance::ort_runner::onnx_builder::{Initializer, Node as ONode};
-
     let batch = 1;
     let n_heads = 32;
     let n_kv_heads = 4;
@@ -649,28 +647,10 @@ fn kv_expand_tinyllama_dims_matches_ort() {
     let head_dim = 64;
     let group_size = n_heads / n_kv_heads;
 
-    let expand_shape: Vec<i64> = vec![
-        batch as i64,
-        n_kv_heads as i64,
-        group_size as i64,
-        seq as i64,
-        head_dim as i64,
-    ];
-    let attn_shape: Vec<i64> = vec![batch as i64, n_heads as i64, seq as i64, head_dim as i64];
-
-    let nodes = vec![
-        ONode::new("Unsqueeze", &["K_compact", "unsq_axes"], &["K_unsq"]),
-        ONode::new("Expand", &["K_unsq", "expand_shape"], &["K_5d"]),
-        ONode::new("Reshape", &["K_5d", "attn_shape"], &["K_exp"]),
-    ];
-    let inits = vec![
-        Initializer::int64_1d("unsq_axes", vec![2]),
-        Initializer::int64_1d("expand_shape", expand_shape),
-        Initializer::int64_1d("attn_shape", attn_shape),
-    ];
-    // Build the model using gqa_expand_attention (but only K expansion + reshape).
-    // Use onnx_builder::gqa_expand_attention as template — it outputs AttnOut.
-    // Instead, build a simpler K-only expansion model.
+    // gqa_expand_attention builds the Unsqueeze + Expand + Reshape pattern
+    // internally with the correct expand_shape and attn_shape for these dims.
+    // We keep `group_size` derived here so readers can see the shape intent.
+    let _ = group_size;
     let model_bytes = onnx_builder::gqa_expand_attention(batch, n_heads, n_kv_heads, seq, head_dim);
 
     let q_elems = batch * n_heads * seq * head_dim;

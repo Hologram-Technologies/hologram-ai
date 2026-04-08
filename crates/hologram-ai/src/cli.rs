@@ -27,7 +27,7 @@ enum Command {
     /// Single model: `hologram-ai compile -m model.onnx -o out/`
     /// Multi-component: `hologram-ai compile --manifest pipeline.toml -o out/`
     Compile {
-        /// Path to the input model (ONNX or GGUF). Mutually exclusive with --manifest.
+        /// Path to the input ONNX model file. Mutually exclusive with --manifest.
         #[arg(
             short,
             long,
@@ -60,7 +60,7 @@ enum Command {
     Download(download::DownloadArgs),
     /// Validate a model: import, optimize, compile, and report results.
     Validate {
-        /// Path to the model file (ONNX or GGUF).
+        /// Path to the ONNX model file.
         #[arg(short, long)]
         model: PathBuf,
     },
@@ -76,9 +76,8 @@ fn main() -> anyhow::Result<()> {
             match ext {
                 "holo" => inspect_holo(file, detail)?,
                 "onnx" => inspect_onnx(&file)?,
-                "gguf" => inspect_gguf(&file)?,
                 other => {
-                    anyhow::bail!("info supports .holo, .onnx, and .gguf files, got '.{other}'")
+                    anyhow::bail!("info supports .holo and .onnx files, got '.{other}'")
                 }
             }
         }
@@ -251,38 +250,12 @@ fn inspect_onnx(path: &std::path::Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Inspect a GGUF model file (parse header + print metadata).
-fn inspect_gguf(path: &std::path::Path) -> anyhow::Result<()> {
-    let data = std::fs::read(path)?;
-    let gguf = hologram_ai_gguf::parser::parse_gguf(&data)?;
-    let arch = hologram_ai_gguf::metadata::ArchParams::from_gguf(&gguf, None)?;
-
-    println!("file:        {:?}", path);
-    println!("format:      GGUF v{}", gguf.version);
-    println!("arch:        {}", arch.arch);
-    println!("tensors:     {}", gguf.tensors.len());
-    println!("context:     {}", arch.context_length);
-    println!("embedding:   {}", arch.embedding_length);
-    println!("layers:      {}", arch.block_count);
-    println!(
-        "heads:       {} (kv: {})",
-        arch.head_count, arch.head_count_kv
-    );
-    println!("ffn:         {}", arch.feed_forward_length);
-    println!("vocab:       {}", arch.vocab_size);
-    println!("rope_base:   {:.1}", arch.rope_freq_base);
-    println!("rms_eps:     {:.1e}", arch.layer_norm_rms_epsilon);
-
-    Ok(())
-}
-
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
 fn model_source_from_path(path: &std::path::Path) -> anyhow::Result<ModelSource> {
     let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
     match ext {
         "onnx" => Ok(ModelSource::OnnxPath(path.to_owned())),
-        "gguf" => Ok(ModelSource::GgufPath(path.to_owned())),
         other => anyhow::bail!("unsupported model extension: '.{other}'"),
     }
 }

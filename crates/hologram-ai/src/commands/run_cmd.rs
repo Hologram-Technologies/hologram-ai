@@ -511,12 +511,19 @@ fn run_generation(
 
         // Stream the new token text. decode() strips leading ▁-spaces
         // which are word boundaries. Decode the growing suffix to preserve them.
+        //
+        // A multi-byte codepoint (e.g. an emoji) can span two BPE tokens, so
+        // `prev_len` (byte length of the prior decode) may land mid-character
+        // in the new decode. Defer printing until `prev_len` lands on a UTF-8
+        // char boundary — the next token will flush the completed character.
         let prev_len = encoder.decode(&token_ids[prompt_len..]).len();
         token_ids.push(next_token);
         let full = encoder.decode(&token_ids[prompt_len..]);
-        let new_text = &full[prev_len..];
-        print!("{new_text}");
-        std::io::stdout().flush().ok();
+        if prev_len <= full.len() && full.is_char_boundary(prev_len) {
+            let new_text = &full[prev_len..];
+            print!("{new_text}");
+            std::io::stdout().flush().ok();
+        }
 
         // Stop if the decoded output ends with any user-provided stop string.
         // The stop string is not stripped from output; the user sees it and

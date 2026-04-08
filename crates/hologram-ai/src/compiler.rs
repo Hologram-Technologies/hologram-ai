@@ -1,7 +1,7 @@
 //! Model compilation pipeline.
 //!
-//! Compiles AI models (ONNX, GGUF) into `.holo` archives via the hologram
-//! O(1) LUT runtime. This crate is a **compiler** — it does not own inference
+//! Compiles ONNX models into `.holo` archives via the hologram O(1) LUT
+//! runtime. This crate is a **compiler** — it does not own inference
 //! sessions or runtime state (see ADR-0016).
 
 use anyhow::Context;
@@ -23,8 +23,6 @@ pub enum ModelSource {
     OnnxPath(PathBuf),
     /// Raw ONNX bytes.
     OnnxBytes(Vec<u8>),
-    /// Path to a GGUF model file.
-    GgufPath(PathBuf),
     /// Pre-built `AiGraph` (bypass importer).
     AiGraph(AiGraph),
     /// Multiple ONNX files forming a multi-component model.
@@ -988,14 +986,6 @@ impl ModelCompiler {
                 hologram_ai_onnx::import_onnx(&bytes, Default::default())
                     .context("importing ONNX from bytes")
             }
-            ModelSource::GgufPath(path) => hologram_ai_gguf::import_gguf(
-                &path,
-                hologram_ai_gguf::GgufImportOptions {
-                    mmap: self.mmap,
-                    arch_override: None,
-                },
-            )
-            .with_context(|| format!("importing GGUF from {path:?}")),
             ModelSource::AiGraph(g) => Ok(g),
             ModelSource::MultiOnnx { .. } => {
                 unreachable!("MultiOnnx is handled before import()")

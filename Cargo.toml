@@ -18,7 +18,6 @@ hologram = { path = "../hologram", features = ["cli", "accelerate", "parallel"] 
 hologram-ai-quant  = { path = "crates/hologram-ai-quant" }
 hologram-ai-common = { path = "crates/hologram-ai-common" }
 hologram-ai-onnx   = { path = "crates/hologram-ai-onnx" }
-hologram-ai-gguf   = { path = "crates/hologram-ai-gguf" }
 hologram-ai-tokenizer = { path = "crates/hologram-ai-tokenizer" }
 
 criterion     = { version = "0.5", features = ["html_reports"] }

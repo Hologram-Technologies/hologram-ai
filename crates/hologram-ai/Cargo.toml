@@ -16,7 +16,6 @@ e2e = []
 hologram-ai-common.workspace = true
 hologram-ai-quant.workspace  = true
 hologram-ai-onnx.workspace   = true
-hologram-ai-gguf.workspace   = true
 hologram-ai-tokenizer.workspace = true
 # hologram with compiler feature — needed for hologram::compile()
 # default features already include compiler; workspace dep points to local path

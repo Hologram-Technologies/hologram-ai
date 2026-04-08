@@ -792,7 +792,6 @@ dependencies = [
  "hologram",
  "hologram-ai-common",
  "hologram-ai-conformance",
- "hologram-ai-gguf",
  "hologram-ai-onnx",
  "hologram-ai-quant",
  "hologram-ai-tokenizer",
@@ -850,19 +849,6 @@ dependencies = [
  "rand 0.8.5",
  "serde",
  "serde_json",
-]
-
-[[package]]
-name = "hologram-ai-gguf"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "bytes",
- "half",
- "hologram-ai-common",
- "hologram-ai-quant",
- "memmap2",
- "thiserror 2.0.18",
 ]
 
 [[package]]

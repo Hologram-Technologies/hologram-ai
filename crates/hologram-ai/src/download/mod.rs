@@ -48,34 +48,24 @@ pub struct DownloadArgs {
 #[derive(Clone, clap::ValueEnum)]
 pub enum DownloadFormat {
     Auto,
-    Gguf,
     Onnx,
 }
 
 // ── Format resolution ────────────────────────────────────────────────────────
 
 enum ResolvedDownload {
-    Gguf { filename: String },
     Onnx { filenames: Vec<String> },
     ConvertToOnnx,
-    ConvertToGguf,
     ConvertDiffusionToOnnx,
 }
 
 fn resolve_format(
     info: &ModelInfo,
     format: &DownloadFormat,
-    quantization: Option<&str>,
+    _quantization: Option<&str>,
 ) -> ResolvedDownload {
     match format {
-        DownloadFormat::Gguf => {
-            if let Some(r) = try_resolve_gguf(info, quantization) {
-                r
-            } else {
-                ResolvedDownload::ConvertToGguf
-            }
-        }
-        DownloadFormat::Onnx => {
+        DownloadFormat::Onnx | DownloadFormat::Auto => {
             if let Some(r) = try_resolve_onnx(info) {
                 r
             } else if is_diffusion_pipeline(info) {
@@ -83,18 +73,6 @@ fn resolve_format(
             } else {
                 ResolvedDownload::ConvertToOnnx
             }
-        }
-        DownloadFormat::Auto => {
-            if let Some(r) = try_resolve_gguf(info, quantization) {
-                return r;
-            }
-            if let Some(r) = try_resolve_onnx(info) {
-                return r;
-            }
-            if is_diffusion_pipeline(info) {
-                return ResolvedDownload::ConvertDiffusionToOnnx;
-            }
-            ResolvedDownload::ConvertToOnnx
         }
     }
 }
@@ -105,34 +83,6 @@ fn is_diffusion_pipeline(info: &ModelInfo) -> bool {
     info.siblings
         .iter()
         .any(|f| f.filename == "model_index.json")
-}
-
-fn try_resolve_gguf(info: &ModelInfo, quantization: Option<&str>) -> Option<ResolvedDownload> {
-    let gguf_files: Vec<_> = info
-        .siblings
-        .iter()
-        .filter(|f| f.filename.ends_with(".gguf"))
-        .collect();
-
-    if gguf_files.is_empty() {
-        return None;
-    }
-
-    if let Some(quant) = quantization {
-        let quant_upper = quant.to_uppercase();
-        if let Some(file) = gguf_files
-            .iter()
-            .find(|f| f.filename.to_uppercase().contains(&quant_upper))
-        {
-            return Some(ResolvedDownload::Gguf {
-                filename: file.filename.clone(),
-            });
-        }
-    }
-
-    Some(ResolvedDownload::Gguf {
-        filename: gguf_files[0].filename.clone(),
-    })
 }
 
 fn try_resolve_onnx(info: &ModelInfo) -> Option<ResolvedDownload> {
@@ -179,17 +129,6 @@ async fn run_async(args: DownloadArgs) -> anyhow::Result<()> {
     let resolved = resolve_format(&info, &args.format, args.quantization.as_deref());
 
     match resolved {
-        ResolvedDownload::Gguf { filename } => {
-            download_gguf(
-                &client,
-                &args.model_id,
-                &args.revision,
-                &filename,
-                &output_dir,
-                &info,
-            )
-            .await?;
-        }
         ResolvedDownload::Onnx { filenames } => {
             download_onnx(
                 &client,
@@ -215,16 +154,6 @@ async fn run_async(args: DownloadArgs) -> anyhow::Result<()> {
                 eprintln!("  component: {}", f.display());
             }
         }
-        ResolvedDownload::ConvertToGguf => {
-            eprintln!("No pre-built GGUF found. Converting via Python...");
-            let result = convert::convert_to_gguf(
-                &args.model_id,
-                &output_dir,
-                args.quantization.as_deref(),
-                args.keep_venv,
-            )?;
-            eprintln!("Converted: {}", result.model_path.display());
-        }
     }
 
     print_summary(&args.model_id, &output_dir)?;
@@ -232,32 +161,6 @@ async fn run_async(args: DownloadArgs) -> anyhow::Result<()> {
 }
 
 // ── Download helpers ─────────────────────────────────────────────────────────
-
-async fn download_gguf(
-    client: &HfClient,
-    model_id: &str,
-    revision: &str,
-    filename: &str,
-    output_dir: &Path,
-    info: &ModelInfo,
-) -> anyhow::Result<()> {
-    let dp = progress::DownloadProgress::new();
-
-    let dest = output_dir.join(filename);
-    let file_info = info.siblings.iter().find(|f| f.filename == filename);
-    let total = file_info.and_then(|f| f.size).unwrap_or(0);
-    let pb = dp.add_file(filename, total);
-    client
-        .download_file(model_id, filename, revision, &dest, &pb)
-        .await?;
-
-    if let Some(lfs) = file_info.and_then(|f| f.lfs.as_ref()) {
-        verify_checksum(&dest, &lfs.sha256)?;
-    }
-
-    download_companions(client, model_id, revision, output_dir, info, &dp).await?;
-    Ok(())
-}
 
 async fn download_onnx(
     client: &HfClient,
@@ -394,13 +297,6 @@ mod tests {
     }
 
     #[test]
-    fn resolve_prefers_gguf_in_auto_mode() {
-        let info = mock_info(&["model-Q4_0.gguf", "model.onnx"]);
-        let resolved = resolve_format(&info, &DownloadFormat::Auto, None);
-        assert!(matches!(resolved, ResolvedDownload::Gguf { .. }));
-    }
-
-    #[test]
     fn resolve_falls_back_to_onnx() {
         let info = mock_info(&["model.onnx"]);
         let resolved = resolve_format(&info, &DownloadFormat::Auto, None);
@@ -415,29 +311,10 @@ mod tests {
     }
 
     #[test]
-    fn resolve_gguf_respects_quantization_filter() {
-        let info = mock_info(&["model-Q4_0.gguf", "model-Q8_0.gguf"]);
-        let resolved = resolve_format(&info, &DownloadFormat::Gguf, Some("Q8_0"));
-        match resolved {
-            ResolvedDownload::Gguf { filename } => {
-                assert!(filename.contains("Q8_0"));
-            }
-            _ => panic!("expected Gguf variant"),
-        }
-    }
-
-    #[test]
     fn resolve_explicit_onnx_with_no_onnx_triggers_convert() {
-        let info = mock_info(&["model-Q4_0.gguf"]);
+        let info = mock_info(&["pytorch_model.bin"]);
         let resolved = resolve_format(&info, &DownloadFormat::Onnx, None);
         assert!(matches!(resolved, ResolvedDownload::ConvertToOnnx));
-    }
-
-    #[test]
-    fn resolve_explicit_gguf_with_no_gguf_triggers_convert() {
-        let info = mock_info(&["model.onnx"]);
-        let resolved = resolve_format(&info, &DownloadFormat::Gguf, None);
-        assert!(matches!(resolved, ResolvedDownload::ConvertToGguf));
     }
 
     #[test]

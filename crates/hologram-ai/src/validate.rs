@@ -78,7 +78,6 @@ pub fn validate_model(path: &Path) -> ValidationReport {
     let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
     let source = match ext {
         "onnx" => ModelSource::OnnxPath(path.to_owned()),
-        "gguf" => ModelSource::GgufPath(path.to_owned()),
         other => {
             return ValidationReport {
                 model_path,
@@ -211,7 +210,6 @@ fn import_model(path: &Path, ext: &str) -> anyhow::Result<hologram_ai_common::Ai
             path,
             Default::default(),
         )?),
-        "gguf" => Ok(hologram_ai_gguf::import_gguf(path, Default::default())?),
         other => anyhow::bail!("unsupported: .{other}"),
     }
 }

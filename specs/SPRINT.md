@@ -685,6 +685,21 @@ follow-up that fully closes the papercut.
 
 ## Complete (this sprint)
 
+### Cleanup: GGUF removal (Plan 061 Stage 0)
+- [x] Removed `hologram-ai-gguf` crate, workspace member, and all consumers
+  (compiler.rs `ModelSource::GgufPath`, lib.rs re-export, cli.rs `inspect_gguf`,
+  validate.rs `.gguf` branch, download/mod.rs `DownloadFormat::Gguf` +
+  `download_gguf` + `convert_to_gguf`, tinyllama_e2e.rs gguf tests,
+  mini_fixture.rs `gguf_causal_logit_consistency`, benches/inference.rs
+  `gguf_holo_path` benchmarks).
+- [x] **TinyLlama ONNX baseline gate cleared post-removal: 40.1 tok/s coherent**
+  (`The capital of France is Paris.`) on `hologram-ai run` with
+  `--temperature 0.0` and chat-formatted prompt.
+- [x] Fixed UTF-8 char-boundary panic in `run_cmd.rs:517` streaming path —
+  multi-byte codepoints (emoji) spanning two BPE tokens no longer panic.
+- [x] Removed dead `nodes`/`inits` locals from `kv_expand_tinyllama_dims_matches_ort`
+  test in conformance suite.
+
 ### Node-by-node inspector tooling
 - [x] `execute_plan_with_intermediates_and_shape_hints` in hologram base
   (**removed** in hologram Sprint 17 — Plans 014+015)

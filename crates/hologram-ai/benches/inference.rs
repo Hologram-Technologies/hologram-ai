@@ -1,9 +1,8 @@
-//! Inference benchmarks: TTFT and decode tok/s for TinyLlama (ONNX + GGUF).
+//! Inference benchmarks: TTFT and decode tok/s for TinyLlama ONNX.
 //!
-//! Requires pre-compiled `.holo` archives in `models/`. Run:
+//! Requires a pre-compiled `.holo` archive in `models/`. Run:
 //!   ./scripts/download-models.sh tinyllama
 //!   cargo run --release -- compile models/TinyLlama-1.1B-Chat-v1.0/model.onnx
-//!   cargo run --release -- compile models/TinyLlama-1.1B-Chat-v1.0-GGUF/*.gguf
 //!
 //! Then:
 //!   cargo bench --bench inference
@@ -26,19 +25,6 @@ fn workspace_root() -> PathBuf {
 
 fn onnx_holo_path() -> PathBuf {
     workspace_root().join("models/TinyLlama-1.1B-Chat-v1.0/model.holo")
-}
-
-fn gguf_holo_path() -> PathBuf {
-    let dir = workspace_root().join("models/TinyLlama-1.1B-Chat-v1.0-GGUF");
-    if let Ok(entries) = std::fs::read_dir(&dir) {
-        for entry in entries.flatten() {
-            let p = entry.path();
-            if p.extension().is_some_and(|e| e == "holo") {
-                return p;
-            }
-        }
-    }
-    dir.join("tinyllama.holo")
 }
 
 // ── Model wrapper ────────────────────────────────────────────────────────────
@@ -322,12 +308,6 @@ fn inference_benchmarks(c: &mut Criterion) {
         bench_ttft(c, "tinyllama_onnx", &model);
         bench_decode(c, "tinyllama_onnx", &model);
         bench_single_decode_step(c, "tinyllama_onnx", &model);
-    }
-
-    if let Some(model) = load_model(&gguf_holo_path()) {
-        bench_ttft(c, "tinyllama_gguf", &model);
-        bench_decode(c, "tinyllama_gguf", &model);
-        bench_single_decode_step(c, "tinyllama_gguf", &model);
     }
 }
 
