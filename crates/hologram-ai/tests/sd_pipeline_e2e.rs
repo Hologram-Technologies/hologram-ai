@@ -253,13 +253,14 @@ fn sd_pipeline_generates_image() {
         Some(QuantStrategy::Q8_0),
     );
     assert!(ensure_compiled(&unet_onnx(), &unet_holo()));
-    // VAE at spatial_scale=2: 256×256 output, ~3GB peak memory.
-    assert!(ensure_compiled_with(
-        &vae_onnx(),
-        &vae_holo(),
-        None,
-        Some(2)
-    ));
+    // VAE at full resolution (512×512 output). With runtime buffer eviction
+    // wired into `execute_direct` and gated by `vae_tape.checkpoint_enabled`
+    // (set below), peak memory drops from ~20 GiB to under 5 GiB even at
+    // full spatial resolution. The previous version compiled with
+    // `spatial_scale=Some(2)` as a memory escape hatch, but that produced
+    // a [1, 4, 32, 32] compile-time input shape that didn't match the
+    // [1, 4, 64, 64] latent fed at runtime.
+    assert!(ensure_compiled(&vae_onnx(), &vae_holo()));
     eprintln!("all 3 components compiled");
 
     let total_start = std::time::Instant::now();
