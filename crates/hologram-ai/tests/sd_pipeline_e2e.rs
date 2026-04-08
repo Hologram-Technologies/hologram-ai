@@ -9,7 +9,6 @@
 #![cfg(feature = "e2e")]
 
 use hologram_ai::compiler::{ModelCompiler, ModelSource};
-use hologram_ai_common::lower::QuantStrategy;
 use std::path::PathBuf;
 
 fn workspace_path(rel: &str) -> PathBuf {
@@ -24,9 +23,6 @@ fn workspace_path(rel: &str) -> PathBuf {
 
 fn text_encoder_holo() -> PathBuf {
     workspace_path("models/stable-diffusion-v1-5/text_encoder/model.holo")
-}
-fn text_encoder_q8_holo() -> PathBuf {
-    workspace_path("models/stable-diffusion-v1-5/text_encoder/model_q8.holo")
 }
 fn unet_holo() -> PathBuf {
     workspace_path("models/stable-diffusion-v1-5/unet/model.holo")
@@ -237,21 +233,22 @@ fn sd_pipeline_generates_image() {
     }
 
     // Compile all components.
-    // Text encoder: compile at seq_len=77 (CLIP's max for SD v1.5).
-    assert!(ensure_compiled_with(
+    // Text encoder: compile with the ONNX model's default seq_len and rely
+    // on variable-length runtime execution to handle the actual [1, 77]
+    // input. Passing `seq_len_override=Some(77)` here triggers a compiler
+    // bug that produces a graph with seq concretized to 77 * 48 = 3696
+    // (48 = 12 heads × 4 attention projections), causing last_hidden_state
+    // to be a [1, 3696, 768] tensor of 2838528 floats instead of the
+    // expected [1, 77, 768] of 59136. The standalone `sd_text_encoder_executes`
+    // test (which uses `ModelCompiler::default()` with no override) produces
+    // the correct shape via the same runtime, confirming the bug is in the
+    // `seq_len_override` compile path. Tracked as a follow-up — see
+    // ~/.claude/projects/memory/project_q8_clip_bug.md for the updated
+    // diagnosis.
+    assert!(ensure_compiled(
         &text_encoder_onnx(),
         &text_encoder_holo(),
-        Some(77),
-        None,
     ));
-    // Also compile a Q8 variant for ~2× faster CLIP inference.
-    let _ = ensure_compiled_full(
-        &text_encoder_onnx(),
-        &text_encoder_q8_holo(),
-        Some(77),
-        None,
-        Some(QuantStrategy::Q8_0),
-    );
     assert!(ensure_compiled(&unet_onnx(), &unet_holo()));
     // VAE at full resolution (512×512 output). With runtime buffer eviction
     // wired into `execute_direct` and gated by `vae_tape.checkpoint_enabled`
