@@ -27,7 +27,7 @@ models/         — test models for development (TinyLlama ONNX, etc.)
 
 ## Rules for Agents
 
-1. **SOLVE PROBLEMS IN THE MOST PRODUCTION-READY WAY POSSIBLE.** Always take a project-wide perspective — solutions must be robust, correct, and ready to ship. No hacks, no shortcuts, no "good enough for now." Every change should be something you'd confidently deploy to production.
+1. **SOLVE PROBLEMS IN THE MOST PRODUCTION-READY WAY POSSIBLE.** Always take a project-wide perspective — solutions must be robust, correct, and ready to ship. No hacks, no shortcuts, no "good enough for now." Never take a shortcut to get something working today — always write the production-ready fix. If the proper fix requires touching every kernel, touch every kernel. If it requires a multi-file refactor, do the multi-file refactor. Every change should be something you'd confidently deploy to production. Do not add TODOs, placeholders, or "temporary" workarounds in source code.
 2. **ZERO RUNTIME PERFORMANCE PENALTIES.** Never introduce unnecessary allocations, copies, indirections, or overhead in hot paths. Prefer zero-cost abstractions, compile-time evaluation, and in-place operations. If a solution has a runtime cost, justify it explicitly and minimize it. Profile-guided decisions over guesswork.
 3. Follow the architecture standards defined in the architecture repo
 4. Do not modify files outside this repository unless explicitly instructed
