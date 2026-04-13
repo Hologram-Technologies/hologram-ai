@@ -296,17 +296,38 @@ impl ModelCompiler {
 
         use hologram_ai_common::sections::meta::ComponentRole;
 
-        // TODO: when Q4 quantization is enabled, quantized weights become dead
-        // in the weight section (replaced by Q4 constants in the graph). Stripping
-        // them requires remapping constant offsets which is a larger refactor.
-        // For now, include all weights — archive size is larger than optimal but
-        // correct. The Q4 constants are still used for execution.
-        let (weights, weight_index) = collect_weight_bytes(&ai_graph)?;
-        let total_weight_bytes = weights.len() as u64;
-        let extra_weights: Option<&[u8]> = if weights.is_empty() {
-            None
+        // Collect weight bytes. For large models (>256 MB of Mmap weights),
+        // stream to a temp file to avoid a multi-GB Vec<u8> allocation.
+        let total_mmap_bytes: u64 = ai_graph
+            .params
+            .values()
+            .filter_map(|p| match p {
+                AiParam::Mmap { len, .. } => Some(*len),
+                _ => None,
+            })
+            .sum();
+        let use_streaming = total_mmap_bytes > 256 * 1024 * 1024; // 256 MB threshold
+
+        let (weights, weight_source, weight_index) = if use_streaming {
+            let (source, idx) = collect_weight_bytes_streaming(&ai_graph)?;
+            (Vec::new(), Some(source), idx)
         } else {
+            let (w, idx) = collect_weight_bytes(&ai_graph)?;
+            (w, None, idx)
+        };
+        let total_weight_bytes = if use_streaming {
+            total_mmap_bytes
+        } else {
+            weights.len() as u64
+        };
+        let extra_weights: Option<&[u8]> = if weights.is_empty() && !use_streaming {
+            None
+        } else if !weights.is_empty() {
             Some(&weights)
+        } else {
+            // Streaming path: weights are in temp file, not in memory.
+            // Pass empty slice — the archive will be built via build_to_file.
+            Some(&[])
         };
 
         let archive_bytes = if is_llm {
@@ -2017,6 +2038,104 @@ fn collect_weight_bytes(
     hologram::hologram_archive::weight::index::WeightIndex,
 )> {
     collect_weight_bytes_filtered(ai_graph, &std::collections::HashSet::new())
+}
+
+/// Streaming version of `collect_weight_bytes`: writes weights to a temp file
+/// instead of a `Vec<u8>`. Returns a `WeightSource::File` for the archive writer.
+///
+/// Peak memory: one weight's I/O buffer (256 KB) + index entries (~1 KB each).
+/// For SDXL UNet with 10 GB of Mmap weights, this uses ~1 MB instead of 10 GB.
+fn collect_weight_bytes_streaming(
+    ai_graph: &AiGraph,
+) -> anyhow::Result<(
+    hologram::hologram_archive::WeightSource,
+    hologram::hologram_archive::weight::index::WeightIndex,
+)> {
+    use hologram::hologram_archive::weight::index::{
+        derive_layer_group, WeightIndex, WeightIndexEntry,
+    };
+    use std::io::{Seek, Write};
+
+    let mut sorted: Vec<_> = ai_graph
+        .params
+        .iter()
+        .filter(|(_, p)| matches!(p, AiParam::Mmap { .. }))
+        .collect();
+    if sorted.is_empty() {
+        return Ok((
+            hologram::hologram_archive::WeightSource::Bytes(Vec::new()),
+            WeightIndex { entries: vec![] },
+        ));
+    }
+    sorted.sort_by_key(|(&tid, _)| tid);
+
+    let tmp = tempfile::NamedTempFile::new()
+        .context("creating temp file for streaming weight collection")?;
+    let mut writer = std::io::BufWriter::with_capacity(256 * 1024, tmp.as_file().try_clone()?);
+    let mut entries = Vec::with_capacity(sorted.len());
+    let mut write_offset = 0u64;
+
+    for (&tid, param) in &sorted {
+        let AiParam::Mmap {
+            path, offset, len, ..
+        } = param
+        else {
+            continue;
+        };
+        let n = *len as usize;
+        let mut f = std::fs::File::open(path)
+            .with_context(|| format!("opening weight file {path:?}"))?;
+        f.seek(std::io::SeekFrom::Start(*offset))?;
+
+        // Stream from source to temp file in 256 KB chunks.
+        let mut remaining = n;
+        let mut buf = vec![0u8; 256 * 1024];
+        while remaining > 0 {
+            let to_read = remaining.min(buf.len());
+            std::io::Read::read_exact(&mut f, &mut buf[..to_read])
+                .with_context(|| format!("reading {n} bytes from {path:?}"))?;
+            writer.write_all(&buf[..to_read])?;
+            remaining -= to_read;
+        }
+
+        let tensor_name = ai_graph
+            .tensor_names
+            .get(&tid)
+            .cloned()
+            .unwrap_or_else(|| format!("tensor_{tid}"));
+        entries.push(WeightIndexEntry {
+            tensor_name: tensor_name.clone(),
+            group: derive_layer_group(&tensor_name),
+            offset: write_offset,
+            size: n as u64,
+        });
+
+        // 4-byte align.
+        let aligned = (n as u64).div_ceil(4) * 4;
+        let padding = aligned - n as u64;
+        if padding > 0 {
+            writer.write_all(&vec![0u8; padding as usize])?;
+        }
+        write_offset += aligned;
+    }
+    writer.flush()?;
+
+    let total_len = write_offset;
+    let path = tmp.into_temp_path().to_path_buf();
+    tracing::info!(
+        total_mb = total_len / (1024 * 1024),
+        n_weights = entries.len(),
+        "streamed weights to temp file ({} MiB)",
+        total_len / (1024 * 1024),
+    );
+
+    Ok((
+        hologram::hologram_archive::WeightSource::File {
+            path,
+            len: total_len,
+        },
+        WeightIndex { entries },
+    ))
 }
 
 /// Predict which weight TIDs will be quantized during lowering.
