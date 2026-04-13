@@ -383,9 +383,9 @@ pub fn lower(
                         q4_eligible.remove(&wt);
                     }
                 }
-                if let Some(q4_bytes) = early_quant_bytes.get(&wt) {
+                if let Some(q4_bytes) = early_quant_bytes.remove(&wt) {
                     builder = builder.matmul_lut_4bit(
-                        ConstantData::Bytes(q4_bytes.clone()),
+                        ConstantData::Bytes(q4_bytes),
                         &[input_idxs[0]], // activation input only
                     );
                     let idx = builder.len() - 1;
@@ -534,7 +534,7 @@ pub fn lower(
                                 q4_eligible.remove(&wt);
                             }
                         }
-                        if let Some(q4_bytes) = early_quant_bytes.get(&wt) {
+                        if let Some(q4_bytes) = early_quant_bytes.remove(&wt) {
                             // Step 1: emit FusedSwiGLU(gate, up) → activated
                             builder = builder.node_with_inputs(
                                 GraphOp::Float(FloatOp::FusedSwiGLU),
@@ -544,7 +544,7 @@ pub fn lower(
 
                             // Step 2: emit MatMulLut4(activated, Q4_down_weight) → output
                             builder = builder.matmul_lut_4bit(
-                                ConstantData::Bytes(q4_bytes.clone()),
+                                ConstantData::Bytes(q4_bytes),
                                 &[swiglu_idx],
                             );
                             let idx = builder.len() - 1;
@@ -578,9 +578,9 @@ pub fn lower(
                                 q4_eligible.remove(&wt);
                             }
                         }
-                        if let Some(q4_bytes) = early_quant_bytes.get(&wt) {
+                        if let Some(q4_bytes) = early_quant_bytes.remove(&wt) {
                             builder = builder.matmul_lut_4bit(
-                                ConstantData::Bytes(q4_bytes.clone()),
+                                ConstantData::Bytes(q4_bytes),
                                 &[input_idxs[0]],
                             );
                             let idx = builder.len() - 1;
@@ -948,9 +948,9 @@ pub fn lower(
                                 q4_eligible.remove(&weight_tid);
                             }
                         }
-                        if let Some(q4_bytes) = early_quant_bytes.get(&weight_tid) {
+                        if let Some(q4_bytes) = early_quant_bytes.remove(&weight_tid) {
                             builder = builder.matmul_lut_4bit(
-                                ConstantData::Bytes(q4_bytes.clone()),
+                                ConstantData::Bytes(q4_bytes),
                                 &[norm_idx],
                             );
                             let proj_idx = builder.len() - 1;
