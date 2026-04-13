@@ -168,9 +168,15 @@ pub fn lower(
             }
         }
     }
-    // Store serialized Q4 bytes for weights quantized at registration time.
-    // During node lowering, any MatMul referencing a TID in this map will
-    // be emitted as MatMulLut4 using the stored bytes (via builder.matmul_lut_4bit).
+    // Deferred Q4 quantization: instead of quantizing all weights up front
+    // (which holds ~2.5 GB of Q4 data for SDXL UNet), we mark eligible
+    // weights here and quantize them one-at-a-time during node lowering.
+    // Peak memory: one weight's Q4 data at a time (~30 MB).
+    let mut q4_eligible: std::collections::HashSet<TensorId> =
+        std::collections::HashSet::new();
+    // Cache for on-demand Q4 quantization results. Populated lazily during
+    // node lowering (one weight at a time). Entries are consumed (removed)
+    // after use to keep memory bounded.
     let mut early_quant_bytes: std::collections::HashMap<TensorId, Vec<u8>> =
         std::collections::HashMap::new();
 
@@ -209,51 +215,23 @@ pub fn lower(
                     && info.storage_dtype == crate::ir::DType::F32
                     && used_only_as_matmul_weight
                 {
-                    if let Ok(raw_bytes) = param_bytes_owned(param) {
-                        let expected = dims[0] * dims[1] * 4;
-                        if raw_bytes.len() == expected {
-                            use hologram::hologram_exec::lut_gemm::quantize::{
-                                dequantize_error_q4, quantize_4bit,
-                            };
-                            let f32_weights: Vec<f32> = raw_bytes
-                                .chunks_exact(4)
-                                .map(|c| f32::from_le_bytes(c.try_into().expect("4 bytes")))
-                                .collect();
-                            let qw4 = quantize_4bit(&f32_weights, dims[0] as u32, dims[1] as u32);
-                            let rel_err = dequantize_error_q4(&f32_weights, &qw4);
-                            // Skip Q4 if relative error > 15% — quality guard.
-                            if rel_err > 0.15 {
-                                tracing::debug!(
-                                    tid,
-                                    rows = dims[0],
-                                    cols = dims[1],
-                                    rel_err,
-                                    "early-quant: skipping Q4 (error too high)"
-                                );
-                            } else if let Ok(serialized) =
-                                rkyv::to_bytes::<rkyv::rancor::Error>(&qw4)
-                            {
-                                early_quant_bytes.insert(tid, serialized.to_vec());
-                                tracing::debug!(
-                                    tid,
-                                    rows = dims[0],
-                                    cols = dims[1],
-                                    "early-quant: f32 weight → Q4 ({} bytes)",
-                                    serialized.len(),
-                                );
-                                // Register minimal placeholder (0 bytes) so
-                                // tid_to_idx has an entry. The actual Q4 data is
-                                // in early_quant_bytes, used by matmul_lut_4bit().
-                                // The placeholder constant takes no archive space.
-                                let placeholder = ConstantData::Bytes(vec![]);
-                                builder = builder
-                                    .constant_with_shape(placeholder, vec![dims[0], dims[1]]);
-                                let builder_idx = builder.len() - 1;
-                                tid_to_idx.insert(tid, builder_idx);
-                                continue;
-                            }
-                        }
-                    }
+                    // Mark as eligible for deferred Q4 quantization.
+                    // The actual quantization happens during node lowering
+                    // (one weight at a time) to keep peak memory bounded.
+                    q4_eligible.insert(tid);
+                    // Register a placeholder constant so tid_to_idx has an entry.
+                    let placeholder = ConstantData::Bytes(vec![]);
+                    builder =
+                        builder.constant_with_shape(placeholder, vec![dims[0], dims[1]]);
+                    let builder_idx = builder.len() - 1;
+                    tid_to_idx.insert(tid, builder_idx);
+                    tracing::debug!(
+                        tid,
+                        rows = dims[0],
+                        cols = dims[1],
+                        "deferred-quant: marked Q4-eligible"
+                    );
+                    continue;
                 }
             }
         }
@@ -391,12 +369,20 @@ pub fn lower(
         // (indices, data). Swap inputs for Gather/GatherElements.
         let input_idxs = swap_gather_inputs(&node.op, input_idxs);
 
-        // ── Early-quant interception: emit MatMulLut4 for pre-quantized weights ──
-        // If this is a MatMul and its weight input was quantized at registration,
-        // emit MatMulLut4 directly — bypasses the normal FloatNeedsShape path.
+        // ── Deferred Q4 interception: quantize on demand and emit MatMulLut4 ──
+        // If this is a MatMul and its weight was marked Q4-eligible, quantize
+        // it now (one weight at a time) and emit MatMulLut4.
         if matches!(node.op, AiOp::MatMul | AiOp::Gemm { .. }) {
             let weight_tid = node.inputs.get(1).copied();
             if let Some(wt) = weight_tid {
+                // On-demand: quantize if eligible and not yet cached.
+                if q4_eligible.contains(&wt) && !early_quant_bytes.contains_key(&wt) {
+                    if let Some(q4) = quantize_weight_on_demand(wt, ai_graph) {
+                        early_quant_bytes.insert(wt, q4);
+                    } else {
+                        q4_eligible.remove(&wt);
+                    }
+                }
                 if let Some(q4_bytes) = early_quant_bytes.get(&wt) {
                     builder = builder.matmul_lut_4bit(
                         ConstantData::Bytes(q4_bytes.clone()),
@@ -541,6 +527,13 @@ pub fn lower(
                 if matches!(node.op, AiOp::FusedSwiGluProjection) {
                     let weight_tid = node.inputs.get(2).copied();
                     if let Some(wt) = weight_tid {
+                        if q4_eligible.contains(&wt) && !early_quant_bytes.contains_key(&wt) {
+                            if let Some(q4) = quantize_weight_on_demand(wt, ai_graph) {
+                                early_quant_bytes.insert(wt, q4);
+                            } else {
+                                q4_eligible.remove(&wt);
+                            }
+                        }
                         if let Some(q4_bytes) = early_quant_bytes.get(&wt) {
                             // Step 1: emit FusedSwiGLU(gate, up) → activated
                             builder = builder.node_with_inputs(
@@ -578,6 +571,13 @@ pub fn lower(
                 ) {
                     let weight_tid = node.inputs.get(1).copied();
                     if let Some(wt) = weight_tid {
+                        if q4_eligible.contains(&wt) && !early_quant_bytes.contains_key(&wt) {
+                            if let Some(q4) = quantize_weight_on_demand(wt, ai_graph) {
+                                early_quant_bytes.insert(wt, q4);
+                            } else {
+                                q4_eligible.remove(&wt);
+                            }
+                        }
                         if let Some(q4_bytes) = early_quant_bytes.get(&wt) {
                             builder = builder.matmul_lut_4bit(
                                 ConstantData::Bytes(q4_bytes.clone()),
@@ -940,7 +940,14 @@ pub fn lower(
                         }
                         let weight_tid = node.inputs[weight_input_pos];
 
-                        // Check if this weight was early-quantized at registration.
+                        // On-demand Q4 quantization for this weight.
+                        if q4_eligible.contains(&weight_tid) && !early_quant_bytes.contains_key(&weight_tid) {
+                            if let Some(q4) = quantize_weight_on_demand(weight_tid, ai_graph) {
+                                early_quant_bytes.insert(weight_tid, q4);
+                            } else {
+                                q4_eligible.remove(&weight_tid);
+                            }
+                        }
                         if let Some(q4_bytes) = early_quant_bytes.get(&weight_tid) {
                             builder = builder.matmul_lut_4bit(
                                 ConstantData::Bytes(q4_bytes.clone()),
@@ -1134,13 +1141,7 @@ fn lower_subgraph_op(
         AiOp::If {
             then_branch,
             else_branch,
-        } => lower_if_op(
-            node,
-            input_idxs,
-            then_branch,
-            else_branch.as_deref(),
-            ctx,
-        ),
+        } => lower_if_op(node, input_idxs, then_branch, else_branch.as_deref(), ctx),
         AiOp::Loop {
             body,
             max_trip_count,
@@ -2080,6 +2081,51 @@ fn try_convert_conv2d_to_lut4(
 }
 
 /// Read parameter bytes into an owned `Vec<u8>`.
+/// Quantize a weight on demand: load from param, quantize to Q4, serialize.
+/// Returns None if the weight doesn't meet Q4 eligibility or has too high error.
+fn quantize_weight_on_demand(
+    tid: TensorId,
+    ai_graph: &AiGraph,
+) -> Option<Vec<u8>> {
+    let param = ai_graph.params.get(&tid)?;
+    let info = ai_graph.tensor_info.get(&tid)?;
+    let dims: Vec<usize> = info
+        .shape
+        .iter()
+        .filter_map(|d| d.as_concrete().map(|c| c as usize))
+        .collect();
+    if dims.len() != 2 || dims[0] < 256 || dims[1] < 256 {
+        return None;
+    }
+    let raw_bytes = param_bytes_owned(param).ok()?;
+    let expected = dims[0] * dims[1] * 4;
+    if raw_bytes.len() != expected {
+        return None;
+    }
+    use hologram::hologram_exec::lut_gemm::quantize::{dequantize_error_q4, quantize_4bit};
+    let f32_weights: Vec<f32> = raw_bytes
+        .chunks_exact(4)
+        .map(|c| f32::from_le_bytes(c.try_into().expect("4 bytes")))
+        .collect();
+    drop(raw_bytes); // Free the f32 bytes before creating Q4.
+    let qw4 = quantize_4bit(&f32_weights, dims[0] as u32, dims[1] as u32);
+    let rel_err = dequantize_error_q4(&f32_weights, &qw4);
+    drop(f32_weights); // Free f32 before serializing.
+    if rel_err > 0.15 {
+        tracing::debug!(tid, rel_err, "deferred-quant: skipping Q4 (error too high)");
+        return None;
+    }
+    let serialized = rkyv::to_bytes::<rkyv::rancor::Error>(&qw4).ok()?;
+    tracing::debug!(
+        tid,
+        rows = dims[0],
+        cols = dims[1],
+        bytes = serialized.len(),
+        "deferred-quant: weight → Q4"
+    );
+    Some(serialized.to_vec())
+}
+
 fn param_bytes_owned(param: &crate::ir::AiParam) -> anyhow::Result<Vec<u8>> {
     use crate::ir::AiParam;
     match param {
