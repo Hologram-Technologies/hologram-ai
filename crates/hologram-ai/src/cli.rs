@@ -1,5 +1,6 @@
 //! CLI entry point for hologram-ai.
 
+use anyhow::Context as _;
 use clap::Parser;
 use hologram_ai::compiler::{ModelCompiler, ModelSource};
 use hologram_ai::download;
@@ -249,43 +250,54 @@ fn main() -> anyhow::Result<()> {
             // ── Compile with all sections in a single pass ──────────────
             let compiled = compiler.compile_with_sections(source, sections)?;
 
-            // Model metadata section — depends on compiled.metadata, so it
-            // needs to be added post-compilation. For the streaming path,
-            // this is a TODO: extract metadata from AiGraph before compilation
-            // so it can be included in the single pass. For now, rebuild just
-            // this one section (small, fast).
-            let kind = if let Some(k) = manifest_kind {
-                k
+            if let Some(archive_path) = &compiled.path {
+                // Streaming path: archive is already on disk. Move it.
+                std::fs::rename(archive_path, &holo_path)
+                    .or_else(|_| std::fs::copy(archive_path, &holo_path).map(|_| ()))
+                    .with_context(|| format!(
+                        "moving archive from {} to {}",
+                        archive_path.display(),
+                        holo_path.display(),
+                    ))?;
             } else {
-                let is_llm = (compiled.metadata.arch != "unknown"
-                    && compiled.metadata.n_layers > 0)
-                    || tok_path.is_some();
-                if is_llm {
-                    hologram::hologram_archive::section::model_meta::ModelKind::TextLlm
+                // In-memory path: add model_meta section and write.
+                let kind = if let Some(k) = manifest_kind {
+                    k
                 } else {
-                    hologram::hologram_archive::section::model_meta::ModelKind::Generic
-                }
-            };
-            let model_meta = hologram::hologram_archive::section::model_meta::ModelMetaSection {
-                kind,
-                arch: compiled.metadata.arch.clone(),
-                description: format!("{} ({})", compiled.metadata.arch, model_path.display()),
-                max_seq_len: compiled.metadata.context_len,
-                supports_prompt: tok_path.is_some(),
-                n_layers: compiled.metadata.n_layers,
-                n_kv_heads: compiled.metadata.n_kv_heads,
-                head_dim: compiled.metadata.head_dim,
-                kv_k_bits: 0,
-                kv_v_bits: 0,
-                kv_boundary_layers: 2,
-                kv_wht: false,
-            };
-            let final_bytes = hologram_ai::compiler::rebuild_archive_with_section(
-                &compiled.bytes,
-                &model_meta,
-            )?;
-
-            std::fs::write(&holo_path, &final_bytes)?;
+                    let is_llm = (compiled.metadata.arch != "unknown"
+                        && compiled.metadata.n_layers > 0)
+                        || tok_path.is_some();
+                    if is_llm {
+                        hologram::hologram_archive::section::model_meta::ModelKind::TextLlm
+                    } else {
+                        hologram::hologram_archive::section::model_meta::ModelKind::Generic
+                    }
+                };
+                let model_meta =
+                    hologram::hologram_archive::section::model_meta::ModelMetaSection {
+                        kind,
+                        arch: compiled.metadata.arch.clone(),
+                        description: format!(
+                            "{} ({})",
+                            compiled.metadata.arch,
+                            model_path.display()
+                        ),
+                        max_seq_len: compiled.metadata.context_len,
+                        supports_prompt: tok_path.is_some(),
+                        n_layers: compiled.metadata.n_layers,
+                        n_kv_heads: compiled.metadata.n_kv_heads,
+                        head_dim: compiled.metadata.head_dim,
+                        kv_k_bits: 0,
+                        kv_v_bits: 0,
+                        kv_boundary_layers: 2,
+                        kv_wht: false,
+                    };
+                let final_bytes = hologram_ai::compiler::rebuild_archive_with_section(
+                    &compiled.bytes,
+                    &model_meta,
+                )?;
+                std::fs::write(&holo_path, &final_bytes)?;
+            }
             println!(
                 "wrote {} ({} nodes, {} weight bytes, {} warnings)",
                 holo_path.display(),

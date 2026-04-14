@@ -73,8 +73,12 @@ pub struct CompileStats {
 
 /// A compiled `.holo` archive ready to be saved or executed.
 pub struct HoloArchive {
-    /// The compiled archive bytes.
+    /// The compiled archive bytes. Empty when `path` is set.
     pub bytes: Vec<u8>,
+    /// Path to the archive on disk. Set for streaming compilation of
+    /// large models — the archive was written directly to disk without
+    /// ever loading it into memory.
+    pub path: Option<std::path::PathBuf>,
     pub metadata: ModelMetadata,
     pub stats: CompileStats,
 }
@@ -527,23 +531,47 @@ impl ModelCompiler {
                 .context("memory planning failed")?;
 
             if let Some(ws) = weight_source {
-                // Streaming path: build archive directly to the output
-                // file, streaming weights from the temp file. Avoids
-                // holding the weight blob in memory.
+                // Streaming path: build archive directly to a temp file,
+                // streaming weights from the collection temp file.
+                // The archive file IS the final output — never read back
+                // into memory.
                 let tmp_archive = tempfile::NamedTempFile::new()
                     .context("creating temp archive file")?;
-                let tmp_path = tmp_archive.path().to_owned();
+                let tmp_path = tmp_archive.into_temp_path().keep()
+                    .map_err(|e| anyhow::anyhow!("persisting temp archive: {e}"))?;
 
                 let archive = compile_one_component(
                     &ai_graph,
                     &mem_plan.kv_cache_layout,
                     &self.lowering_options(),
                     &LowerPhase::Forward,
-                    Some(&[]), // empty weights — Deferred constants resolve from the weight source
+                    Some(&[]),
                     Some(&weight_index),
                 )?;
                 let unpacked = unpack_archive(&archive)?;
                 let layer_header = build_tensor_port_header(&unpacked.plan, &ai_graph);
+
+                // Build model_meta section here (not in CLI) so it's
+                // included in the single-pass build.
+                let mut all_sections = extra_sections.clone();
+                {
+                    use hologram::hologram_archive::section::EmbeddableSection;
+                    let model_meta = hologram::hologram_archive::section::model_meta::ModelMetaSection {
+                        kind: hologram::hologram_archive::section::model_meta::ModelKind::Generic,
+                        arch: pre_metadata.arch.clone(),
+                        description: pre_metadata.arch.clone(),
+                        max_seq_len: pre_metadata.context_len,
+                        supports_prompt: false,
+                        n_layers: pre_metadata.n_layers,
+                        n_kv_heads: pre_metadata.n_kv_heads,
+                        head_dim: pre_metadata.head_dim,
+                        kv_k_bits: 0,
+                        kv_v_bits: 0,
+                        kv_boundary_layers: 2,
+                        kv_wht: false,
+                    };
+                    all_sections.push((model_meta.section_kind(), model_meta.to_bytes()));
+                }
 
                 build_final_archive_to_file(
                     unpacked,
@@ -551,21 +579,31 @@ impl ModelCompiler {
                     Some(layer_header),
                     None,
                     Some(&weight_index),
-                    &extra_sections,
+                    &all_sections,
                     &tmp_path,
                 )?;
 
                 let archive_size = std::fs::metadata(&tmp_path)
                     .map(|m| m.len())
                     .unwrap_or(0);
-                tracing::info!(
+                info!(
                     archive_mb = archive_size / (1024 * 1024),
-                    "streaming archive: {} MiB on disk",
+                    "streaming archive: {} MiB",
                     archive_size / (1024 * 1024),
                 );
 
-                std::fs::read(&tmp_path)
-                    .context("reading streaming archive from temp file")?
+                // Return the path — no bytes loaded into memory.
+                return Ok(HoloArchive {
+                    bytes: Vec::new(),
+                    path: Some(tmp_path),
+                    metadata: pre_metadata,
+                    stats: CompileStats {
+                        import_warnings,
+                        validation_errors: 0,
+                        total_weight_bytes,
+                        node_count: 0,
+                    },
+                });
             } else {
                 self.compile_components(
                     vec![ComponentSpec {
@@ -589,6 +627,7 @@ impl ModelCompiler {
 
         Ok(HoloArchive {
             bytes: archive_bytes,
+            path: None,
             metadata,
             stats: CompileStats {
                 import_warnings,
@@ -699,6 +738,7 @@ impl ModelCompiler {
 
         let archive = HoloArchive {
             bytes: archive_bytes,
+            path: None,
             metadata,
             stats: CompileStats {
                 import_warnings,
@@ -813,6 +853,7 @@ impl ModelCompiler {
 
         let archive = HoloArchive {
             bytes: archive_bytes,
+            path: None,
             metadata,
             stats: CompileStats {
                 import_warnings,
@@ -1116,6 +1157,7 @@ impl ModelCompiler {
 
         Ok(HoloArchive {
             bytes: archive_bytes,
+            path: None,
             metadata: ModelMetadata {
                 arch: "multi-onnx".into(),
                 vocab_size: 0,
