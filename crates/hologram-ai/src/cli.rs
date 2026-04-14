@@ -175,6 +175,9 @@ fn main() -> anyhow::Result<()> {
                     (source, model_path.clone(), None, None)
                 };
 
+            // These sections are collected here so that streaming compilation
+            // can include them in the single build pass (no rebuild-with-section
+            // round-trips on a 14 GB archive).
             let quant_strategy = match quantize.as_deref() {
                 Some("q2_0" | "Q2_0") => hologram_ai_common::lower::QuantStrategy::Q2_0,
                 Some("q4_0" | "Q4_0") => hologram_ai_common::lower::QuantStrategy::Q4_0,
@@ -266,8 +269,6 @@ fn main() -> anyhow::Result<()> {
             }
 
             // Embed host metadata section if any fields are populated (Plan 060).
-            // Precedence: manifest [host] > CLI flags. A future phase adds
-            // GGUF v3 auto-population as a third source (lowest priority).
             let host_section = build_host_meta(&host_cli, manifest_host.as_ref(), None);
             if !host_section.is_empty() {
                 final_bytes = hologram_ai::compiler::rebuild_archive_with_section(

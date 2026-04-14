@@ -73,7 +73,7 @@ pub struct CompileStats {
 
 /// A compiled `.holo` archive ready to be saved or executed.
 pub struct HoloArchive {
-    /// The compiled archive bytes (single archive or pipeline archive).
+    /// The compiled archive bytes.
     pub bytes: Vec<u8>,
     pub metadata: ModelMetadata,
     pub stats: CompileStats,
@@ -204,7 +204,25 @@ impl ModelCompiler {
     /// For LLM models (GGUF with transformer architecture), produces a pipeline
     /// archive with named layer entrypoints. For simpler models (ONNX), produces
     /// a single-graph archive.
-    pub fn compile(&self, source: ModelSource) -> anyhow::Result<HoloArchive> {
+    ///
+    /// `extra_sections`: optional sections (model_meta, tokenizer, host) to
+    /// embed in the archive during the single build pass. Avoids the costly
+    /// rebuild_archive_with_section post-processing that unpacks + repacks the
+    /// entire archive per section (3× for a 14 GB SDXL UNet archive = 42 GB
+    /// of wasted allocations).
+    pub fn compile(
+        &self,
+        source: ModelSource,
+    ) -> anyhow::Result<HoloArchive> {
+        self.compile_with_sections(source, &[])
+    }
+
+    /// Compile with embedded sections.
+    pub fn compile_with_sections(
+        &self,
+        source: ModelSource,
+        extra_sections: &[(u32, Vec<u8>)],
+    ) -> anyhow::Result<HoloArchive> {
         // Multi-component models have their own compilation path.
         if let ModelSource::MultiOnnx {
             components,
@@ -490,14 +508,19 @@ impl ModelCompiler {
                     Some(layer_header),
                     None,
                     Some(&weight_index),
+                    extra_sections,
                     &tmp_path,
                 )?;
 
-                // Read the file back — yes this is still in-memory for the
-                // HoloArchive return type. A full streaming API would return
-                // a path instead. For now, this eliminates the 10 GB weight
-                // blob from the compilation pipeline — the archive file is
-                // much smaller (~2-4 GB after Q4 quantization).
+                let archive_size = std::fs::metadata(&tmp_path)
+                    .map(|m| m.len())
+                    .unwrap_or(0);
+                tracing::info!(
+                    archive_mb = archive_size / (1024 * 1024),
+                    "streaming archive: {} MiB on disk",
+                    archive_size / (1024 * 1024),
+                );
+
                 std::fs::read(&tmp_path)
                     .context("reading streaming archive from temp file")?
             } else {
@@ -1225,6 +1248,7 @@ fn build_final_archive_to_file(
     layer_header: Option<hologram::hologram_archive::entrypoint::schedule::LayerHeader>,
     bundle: Option<&hologram_ai_common::ContextBundle>,
     weight_index: Option<&hologram::hologram_archive::weight::index::WeightIndex>,
+    extra_sections: &[(u32, Vec<u8>)],
     output_path: &std::path::Path,
 ) -> anyhow::Result<()> {
     use hologram::hologram_archive::section::{
@@ -1265,6 +1289,11 @@ fn build_final_archive_to_file(
         for (kind, bytes) in bundle.iter() {
             writer = writer.add_raw_section(kind, bytes.to_vec());
         }
+    }
+
+    // Add caller-provided sections (model_meta, tokenizer, host_meta).
+    for (kind, bytes) in extra_sections {
+        writer = writer.add_raw_section(*kind, bytes.clone());
     }
 
     writer
