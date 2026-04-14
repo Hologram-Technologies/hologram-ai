@@ -79,6 +79,43 @@ pub struct HoloArchive {
     pub stats: CompileStats,
 }
 
+/// Sections to embed in the archive during the single build pass.
+///
+/// Collected by the CLI before compilation so that the compiler can
+/// include them in `build_final_archive_to_file` — no post-processing
+/// `rebuild_archive_with_section` round-trips needed.
+#[derive(Default)]
+pub struct ArchiveSections {
+    sections: Vec<(u32, Vec<u8>)>,
+}
+
+impl ArchiveSections {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Add a section from an `EmbeddableSection` implementor.
+    pub fn add(&mut self, section: &dyn hologram::hologram_archive::section::EmbeddableSection) {
+        self.sections
+            .push((section.section_kind(), section.to_bytes()));
+    }
+
+    /// Add a raw section (kind + pre-serialized bytes).
+    pub fn add_raw(&mut self, kind: u32, bytes: Vec<u8>) {
+        self.sections.push((kind, bytes));
+    }
+
+    /// Whether any sections have been added.
+    pub fn is_empty(&self) -> bool {
+        self.sections.is_empty()
+    }
+
+    /// Consume and return the collected sections.
+    pub fn into_inner(self) -> Vec<(u32, Vec<u8>)> {
+        self.sections
+    }
+}
+
 /// Debug mapping from source tensor names to compiled node indices.
 ///
 /// Used by execution conformance testing to correlate ORT intermediate
@@ -214,22 +251,28 @@ impl ModelCompiler {
         &self,
         source: ModelSource,
     ) -> anyhow::Result<HoloArchive> {
-        self.compile_with_sections(source, &[])
+        self.compile_with_sections(source, ArchiveSections::new())
     }
 
     /// Compile with embedded sections.
+    ///
+    /// Sections (model_meta, tokenizer, host) are included in the single
+    /// archive build pass. No post-processing `rebuild_archive_with_section`
+    /// round-trips — critical for large models where each rebuild unpacks +
+    /// repacks the entire archive.
     pub fn compile_with_sections(
         &self,
         source: ModelSource,
-        extra_sections: &[(u32, Vec<u8>)],
+        sections: ArchiveSections,
     ) -> anyhow::Result<HoloArchive> {
+        let extra_sections = sections.into_inner();
         // Multi-component models have their own compilation path.
         if let ModelSource::MultiOnnx {
             components,
             connections,
         } = source
         {
-            return self.compile_multi_onnx(components, connections);
+            return self.compile_multi_onnx(components, connections, &extra_sections);
         }
 
         // Step 1 — import.
@@ -508,7 +551,7 @@ impl ModelCompiler {
                     Some(layer_header),
                     None,
                     Some(&weight_index),
-                    extra_sections,
+                    &extra_sections,
                     &tmp_path,
                 )?;
 
@@ -651,6 +694,7 @@ impl ModelCompiler {
             Some(layer_header),
             bundle,
             wi,
+            &[],
         )?;
 
         let archive = HoloArchive {
@@ -764,6 +808,7 @@ impl ModelCompiler {
             Some(layer_header),
             bundle,
             wi,
+            &[],
         )?;
 
         let archive = HoloArchive {
@@ -928,6 +973,7 @@ impl ModelCompiler {
         &self,
         components: Vec<ComponentInput>,
         connections: Vec<hologram_ai_common::sections::meta::ComponentConnection>,
+        extra_sections: &[(u32, Vec<u8>)],
     ) -> anyhow::Result<HoloArchive> {
         use hologram_ai_common::sections::meta::ComponentRole;
 
@@ -1180,6 +1226,7 @@ fn build_final_archive(
     layer_header: Option<hologram::hologram_archive::entrypoint::schedule::LayerHeader>,
     bundle: Option<&hologram_ai_common::ContextBundle>,
     weight_index: Option<&hologram::hologram_archive::weight::index::WeightIndex>,
+    extra_sections: &[(u32, Vec<u8>)],
 ) -> anyhow::Result<Vec<u8>> {
     use hologram::hologram_archive::section::{
         EmbeddableSection, SECTION_LAYER_HEADER, SECTION_WEIGHT_INDEX,
@@ -1231,6 +1278,11 @@ fn build_final_archive(
         for (kind, bytes) in bundle.iter() {
             writer = writer.add_raw_section(kind, bytes.to_vec());
         }
+    }
+
+    // Add caller-provided sections (model_meta, tokenizer, host_meta).
+    for (kind, bytes) in extra_sections {
+        writer = writer.add_raw_section(*kind, bytes.clone());
     }
 
     writer
@@ -1449,6 +1501,7 @@ fn compile_one_component(
         Some(layer_header),
         bundle,
         weight_index,
+        &[], // compile_one_component doesn't add extra sections
     )
 }
 

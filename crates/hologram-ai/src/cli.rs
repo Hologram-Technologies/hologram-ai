@@ -199,7 +199,7 @@ fn main() -> anyhow::Result<()> {
                 patch_budget_ratio,
                 ..Default::default()
             };
-            let compiled = compiler.compile(source)?;
+
             if output.exists() && !output.is_dir() {
                 anyhow::bail!(
                     "'{}' exists and is not a directory. Remove it or choose a different --output path.",
@@ -220,13 +220,43 @@ fn main() -> anyhow::Result<()> {
                 candidate.exists().then_some(candidate)
             });
 
-            // Embed model metadata section.
-            // Use manifest kind if provided, otherwise auto-detect.
+            // ── Collect all sections BEFORE compilation ──────────────────
+            // Single-pass: sections are embedded during archive build.
+            // No post-processing rebuild_archive_with_section round-trips.
+            let mut sections = hologram_ai::compiler::ArchiveSections::new();
+
+            // Tokenizer section.
+            if let Some(tok_path) = &tok_path {
+                let tok_section =
+                    hologram_ai_tokenizer::archive::TokenizerSectionData::from_tokenizer_json(
+                        tok_path,
+                    )?;
+                eprintln!(
+                    "embedding tokenizer ({} tokens) from {}",
+                    tok_section.vocab.len(),
+                    tok_path.display()
+                );
+                sections.add(&tok_section);
+            }
+
+            // Host metadata section.
+            let host_section = build_host_meta(&host_cli, manifest_host.as_ref(), None);
+            if !host_section.is_empty() {
+                sections.add(&host_section);
+                eprintln!("embedded host metadata section");
+            }
+
+            // ── Compile with all sections in a single pass ──────────────
+            let compiled = compiler.compile_with_sections(source, sections)?;
+
+            // Model metadata section — depends on compiled.metadata, so it
+            // needs to be added post-compilation. For the streaming path,
+            // this is a TODO: extract metadata from AiGraph before compilation
+            // so it can be included in the single pass. For now, rebuild just
+            // this one section (small, fast).
             let kind = if let Some(k) = manifest_kind {
                 k
             } else {
-                // Detect LLM: either the metadata says so (GGUF sets arch/n_layers)
-                // or we have a tokenizer (strong signal for text models).
                 let is_llm = (compiled.metadata.arch != "unknown"
                     && compiled.metadata.n_layers > 0)
                     || tok_path.is_some();
@@ -250,33 +280,10 @@ fn main() -> anyhow::Result<()> {
                 kv_boundary_layers: 2,
                 kv_wht: false,
             };
-            let mut final_bytes =
-                hologram_ai::compiler::rebuild_archive_with_section(&compiled.bytes, &model_meta)?;
-
-            // Embed tokenizer section if available.
-            if let Some(tok_path) = &tok_path {
-                let section =
-                    hologram_ai_tokenizer::archive::TokenizerSectionData::from_tokenizer_json(
-                        tok_path,
-                    )?;
-                eprintln!(
-                    "embedding tokenizer ({} tokens) from {}",
-                    section.vocab.len(),
-                    tok_path.display()
-                );
-                final_bytes =
-                    hologram_ai::compiler::rebuild_archive_with_section(&final_bytes, &section)?;
-            }
-
-            // Embed host metadata section if any fields are populated (Plan 060).
-            let host_section = build_host_meta(&host_cli, manifest_host.as_ref(), None);
-            if !host_section.is_empty() {
-                final_bytes = hologram_ai::compiler::rebuild_archive_with_section(
-                    &final_bytes,
-                    &host_section,
-                )?;
-                eprintln!("embedded host metadata section");
-            }
+            let final_bytes = hologram_ai::compiler::rebuild_archive_with_section(
+                &compiled.bytes,
+                &model_meta,
+            )?;
 
             std::fs::write(&holo_path, &final_bytes)?;
             println!(
