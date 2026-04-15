@@ -1072,9 +1072,8 @@ impl ModelCompiler {
                 // Concretize.
                 let (ai_graph, seq_dim_positions) = concretize_all_dims(ai_graph, seq_len)
                     .with_context(|| format!("concretizing component '{}'", comp.name))?;
-                let ai_graph = post_concretization_repair(ai_graph)?;
-                // TODO(Plan 045): zero seq-dependent i64 values in shape constants
-                let _ = &seq_dim_positions;
+                let mut ai_graph = post_concretization_repair(ai_graph)?;
+                zero_seq_dims_for_lowering(&mut ai_graph, &seq_dim_positions);
 
                 // Memory plan.
                 let mem_plan = if is_transformer {
@@ -2194,6 +2193,20 @@ fn concretize_all_dims(
         {
             debug!(var = %entry.name, value = context_len, "concretizing seq-like dim");
             entry.fixed = Some(context_len);
+        } else if name_lower.contains("height") || name_lower.contains("width") {
+            // Spatial dims for diffusion models: default to 128 (1024×1024
+            // image ÷ 8 VAE downscale). Overridden by spatial_scale if set.
+            let spatial_default = 128u64;
+            debug!(var = %entry.name, value = spatial_default, "concretizing spatial dim");
+            entry.fixed = Some(spatial_default);
+        } else if name_lower.contains("channel") {
+            // Channel dim for diffusion latent space: typically 4.
+            debug!(var = %entry.name, value = 4, "concretizing channel dim");
+            entry.fixed = Some(4);
+        } else if name_lower == "steps" {
+            // Timestep steps: always 1 (single timestep per forward pass).
+            debug!(var = %entry.name, value = 1, "concretizing steps dim");
+            entry.fixed = Some(1);
         } else {
             debug!(var = %entry.name, value = 1, "concretizing batch-like dim");
             entry.upper = Some(1u64);
