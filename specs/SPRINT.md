@@ -123,11 +123,20 @@ zero runtime code. All kernels belong in hologram base crate.
   **Finding:** Shape metadata overrides can't fix baked op parameters (MatMul m/k/n,
   Softmax size). Shape overrides tell the *next* op what shape a buffer has, but
   the *current* op still computes with its baked parameter values.
-- [ ] **0-sentinel op parameters (Plan 045)** — zero seq-dependent values in
-  Reshape/Expand shape constants AND set seq axis to Dynamic for MatMul/norm
-  input tensors. Runs after `post_concretization_repair`, before `lower()`.
-  This makes DeferredStrategy emit 0-sentinels that the runtime resolves
-  from buffer sizes. See Plan 045 "Implementation: Shape Tensor Zeroing Pass".
+- [x] **0-sentinel op parameters (Plan 045)** — `zero_seq_dims_for_lowering()`
+  now called in all compile paths including `compile_multi_onnx` (was missing).
+  Fixed 75× UNet regression (>10 min → ~20s).
+- [x] **Metal MatMul dispatch** — wired Metal SGEMM through tape executor for
+  InlineMatMul, InlineMatMulActivation, InlineMatMulBiasActivation. 15× kernel
+  speedup (8.6s → 0.57s). Conv2d 1×1 also routes through Metal.
+- [x] **Online softmax for large attention** — SD self-attention (4096×4096)
+  uses O(seq) online softmax instead of materializing O(seq²) score matrix.
+- [x] **Streaming pipeline archives** — `PipelineWriter::build_to_file()` streams
+  weights from disk. All archives are now proper pipeline format (SECTION_PIPELINE).
+- [ ] **GPU buffer chaining (Plan 065)** — `GpuBuffer` + `GpuInput` abstraction
+  enables GPU-to-GPU op chaining without CPU readback. `dispatch_*_chained` trait
+  methods with backward-compatible defaults. Metal override passes `metal::Buffer`
+  directly between consecutive GPU ops. Target: 20s → ~3-5s for SD UNet.
   - [ ] `zero_seq_dims_for_lowering()` — new function in compiler.rs
     - Zero `known_i64_values[axis]` on Reshape/Flatten output tensors
     - Zero seq dims on Expand shape input tensors
