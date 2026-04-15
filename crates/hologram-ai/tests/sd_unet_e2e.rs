@@ -50,7 +50,7 @@ fn sd_unet_holo_path() -> PathBuf {
 /// The archive is written to disk immediately and the in-memory buffer dropped.
 fn ensure_compiled() -> bool {
     let holo = sd_unet_holo_path();
-    if holo.exists() {
+    if holo.exists() && std::fs::metadata(&holo).map(|m| m.len() > 0).unwrap_or(false) {
         return true;
     }
     let onnx = sd_unet_model_path();
@@ -61,7 +61,15 @@ fn ensure_compiled() -> bool {
         .compile(ModelSource::OnnxPath(onnx))
         .expect("SD UNet ONNX compilation failed");
 
-    std::fs::write(&holo, &archive.bytes).expect("writing archive to disk");
+    // Streaming compilation writes directly to a temp file (bytes is empty).
+    // Move the temp file to the final path; fall back to writing bytes.
+    if let Some(src) = &archive.path {
+        std::fs::rename(src, &holo)
+            .or_else(|_| std::fs::copy(src, &holo).map(|_| ()))
+            .expect("moving streamed archive to final path");
+    } else {
+        std::fs::write(&holo, &archive.bytes).expect("writing archive to disk");
+    }
     // Drop archive immediately to free ~3.4GB.
     drop(archive);
     true
