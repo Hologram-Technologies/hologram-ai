@@ -55,6 +55,14 @@ Implementations:
 
 ```rust
 /// Dispatches tensor operations on a specific device.
+///
+/// Every backend implements the full UOR computational model:
+/// - Ring arithmetic (Z/256Z, LUT-based transforms)
+/// - Float ops (matmul, conv2d, normalization, elementwise)
+/// - Data movement (transpose, slice, concat, reshape)
+///
+/// UOR LUT tables are loaded onto the device via ComputeMemory::upload
+/// at initialization and stay resident for the lifetime of execution.
 pub trait ComputeBackend<M: ComputeMemory>: Send + Sync {
     /// Execute a single kernel with device-native buffers.
     fn dispatch(
@@ -64,6 +72,11 @@ pub trait ComputeBackend<M: ComputeMemory>: Send + Sync {
         output: &mut M::Buffer,
         params: &KernelParams,
     ) -> ExecResult<()>;
+
+    /// Load UOR ring LUT tables onto the device.
+    /// Called once at initialization. The tables stay on-device for all
+    /// subsequent ring op dispatches.
+    fn load_ring_tables(&mut self, tables: &[&[u8; 256]], memory: &M);
 
     /// Flush pending work (GPU command buffer commit + wait).
     fn flush(&self);
@@ -205,9 +218,38 @@ With all data on GPU and one flush at the end:
 - Single commit + wait_until_completed at the end
 - Expected: **~2-5s** for SD v1.5 UNet (vs current 24s)
 
+## Crate Structure
+
+New crate: **`hologram-backend`** — contains all device abstractions.
+`hologram-exec` becomes a thin executor that consumes `hologram-backend`.
+
+```
+hologram-backend/
+  src/
+    lib.rs           — ComputeMemory, ComputeBackend traits
+    cpu.rs           — CpuMemory + CpuBackend (SIMD, Accelerate BLAS)
+    metal.rs         — MetalMemory + MetalBackend (Apple GPU)
+    webgpu.rs        — WebGpuMemory + WebGpuBackend (browser + wgpu)
+    kernels/         — shared kernel definitions (shader source, params)
+```
+
+### Platform Support (priority order)
+1. **macOS** — MetalBackend (Apple Silicon GPU)
+2. **WASM** — WebGpuBackend (browser WebGPU API)
+3. **x86_64** — CpuBackend (AVX2/FMA + optional MKL)
+4. **iOS** — MetalBackend (shared with macOS)
+
+### WebGPU / WASM Considerations
+- WebGPU is async (command buffer submit → poll → readback). The
+  `ComputeMemory::download` and `ComputeBackend::flush` methods need
+  async variants or callback-based APIs for the WASM target.
+- WGSL shader source replaces MSL for WebGPU kernels. Shared kernel
+  logic can be templated or dual-compiled.
+- `wasm32-unknown-unknown` target: no std::thread, no mmap. Memory
+  management uses WebGPU's buffer mapping API.
+
 ## Files
 
-- `hologram/crates/hologram-exec/src/memory/` — new module for ComputeMemory
-- `hologram/crates/hologram-exec/src/backend/` — refactored ComputeBackend<M>
-- `hologram/crates/hologram-exec/src/executor.rs` — new single-path executor
-- `hologram/crates/hologram-exec/src/tape.rs` — keep as legacy, eventually remove dual-path code
+- `hologram/crates/hologram-backend/` — new crate for device abstractions
+- `hologram/crates/hologram-exec/` — simplified executor consuming hologram-backend
+- `hologram/crates/hologram-exec/src/tape.rs` — keep as legacy, eventually thin wrapper

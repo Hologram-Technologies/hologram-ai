@@ -133,10 +133,14 @@ zero runtime code. All kernels belong in hologram base crate.
   uses O(seq) online softmax instead of materializing O(seq²) score matrix.
 - [x] **Streaming pipeline archives** — `PipelineWriter::build_to_file()` streams
   weights from disk. All archives are now proper pipeline format (SECTION_PIPELINE).
-- [ ] **GPU buffer chaining (Plan 065)** — `GpuBuffer` + `GpuInput` abstraction
-  enables GPU-to-GPU op chaining without CPU readback. `dispatch_*_chained` trait
-  methods with backward-compatible defaults. Metal override passes `metal::Buffer`
-  directly between consecutive GPU ops. Target: 20s → ~3-5s for SD UNet.
+- [x] **GPU buffer chaining (Plan 065)** — `GpuBuffer` + `GpuInput` abstraction,
+  Metal kernel coverage for all SD UNet ops, GPU-to-GPU op chaining. CPU kernel
+  time reduced to 587ms but hybrid GPU/CPU execution creates 24s sync overhead.
+- [ ] **ComputeBackend + ComputeMemory rewrite (Plan 067)** — replaces Plans
+  065/066. New `hologram-backend` crate with device-native execution: all data
+  lives on one device, all computation happens there, no CPU↔GPU transfers.
+  Every backend implements full UOR computational model (ring ops, float ops,
+  data movement). Target: 2-5s for SD UNet.
   - [ ] `zero_seq_dims_for_lowering()` — new function in compiler.rs
     - Zero `known_i64_values[axis]` on Reshape/Flatten output tensors
     - Zero seq dims on Expand shape input tensors
