@@ -460,7 +460,7 @@ impl ModelCompiler {
             );
 
             // Compile all three as a pipeline. Weights are shared (same weight_group).
-            self.compile_components(
+            self.compile_components_with_sections(
                 vec![
                     ComponentSpec {
                         name: "prefill".into(),
@@ -497,6 +497,7 @@ impl ModelCompiler {
                     },
                 ],
                 vec![], // no inter-component connections
+                &extra_sections,
             )?
         } else {
             // ── Non-LLM: single graph ───────────────────────────────────────
@@ -606,7 +607,7 @@ impl ModelCompiler {
                     },
                 });
             } else {
-                self.compile_components(
+                self.compile_components_with_sections(
                     vec![ComponentSpec {
                         name: "model".into(),
                         role: ComponentRole::Backbone,
@@ -619,6 +620,7 @@ impl ModelCompiler {
                         weight_index: Some(weight_index.clone()),
                     }],
                     vec![],
+                    &extra_sections,
                 )?
             }
         };
@@ -882,6 +884,17 @@ impl ModelCompiler {
         specs: Vec<ComponentSpec<'_>>,
         connections: Vec<hologram_ai_common::sections::meta::ComponentConnection>,
     ) -> anyhow::Result<Vec<u8>> {
+        self.compile_components_with_sections(specs, connections, &[])
+    }
+
+    /// Compile components with additional sections (tokenizer, host meta, etc.)
+    /// embedded in the pipeline wrapper archive.
+    pub fn compile_components_with_sections(
+        &self,
+        specs: Vec<ComponentSpec<'_>>,
+        connections: Vec<hologram_ai_common::sections::meta::ComponentConnection>,
+        extra_sections: &[(u32, Vec<u8>)],
+    ) -> anyhow::Result<Vec<u8>> {
         use hologram::hologram_archive::section::EmbeddableSection;
         use hologram::hologram_archive::writer::pipeline_writer::PipelineWriter;
         use hologram::hologram_archive::WeightStore;
@@ -965,6 +978,11 @@ impl ModelCompiler {
         let meta_section = meta.to_bytes();
         writer = writer.add_section(meta.section_kind(), meta_section);
 
+        // Embed extra sections (tokenizer, host metadata, etc.) in the wrapper.
+        for (kind, bytes) in extra_sections {
+            writer = writer.add_section(*kind, bytes.clone());
+        }
+
         // Build shared weight blob + dedup index for multi-component models
         // with DIFFERENT weight groups (e.g., SD text_encoder + unet).
         // For LLM pipeline (prefill+decode sharing one weight_group), skip the
@@ -1015,7 +1033,7 @@ impl ModelCompiler {
         &self,
         components: Vec<ComponentInput>,
         connections: Vec<hologram_ai_common::sections::meta::ComponentConnection>,
-        extra_sections: &[(u32, Vec<u8>)],
+        _extra_sections: &[(u32, Vec<u8>)],
     ) -> anyhow::Result<HoloArchive> {
         use hologram_ai_common::sections::meta::ComponentRole;
 
@@ -1336,7 +1354,7 @@ fn build_final_archive(
 ///
 /// Unlike `build_final_archive` which holds all weights in memory, this writes
 /// the archive directly to disk. Peak memory: graph + sections (~tens of MB).
-fn build_final_archive_to_file(
+fn _build_final_archive_to_file(
     unpacked: UnpackedArchive,
     weight_source: hologram::hologram_archive::WeightSource,
     layer_header: Option<hologram::hologram_archive::entrypoint::schedule::LayerHeader>,

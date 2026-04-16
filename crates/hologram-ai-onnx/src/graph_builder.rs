@@ -7,7 +7,7 @@ use crate::{
     tensor_map::tensor_to_param,
 };
 use hologram_ai_common::{
-    AiGraph, AiNode, AiOp, AiParam, DType, Dim, DimVarSource, DimVarTable, ImportWarning, NodeId,
+    AiGraph, AiNode, AiOp, DType, Dim, DimVarSource, DimVarTable, ImportWarning, NodeId,
     QuantDescriptor, SemanticHint, Shape, TensorId, TensorInfo,
 };
 use std::collections::HashMap;
@@ -691,7 +691,7 @@ fn extract_i64_const(
 
     match info.logical_dtype {
         DType::INT64 => {
-            if data.len() % 8 != 0 {
+            if !data.len().is_multiple_of(8) {
                 return None;
             }
             Some(
@@ -701,7 +701,7 @@ fn extract_i64_const(
             )
         }
         DType::INT32 => {
-            if data.len() % 4 != 0 {
+            if !data.len().is_multiple_of(4) {
                 return None;
             }
             Some(
