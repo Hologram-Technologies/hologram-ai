@@ -2258,7 +2258,29 @@ fn zero_seq_dims_for_lowering(
         }
     }
 
-    debug!(zeroed_i64, "zero_seq_dims_for_lowering complete");
+    // ── Zero seq dims in tensor shapes ────────────────────────────────────
+    // For ALL seq-dependent tensors, set the shape dim to 0 (sentinel).
+    // This ensures that downstream ops (Slice, Reshape, etc.) see the
+    // seq axis as dynamic at lowering time, producing 0-sentinel parameters
+    // that the runtime resolves from actual buffer sizes.
+    let mut zeroed_shapes = 0usize;
+    for &(tid, axis) in seq_dim_positions {
+        if let Some(info) = graph.tensor_info.get_mut(&tid) {
+            if axis < info.shape.len() {
+                if let hologram_ai_common::Dim::Concrete(v) = &info.shape[axis] {
+                    if *v > 0 {
+                        info.shape[axis] = hologram_ai_common::Dim::Concrete(0);
+                        zeroed_shapes += 1;
+                    }
+                }
+            }
+        }
+    }
+
+    debug!(
+        zeroed_i64,
+        zeroed_shapes, "zero_seq_dims_for_lowering complete"
+    );
 }
 
 /// Concretize all symbolic and dynamic dimensions in the graph.
