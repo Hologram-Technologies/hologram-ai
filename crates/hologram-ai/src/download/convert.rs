@@ -33,6 +33,10 @@ import torch
 print(f"Loading model {model_id}...", file=sys.stderr)
 config = AutoConfig.from_pretrained(model_id)
 config.use_cache = False
+# Ensure causal attention mask is generated even without KV cache.
+# Without this, LLaMA-style models attend to future tokens, producing garbage.
+if hasattr(config, '_attn_implementation'):
+    config._attn_implementation = 'eager'
 
 # Detect causal decoder models (GPT, LLaMA, Mistral, etc.) and use
 # AutoModelForCausalLM so the ONNX export produces logits directly.
@@ -64,13 +68,18 @@ config.save_pretrained(output_dir)
 seq_len = 8
 dummy_ids = torch.ones(1, seq_len, dtype=torch.long)
 dummy_mask = torch.ones(1, seq_len, dtype=torch.long)
+dummy_pos = torch.arange(seq_len, dtype=torch.long).unsqueeze(0)
 
 input_names = ["input_ids", "attention_mask"]
+inputs = (dummy_ids, dummy_mask)
 dynamic_axes = {
     "input_ids": {0: "batch_size", 1: "sequence_length"},
     "attention_mask": {0: "batch_size", 1: "sequence_length"},
     output_names[0]: {0: "batch_size", 1: "sequence_length"},
 }
+# Note: position_ids are NOT exported as an input. The model computes
+# them internally from the attention mask. hologram-ai's
+# PositionIdsInjection pass handles position tracking for KV cache.
 
 onnx_path = os.path.join(output_dir, "model.onnx")
 print(f"Exporting to {onnx_path}...", file=sys.stderr)
@@ -80,7 +89,7 @@ model.train(False)
 with torch.no_grad():
     torch.onnx.export(
         model,
-        (dummy_ids, dummy_mask),
+        inputs,
         onnx_path,
         input_names=input_names,
         output_names=output_names,

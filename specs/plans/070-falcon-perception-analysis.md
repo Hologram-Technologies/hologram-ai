@@ -336,20 +336,23 @@ const PATCH_DIM: &str = "patch_dim";             // patch_size² * channels (e.g
 
 ## 10. Updated Priority Table
 
-| Priority | Item | Complexity | Blocks |
-|----------|------|-----------|--------|
-| **P0** | Paged KV cache runtime in hologram-exec | Medium | Plan 016 |
-| **P0** | ONNX export script for Falcon-Perception (Python) | Small | Any testing |
-| **P1** | `AttentionMaskKind` enum (replace `causal: bool`) | Small | Vision-language support |
-| **P1** | `RoPE2D` / split temporal-spatial RoPE | Small | Vision-language support |
-| **P1** | Vision special tokens in tokenizer (`VisionTokenConfig`) | Small | Multimodal encoding |
-| **P1** | New DimVars for image dimensions | Trivial | Shape inference |
-| **P2** | `FusedSquaredReluGate` fusion pass | Small | Performance |
-| **P2** | Sink token gating | Trivial | Attention quality |
-| **P2** | SafeTensors weight loader crate | Medium | HuggingFace ecosystem |
-| **P3** | `MultimodalTokenizer` trait + encode_with_images | Medium | End-to-end VLM pipeline |
-| **P3** | AnyUp-style windowed cross-attention | Medium | Segmentation models |
-| **P3** | Ragged dimension support in DimExpr | Large | Production batched serving |
+| Priority | Item | Repo | Complexity | Blocks |
+|----------|------|------|-----------|--------|
+| **P0** | Paged KV cache runtime (`PagedKvCache`, `KvPagedWrite`/`KvPagedRead` dispatch) | **hologram** (hologram-exec) | Medium | Plan 016 |
+| **P0** | ONNX export script for Falcon-Perception (Python) | **tooling** | Small | Any testing |
+| **P1** | `AttentionMaskKind` enum on AiOp + lowering | **hologram-ai** | Small | VLM support |
+| **P1** | `AttentionMaskKind` kernel support in `dispatch_attention` (hybrid prefix, spatial window) | **hologram** (hologram-exec) | Medium | VLM support |
+| **P1** | `RoPE2D` FloatOp variant + kernel (2D spatial rotation) | **hologram** (hologram-core) | Small | VLM support |
+| **P1** | `RoPE2D` AiOp + lowering (split temporal/spatial) | **hologram-ai** | Small | VLM support |
+| **P1** | Vision special tokens in tokenizer (`VisionTokenConfig`) | **hologram-ai** | Small | Multimodal encoding |
+| **P1** | New DimVars for image dimensions | **hologram-ai** (common) | Trivial | Shape inference |
+| **P2** | `FusedSquaredReluGate` FloatOp + kernel | **hologram** (hologram-core) | Small | Performance |
+| **P2** | `SquaredReluGateFusion` pass + lowering | **hologram-ai** | Small | Performance |
+| **P2** | Sink token gating FloatOp + kernel (fused into attention output) | **hologram** (hologram-exec) | Trivial | Attention quality |
+| **P2** | SafeTensors weight loader crate | **hologram-ai** (new crate) | Medium | HF ecosystem |
+| **P3** | `MultimodalTokenizer` trait + encode_with_images | **hologram-ai** | Medium | E2E VLM pipeline |
+| **P3** | AnyUp-style windowed cross-attention kernel | **hologram** (hologram-exec) | Medium | Segmentation |
+| **P3** | Ragged dimension support in DimExpr | **hologram-ai** (common) | Large | Batched serving |
 
 ## Verification
 

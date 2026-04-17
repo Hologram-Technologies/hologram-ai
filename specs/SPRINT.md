@@ -330,20 +330,25 @@ zero runtime code. All kernels belong in hologram base crate.
       Eliminates 335MB memory traffic per Conv2d+SiLU block at 512×512.
 - [ ] **Vision-language model support (Plan 070 — Falcon-Perception analysis)**
   - [ ] ONNX export script for Falcon-Perception-300M (Python `torch.onnx.export`)
-  - [ ] `AttentionMaskKind` enum — replace `causal: bool` with `Full | Causal |
-    HybridCausalPrefix | SpatialWindow | BlockSparse` for vision-language
-    hybrid attention (bidirectional images + causal text)
-  - [ ] `RoPE2D` / split temporal-spatial RoPE — 3D rotary: 1D temporal on lower
-    head_dim half, 2D learned spatial golden-ratio on upper half
-  - [ ] `VisionTokenConfig` in tokenizer — image placeholder, coord/size/seg
-    token IDs for multimodal encoding
-  - [ ] New DimVars: `IMAGE_HEIGHT`, `IMAGE_WIDTH`, `NUM_IMAGES`, `PATCH_DIM`
-  - [ ] `FusedSquaredReluGate` fusion pass (Falcon FFN pattern: `relu(gate)² * up`)
-  - [ ] Sink token gating (`sigmoid(LSE - sink_param)` per-head attention scaling)
-  - [ ] SafeTensors weight loader crate (medium-term, for HuggingFace ecosystem)
-  - [ ] `MultimodalTokenizer` trait + `encode_with_images()` API
-  - [ ] Paged KV cache in hologram-exec (see Plan 016) — Falcon reference impl
-    uses virtual page tables, LIFO free-page stack, CPU-side metadata
+  - **hologram-ai changes:**
+    - [ ] `AttentionMaskKind` enum on AiOp — replace `causal: bool` with `Full |
+      Causal | HybridCausalPrefix | SpatialWindow | BlockSparse` + lowering
+    - [ ] `RoPE2D` AiOp variant + lowering (split temporal/spatial halves)
+    - [ ] `VisionTokenConfig` in tokenizer — image placeholder, coord/size/seg
+      token IDs for multimodal encoding
+    - [ ] New DimVars: `IMAGE_HEIGHT`, `IMAGE_WIDTH`, `NUM_IMAGES`, `PATCH_DIM`
+    - [ ] `SquaredReluGateFusion` pass (pattern: `relu(gate)² * up`)
+    - [ ] SafeTensors weight loader crate (medium-term, for HF ecosystem)
+    - [ ] `MultimodalTokenizer` trait + `encode_with_images()` API
+  - **hologram base changes:**
+    - [ ] `AttentionMaskKind` kernel support in `dispatch_attention` — hybrid
+      bidirectional prefix + causal suffix, spatial window patterns
+    - [ ] `FloatOp::RoPE2D` variant + kernel (2D spatial rotation with learned freqs)
+    - [ ] `FloatOp::FusedSquaredReluGate` kernel (like FusedSwiGLU but relu²)
+    - [ ] Sink token gating (`sigmoid(LSE - sink_param)`) fused into attention output
+    - [ ] Paged KV cache in hologram-exec (Plan 016) — virtual page tables,
+      LIFO free-page stack, `KvPagedWrite`/`KvPagedRead` dispatch
+    - [ ] AnyUp-style windowed cross-attention kernel (P3, segmentation)
 - [ ] Test with Whisper (encoder-decoder, audio)
 - [ ] Fix any op dispatch failures discovered
 - [ ] Goal: `hologram-ai compile -m model.onnx` works for top-20 HuggingFace models
