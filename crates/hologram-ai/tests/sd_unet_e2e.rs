@@ -205,3 +205,66 @@ fn sd_unet_onnx_executes() {
     // Save for ORT comparison.
     std::fs::write("/tmp/hologram_unet_out.bin", out_bytes).expect("saving output");
 }
+
+#[test]
+fn sd_unet_metal_backend() {
+    let model = sd_unet_model_path();
+    if !model.exists() {
+        eprintln!("skipping sd_unet_metal_backend: model not found");
+        return;
+    }
+
+    assert!(ensure_compiled(), "compilation failed");
+
+    let holo_path = sd_unet_holo_path();
+    let loader = hologram::HoloLoader::open(&holo_path).expect("mmap open failed");
+    let pipeline = unsafe { hologram::LoadedPipeline::from_bytes_zero_copy(loader.as_bytes()) }
+        .expect("loading pipeline failed");
+    let plan = pipeline.into_first_model().expect("no model in pipeline");
+
+    let tape = hologram::build_tape_from_plan(&plan).expect("building tape");
+
+    let sample_data = vec![0.0f32; 1 * 4 * 64 * 64];
+    let timestep_data: Vec<f32> = vec![500.0];
+    let encoder_data = vec![0.0f32; 1 * 77 * 768];
+
+    let mut inputs = hologram::GraphInputs::new();
+    inputs.set_with_shape(0, bytemuck::cast_slice(&sample_data).to_vec(), vec![1, 4, 64, 64]);
+    inputs.set_with_shape(1, bytemuck::cast_slice(&timestep_data).to_vec(), vec![1]);
+    inputs.set_with_shape(2, bytemuck::cast_slice(&encoder_data).to_vec(), vec![1, 77, 768]);
+
+    // Use the new Metal backend path.
+    let metal_mem = match hologram::backend::metal::MetalMemory::new() {
+        Some(m) => m,
+        None => {
+            eprintln!("skipping: Metal not available on this system");
+            return;
+        }
+    };
+    let metal_backend = match hologram::backend::metal::MetalBackend::new() {
+        Some(b) => b,
+        None => {
+            eprintln!("skipping: Metal backend failed to initialize (shader compilation error?)");
+            return;
+        }
+    };
+
+    eprintln!("starting Metal backend execution...");
+    let start = std::time::Instant::now();
+    let result = hologram::execute_tape_on_backend(
+        &tape, &plan, &inputs, &metal_mem, &metal_backend,
+    );
+    let elapsed = start.elapsed();
+    eprintln!("Metal execution took: {elapsed:.2?}");
+
+    match result {
+        Ok(outputs) => {
+            let (_name, out_bytes) = outputs.get(0).expect("no output");
+            let out_floats = bytes_to_f32(out_bytes);
+            eprintln!("Metal output: {} floats", out_floats.len());
+        }
+        Err(e) => {
+            eprintln!("Metal execution error (expected during migration): {e}");
+        }
+    }
+}

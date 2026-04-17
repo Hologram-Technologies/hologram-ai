@@ -768,6 +768,7 @@ version = "0.4.1"
 dependencies = [
  "bytemuck",
  "hologram-archive",
+ "hologram-backend",
  "hologram-cli",
  "hologram-compiler",
  "hologram-core",

@@ -46,6 +46,7 @@ parking_lot.workspace = true
 [dev-dependencies]
 # Provides onnx_builder (pure Rust, no ORT) for mini fixture tests.
 hologram-ai-conformance = { path = "../hologram-ai-conformance" }
+# hologram-backend is accessed via hologram's re-export
 bytemuck = { workspace = true }
 criterion = { workspace = true }
 
