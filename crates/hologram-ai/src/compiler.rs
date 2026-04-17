@@ -532,6 +532,27 @@ impl ModelCompiler {
                     writer = writer.add_section(*kind, bytes.clone());
                 }
 
+                // Add model_meta section for LLM detection at load time.
+                {
+                    use hologram::hologram_archive::section::EmbeddableSection;
+                    let model_meta =
+                        hologram::hologram_archive::section::model_meta::ModelMetaSection {
+                            kind: hologram::hologram_archive::section::model_meta::ModelKind::TextLlm,
+                            arch: pre_metadata.arch.clone(),
+                            description: pre_metadata.arch.clone(),
+                            max_seq_len: pre_metadata.context_len,
+                            supports_prompt: true,
+                            n_layers: pre_metadata.n_layers,
+                            n_kv_heads: pre_metadata.n_kv_heads,
+                            head_dim: pre_metadata.head_dim,
+                            kv_k_bits: 0,
+                            kv_v_bits: 0,
+                            kv_boundary_layers: 2,
+                            kv_wht: false,
+                        };
+                    writer = writer.add_section(model_meta.section_kind(), model_meta.to_bytes());
+                }
+
                 writer
                     .build_to_file(&output_path, &scratch_path)
                     .map_err(|e| anyhow::anyhow!("building streaming LLM pipeline: {e}"))?;
