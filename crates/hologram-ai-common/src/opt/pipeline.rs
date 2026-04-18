@@ -93,7 +93,7 @@ impl OptPipeline {
             // input. Enables KV cache decode at seq=1 by passing the correct
             // absolute position from the generation loop.
             Box::new(PositionIdsInjection),
-            Box::new(AttentionFusion),
+            Box::new(AttentionFusion { force_causal: None }),
             Box::new(KvSlotInjection),
             // Infer semantic hints (Embedding, AttentionWeight, Residual, etc.)
             // from op types. Runs after all fusion passes so fused ops are present.

@@ -26,7 +26,20 @@ use crate::ir::{AiGraph, AiNode, AiOp, TensorId};
 use std::collections::{HashMap, HashSet};
 
 /// Fuse decomposed SDPA chains into `AiOp::GroupedQueryAttention`.
-pub struct AttentionFusion;
+///
+/// When `force_causal` is true, all fused attention ops are marked causal
+/// regardless of whether an explicit mask Add was detected in the ONNX graph.
+/// This is necessary for causal LM models (GPT, LLaMA, etc.) where PyTorch's
+/// `scaled_dot_product_attention` applies the causal mask internally without
+/// emitting it as an explicit Add node in the ONNX export.
+///
+/// When `force_causal` is `None`, the pass auto-detects: if the graph's output
+/// names contain "logits" or "output" (causal LM signature), causal is forced.
+/// Encoder models (BERT, CLIP) and diffusion components (UNet, VAE) do not
+/// match and correctly get bidirectional attention.
+pub struct AttentionFusion {
+    pub force_causal: Option<bool>,
+}
 
 impl Pass for AttentionFusion {
     fn name(&self) -> &str {
@@ -34,6 +47,19 @@ impl Pass for AttentionFusion {
     }
 
     fn run(&self, mut graph: AiGraph) -> anyhow::Result<AiGraph> {
+        // Resolve force_causal: explicit override > auto-detect from graph outputs.
+        // Causal LMs output "logits" or "output"; encoders/diffusion output
+        // "last_hidden_state", "sample", etc.
+        let force_causal = self.force_causal.unwrap_or_else(|| {
+            graph
+                .output_names
+                .iter()
+                .any(|n| n == "logits" || n == "output")
+        });
+        if force_causal {
+            tracing::info!("AttentionFusion: forcing causal=true (causal LM detected)");
+        }
+
         let tid_to_node: HashMap<TensorId, usize> = graph
             .nodes
             .iter()
@@ -146,7 +172,7 @@ impl Pass for AttentionFusion {
                         num_kv_heads,
                         head_dim,
                         scale: Some(effective_scale),
-                        causal: chain.has_mask,
+                        causal: chain.has_mask || force_causal,
                         heads_first: true,
                         qk_norm: false,
                         rope: false,
@@ -176,7 +202,9 @@ impl Pass for AttentionFusion {
                     num_kv_heads,
                     head_dim,
                     effective_scale,
-                    causal = chain.has_mask,
+                    causal = chain.has_mask || force_causal,
+                    mask_in_graph = chain.has_mask,
+                    force_causal,
                     "AttentionFusion: fused SDPA chain"
                 );
             }
@@ -711,7 +739,9 @@ mod tests {
         let graph = build_sdpa_graph();
         assert_eq!(graph.nodes.len(), 5);
 
-        let fused = AttentionFusion.run(graph).expect("fusion failed");
+        let fused = AttentionFusion { force_causal: Some(false) }
+            .run(graph)
+            .expect("fusion failed");
 
         // Should have 1 node: GroupedQueryAttention (Mul, Add, Softmax, output MatMul removed).
         // The Q@K^T MatMul is also removed.
@@ -737,6 +767,130 @@ mod tests {
                 assert_eq!(*head_dim, 16);
                 assert!((scale.expect("scale") - 0.25).abs() < 1e-6);
                 assert!(*causal, "should detect causal mask");
+            }
+            other => panic!("expected GroupedQueryAttention, got {other:?}"),
+        }
+    }
+
+    /// Build a minimal SDPA graph WITHOUT the Add(mask) step:
+    /// Q@K^T → Softmax → MatMul(V). This mimics PyTorch SDPA export
+    /// where the causal mask is applied internally, not as an explicit op.
+    fn build_maskless_sdpa_graph(output_name: &str) -> AiGraph {
+        let mut graph = AiGraph {
+            name: "test_maskless_sdpa".into(),
+            nodes: Vec::new(),
+            inputs: Vec::new(),
+            outputs: Vec::new(),
+            input_names: vec!["input_ids".into()],
+            output_names: vec![output_name.into()],
+            params: HashMap::new(),
+            tensor_info: HashMap::new(),
+            metadata: HashMap::new(),
+            warnings: Vec::new(),
+            dim_vars: crate::ir::DimVarTable::default(),
+            shape_constraints: crate::ir::ConstraintStore::default(),
+            subgraphs: HashMap::new(),
+            tensor_names: HashMap::new(),
+            topo_cache: Default::default(),
+        };
+        let mut next_tid: TensorId = 0;
+        let mut next_nid: u32 = 0;
+        let alloc_tid = |next: &mut TensorId| -> TensorId {
+            let t = *next;
+            *next += 1;
+            t
+        };
+
+        let q = alloc_tid(&mut next_tid);
+        let k_t = alloc_tid(&mut next_tid);
+        let v = alloc_tid(&mut next_tid);
+
+        graph.tensor_info.insert(q, f32_info(shape_4d(1, 4, 8, 16)));
+        graph.tensor_info.insert(k_t, f32_info(shape_4d(1, 4, 16, 8)));
+        graph.tensor_info.insert(v, f32_info(shape_4d(1, 4, 8, 16)));
+
+        // MatMul(Q, K^T) → scores
+        let scores = alloc_tid(&mut next_tid);
+        graph.tensor_info.insert(scores, f32_info(shape_4d(1, 4, 8, 8)));
+        graph.nodes.push(AiNode::new(
+            { let n = next_nid; next_nid += 1; n },
+            AiOp::MatMul,
+            vec![q, k_t],
+            vec![scores],
+        ));
+
+        // Softmax(scores) → weights (no Add/mask in between)
+        let weights = alloc_tid(&mut next_tid);
+        graph.tensor_info.insert(weights, f32_info(shape_4d(1, 4, 8, 8)));
+        graph.nodes.push(AiNode::new(
+            { let n = next_nid; next_nid += 1; n },
+            AiOp::Softmax { axis: -1 },
+            vec![scores],
+            vec![weights],
+        ));
+
+        // MatMul(weights, V) → output
+        let output = alloc_tid(&mut next_tid);
+        graph.tensor_info.insert(output, f32_info(shape_4d(1, 4, 8, 16)));
+        graph.nodes.push(AiNode::new(
+            { let _n = next_nid; next_nid += 1; _n },
+            AiOp::MatMul,
+            vec![weights, v],
+            vec![output],
+        ));
+
+        graph.inputs = vec![q, k_t, v];
+        graph.outputs = vec![output];
+        let _ = next_nid;
+        graph
+    }
+
+    #[test]
+    fn maskless_sdpa_auto_detects_causal_for_llm() {
+        // Graph with output named "logits" → auto-detect should force causal.
+        let graph = build_maskless_sdpa_graph("logits");
+        let fused = AttentionFusion { force_causal: None }
+            .run(graph)
+            .expect("fusion failed");
+
+        assert_eq!(fused.nodes.len(), 1);
+        match &fused.nodes[0].op {
+            AiOp::GroupedQueryAttention { causal, .. } => {
+                assert!(*causal, "auto-detect should force causal for LLM output");
+            }
+            other => panic!("expected GroupedQueryAttention, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn maskless_sdpa_not_causal_for_encoder() {
+        // Graph with output named "last_hidden_state" → should NOT be causal.
+        let graph = build_maskless_sdpa_graph("last_hidden_state");
+        let fused = AttentionFusion { force_causal: None }
+            .run(graph)
+            .expect("fusion failed");
+
+        assert_eq!(fused.nodes.len(), 1);
+        match &fused.nodes[0].op {
+            AiOp::GroupedQueryAttention { causal, .. } => {
+                assert!(!*causal, "encoder attention should not be causal");
+            }
+            other => panic!("expected GroupedQueryAttention, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn force_causal_override_true() {
+        // Explicitly force causal even for encoder-like output.
+        let graph = build_maskless_sdpa_graph("last_hidden_state");
+        let fused = AttentionFusion { force_causal: Some(true) }
+            .run(graph)
+            .expect("fusion failed");
+
+        assert_eq!(fused.nodes.len(), 1);
+        match &fused.nodes[0].op {
+            AiOp::GroupedQueryAttention { causal, .. } => {
+                assert!(*causal, "force_causal=Some(true) should override auto-detect");
             }
             other => panic!("expected GroupedQueryAttention, got {other:?}"),
         }
