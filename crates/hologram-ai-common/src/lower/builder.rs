@@ -180,12 +180,12 @@ pub fn lower(
         tracing::info!(
             total_params = total_params_approx,
             threshold = q4_min_params,
-            "model too small for Q4 — upgrading to Q8 for quality"
+            "model too small for Q4 — falling back to f32"
         );
-        // Upgrade to Q8: disable Q4 early-quant. The Q8 path is handled
-        // separately via QuantStrategy::Q8_0 lowering (Gemm quant_b=2).
-        // For now, fall back to f32 (no early quant). The user can
-        // explicitly request Q4 via --quantize q4_0 to override.
+        // Disable Q4 early-quant, fall back to f32. Q8 k-means is too slow
+        // for compile-time use (hours for 120+ weight matrices). A fast per-row
+        // Q8 format (like GGML's Q8_0) would enable Q8 here — tracked as
+        // future work in Plan 074 Pattern 6.
         (false, LoweringOptions {
             quant_strategy: QuantStrategy::None,
         })
@@ -194,7 +194,9 @@ pub fn lower(
             quant_strategy: opts.quant_strategy,
         })
     };
-    let _ = &opts_effective; // suppress unused warning
+    // Shadow `opts` with the effective options so all downstream code
+    // (including Q8 interception at line ~735) uses the right strategy.
+    let opts = &opts_effective;
 
     let base_threshold = 0.15f32;
     let size_scale = (total_params_approx as f64 / 1e9).sqrt().max(0.3) as f32;
@@ -1016,7 +1018,7 @@ pub fn lower(
                             continue;
                         }
 
-                        // No early-quant — emit as plain f32 MatMul.
+                        // No quantization — emit as plain f32 MatMul.
                         {
                             let n_val = split_sizes[i] as u32;
                             let matmul_op = GraphOp::Float(FloatOp::MatMul {
@@ -2130,6 +2132,57 @@ fn try_convert_conv2d_to_lut4(
         rows: kernel_size as u32,
         cols: oc_per_group as u32,
     }))
+}
+
+/// Quantize a weight on demand to Q8: load from param, quantize to 8-bit, serialize.
+/// Returns None if the weight doesn't meet eligibility.
+///
+/// NOTE: Currently unused because the k-means Q8 quantization is too slow for
+/// compile-time use (O(elements × 256 × iterations)). A fast per-row symmetric
+/// Q8 format would make this viable.
+#[allow(dead_code)]
+fn quantize_weight_q8_on_demand(tid: TensorId, ai_graph: &AiGraph) -> Option<Vec<u8>> {
+    use hologram::hologram_exec::lut_gemm::quantize::quantize_8bit;
+
+    let param = ai_graph.params.get(&tid)?;
+    let info = ai_graph.tensor_info.get(&tid)?;
+    let dims: Vec<usize> = info
+        .shape
+        .iter()
+        .filter_map(|d| d.as_concrete().map(|c| c as usize))
+        .collect();
+    if dims.len() != 2 || dims[0] < 256 || dims[1] < 256 {
+        return None;
+    }
+    // Skip very large matrices (e.g., embedding/LM-head at 151936×896).
+    // Q8 k-means quantization is O(elements × 256 × iterations) — too
+    // slow for matrices > 10M elements. These are typically the tied
+    // embedding weight which is less sensitive to quantization anyway.
+    let n_elements = dims[0] * dims[1];
+    if n_elements > 10_000_000 {
+        return None;
+    }
+    let raw_bytes = param_bytes_owned(param).ok()?;
+    let expected = dims[0] * dims[1] * 4;
+    if raw_bytes.len() != expected {
+        return None;
+    }
+    let f32_weights: Vec<f32> = raw_bytes
+        .chunks_exact(4)
+        .map(|c| f32::from_le_bytes(c.try_into().expect("4 bytes")))
+        .collect();
+    drop(raw_bytes);
+    let qw8 = quantize_8bit(&f32_weights, dims[0] as u32, dims[1] as u32);
+    drop(f32_weights);
+    let serialized = rkyv::to_bytes::<rkyv::rancor::Error>(&qw8).ok()?;
+    tracing::debug!(
+        tid,
+        rows = dims[0],
+        cols = dims[1],
+        bytes = serialized.len(),
+        "deferred-quant: weight → Q8"
+    );
+    Some(serialized.to_vec())
 }
 
 /// Quantize a weight on demand: load from param, quantize to Q4, serialize.
