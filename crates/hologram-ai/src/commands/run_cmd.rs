@@ -361,8 +361,14 @@ fn run_generation(
         .position(|n| n == "position_ids")
         .map(|i| i as u32);
 
-    let vocab_size = encoder.vocab_size();
-    let bytes_per_pos = vocab_size * 4;
+    // Infer vocab size from the model's compiled output shape rather than the
+    // tokenizer. Models often pad vocab to a multiple (e.g., Qwen2 has
+    // tokenizer vocab=151643 but model logit dim=151936). Using the tokenizer
+    // vocab for position extraction causes a misaligned read at multi-token
+    // prompts where the offset accumulates per position.
+    let tokenizer_vocab = encoder.vocab_size();
+    let mut vocab_size = tokenizer_vocab;
+    let mut bytes_per_pos = vocab_size * 4;
     let start = std::time::Instant::now();
 
     // KV cache state — used for any model with attention layers (pipeline
@@ -477,6 +483,23 @@ fn run_generation(
             Some((_, data)) => data,
             None => anyhow::bail!("model produced no output"),
         };
+
+        // On first step, infer the model's actual vocab dimension from the
+        // output buffer. This handles models where the logit dimension differs
+        // from the tokenizer vocab (e.g., Qwen2: vocab=151643, logit=151936).
+        if step == 0 && actual_len > 0 {
+            let total_f32 = logit_data.len() / 4;
+            let inferred = total_f32 / actual_len;
+            if inferred > 0 && inferred != vocab_size && total_f32 == inferred * actual_len {
+                tracing::info!(
+                    tokenizer_vocab,
+                    model_vocab = inferred,
+                    "using model output dim for logit extraction (differs from tokenizer)"
+                );
+                vocab_size = inferred;
+                bytes_per_pos = vocab_size * 4;
+            }
+        }
 
         let target_pos = actual_len.saturating_sub(1);
 
