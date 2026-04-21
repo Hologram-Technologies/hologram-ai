@@ -26,13 +26,19 @@ enum Command {
     /// Compile a model to a `.holo` archive file.
     ///
     /// Single model: `hologram-ai compile -m model.onnx -o out/`
+    /// Config file:  `hologram-ai compile --config models/model/hologram.toml`
     /// Multi-component: `hologram-ai compile --manifest pipeline.toml -o out/`
     Compile {
+        /// Path to a hologram.toml config file. All paths in the config are
+        /// resolved relative to the config file's directory. CLI flags override
+        /// config values.
+        #[arg(short, long, value_name = "FILE")]
+        config: Option<PathBuf>,
         /// Path to the input ONNX model file. Mutually exclusive with --manifest.
         #[arg(
             short,
             long,
-            required_unless_present = "manifest",
+            required_unless_present_any = &["manifest", "config"],
             conflicts_with = "manifest"
         )]
         model: Option<PathBuf>,
@@ -42,7 +48,7 @@ enum Command {
         manifest: Option<PathBuf>,
         /// Output directory for the compiled `.holo` archive.
         #[arg(short, long, value_name = "DIR")]
-        output: PathBuf,
+        output: Option<PathBuf>,
         /// Path to tokenizer.json (auto-detected from model directory if omitted).
         #[arg(long, value_name = "FILE")]
         tokenizer: Option<PathBuf>,
@@ -133,6 +139,7 @@ fn main() -> anyhow::Result<()> {
             }
         }
         Command::Compile {
+            config,
             model,
             manifest,
             output,
@@ -153,8 +160,47 @@ fn main() -> anyhow::Result<()> {
             patch_budget,
             no_patch_prune,
         } => {
+            // Load config file if provided. Paths are resolved relative to
+            // the config file's directory.
+            let cfg = if let Some(config_path) = &config {
+                let cfg = load_model_config(config_path)
+                    .with_context(|| format!("loading config from {}", config_path.display()))?;
+                Some(cfg)
+            } else {
+                None
+            };
+            let config_dir = config
+                .as_ref()
+                .and_then(|p| p.parent())
+                .map(|p| p.to_path_buf());
+
+            // Merge: CLI flags override config values.
+            let effective_model = model.or_else(|| {
+                cfg.as_ref()
+                    .and_then(|c| c.model.path.as_ref())
+                    .map(|p| resolve_config_path(&config_dir, p))
+            });
+            let effective_output = output.or_else(|| {
+                cfg.as_ref()
+                    .and_then(|c| c.model.output.as_ref())
+                    .map(|p| resolve_config_path(&config_dir, p))
+            });
+            let effective_quantize = quantize.or_else(|| {
+                cfg.as_ref().and_then(|c| c.model.quantize.clone())
+            });
+            let effective_seq_len = seq_len.or_else(|| {
+                cfg.as_ref().and_then(|c| c.model.seq_len)
+            });
+            let effective_tokenizer = tokenizer.or_else(|| {
+                cfg.as_ref()
+                    .and_then(|c| c.model.tokenizer.as_ref())
+                    .map(|p| resolve_config_path(&config_dir, p))
+            });
+
             let host_cli = HostMetaCliArgs {
-                prompt_template,
+                prompt_template: prompt_template.or_else(|| {
+                    cfg.as_ref().and_then(|c| c.model.prompt_template.clone())
+                }),
                 chat_template,
                 temperature,
                 top_k,
@@ -171,10 +217,17 @@ fn main() -> anyhow::Result<()> {
                     let (source, kind, host) = parse_manifest(manifest_path)?;
                     (source, manifest_path.clone(), kind, host)
                 } else {
-                    let model_path = model.as_ref().expect("--model or --manifest required");
+                    let model_path = effective_model
+                        .as_ref()
+                        .context("--model, --manifest, or --config with [model].path required")?;
                     let source = model_source_from_path(model_path)?;
                     (source, model_path.clone(), None, None)
                 };
+            let output = effective_output
+                .context("--output or --config with [model].output required")?;
+            let tokenizer = effective_tokenizer;
+            let seq_len = effective_seq_len;
+            let quantize = effective_quantize;
 
             // These sections are collected here so that streaming compilation
             // can include them in the single build pass (no rebuild-with-section
@@ -690,6 +743,51 @@ fn build_host_meta(
         sampling,
         ports,
         model_card,
+    }
+}
+
+// ── Model config file (hologram.toml) ────────────────────────────────────────
+
+/// `hologram.toml` config file for per-model compilation settings.
+///
+/// All paths are resolved relative to the config file's directory.
+/// CLI flags override config values.
+#[derive(serde::Deserialize)]
+struct ModelConfig {
+    #[serde(default)]
+    model: ModelConfigModel,
+    #[serde(default)]
+    #[allow(dead_code)] // Used when `--config` is passed to the `run` command (future).
+    run: Option<ModelConfigRun>,
+}
+
+#[derive(Default, serde::Deserialize)]
+struct ModelConfigModel {
+    path: Option<String>,
+    output: Option<String>,
+    quantize: Option<String>,
+    seq_len: Option<u64>,
+    tokenizer: Option<String>,
+    prompt_template: Option<String>,
+}
+
+#[allow(dead_code)] // Fields used when `--config` is passed to the `run` command (future).
+#[derive(Default, serde::Deserialize)]
+struct ModelConfigRun {
+    prompt: Option<String>,
+    max_tokens: Option<u32>,
+}
+
+fn load_model_config(path: &std::path::Path) -> anyhow::Result<ModelConfig> {
+    let text = std::fs::read_to_string(path)
+        .with_context(|| format!("reading config {}", path.display()))?;
+    toml::from_str(&text).with_context(|| format!("parsing config {}", path.display()))
+}
+
+fn resolve_config_path(config_dir: &Option<PathBuf>, relative: &str) -> PathBuf {
+    match config_dir {
+        Some(dir) => dir.join(relative),
+        None => PathBuf::from(relative),
     }
 }
 

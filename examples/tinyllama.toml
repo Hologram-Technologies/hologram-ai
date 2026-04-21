@@ -1,0 +1,13 @@
+# TinyLlama 1.1B Chat — Q4 quantized compilation
+#
+# Compile: cargo run --release -- compile --config examples/tinyllama.toml
+# Run:     cargo run --release -- run models/TinyLlama-1.1B-Chat-v1.0/model.holo --prompt "The capital of France is" --max-tokens 30
+
+[model]
+path = "../models/TinyLlama-1.1B-Chat-v1.0/model.onnx"
+output = "../models/TinyLlama-1.1B-Chat-v1.0"
+quantize = "q4_0"
+
+[run]
+prompt = "The capital of France is"
+max_tokens = 30

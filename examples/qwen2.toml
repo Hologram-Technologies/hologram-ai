@@ -1,0 +1,13 @@
+# Qwen2 0.5B — Q8 quantized compilation (auto-downgraded from Q4 for small models)
+#
+# Compile: cargo run --release -- compile --config examples/qwen2.toml
+# Run:     cargo run --release -- run models/Qwen2-0.5B/model.holo --prompt "The capital of France is" --max-tokens 30
+
+[model]
+path = "../models/Qwen2-0.5B/model.onnx"
+output = "../models/Qwen2-0.5B"
+quantize = "q4_0"
+
+[run]
+prompt = "The capital of France is"
+max_tokens = 30
