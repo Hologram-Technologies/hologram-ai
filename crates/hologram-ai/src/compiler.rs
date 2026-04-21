@@ -3316,8 +3316,8 @@ impl HoloRunner {
                 weight_cache: parking_lot::RwLock::new(hologram::WeightCache::new()),
                 patch_prune,
             };
-            // Pre-warm dequant cache: populate f32 expansion for all Q4 constants
-            // so decode steps never pay the dequant overhead.
+            // Pre-warm dequant cache: populate f32 expansion for all Q4/Q8
+            // constants so decode steps never pay the dequant overhead.
             #[cfg(target_os = "macos")]
             {
                 let sg = runner.plan.graph();
@@ -3325,9 +3325,22 @@ impl HoloRunner {
                 wc.prewarm_q4(&runner.tape, &sg.constants, runner.plan.weights());
                 wc.prewarm_q8(&runner.tape, &sg.constants, runner.plan.weights());
                 if let Some(ref dt) = runner.decode_tape {
-                    // Decode plan shares weights with prefill plan.
-                    wc.prewarm_q4(dt, &sg.constants, runner.plan.weights());
-                    wc.prewarm_q8(dt, &sg.constants, runner.plan.weights());
+                    // Use the decode plan's own ConstantStore — with inlined Bytes
+                    // constants (Plan 077), each graph has its own constants and the
+                    // ConstantIds differ between prefill and decode.
+                    let decode_constants = runner
+                        .decode_plan
+                        .as_ref()
+                        .map(|dp| &dp.graph().constants);
+                    let decode_weights = runner
+                        .decode_plan
+                        .as_ref()
+                        .map(|dp| dp.weights())
+                        .unwrap_or(&[]);
+                    if let Some(dc) = decode_constants {
+                        wc.prewarm_q4(dt, dc, decode_weights);
+                        wc.prewarm_q8(dt, dc, decode_weights);
+                    }
                 }
             }
             Ok(runner)
