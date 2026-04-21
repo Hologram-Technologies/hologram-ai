@@ -145,68 +145,13 @@ pub fn lower(
     //
     // We track which TIDs became Q4 constants so node lowering emits
     // MatMulLut4 instead of FloatOp::MatMul.
-    let do_early_quant = matches!(
-        opts.quant_strategy,
-        QuantStrategy::Q4_0 | QuantStrategy::Q2_0
-    );
-
-    // ── Adaptive quantization threshold ──────────────────────────────
-    // Smaller models are more sensitive to quantization error because each
-    // weight carries more information. Scale the error threshold by
-    // sqrt(total_params / 1B) so that:
-    //   TinyLlama 1.1B: 0.15 × 1.05 = 0.157 (unchanged)
-    //   Qwen2     0.5B: 0.15 × 0.71 = 0.106 (stricter)
-    //   LLaMA-3   8B:   0.15 × 2.83 = 0.424 (more permissive)
-    let total_param_bytes: u64 = ai_graph
-        .params
-        .values()
-        .map(|p| match p {
-            crate::ir::AiParam::Inline { data, .. } => data.len() as u64,
-            crate::ir::AiParam::Mmap { len, .. } => *len,
-        })
-        .sum();
-    let total_params_approx = total_param_bytes / 4; // f32 params
-
-    // ── Model-size-aware quantization ────────────────────────────────
-    // Small models (<1B params) are too sensitive for Q4 — the 9% per-weight
-    // error compounds across layers into garbage output. Automatically
-    // upgrade to Q8 (1% per-weight error) for small models.
-    // Threshold: 750M params (~3GB f32). Below this, Q4 is not safe.
-    let q4_min_params: u64 = 750_000_000;
-    let (do_early_quant, opts_effective) = if do_early_quant
-        && total_params_approx < q4_min_params
-        && matches!(opts.quant_strategy, QuantStrategy::Q4_0)
-    {
-        tracing::info!(
-            total_params = total_params_approx,
-            threshold = q4_min_params,
-            "model too small for Q4 — using Q8 uniform for quality"
-        );
-        // Disable Q4 early-quant, switch to Q8. The Q8 uniform quantization
-        // is O(n) (no k-means) and the runtime uses BLAS dequant-matmul
-        // (same as Q4 hybrid path). ~2x faster than f32, near-lossless quality.
-        (false, LoweringOptions {
-            quant_strategy: QuantStrategy::Q8_0,
-        })
-    } else {
-        (do_early_quant, LoweringOptions {
-            quant_strategy: opts.quant_strategy,
-        })
-    };
-    // Shadow `opts` with the effective options so all downstream code
-    // (including Q8 interception at line ~735) uses the right strategy.
-    let opts = &opts_effective;
-
-    let base_threshold = 0.15f32;
-    let size_scale = (total_params_approx as f64 / 1e9).sqrt().max(0.3) as f32;
-    let q4_error_threshold = base_threshold * size_scale;
-    if do_early_quant {
-        tracing::info!(
-            total_params = total_params_approx,
-            q4_error_threshold,
-            "adaptive Q4 threshold (model-size-aware)"
-        );
-    }
+    // ── Quantization is now handled by the post-lowering quantize_graph() pass.
+    // All weight nodes are emitted as f32 Float(MatMul). The quantize pass
+    // runs after lower() and converts eligible nodes to MatMulLut4/8.
+    // The old early-quant hooks below are disabled.
+    let do_early_quant = false;
+    let q4_error_threshold = 0.15f32; // unused but referenced by dead code below
+    let _ = q4_error_threshold;
 
     // Collect attention dimensions to skip attention-sensitive weights.
     let mut attn_n_dims: Vec<usize> = Vec::new();

@@ -63,6 +63,12 @@ pub fn quantize_graph(
     let size_scale = (total_params as f64 / 1e9).sqrt().max(0.3) as f32;
     let q4_error_threshold = 0.15 * size_scale;
 
+    tracing::info!(
+        total_nodes = graph.node_count(),
+        ?effective_level,
+        "quantize_graph: scanning"
+    );
+
     // Collect all MatMul/Gemm nodes and their weight constant predecessors.
     // We collect first, then mutate — avoids borrow issues.
     let candidates: Vec<(NodeId, ConstantId, GraphOp)> = graph
