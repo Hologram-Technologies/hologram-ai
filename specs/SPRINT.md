@@ -257,6 +257,16 @@ zero runtime code. All kernels belong in hologram base crate.
   reducing oversized buffer allocation. 2× decode throughput at large compiled seq.
 - [x] Auto-detect causal LM: ONNX export script uses `AutoModelForCausalLM` for
   decoder models (LLaMA, GPT, Mistral, etc.) producing logits output directly.
+- [x] **Model-size-aware quantization (Plan 074 Pattern 6)** — compiler auto-
+  downgrades Q4 → f32 for models < 750M params. Adaptive Q4 error threshold
+  scaled by `sqrt(total_params / 1B)`. Q8 uniform BLAS path added for small
+  model fallback (partial coverage). TinyLlama 39 tok/s Q4, Qwen2 5.3 tok/s Q8.
+- [ ] **Post-lowering quantization pass (Plan 076)** — refactor quantization
+  from 9+ hooks scattered across builder.rs into a single graph pass that runs
+  between `lower()` and `compile()`. Walks the Graph, converts eligible
+  `Float(MatMul)` → `MatMulLut4/8` with pre-serialized weights. Enables:
+  full Q8 coverage for small models (→ 10+ tok/s), per-layer sensitivity,
+  mixed Q4/Q8, and future GPTQ/AWQ algorithms.
 
 ---
 
@@ -370,22 +380,25 @@ zero runtime code. All kernels belong in hologram base crate.
     - [ ] Paged KV cache in hologram-exec (Plan 016) — virtual page tables,
       LIFO free-page stack, `KvPagedWrite`/`KvPagedRead` dispatch
     - [ ] AnyUp-style windowed cross-attention kernel (P3, segmentation)
-- [ ] **Architectural patterns from Qwen (Plan 074)**
-  Six compiler improvements inspired by Qwen, benefiting all model families:
+- [x] **Qwen2-0.5B cross-family validation (Plan 074)**
+  - [x] Download + compile + decode Qwen2-0.5B ONNX (first non-LLaMA LLM)
+  - [x] ByteLevel BPE tokenizer (BBPE, 151K vocab) — hologram-ai + hologram base
+  - [x] config.json companion file reading for arch/vocab metadata
+  - [x] Position IDs (PositionIdsInjection), arch detection (`"qwen2"`)
+  - [x] Post-embedding RMSNorm verified correct (49 fusions)
+  - [x] InlineTranspose 0-sentinel fix for M>1 prefill (hologram base)
+  - [x] Vocab dimension inference from output buffer
+  - [x] Model-size-aware quantization (auto Q4→Q8 for <750M params)
+  - [x] HOLOGRAM_DUMP_DIR diagnostic infrastructure
+  - [x] qwen2_e2e.rs test suite (compile, run, variable seq_len, logit comparison)
+  - [ ] **Plan 076: Post-lowering quantization pass** — full Q8 coverage for
+    10+ tok/s (currently 5.3 at partial coverage)
+- [ ] **Architectural patterns from Qwen (Plan 074) — future**
   - [ ] Pattern 1: Fused RoPE + context scaling (NTK/YaRN for 128K+ context)
-    - [ ] Wire `rope`/`rope_base` into `dispatch_attention()` (hologram base)
-    - [ ] `RopeScaling` enum (Linear/NTK/YaRN) + CLI `--context-scale`
-    - [ ] Detect RoPE in ONNX graph, re-enable `PreAttentionFusion`
   - [ ] Pattern 2: LogN attention scaling (`log(n)/log(n_train)` for long ctx)
   - [ ] Pattern 3: QK-Norm (RMSNorm on Q/K before attention)
   - [ ] Pattern 4: KV cache quantization as first-class feature
-    - [ ] Serialize `KvCacheConfig` into archive metadata
   - [ ] Pattern 5: SwiGLU clamping for numerical stability at Q4
-  - [ ] Pattern 6: Per-layer quantization sensitivity (`--protect-layers`)
-  - [ ] Validation: Qwen2-0.5B cross-family test
-    - [ ] Download + compile + decode Qwen2-0.5B ONNX
-    - [ ] Verify byte-level BPE tokenizer (BBPE, 151K vocab)
-    - [ ] Position IDs, arch detection (`"qwen2"`), post-embed RMSNorm
 - [ ] Test with Whisper (encoder-decoder, audio)
 - [ ] Fix any op dispatch failures discovered
 - [ ] Goal: `hologram-ai compile -m model.onnx` works for top-20 HuggingFace models
