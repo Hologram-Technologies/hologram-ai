@@ -25,7 +25,14 @@ use crate::compiler::HoloRunner;
 #[derive(Args)]
 pub struct RunArgs {
     /// Path to the `.holo` file to execute.
-    pub file: PathBuf,
+    /// If `--model-config` is provided, this is optional and inferred from the
+    /// config's `[model].output` directory.
+    pub file: Option<PathBuf>,
+    /// Path to a hologram.toml model config file. Reads `[run].prompt`,
+    /// `[run].max_tokens`, and infers the `.holo` path from `[model].output`.
+    /// CLI flags override config values.
+    #[arg(long, value_name = "FILE")]
+    pub model_config: Option<PathBuf>,
     /// Input values as `INDEX:HEX` pairs (e.g. `--input 0:deadbeef`).
     #[arg(long = "input", value_name = "INDEX:HEX")]
     pub inputs: Vec<String>,
@@ -124,14 +131,60 @@ pub fn parse_kv_cache_config(
 // ── Entry point ────────────────────────────────────────────────────────────
 
 /// Execute the run command using shape-aware inference.
-pub fn execute(args: RunArgs) -> anyhow::Result<()> {
+pub fn execute(mut args: RunArgs) -> anyhow::Result<()> {
+    // Load model config if provided — fill in missing CLI args.
+    if let Some(ref config_path) = args.model_config {
+        let text = std::fs::read_to_string(config_path)
+            .with_context(|| format!("reading model config {}", config_path.display()))?;
+        let cfg: toml::Value = toml::from_str(&text)
+            .with_context(|| format!("parsing model config {}", config_path.display()))?;
+        let config_dir = config_path.parent().unwrap_or(std::path::Path::new("."));
+
+        // Infer .holo path from [model].output if --file not given.
+        if args.file.is_none() {
+            if let Some(output) = cfg.get("model").and_then(|m| m.get("output")).and_then(|v| v.as_str()) {
+                let output_dir = config_dir.join(output);
+                // Find the .holo file in the output directory.
+                let holo = if output_dir.is_dir() {
+                    std::fs::read_dir(&output_dir)?
+                        .filter_map(|e| e.ok())
+                        .find(|e| e.path().extension().map_or(false, |ext| ext == "holo"))
+                        .map(|e| e.path())
+                        .with_context(|| format!("no .holo file found in {}", output_dir.display()))?
+                } else if output_dir.extension().map_or(false, |ext| ext == "holo") {
+                    output_dir
+                } else {
+                    anyhow::bail!("cannot infer .holo path from config output: {}", output_dir.display());
+                };
+                args.file = Some(holo);
+            }
+        }
+
+        // Fill in [run] defaults.
+        if let Some(run) = cfg.get("run") {
+            if args.prompt.is_none() {
+                if let Some(prompt) = run.get("prompt").and_then(|v| v.as_str()) {
+                    args.prompt = Some(prompt.to_string());
+                }
+            }
+            if args.max_tokens.is_none() {
+                if let Some(max) = run.get("max_tokens").and_then(|v| v.as_integer()) {
+                    args.max_tokens = Some(max as usize);
+                }
+            }
+        }
+    }
+
+    let file = args.file.as_ref()
+        .context("no .holo file specified — use a positional argument or --model-config")?;
+
     let load_start = std::time::Instant::now();
     let runner = HoloRunner::from_path(
-        &args.file,
+        file,
         args.cache_dir.as_deref(),
         args.config.as_deref(),
     )
-    .with_context(|| format!("loading archive {}", args.file.display()))?;
+    .with_context(|| format!("loading archive {}", file.display()))?;
     info!(
         "archive loaded in {:.1}ms",
         load_start.elapsed().as_secs_f64() * 1000.0
