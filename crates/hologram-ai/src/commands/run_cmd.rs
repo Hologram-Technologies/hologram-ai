@@ -25,14 +25,14 @@ use crate::compiler::HoloRunner;
 #[derive(Args)]
 pub struct RunArgs {
     /// Path to the `.holo` file to execute.
-    /// If `--model-config` is provided, this is optional and inferred from the
+    /// If `--config` is provided, this is optional and inferred from the
     /// config's `[model].output` directory.
     pub file: Option<PathBuf>,
-    /// Path to a hologram.toml model config file. Reads `[run].prompt`,
+    /// Path to a hologram.toml config file. Reads `[run].prompt`,
     /// `[run].max_tokens`, and infers the `.holo` path from `[model].output`.
     /// CLI flags override config values.
-    #[arg(long, value_name = "FILE")]
-    pub model_config: Option<PathBuf>,
+    #[arg(short, long, value_name = "FILE")]
+    pub config: Option<PathBuf>,
     /// Input values as `INDEX:HEX` pairs (e.g. `--input 0:deadbeef`).
     #[arg(long = "input", value_name = "INDEX:HEX")]
     pub inputs: Vec<String>,
@@ -60,10 +60,10 @@ pub struct RunArgs {
     /// Default: from config file, or next to the archive file.
     #[arg(long, value_name = "DIR")]
     pub cache_dir: Option<PathBuf>,
-    /// Path to a hologram config file (TOML). Overrides the default
+    /// Path to a hologram runtime config file (TOML). Overrides the default
     /// config search (~/.hologram/config.toml, .hologram/config.toml).
     #[arg(long, value_name = "FILE")]
-    pub config: Option<PathBuf>,
+    pub runtime_config: Option<PathBuf>,
     /// KV cache quantization: `f32` (default), `q8`, `q4`, or `q8:q4` for
     /// asymmetric K:V precision. V compression is nearly free; K precision
     /// dominates quality.
@@ -133,7 +133,7 @@ pub fn parse_kv_cache_config(
 /// Execute the run command using shape-aware inference.
 pub fn execute(mut args: RunArgs) -> anyhow::Result<()> {
     // Load model config if provided — fill in missing CLI args.
-    if let Some(ref config_path) = args.model_config {
+    if let Some(ref config_path) = args.config {
         let text = std::fs::read_to_string(config_path)
             .with_context(|| format!("reading model config {}", config_path.display()))?;
         let cfg: toml::Value = toml::from_str(&text)
@@ -182,7 +182,7 @@ pub fn execute(mut args: RunArgs) -> anyhow::Result<()> {
     let runner = HoloRunner::from_path(
         file,
         args.cache_dir.as_deref(),
-        args.config.as_deref(),
+        args.runtime_config.as_deref(),
     )
     .with_context(|| format!("loading archive {}", file.display()))?;
     info!(
