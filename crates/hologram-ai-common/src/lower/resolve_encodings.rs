@@ -223,6 +223,56 @@ pub fn resolve_encodings(
         );
     }
 
+    // Second pass: inline ALL remaining Deferred constants from the weight file.
+    // This eliminates the streaming weight blob entirely — every constant is
+    // either a quantized Bytes (from the loop above) or an inlined Bytes (here).
+    if let Some(wf) = weight_file {
+        let store = graph.constant_store();
+        let n = store.len();
+        let mut inlined = 0usize;
+        let mut inlined_bytes = 0u64;
+        // Collect Deferred constants first to avoid borrow issues.
+        let deferred: Vec<(ConstantId, u64, u64)> = (0..n)
+            .filter_map(|i| {
+                let cid = ConstantId::new(i as u32);
+                match store.get(cid)? {
+                    ConstantData::Deferred {
+                        byte_size,
+                        source_id,
+                    } if *byte_size > 0 => Some((cid, *source_id, *byte_size)),
+                    _ => None,
+                }
+            })
+            .collect();
+
+        for (cid, source_id, byte_size) in deferred {
+            let start = source_id as usize;
+            let end = start + byte_size as usize;
+            if end <= wf.len() {
+                let data = wf[start..end].to_vec();
+                graph.replace_constant(cid, ConstantData::Bytes(data));
+                inlined += 1;
+                inlined_bytes += byte_size;
+            } else {
+                tracing::warn!(
+                    cid = cid.raw(),
+                    start,
+                    end,
+                    file_len = wf.len(),
+                    "inline: deferred constant out of bounds"
+                );
+            }
+        }
+
+        if inlined > 0 {
+            tracing::info!(
+                inlined,
+                inlined_mb = inlined_bytes / (1024 * 1024),
+                "inlined remaining Deferred constants"
+            );
+        }
+    }
+
     Ok(stats)
 }
 
