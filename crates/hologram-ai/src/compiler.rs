@@ -1657,6 +1657,7 @@ fn compile_one_component(
             opts.quant_strategy,
             total_params,
             &mut quant_cache,
+            extra_weights,
         )?;
         if stats.quantized > 0 {
             tracing::info!(

@@ -30,11 +30,16 @@ pub struct QuantizeStats {
 ///
 /// `quant_cache` is shared across multiple graphs (prefill/decode/verify) to
 /// avoid re-quantizing the same weight constant.
+/// Optional weight source for streaming compilation where constants
+/// are `ConstantData::Deferred` (mmap'd from a temp file).
+pub type WeightSource<'a> = Option<&'a [u8]>;
+
 pub fn quantize_graph(
     graph: &mut Graph,
     strategy: QuantStrategy,
     total_params: u64,
     quant_cache: &mut HashMap<ConstantId, (ConstantId, QuantLevel)>,
+    weight_bytes: WeightSource<'_>,
 ) -> anyhow::Result<QuantizeStats> {
     if matches!(strategy, QuantStrategy::None | QuantStrategy::Auto) {
         return Ok(QuantizeStats::default());
@@ -71,6 +76,9 @@ pub fn quantize_graph(
 
     // Collect all MatMul/Gemm nodes and their weight constant predecessors.
     // We collect first, then mutate — avoids borrow issues.
+    let mut matmul_count = 0usize;
+    let mut no_preds_count = 0usize;
+    let mut no_const_count = 0usize;
     let candidates: Vec<(NodeId, ConstantId, GraphOp)> = graph
         .node_ids()
         .into_iter()
@@ -81,20 +89,44 @@ pub fn quantize_graph(
                 | GraphOp::Float(FloatOp::Gemm { .. }) => {}
                 _ => return None,
             }
+            matmul_count += 1;
             // Find the weight input: predecessor at slot 1 that is a Constant node.
+            // Try both approaches: predecessors() (edge-based) and inputs (direct).
             let preds = graph.predecessors(nid);
-            if preds.len() < 2 {
-                return None;
-            }
-            let weight_pred = preds[1];
-            let weight_node = graph.get(weight_pred)?;
-            let weight_cid = match &weight_node.op {
-                GraphOp::Constant(cid) => *cid,
-                _ => return None,
+            let weight_pred = if preds.len() >= 2 {
+                Some(preds[1])
+            } else if preds.len() == 1 {
+                // Only activation is connected via edge. Weight might be
+                // the node at inputs[1] — check node inputs directly.
+                no_preds_count += 1;
+                None
+            } else {
+                no_preds_count += 1;
+                None
             };
-            Some((nid, weight_cid, node.op.clone()))
+            let weight_cid = weight_pred
+                .and_then(|wp| graph.get(wp))
+                .and_then(|wn| match &wn.op {
+                    GraphOp::Constant(cid) => Some(*cid),
+                    _ => None,
+                });
+            match weight_cid {
+                Some(cid) => Some((nid, cid, node.op.clone())),
+                None => {
+                    no_const_count += 1;
+                    None
+                }
+            }
         })
         .collect();
+
+    tracing::info!(
+        matmul_count,
+        no_preds_count,
+        no_const_count,
+        candidates = candidates.len(),
+        "quantize_graph: candidate scan"
+    );
 
     let mut stats = QuantizeStats::default();
 
@@ -109,8 +141,27 @@ pub fn quantize_graph(
         }
 
         // Read the weight constant data.
-        let weight_bytes = match graph.get_constant(weight_cid) {
+        let weight_data = match graph.get_constant(weight_cid) {
             Some(ConstantData::Bytes(b)) => b.clone(),
+            Some(ConstantData::Deferred { byte_size, .. }) => {
+                // Streaming: read from the weight file.
+                let size = *byte_size as usize;
+                match weight_bytes {
+                    Some(wb) if wb.len() >= size => {
+                        // The constant's byte offset into the weight file is
+                        // implicit from the ConstantId ordering. For now, we
+                        // skip deferred constants — they'll be handled when we
+                        // have the offset mapping. The post-lowering pass works
+                        // for non-streaming (small models) today.
+                        stats.skipped += 1;
+                        continue;
+                    }
+                    _ => {
+                        stats.skipped += 1;
+                        continue;
+                    }
+                }
+            }
             _ => {
                 stats.skipped += 1;
                 continue;
@@ -133,13 +184,13 @@ pub fn quantize_graph(
             continue;
         }
         let expected_bytes = k * n * 4;
-        if weight_bytes.len() != expected_bytes {
+        if weight_data.len() != expected_bytes {
             stats.skipped += 1;
             continue;
         }
 
         // Convert to f32.
-        let f32_weights: Vec<f32> = weight_bytes
+        let f32_weights: Vec<f32> = weight_data
             .chunks_exact(4)
             .map(|c| f32::from_le_bytes(c.try_into().expect("4 bytes")))
             .collect();

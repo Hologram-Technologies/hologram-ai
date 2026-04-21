@@ -145,12 +145,17 @@ pub fn lower(
     //
     // We track which TIDs became Q4 constants so node lowering emits
     // MatMulLut4 instead of FloatOp::MatMul.
-    // ── Quantization is now handled by the post-lowering quantize_graph() pass.
-    // All weight nodes are emitted as f32 Float(MatMul). The quantize pass
-    // runs after lower() and converts eligible nodes to MatMulLut4/8.
-    // The old early-quant hooks below are disabled.
-    let do_early_quant = false;
-    let q4_error_threshold = 0.15f32; // unused but referenced by dead code below
+    // For streaming compilation (large models with mmap'd weights), early-quant
+    // during lowering is still used because the post-lowering quantize_graph()
+    // pass cannot read Deferred constants. For non-streaming (small models where
+    // weights are ConstantData::Bytes), early-quant is disabled and the post-
+    // lowering pass handles all quantization with full coverage.
+    let is_streaming = ai_graph.params.values().any(|p| matches!(p, crate::ir::AiParam::Mmap { .. }));
+    let do_early_quant = is_streaming && matches!(
+        opts.quant_strategy,
+        QuantStrategy::Q4_0 | QuantStrategy::Q2_0
+    );
+    let q4_error_threshold = 0.15f32;
     let _ = q4_error_threshold;
 
     // Collect attention dimensions to skip attention-sensitive weights.
