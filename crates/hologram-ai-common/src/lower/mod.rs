@@ -7,7 +7,7 @@ pub mod strategy;
 
 pub use builder::{lower, LoweringOptions, LoweringOutput, QuantStrategy};
 pub use quantize_graph::{quantize_graph, QuantLevel, QuantizeStats};
-pub use resolve_encodings::{resolve_encodings, ResolveStats};
+pub use resolve_encodings::{resolve_encodings, trim_weight_blob, ResolveStats};
 pub use shape_spec_bridge::{
     float_op_to_shape_spec_repr, resolve_spec, walk_shape_context, ShapeProjection,
 };

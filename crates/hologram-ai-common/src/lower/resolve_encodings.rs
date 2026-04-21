@@ -198,9 +198,11 @@ pub fn resolve_encodings(
         // stats.content_entries after all graphs are compiled.
         let effective_cid = graph.add_constant(ConstantData::Bytes(serialized.clone()));
 
-        // TODO(Plan 077): After PipelineWriter gains content-address awareness,
-        // replace the original f32 Deferred constant to avoid streaming unused
-        // f32 weights. For now the archive is larger than optimal.
+        // Replace the original f32 Deferred constant with empty Bytes so
+        // trim_weight_blob excludes it from the trimmed blob.
+        if graph.get_constant(weight_cid).map_or(false, |c| c.is_deferred()) {
+            graph.replace_constant(weight_cid, ConstantData::Bytes(vec![]));
+        }
 
         quant_cache.insert(weight_cid, (effective_cid, level));
 
@@ -260,6 +262,88 @@ fn make_quantized_op(level: QuantLevel, cid: ConstantId) -> GraphOp {
         QuantLevel::Q4 => GraphOp::MatMulLut4(cid),
         QuantLevel::Q8 => GraphOp::MatMulLut8(cid),
     }
+}
+
+/// Build a trimmed weight blob containing only the Deferred constant ranges
+/// still referenced in the graph. Updates Deferred offsets to point into the
+/// new contiguous blob. Returns `None` if no Deferred constants remain.
+///
+/// This eliminates the streaming archive bloat where quantized (now Bytes)
+/// weights caused the full f32 blob to be copied unnecessarily.
+pub fn trim_weight_blob(graph: &mut Graph, weight_file: &[u8]) -> Option<Vec<u8>> {
+    let store = graph.constant_store();
+    let n = store.len();
+
+    // Collect all Deferred constant ranges: (cid, source_id, byte_size).
+    let mut ranges: Vec<(ConstantId, u64, u64)> = Vec::new();
+    for i in 0..n {
+        let cid = ConstantId::new(i as u32);
+        if let Some(ConstantData::Deferred {
+            byte_size,
+            source_id,
+        }) = store.get(cid)
+        {
+            if *byte_size > 0 {
+                ranges.push((cid, *source_id, *byte_size));
+            }
+        }
+    }
+
+    if ranges.is_empty() {
+        return None;
+    }
+
+    // Sort by source offset for sequential reads.
+    ranges.sort_by_key(|&(_, offset, _)| offset);
+
+    // Build the trimmed blob: pack ranges contiguously.
+    let total_trimmed: u64 = ranges.iter().map(|&(_, _, size)| size).sum();
+    let mut blob = Vec::with_capacity(total_trimmed as usize);
+    let mut new_offsets: Vec<(ConstantId, u64)> = Vec::with_capacity(ranges.len());
+
+    for &(cid, source_offset, byte_size) in &ranges {
+        let start = source_offset as usize;
+        let end = start + byte_size as usize;
+        if end > weight_file.len() {
+            tracing::warn!(
+                cid = cid.raw(),
+                start,
+                end,
+                file_len = weight_file.len(),
+                "trim_weight_blob: deferred constant out of bounds, skipping"
+            );
+            continue;
+        }
+        let new_offset = blob.len() as u64;
+        blob.extend_from_slice(&weight_file[start..end]);
+        new_offsets.push((cid, new_offset));
+    }
+
+    // Update Deferred constants with new offsets.
+    for (cid, new_offset) in new_offsets {
+        if let Some(ConstantData::Deferred { byte_size, .. }) = graph.get_constant(cid) {
+            let byte_size = *byte_size;
+            graph.replace_constant(
+                cid,
+                ConstantData::Deferred {
+                    byte_size,
+                    source_id: new_offset,
+                },
+            );
+        }
+    }
+
+    let original_mb = weight_file.len() / (1024 * 1024);
+    let trimmed_mb = blob.len() / (1024 * 1024);
+    tracing::info!(
+        deferred_count = ranges.len(),
+        original_mb,
+        trimmed_mb,
+        saved_mb = original_mb - trimmed_mb,
+        "trimmed weight blob"
+    );
+
+    Some(blob)
 }
 
 /// Quantize a weight matrix and return (serialized_bytes, level, original_byte_count).

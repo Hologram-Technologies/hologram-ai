@@ -1731,6 +1731,17 @@ fn compile_one_component(
         (stats.content_entries, all_weights_encoded)
     };
 
+    // Trim the streaming weight blob to contain only non-quantized Deferred
+    // constants. This replaces the 4+ GB f32 blob with a much smaller blob
+    // (~400 MB for TinyLlama) containing just embeddings, biases, and norms.
+    let trimmed_weights: Option<Vec<u8>> = if !all_weights_encoded {
+        weight_mmap.and_then(|wm| {
+            hologram_ai_common::lower::trim_weight_blob(&mut lower_out.graph, wm)
+        })
+    } else {
+        None
+    };
+
     let compiled = {
         let _span = tracing::info_span!("hologram_compile", phase = phase_name).entered();
         hologram::compile(lower_out.graph)
@@ -1873,9 +1884,17 @@ fn compile_one_component(
         );
     }
 
+    // Use trimmed weight blob if available (quantized streaming path),
+    // otherwise fall back to the original extra_weights.
+    let effective_weights: Option<&[u8]> = if let Some(ref tw) = trimmed_weights {
+        Some(tw.as_slice())
+    } else {
+        extra_weights
+    };
+
     let archive = build_final_archive(
         unpacked,
-        extra_weights,
+        effective_weights,
         Some(layer_header),
         bundle,
         weight_index,
@@ -1883,7 +1902,7 @@ fn compile_one_component(
     )?;
     Ok(ComponentResult {
         archive,
-        all_weights_encoded,
+        all_weights_encoded: all_weights_encoded || trimmed_weights.is_some(),
     })
 }
 
