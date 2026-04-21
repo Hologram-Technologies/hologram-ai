@@ -1668,7 +1668,7 @@ fn compile_one_component(
 
     // UOR encoding resolution (Plan 077): convert eligible Float(MatMul)/Gemm
     // to MatMulLut4/8 with content-addressed constants.
-    {
+    let content_entries = {
         let _span = tracing::info_span!("resolve_encodings", phase = phase_name).entered();
         let mut quant_cache = std::collections::HashMap::new();
         let stats = hologram_ai_common::lower::resolve_encodings(
@@ -1683,10 +1683,12 @@ fn compile_one_component(
                 encoded = stats.encoded,
                 skipped = stats.skipped,
                 saved_mb = stats.bytes_saved / (1024 * 1024),
+                content_entries = stats.content_entries.len(),
                 "UOR encoding resolution"
             );
         }
-    }
+        stats.content_entries
+    };
 
     let compiled = {
         let _span = tracing::info_span!("hologram_compile", phase = phase_name).entered();
@@ -1807,13 +1809,36 @@ fn compile_one_component(
         Some(&lower_out.context)
     };
 
+    // Build ContentAddressIndex from encoding resolution entries (Plan 077).
+    let mut extra_sections: Vec<(u32, Vec<u8>)> = Vec::new();
+    if !content_entries.is_empty() {
+        use hologram::hologram_archive::section::EmbeddableSection;
+        use hologram::hologram_archive::weight::content_addr::ContentAddressIndex;
+        let mut index = ContentAddressIndex::with_capacity(content_entries.len());
+        // Offset tracking: we don't know the exact blob offsets here since they
+        // depend on the archive layout. Use byte_size as placeholder offsets —
+        // the ContentAddressIndex primarily serves as a digest registry for now.
+        // Full offset resolution comes when PipelineWriter is content-address-aware.
+        let mut running_offset: u64 = 0;
+        for entry in &content_entries {
+            index.insert(entry.digest, running_offset, entry.byte_size);
+            running_offset += entry.byte_size;
+        }
+        index.sort();
+        extra_sections.push((index.section_kind(), index.to_bytes()));
+        tracing::info!(
+            entries = content_entries.len(),
+            "emitted ContentAddressIndex section"
+        );
+    }
+
     build_final_archive(
         unpacked,
         extra_weights,
         Some(layer_header),
         bundle,
         weight_index,
-        &[], // compile_one_component doesn't add extra sections
+        &extra_sections,
     )
 }
 

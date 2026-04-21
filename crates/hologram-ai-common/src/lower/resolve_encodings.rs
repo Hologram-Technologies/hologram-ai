@@ -9,9 +9,18 @@
 //! resolution across mmap/in-memory/streaming paths.
 
 use crate::lower::QuantStrategy;
-use hologram::hologram_graph::constant::{ConstantData, ConstantEncoding};
+use hologram::hologram_graph::constant::ConstantData;
 use hologram::{ConstantId, FloatOp, Graph, GraphOp, NodeId};
 use std::collections::HashMap;
+
+/// A content-address entry for one encoded weight tensor.
+#[derive(Debug, Clone)]
+pub struct EncodedWeightEntry {
+    /// BLAKE3 digest of the encoded bytes.
+    pub digest: [u8; 32],
+    /// Byte size of the encoded data.
+    pub byte_size: u64,
+}
 
 /// Statistics from the encoding resolution pass.
 #[derive(Debug, Default)]
@@ -22,6 +31,8 @@ pub struct ResolveStats {
     pub skipped: usize,
     /// Total weight bytes saved (f32 original - encoded).
     pub bytes_saved: u64,
+    /// Content-address entries for all encoded weights (for building ContentAddressIndex).
+    pub content_entries: Vec<EncodedWeightEntry>,
 }
 
 /// Quantization level (maps to UOR quantum level projections).
@@ -176,35 +187,16 @@ pub fn resolve_encodings(
         // Compute BLAKE3 digest of encoded bytes.
         let digest: [u8; 32] = blake3::hash(&serialized).into();
 
-        // Determine encoding tag.
-        let encoding = match level {
-            QuantLevel::Q2 | QuantLevel::Q4 => ConstantEncoding::Clustered {
-                bits: level_to_bits(level),
-            },
-            QuantLevel::Q8 => ConstantEncoding::BlockQuantized { bits: 8 },
-        };
-
-        // Register as content-addressed constant.
-        let _content_addressed_cid = graph.add_constant(ConstantData::ContentAddressed {
-            byte_size: serialized.len() as u64,
+        // Track content-address entry for the ContentAddressIndex section.
+        stats.content_entries.push(EncodedWeightEntry {
             digest,
-            encoding,
+            byte_size: serialized.len() as u64,
         });
 
-        // Also store the actual bytes so the archive writer can embed them.
-        // The ContentAddressed variant carries the metadata; we need a way
-        // for the archive writer to access the raw encoded bytes. We store
-        // them in a separate inline constant and track the mapping.
-        //
-        // NOTE: For now, we use the simpler approach of storing the bytes
-        // directly as a Bytes constant (same as Plan 076) and creating a
-        // ContentAddressed alias. The full content-address resolution
-        // (where bytes live only in the weight blob) comes in Phase 2.5.
-        let bytes_cid = graph.add_constant(ConstantData::Bytes(serialized.clone()));
-        // The quantized_cid is what the graph references; bytes_cid holds the data.
-        // We'll reconcile these in the archive writer.
-        // For now, use bytes_cid directly (matches existing behavior).
-        let effective_cid = bytes_cid;
+        // Register the encoded bytes as a constant. The graph uses Bytes
+        // for now; the archive writer builds the ContentAddressIndex from
+        // stats.content_entries after all graphs are compiled.
+        let effective_cid = graph.add_constant(ConstantData::Bytes(serialized.clone()));
 
         quant_cache.insert(weight_cid, (effective_cid, level));
 
@@ -255,14 +247,6 @@ fn read_weight_bytes(graph: &Graph, cid: ConstantId, weight_file: WeightFile<'_>
             // Already encoded — skip re-encoding.
             None
         }
-    }
-}
-
-fn level_to_bits(level: QuantLevel) -> u8 {
-    match level {
-        QuantLevel::Q2 => 2,
-        QuantLevel::Q4 => 4,
-        QuantLevel::Q8 => 8,
     }
 }
 
