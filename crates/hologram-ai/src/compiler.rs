@@ -494,6 +494,7 @@ impl ModelCompiler {
                                 &LowerPhase::Forward,
                                 Some(&[]),
                                 Some(&weight_index),
+                                total_weight_bytes / 4,
                             )
                         });
                         let h_d = s.spawn(|| {
@@ -504,6 +505,7 @@ impl ModelCompiler {
                                 &LowerPhase::Forward,
                                 None,
                                 None,
+                                total_weight_bytes / 4,
                             )
                         });
                         let h_v = s.spawn(|| {
@@ -514,6 +516,7 @@ impl ModelCompiler {
                                 &LowerPhase::Forward,
                                 None,
                                 None,
+                                total_weight_bytes / 4,
                             )
                         });
                         let p = h_p.join().expect("prefill compile thread panicked");
@@ -716,6 +719,7 @@ impl ModelCompiler {
                     &LowerPhase::Forward,
                     Some(&[]),
                     Some(&weight_index),
+                    total_weight_bytes / 4,
                 )?;
 
                 // Build MetaSection for the pipeline wrapper.
@@ -1117,6 +1121,7 @@ impl ModelCompiler {
                 &spec.phase,
                 weights_for_component,
                 wi_for_component,
+                total_weight_bytes_before / 4,
             )
             .with_context(|| format!("compiling component '{}'", spec.name))?;
             info!(
@@ -1624,6 +1629,7 @@ fn compile_one_component(
     phase: &LowerPhase,
     extra_weights: Option<&[u8]>,
     weight_index: Option<&hologram::hologram_archive::weight::index::WeightIndex>,
+    total_params: u64,
 ) -> anyhow::Result<Vec<u8>> {
     let phase_name = phase.layer_name();
     let _span = tracing::info_span!("compile_one_component", phase = phase_name).entered();
@@ -1641,6 +1647,26 @@ fn compile_one_component(
 
     // Validate: check all Gemm/MatMul nodes' weight inputs are valid constants.
     validate_matmul_constants(&lower_out.graph, extra_weights);
+
+    // Post-lowering quantization: convert eligible Float(MatMul) to MatMulLut4/8.
+    {
+        let _span = tracing::info_span!("quantize_graph", phase = phase_name).entered();
+        let mut quant_cache = std::collections::HashMap::new();
+        let stats = hologram_ai_common::lower::quantize_graph(
+            &mut lower_out.graph,
+            opts.quant_strategy,
+            total_params,
+            &mut quant_cache,
+        )?;
+        if stats.quantized > 0 {
+            tracing::info!(
+                quantized = stats.quantized,
+                skipped = stats.skipped,
+                saved_mb = stats.bytes_saved / (1024 * 1024),
+                "post-lowering quantization"
+            );
+        }
+    }
 
     let compiled = {
         let _span = tracing::info_span!("hologram_compile", phase = phase_name).entered();

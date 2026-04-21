@@ -1,9 +1,11 @@
 pub mod builder;
 pub mod dispatch;
+pub mod quantize_graph;
 pub mod shape_spec_bridge;
 pub mod strategy;
 
 pub use builder::{lower, LoweringOptions, LoweringOutput, QuantStrategy};
+pub use quantize_graph::{quantize_graph, QuantLevel, QuantizeStats};
 pub use shape_spec_bridge::{
     float_op_to_shape_spec_repr, resolve_spec, walk_shape_context, ShapeProjection,
 };
