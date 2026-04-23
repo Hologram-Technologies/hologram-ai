@@ -7,21 +7,14 @@
 //! Run with:
 //!   cargo test -p hologram-ai -- mini_fixture --nocapture
 
+mod common;
+
 use hologram_ai_conformance::ort_runner::onnx_builder;
 
 const MINI_HIDDEN: usize = 32;
 const MINI_HEADS: usize = 2;
 const MINI_FFN: usize = 64;
 const MINI_VOCAB: usize = 32;
-
-#[cfg(feature = "e2e")]
-fn workspace_path(rel: &str) -> std::path::PathBuf {
-    let mut p = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    p.pop();
-    p.pop();
-    p.push(rel);
-    p
-}
 
 #[cfg(feature = "e2e")]
 fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
@@ -104,8 +97,8 @@ fn mini_transformer_variable_seq_len_runs() {
 #[test]
 #[cfg(feature = "e2e")]
 fn onnx_kv_decode_matches_full_prefill() {
-    let causal = workspace_path("models/TinyLlama-1.1B-Chat-v1.0/model_causal.onnx");
-    let fallback = workspace_path("models/TinyLlama-1.1B-Chat-v1.0/model.onnx");
+    let causal = common::workspace_path("models/TinyLlama-1.1B-Chat-v1.0/model_causal.onnx");
+    let fallback = common::workspace_path("models/TinyLlama-1.1B-Chat-v1.0/model.onnx");
     let model = if causal.exists() { causal } else { fallback };
     if !model.exists() {
         eprintln!("SKIP: no TinyLlama ONNX model found");
@@ -285,8 +278,8 @@ fn onnx_kv_decode_matches_full_prefill() {
 #[test]
 #[cfg(feature = "e2e")]
 fn onnx_kv_decode_variable_length() {
-    let causal = workspace_path("models/TinyLlama-1.1B-Chat-v1.0/model_causal.onnx");
-    let fallback = workspace_path("models/TinyLlama-1.1B-Chat-v1.0/model.onnx");
+    let causal = common::workspace_path("models/TinyLlama-1.1B-Chat-v1.0/model_causal.onnx");
+    let fallback = common::workspace_path("models/TinyLlama-1.1B-Chat-v1.0/model.onnx");
     let model = if causal.exists() { causal } else { fallback };
     if !model.exists() {
         eprintln!("SKIP: no TinyLlama ONNX model found");

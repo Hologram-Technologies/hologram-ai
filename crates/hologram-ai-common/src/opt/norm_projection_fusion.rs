@@ -36,9 +36,10 @@
 //! Constraint: the norm output must have no consumers besides the projections.
 //! Only f32 weights are concatenated (Q4 weights skipped to avoid rkyv overflow).
 
+use super::graph_utils::{build_consumer_map, next_node_id};
 use super::pipeline::Pass;
 use crate::ir::{AiGraph, AiNode, AiOp, DType, TensorId};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 
 pub struct NormProjectionFusion;
 
@@ -58,18 +59,13 @@ impl Pass for NormProjectionFusion {
 
     fn run(&self, mut graph: AiGraph) -> anyhow::Result<AiGraph> {
         // Map: tensor_id → list of (consuming_node_idx, input_position).
-        let mut consumers: HashMap<TensorId, Vec<(usize, usize)>> = HashMap::new();
-        for (i, n) in graph.nodes.iter().enumerate() {
-            for (pos, &tid) in n.inputs.iter().enumerate() {
-                consumers.entry(tid).or_default().push((i, pos));
-            }
-        }
+        let consumers = build_consumer_map(&graph);
 
         let mut to_remove: HashSet<usize> = HashSet::new();
         let mut new_node_groups: Vec<(usize, Vec<AiNode>)> = Vec::new();
         let mut fused_count: u32 = 0;
 
-        let mut next_node_id = graph.nodes.iter().map(|n| n.id).max().unwrap_or(0) + 1;
+        let mut next_nid = next_node_id(&graph);
 
         for (norm_idx, norm_node) in graph.nodes.iter().enumerate() {
             let (epsilon, has_residual_add) = match &norm_node.op {
@@ -194,8 +190,8 @@ impl Pass for NormProjectionFusion {
                 .map(|&(_, _, orig_out_tid)| orig_out_tid)
                 .collect();
 
-            let fused_node_id = next_node_id;
-            next_node_id += 1;
+            let fused_node_id = next_nid;
+            next_nid += 1;
             let fused_node = AiNode::new(
                 fused_node_id,
                 AiOp::FusedNormProjection {

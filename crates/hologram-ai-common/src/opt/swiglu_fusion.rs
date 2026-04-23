@@ -20,6 +20,7 @@
 //! (LLaMA, Qwen, Mistral, Gemma, etc.). Fusing eliminates the intermediate
 //! SiLU buffer and one dispatch.
 
+use super::graph_utils::{apply_node_mutations, build_consumer_map, build_producer_map};
 use super::pipeline::Pass;
 use crate::ir::{AiGraph, AiNode, AiOp, TensorId};
 use std::collections::{HashMap, HashSet};
@@ -41,20 +42,10 @@ impl Pass for SwiGluFusion {
 
     fn run(&self, mut graph: AiGraph) -> anyhow::Result<AiGraph> {
         // Map: tensor_id → node index that produces it.
-        let tid_to_node: HashMap<TensorId, usize> = graph
-            .nodes
-            .iter()
-            .enumerate()
-            .flat_map(|(i, n)| n.outputs.iter().map(move |&tid| (tid, i)))
-            .collect();
+        let tid_to_node = build_producer_map(&graph);
 
         // Map: tensor_id → list of (consuming_node_idx, input_position).
-        let mut consumers: HashMap<TensorId, Vec<(usize, usize)>> = HashMap::new();
-        for (i, n) in graph.nodes.iter().enumerate() {
-            for (pos, &tid) in n.inputs.iter().enumerate() {
-                consumers.entry(tid).or_default().push((i, pos));
-            }
-        }
+        let consumers = build_consumer_map(&graph);
 
         let mut to_remove: HashSet<usize> = HashSet::new();
         let mut replacements: HashMap<usize, AiNode> = HashMap::new();
@@ -143,19 +134,7 @@ impl Pass for SwiGluFusion {
         }
 
         // Apply replacements and removals.
-        let mut new_nodes = Vec::with_capacity(graph.nodes.len() - to_remove.len());
-        for (i, node) in graph.nodes.into_iter().enumerate() {
-            if to_remove.contains(&i) {
-                continue;
-            }
-            if let Some(fused) = replacements.remove(&i) {
-                new_nodes.push(fused);
-            } else {
-                new_nodes.push(node);
-            }
-        }
-        graph.nodes = new_nodes;
-        graph.invalidate_topo_cache();
+        apply_node_mutations(&mut graph, &to_remove, &mut replacements);
 
         Ok(graph)
     }

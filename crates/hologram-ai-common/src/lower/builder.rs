@@ -5,10 +5,8 @@
 
 use super::dispatch::{dispatch, DispatchTarget};
 use super::shape_spec_bridge::ShapeProjection;
-use super::strategy::{
-    ai_dtype_to_float_dtype, input_float_dtype, ConcreteStrategy, DeferredStrategy,
-    LoweringStrategy,
-};
+use super::op_resolver::{ai_dtype_to_float_dtype, input_float_dtype};
+use super::strategy::{ConcreteStrategy, DeferredStrategy, LoweringStrategy};
 use super::LowerPhase;
 use crate::exec_context::{
     ContextBundle, NodeShapeRecipe, ShapeContextGraph, ShapeProjectionEntry, ShapeRecipeSection,

@@ -8,27 +8,21 @@
 
 #![cfg(feature = "e2e")]
 
+mod common;
+
 use hologram_ai::compiler::{ModelCompiler, ModelSource};
 use std::path::PathBuf;
 
-fn workspace_path(rel: &str) -> PathBuf {
-    let mut p = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    p.pop();
-    p.pop();
-    p.push(rel);
-    p
-}
-
 fn vae_onnx_path() -> PathBuf {
-    workspace_path("models/stable-diffusion-v1-5/vae_decoder/model.onnx")
+    common::workspace_path("models/stable-diffusion-v1-5/vae_decoder/model.onnx")
 }
 
 fn vae_holo_path() -> PathBuf {
-    workspace_path("models/stable-diffusion-v1-5/vae_decoder/model.holo")
+    common::workspace_path("models/stable-diffusion-v1-5/vae_decoder/model.holo")
 }
 
 fn vae_holo_small_path() -> PathBuf {
-    workspace_path("models/stable-diffusion-v1-5/vae_decoder/model_small.holo")
+    common::workspace_path("models/stable-diffusion-v1-5/vae_decoder/model_small.holo")
 }
 
 fn ensure_compiled() -> bool {

@@ -44,6 +44,7 @@
 //!
 //! The pattern is commutative on `Mul` and `Add`, so argument order doesn't matter.
 
+use super::graph_utils::{apply_node_mutations, build_producer_map, next_node_id};
 use super::pipeline::Pass;
 use crate::ir::{AiGraph, AiNode, AiOp, AiParam, TensorId};
 use std::collections::{HashMap, HashSet};
@@ -57,19 +58,11 @@ impl Pass for RmsNormFusion {
     }
 
     fn run(&self, mut graph: AiGraph) -> anyhow::Result<AiGraph> {
-        // tid → index in graph.nodes (for the node that produces that tensor).
-        let tid_to_node: HashMap<TensorId, usize> = graph
-            .nodes
-            .iter()
-            .enumerate()
-            .flat_map(|(i, n)| n.outputs.iter().map(move |&tid| (tid, i)))
-            .collect();
+        let tid_to_node = build_producer_map(&graph);
 
         let mut to_remove: HashSet<usize> = HashSet::new();
-        // Maps node_idx → replacement AiNode (replaces the outer Mul).
         let mut replacements: HashMap<usize, AiNode> = HashMap::new();
-
-        let mut next_id = graph.nodes.iter().map(|n| n.id).max().unwrap_or(0) + 1;
+        let mut nid = next_node_id(&graph);
 
         for (node_idx, node) in graph.nodes.iter().enumerate() {
             // Outer Mul(normed, weight) — one input is a weight param, one is computed.
@@ -106,12 +99,12 @@ impl Pass for RmsNormFusion {
                     to_remove.insert(node_idx);
 
                     let fused = AiNode::new(
-                        next_id,
+                        nid,
                         AiOp::RmsNorm { epsilon },
                         vec![x_tid, weight_tid],
                         vec![out_tid],
                     );
-                    next_id += 1;
+                    nid += 1;
                     replacements.insert(node_idx, fused);
 
                     tracing::debug!(
@@ -126,24 +119,10 @@ impl Pass for RmsNormFusion {
             }
         }
 
-        if replacements.is_empty() {
-            return Ok(graph);
+        let fused_count = apply_node_mutations(&mut graph, &to_remove, &mut replacements);
+        if fused_count > 0 {
+            tracing::info!("RmsNormFusion: fused {fused_count} RmsNorm chain(s)");
         }
-
-        let fused_count = replacements.len();
-
-        let mut new_nodes: Vec<AiNode> = Vec::with_capacity(graph.nodes.len());
-        for (idx, node) in graph.nodes.into_iter().enumerate() {
-            if let Some(replacement) = replacements.remove(&idx) {
-                new_nodes.push(replacement);
-            } else if !to_remove.contains(&idx) {
-                new_nodes.push(node);
-            }
-        }
-        graph.nodes = new_nodes;
-        graph.invalidate_topo_cache();
-
-        tracing::info!("RmsNormFusion: fused {fused_count} RmsNorm chain(s)");
         Ok(graph)
     }
 }

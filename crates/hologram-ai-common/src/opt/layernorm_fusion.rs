@@ -19,6 +19,7 @@
 //!
 //! Fused to: `LayerNorm { axis: -1, epsilon: ε }` with inputs `[X, weight, bias]`.
 
+use super::graph_utils::{apply_node_mutations, build_producer_map, next_node_id};
 use super::pipeline::Pass;
 use crate::ir::{AiGraph, AiNode, AiOp, AiParam, TensorId};
 use std::collections::{HashMap, HashSet};
@@ -33,17 +34,12 @@ impl Pass for LayerNormFusion {
 
     fn run(&self, mut graph: AiGraph) -> anyhow::Result<AiGraph> {
         // tid -> index in graph.nodes (for the node that produces that tensor).
-        let tid_to_node: HashMap<TensorId, usize> = graph
-            .nodes
-            .iter()
-            .enumerate()
-            .flat_map(|(i, n)| n.outputs.iter().map(move |&tid| (tid, i)))
-            .collect();
+        let tid_to_node = build_producer_map(&graph);
 
         let mut to_remove: HashSet<usize> = HashSet::new();
         let mut replacements: HashMap<usize, AiNode> = HashMap::new();
 
-        let mut next_id = graph.nodes.iter().map(|n| n.id).max().unwrap_or(0) + 1;
+        let mut next_id = next_node_id(&graph);
 
         for (node_idx, node) in graph.nodes.iter().enumerate() {
             // Outer Add(scaled, bias) -- one input is a bias param/graph-input,
@@ -105,17 +101,7 @@ impl Pass for LayerNormFusion {
         }
 
         let fused_count = replacements.len();
-
-        let mut new_nodes: Vec<AiNode> = Vec::with_capacity(graph.nodes.len());
-        for (idx, node) in graph.nodes.into_iter().enumerate() {
-            if let Some(replacement) = replacements.remove(&idx) {
-                new_nodes.push(replacement);
-            } else if !to_remove.contains(&idx) {
-                new_nodes.push(node);
-            }
-        }
-        graph.nodes = new_nodes;
-        graph.invalidate_topo_cache();
+        apply_node_mutations(&mut graph, &to_remove, &mut replacements);
 
         tracing::info!("LayerNormFusion: fused {fused_count} LayerNorm chain(s)");
         Ok(graph)

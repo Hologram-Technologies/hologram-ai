@@ -16,20 +16,13 @@
 
 #![cfg(feature = "e2e")]
 
+mod common;
+
 use hologram_ai::validate::validate_model;
 use std::path::PathBuf;
 
-/// Resolve a path relative to the hologram-ai workspace root.
-fn workspace_path(rel: &str) -> PathBuf {
-    let mut p = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    p.pop(); // crates/hologram-ai → crates/
-    p.pop(); // crates/ → workspace root
-    p.push(rel);
-    p
-}
-
 fn model_path() -> Option<PathBuf> {
-    let p = workspace_path("models/Qwen2-0.5B/model.onnx");
+    let p = common::workspace_path("models/Qwen2-0.5B/model.onnx");
     if p.exists() {
         Some(p)
     } else {

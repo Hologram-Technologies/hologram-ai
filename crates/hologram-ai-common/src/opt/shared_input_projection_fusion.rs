@@ -35,6 +35,7 @@
 //!
 //! Saves 66 BLAS calls per decode step (44 from QKV + 22 from gate+up).
 
+use super::graph_utils::next_node_id;
 use super::pipeline::Pass;
 use crate::ir::{AiGraph, AiNode, AiOp, AiParam, DType, Dim, SemanticHint, TensorId, TensorInfo};
 use std::collections::{HashMap, HashSet};
@@ -117,7 +118,7 @@ impl Pass for SharedInputProjectionFusion {
             let mut fused_gate_up = 0u32;
 
             // Next available node ID and tensor ID.
-            let mut next_node_id = graph.nodes.iter().map(|n| n.id).max().unwrap_or(0) + 1;
+            let mut next_node_id = next_node_id(&graph);
             let mut next_tid = graph
                 .nodes
                 .iter()

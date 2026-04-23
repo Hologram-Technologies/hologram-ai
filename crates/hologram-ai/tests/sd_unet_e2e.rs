@@ -17,31 +17,17 @@
 
 #![cfg(feature = "e2e")]
 
+mod common;
+
 use hologram_ai::compiler::{ModelCompiler, ModelSource};
 use std::path::PathBuf;
 
-/// Parse bytes as f32 without alignment requirements.
-fn bytes_to_f32(bytes: &[u8]) -> Vec<f32> {
-    bytes
-        .chunks_exact(4)
-        .map(|c| f32::from_le_bytes(c.try_into().expect("chunk is exactly 4 bytes")))
-        .collect()
-}
-
-fn workspace_path(rel: &str) -> PathBuf {
-    let mut p = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    p.pop(); // crates/hologram-ai → crates/
-    p.pop(); // crates/ → workspace root
-    p.push(rel);
-    p
-}
-
 fn sd_unet_model_path() -> PathBuf {
-    workspace_path("models/stable-diffusion-v1-5/unet/model.onnx")
+    common::workspace_path("models/stable-diffusion-v1-5/unet/model.onnx")
 }
 
 fn sd_unet_holo_path() -> PathBuf {
-    workspace_path("models/stable-diffusion-v1-5/unet/model.holo")
+    common::workspace_path("models/stable-diffusion-v1-5/unet/model.holo")
 }
 
 /// Compile the UNet ONNX model and write the `.holo` archive to disk.
@@ -171,7 +157,7 @@ fn sd_unet_onnx_executes() {
 
     // SD v1.5 UNet output: noise prediction [1, 4, 64, 64]
     let (_name, out_bytes) = outputs.get(0).expect("no output at index 0");
-    let out_floats = bytes_to_f32(out_bytes);
+    let out_floats = common::bytes_to_f32(out_bytes);
     eprintln!(
         "output: {} floats ({} bytes)",
         out_floats.len(),
@@ -271,7 +257,7 @@ fn sd_unet_metal_backend() {
     match result {
         Ok(outputs) => {
             let (_name, out_bytes) = outputs.get(0).expect("no output");
-            let out_floats = bytes_to_f32(out_bytes);
+            let out_floats = common::bytes_to_f32(out_bytes);
             eprintln!("Metal output: {} floats", out_floats.len());
         }
         Err(e) => {

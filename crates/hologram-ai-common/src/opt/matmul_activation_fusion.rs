@@ -23,9 +23,10 @@
 //! SiLU in LLaMA/Mistral, GeLU in GPT/BERT). Fusing saves ~2x memory
 //! traffic by avoiding the intermediate activation buffer.
 
+use super::graph_utils::{build_consumer_map, build_producer_map, has_single_consumer, remove_nodes};
 use super::pipeline::Pass;
-use crate::ir::{AiGraph, AiNode, AiOp, TensorId};
-use std::collections::{HashMap, HashSet};
+use crate::ir::{AiGraph, AiNode, AiOp};
+use std::collections::HashSet;
 
 /// Fuse `MatMul + Activation` into `AiOp::MatMulSilu/Gelu/Relu`.
 pub struct MatMulActivationFusion;
@@ -36,21 +37,8 @@ impl Pass for MatMulActivationFusion {
     }
 
     fn run(&self, mut graph: AiGraph) -> anyhow::Result<AiGraph> {
-        // Map: tensor_id → node index that produces it.
-        let tid_to_node: HashMap<TensorId, usize> = graph
-            .nodes
-            .iter()
-            .enumerate()
-            .flat_map(|(i, n)| n.outputs.iter().map(move |&tid| (tid, i)))
-            .collect();
-
-        // Map: tensor_id → list of (consuming_node_idx, input_position).
-        let mut consumers: HashMap<TensorId, Vec<(usize, usize)>> = HashMap::new();
-        for (i, n) in graph.nodes.iter().enumerate() {
-            for (pos, &tid) in n.inputs.iter().enumerate() {
-                consumers.entry(tid).or_default().push((i, pos));
-            }
-        }
+        let tid_to_node = build_producer_map(&graph);
+        let consumers = build_consumer_map(&graph);
 
         // Collect fusion candidates: (matmul_idx, act_idx, fused_op).
         let mut fusions: Vec<(usize, usize, AiOp)> = Vec::new();
@@ -84,8 +72,7 @@ impl Pass for MatMulActivationFusion {
 
             // MatMul output must have exactly one consumer (this activation).
             let matmul_out_tid = matmul_node.outputs[0];
-            let matmul_consumers = consumers.get(&matmul_out_tid).map_or(0, |c| c.len());
-            if matmul_consumers != 1 {
+            if !has_single_consumer(matmul_out_tid, &consumers) {
                 continue;
             }
 
@@ -109,16 +96,7 @@ impl Pass for MatMulActivationFusion {
         let fused_count = fusions.len();
 
         // Remove dead activation nodes.
-        if fused_count > 0 {
-            let kept: Vec<AiNode> = graph
-                .nodes
-                .into_iter()
-                .enumerate()
-                .filter(|(i, _)| !to_remove.contains(i))
-                .map(|(_, n)| n)
-                .collect();
-            graph.nodes = kept;
-        }
+        remove_nodes(&mut graph, &to_remove);
 
         tracing::info!("MatMulActivationFusion: fused {fused_count} MatMul+Activation pair(s)");
         Ok(graph)

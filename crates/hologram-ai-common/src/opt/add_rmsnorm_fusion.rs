@@ -27,8 +27,9 @@
 //! **Not yet registered in the pipeline** — requires a corresponding
 //! `FloatOp::AddRmsNorm` + kernel in hologram base crate. See Plan 019.
 
+use super::graph_utils::{apply_node_mutations, build_consumer_map, build_producer_map};
 use super::pipeline::Pass;
-use crate::ir::{AiGraph, AiNode, AiOp, TensorId};
+use crate::ir::{AiGraph, AiNode, AiOp};
 use std::collections::{HashMap, HashSet};
 
 /// Fuse `Add + RmsNorm` into `AiOp::FusedLayerNormResidual`.
@@ -44,21 +45,8 @@ impl Pass for AddRmsNormFusion {
     }
 
     fn run(&self, mut graph: AiGraph) -> anyhow::Result<AiGraph> {
-        // Map: tensor_id → node index that produces it.
-        let tid_to_node: HashMap<TensorId, usize> = graph
-            .nodes
-            .iter()
-            .enumerate()
-            .flat_map(|(i, n)| n.outputs.iter().map(move |&tid| (tid, i)))
-            .collect();
-
-        // Map: tensor_id → list of (consuming_node_idx, input_position).
-        let mut consumers: HashMap<TensorId, Vec<(usize, usize)>> = HashMap::new();
-        for (i, n) in graph.nodes.iter().enumerate() {
-            for (pos, &tid) in n.inputs.iter().enumerate() {
-                consumers.entry(tid).or_default().push((i, pos));
-            }
-        }
+        let tid_to_node = build_producer_map(&graph);
+        let consumers = build_consumer_map(&graph);
 
         let mut to_remove: HashSet<usize> = HashSet::new();
         let mut replacements: HashMap<usize, AiNode> = HashMap::new();
@@ -136,21 +124,7 @@ impl Pass for AddRmsNormFusion {
             tracing::info!(fused_count, "AddRmsNormFusion: fused Add+RmsNorm pairs");
         }
 
-        // Apply replacements and removals.
-        let mut new_nodes = Vec::with_capacity(graph.nodes.len() - to_remove.len());
-        for (i, node) in graph.nodes.into_iter().enumerate() {
-            if to_remove.contains(&i) {
-                continue;
-            }
-            if let Some(fused) = replacements.remove(&i) {
-                new_nodes.push(fused);
-            } else {
-                new_nodes.push(node);
-            }
-        }
-        graph.nodes = new_nodes;
-        graph.invalidate_topo_cache();
-
+        apply_node_mutations(&mut graph, &to_remove, &mut replacements);
         Ok(graph)
     }
 }

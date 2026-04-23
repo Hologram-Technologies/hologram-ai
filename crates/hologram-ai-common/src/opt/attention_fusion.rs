@@ -21,6 +21,7 @@
 //! 2. Unified KV cache injection for both ONNX and GGUF models
 //! 3. ~30% fewer graph nodes per transformer layer
 
+use super::graph_utils::{apply_node_mutations, build_consumer_map, build_producer_map, next_node_id};
 use super::pipeline::Pass;
 use crate::ir::{AiGraph, AiNode, AiOp, TensorId};
 use std::collections::{HashMap, HashSet};
@@ -60,24 +61,12 @@ impl Pass for AttentionFusion {
             tracing::info!("AttentionFusion: forcing causal=true (causal LM detected)");
         }
 
-        let tid_to_node: HashMap<TensorId, usize> = graph
-            .nodes
-            .iter()
-            .enumerate()
-            .flat_map(|(i, n)| n.outputs.iter().map(move |&tid| (tid, i)))
-            .collect();
-
-        // Build consumers map: TensorId → list of (node_idx, input_position).
-        let mut consumers: HashMap<TensorId, Vec<(usize, usize)>> = HashMap::new();
-        for (i, n) in graph.nodes.iter().enumerate() {
-            for (pos, &tid) in n.inputs.iter().enumerate() {
-                consumers.entry(tid).or_default().push((i, pos));
-            }
-        }
+        let tid_to_node = build_producer_map(&graph);
+        let consumers = build_consumer_map(&graph);
 
         let mut to_remove: HashSet<usize> = HashSet::new();
         let mut replacements: HashMap<usize, AiNode> = HashMap::new();
-        let mut next_id = graph.nodes.iter().map(|n| n.id).max().unwrap_or(0) + 1;
+        let mut next_id = next_node_id(&graph);
 
         // Cache head params from the first successfully-fused layer so subsequent
         // layers with Dynamic shape dims can reuse them (all layers share architecture).
@@ -222,16 +211,7 @@ impl Pass for AttentionFusion {
         }
 
         let fused_count = replacements.len();
-        let mut new_nodes: Vec<AiNode> = Vec::with_capacity(graph.nodes.len());
-        for (idx, node) in graph.nodes.into_iter().enumerate() {
-            if let Some(replacement) = replacements.remove(&idx) {
-                new_nodes.push(replacement);
-            } else if !to_remove.contains(&idx) {
-                new_nodes.push(node);
-            }
-        }
-        graph.nodes = new_nodes;
-        graph.invalidate_topo_cache();
+        apply_node_mutations(&mut graph, &to_remove, &mut replacements);
 
         tracing::info!("AttentionFusion: fused {fused_count} SDPA chain(s)");
         Ok(graph)

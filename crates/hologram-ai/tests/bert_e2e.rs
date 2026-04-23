@@ -18,27 +18,13 @@
 
 #![cfg(feature = "e2e")]
 
+mod common;
+
 use hologram_ai::compiler::{ModelCompiler, ModelSource};
 use std::path::PathBuf;
 
-/// Parse bytes as f32 without alignment requirements.
-fn bytes_to_f32(bytes: &[u8]) -> Vec<f32> {
-    bytes
-        .chunks_exact(4)
-        .map(|c| f32::from_le_bytes(c.try_into().expect("chunk is exactly 4 bytes")))
-        .collect()
-}
-
-fn workspace_path(rel: &str) -> PathBuf {
-    let mut p = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    p.pop(); // crates/hologram-ai → crates/
-    p.pop(); // crates/ → workspace root
-    p.push(rel);
-    p
-}
-
 fn bert_model_path() -> PathBuf {
-    workspace_path("models/bert-base-uncased/model.onnx")
+    common::workspace_path("models/bert-base-uncased/model.onnx")
 }
 
 #[test]
@@ -139,7 +125,7 @@ fn bert_onnx_executes() {
 
     // BERT-base output: last_hidden_state [1, seq_len, 768]
     let (_name, out_bytes) = outputs.get(0).expect("no output at index 0");
-    let out_floats = bytes_to_f32(out_bytes);
+    let out_floats = common::bytes_to_f32(out_bytes);
 
     // Should have seq_len * 768 floats (BERT hidden dim = 768).
     let expected_len = seq_len * 768;

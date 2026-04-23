@@ -7,6 +7,7 @@
 //! - `DepthToSpace` → `Reshape` + `Transpose` + `Reshape`
 //! - `SpaceToDepth` → `Reshape` + `Transpose` + `Reshape`
 
+use super::graph_utils::next_node_id;
 use super::pipeline::Pass;
 use crate::ir::{AiGraph, AiNode, AiOp, DType, TensorId, TensorInfo};
 
@@ -45,7 +46,7 @@ impl Pass for OpDecomposition {
             next_tid = next_tid.max(max_out + 1);
         }
 
-        let mut next_nid: u32 = graph.nodes.iter().map(|n| n.id).max().unwrap_or(0) + 1;
+        let mut next_nid: u32 = next_node_id(&graph);
 
         let mut new_nodes: Vec<AiNode> = Vec::new();
 

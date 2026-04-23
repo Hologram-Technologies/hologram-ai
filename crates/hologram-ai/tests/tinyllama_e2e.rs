@@ -12,17 +12,10 @@
 
 #![cfg(feature = "e2e")]
 
+mod common;
+
 use hologram_ai::validate::validate_model;
 use std::path::PathBuf;
-
-/// Resolve a path relative to the hologram-ai workspace root.
-fn workspace_path(rel: &str) -> PathBuf {
-    let mut p = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    p.pop(); // crates/hologram-ai → crates/
-    p.pop(); // crates/ → workspace root
-    p.push(rel);
-    p
-}
 
 /// The binary under test — built by cargo alongside the test runner.
 fn hologram_ai_bin() -> PathBuf {
@@ -33,7 +26,7 @@ fn hologram_ai_bin() -> PathBuf {
 
 #[test]
 fn tinyllama_onnx_compiles() {
-    let model = workspace_path("models/TinyLlama-1.1B-Chat-v1.0/model.onnx");
+    let model = common::workspace_path("models/TinyLlama-1.1B-Chat-v1.0/model.onnx");
     if !model.exists() {
         eprintln!("SKIP: {} not found", model.display());
         return;
@@ -149,8 +142,8 @@ fn tinyllama_onnx_runs_and_produces_english() {
     // model.onnx is a bidirectional (encoder-style) export that cannot be used
     // for autoregressive generation — it attends to all positions in both
     // directions, producing incoherent hidden states at generation time.
-    let causal = workspace_path("models/TinyLlama-1.1B-Chat-v1.0/model_causal.onnx");
-    let fallback = workspace_path("models/TinyLlama-1.1B-Chat-v1.0/model.onnx");
+    let causal = common::workspace_path("models/TinyLlama-1.1B-Chat-v1.0/model_causal.onnx");
+    let fallback = common::workspace_path("models/TinyLlama-1.1B-Chat-v1.0/model.onnx");
     let model = if causal.exists() {
         causal
     } else if fallback.exists() {
@@ -211,16 +204,16 @@ fn tinyllama_onnx_runs_and_produces_english() {
 /// shape-mismatch errors.
 #[test]
 fn tinyllama_onnx_variable_seq_len_runs() {
-    let model = workspace_path("models/TinyLlama-1.1B-Chat-v1.0/model.onnx");
+    let model = common::workspace_path("models/TinyLlama-1.1B-Chat-v1.0/model.onnx");
     if !model.exists() {
-        let causal = workspace_path("models/TinyLlama-1.1B-Chat-v1.0/model_causal.onnx");
+        let causal = common::workspace_path("models/TinyLlama-1.1B-Chat-v1.0/model_causal.onnx");
         if !causal.exists() {
             eprintln!("SKIP: no TinyLlama ONNX model found");
             return;
         }
     }
     let model = {
-        let causal = workspace_path("models/TinyLlama-1.1B-Chat-v1.0/model_causal.onnx");
+        let causal = common::workspace_path("models/TinyLlama-1.1B-Chat-v1.0/model_causal.onnx");
         if causal.exists() {
             causal
         } else {
@@ -284,7 +277,7 @@ fn nan_detector_no_false_positive_on_i64_concat() {
     // Build a tiny ONNX with a Concat(I64) node whose output contains -1.
     // We use an existing small test model that has I64 ops (cast/shape).
     // If this returns a shape mismatch (not a NaN panic), the fix is working.
-    let model = workspace_path("models/TinyLlama-1.1B-Chat-v1.0/model.onnx");
+    let model = common::workspace_path("models/TinyLlama-1.1B-Chat-v1.0/model.onnx");
     if !model.exists() {
         eprintln!("SKIP: model not found");
         return;
@@ -309,7 +302,7 @@ fn nan_detector_no_false_positive_on_i64_concat() {
 /// Status: FIXED.
 #[test]
 fn tinyllama_onnx_batched_matmul_shape_regression() {
-    let model = workspace_path("models/TinyLlama-1.1B-Chat-v1.0/model.onnx");
+    let model = common::workspace_path("models/TinyLlama-1.1B-Chat-v1.0/model.onnx");
     if !model.exists() {
         eprintln!("SKIP: model not found");
         return;

@@ -14,6 +14,7 @@
 //!
 //! Constraint: MatMul output must have exactly one consumer (the Mul).
 
+use super::graph_utils::{apply_node_mutations, build_producer_map};
 use super::pipeline::Pass;
 use crate::ir::{AiGraph, AiNode, AiOp, AiParam, TensorId};
 use std::collections::{HashMap, HashSet};
@@ -26,12 +27,7 @@ impl Pass for ScalarAbsorption {
     }
 
     fn run(&self, mut graph: AiGraph) -> anyhow::Result<AiGraph> {
-        let tid_to_node: HashMap<TensorId, usize> = graph
-            .nodes
-            .iter()
-            .enumerate()
-            .flat_map(|(i, n)| n.outputs.iter().map(move |&tid| (tid, i)))
-            .collect();
+        let tid_to_node = build_producer_map(&graph);
 
         let mut consumer_count: HashMap<TensorId, usize> = HashMap::new();
         for n in &graph.nodes {
@@ -123,21 +119,7 @@ impl Pass for ScalarAbsorption {
             );
         }
 
-        if !to_remove.is_empty() || !replacements.is_empty() {
-            let mut new_nodes = Vec::with_capacity(graph.nodes.len() - to_remove.len());
-            for (i, node) in graph.nodes.into_iter().enumerate() {
-                if to_remove.contains(&i) {
-                    continue;
-                }
-                if let Some(fused) = replacements.remove(&i) {
-                    new_nodes.push(fused);
-                } else {
-                    new_nodes.push(node);
-                }
-            }
-            graph.nodes = new_nodes;
-            graph.invalidate_topo_cache();
-        }
+        apply_node_mutations(&mut graph, &to_remove, &mut replacements);
 
         Ok(graph)
     }

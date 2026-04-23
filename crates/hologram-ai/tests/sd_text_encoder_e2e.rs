@@ -5,23 +5,17 @@
 
 #![cfg(feature = "e2e")]
 
+mod common;
+
 use hologram_ai::compiler::{ModelCompiler, ModelSource};
 use std::path::PathBuf;
 
-fn workspace_path(rel: &str) -> PathBuf {
-    let mut p = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    p.pop();
-    p.pop();
-    p.push(rel);
-    p
-}
-
 fn text_encoder_onnx_path() -> PathBuf {
-    workspace_path("models/stable-diffusion-v1-5/text_encoder/model.onnx")
+    common::workspace_path("models/stable-diffusion-v1-5/text_encoder/model.onnx")
 }
 
 fn text_encoder_holo_path() -> PathBuf {
-    workspace_path("models/stable-diffusion-v1-5/text_encoder/model.holo")
+    common::workspace_path("models/stable-diffusion-v1-5/text_encoder/model.holo")
 }
 
 fn ensure_compiled() -> bool {

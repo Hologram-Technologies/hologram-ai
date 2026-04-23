@@ -8,41 +8,35 @@
 
 #![cfg(feature = "e2e")]
 
+mod common;
+
 use hologram_ai::compiler::{ModelCompiler, ModelSource};
 use std::path::PathBuf;
-
-fn workspace_path(rel: &str) -> PathBuf {
-    let mut p = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    p.pop();
-    p.pop();
-    p.push(rel);
-    p
-}
 
 // ── Model paths ──────────────────────────────────────────────────────────────
 
 fn text_encoder_holo() -> PathBuf {
-    workspace_path("models/stable-diffusion-v1-5/text_encoder/model.holo")
+    common::workspace_path("models/stable-diffusion-v1-5/text_encoder/model.holo")
 }
 fn unet_holo() -> PathBuf {
-    workspace_path("models/stable-diffusion-v1-5/unet/model.holo")
+    common::workspace_path("models/stable-diffusion-v1-5/unet/model.holo")
 }
 fn vae_holo() -> PathBuf {
-    workspace_path("models/stable-diffusion-v1-5/vae_decoder/model_pipeline.holo")
+    common::workspace_path("models/stable-diffusion-v1-5/vae_decoder/model_pipeline.holo")
 }
 
 fn text_encoder_onnx() -> PathBuf {
-    workspace_path("models/stable-diffusion-v1-5/text_encoder/model.onnx")
+    common::workspace_path("models/stable-diffusion-v1-5/text_encoder/model.onnx")
 }
 fn unet_onnx() -> PathBuf {
-    workspace_path("models/stable-diffusion-v1-5/unet/model.onnx")
+    common::workspace_path("models/stable-diffusion-v1-5/unet/model.onnx")
 }
 fn vae_onnx() -> PathBuf {
-    workspace_path("models/stable-diffusion-v1-5/vae_decoder/model.onnx")
+    common::workspace_path("models/stable-diffusion-v1-5/vae_decoder/model.onnx")
 }
 
 fn output_path() -> PathBuf {
-    workspace_path("models/stable-diffusion-v1-5/output.ppm")
+    common::workspace_path("models/stable-diffusion-v1-5/output.ppm")
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
@@ -113,11 +107,6 @@ fn f32_to_bytes(data: &[f32]) -> Vec<u8> {
     bytemuck::cast_slice(data).to_vec()
 }
 
-fn bytes_to_f32(data: &[u8]) -> Vec<f32> {
-    data.chunks_exact(4)
-        .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
-        .collect()
-}
 
 // ── Euler-a scheduler ────────────────────────────────────────────────────────
 
@@ -183,7 +172,7 @@ fn ddim_step(latent: &mut [f32], noise_pred: &[f32], alpha_bar_t: f32, alpha_bar
 fn tokenize_clip(prompt: &str) -> Vec<i64> {
     use hologram_ai_tokenizer::{NativeTokenizer, Tokenizer};
 
-    let tokenizer_path = workspace_path("models/stable-diffusion-v1-5/tokenizer.json");
+    let tokenizer_path = common::workspace_path("models/stable-diffusion-v1-5/tokenizer.json");
     let tokenizer =
         NativeTokenizer::from_tokenizer_json(&tokenizer_path).expect("loading CLIP tokenizer");
 
@@ -319,7 +308,7 @@ fn sd_pipeline_generates_image() {
         .by_name("last_hidden_state")
         .or_else(|| te_outputs.get(0).map(|(_, d)| d))
         .expect("no text encoder output");
-    let hidden_states = bytes_to_f32(hidden_bytes);
+    let hidden_states = common::bytes_to_f32(hidden_bytes);
     let expected_len = 77 * 768;
     if hidden_states.len() != expected_len {
         eprintln!(
@@ -379,7 +368,7 @@ fn sd_pipeline_generates_image() {
     uncond_inputs.set_with_shape(0, uncond_bytes, vec![1, 77]);
     let uncond_outputs = execute(&te_tape, &te_plan, &uncond_inputs);
     let (_, uncond_hidden_bytes) = uncond_outputs.get(0).expect("no uncond output");
-    let uncond_states = bytes_to_f32(uncond_hidden_bytes);
+    let uncond_states = common::bytes_to_f32(uncond_hidden_bytes);
     let uncond_77_768: Vec<f32> = uncond_states[..clip_len].to_vec();
     eprintln!("unconditional hidden states ready");
 
@@ -402,7 +391,7 @@ fn sd_pipeline_generates_image() {
         cond_inputs.set_with_shape(1, f32_to_bytes(&[timestep_f32]), vec![1]);
         cond_inputs.set_with_shape(2, f32_to_bytes(&hidden_77_768), vec![1, 77, 768]);
         let cond_out = execute(&unet_tape, &unet_plan, &cond_inputs);
-        let cond_noise = bytes_to_f32(cond_out.get(0).expect("no cond output").1);
+        let cond_noise = common::bytes_to_f32(cond_out.get(0).expect("no cond output").1);
 
         // Unconditional prediction (empty prompt).
         let mut uncond_unet_inputs = hologram::GraphInputs::new();
@@ -410,7 +399,7 @@ fn sd_pipeline_generates_image() {
         uncond_unet_inputs.set_with_shape(1, f32_to_bytes(&[timestep_f32]), vec![1]);
         uncond_unet_inputs.set_with_shape(2, f32_to_bytes(&uncond_77_768), vec![1, 77, 768]);
         let uncond_out = execute(&unet_tape, &unet_plan, &uncond_unet_inputs);
-        let uncond_noise = bytes_to_f32(uncond_out.get(0).expect("no uncond output").1);
+        let uncond_noise = common::bytes_to_f32(uncond_out.get(0).expect("no uncond output").1);
 
         // Classifier-free guidance: noise = uncond + scale * (cond - uncond)
         let noise_pred: Vec<f32> = uncond_noise
@@ -485,7 +474,7 @@ fn sd_pipeline_generates_image() {
     eprintln!("VAE decode: {:.2?}", start.elapsed());
 
     let (_name, image_bytes) = vae_outputs.get(0).expect("no VAE output");
-    let image = bytes_to_f32(image_bytes);
+    let image = common::bytes_to_f32(image_bytes);
     eprintln!("image: {} floats", image.len());
 
     // ── Step 5: Save Image ────────────────────────────────────────────────
