@@ -673,11 +673,25 @@ reduction, fuse them.
 - [x] Adaptive sparse_v threshold — HOLOGRAM_SPARSE_V_THRESHOLD env var
 - [ ] wasm32 SIMD128 micro-kernels (Plan 039 #11)
 
-#### Path to 60+ tok/s (Plans 055-057) — RESULTS
+#### Path to 60+ tok/s (Plans 055-057, 078) — RESULTS
 
 **Achieved: 43.0 tok/s** on ONNX TinyLlama `--quantize q4_0` (from 2.7 f32 baseline).
 This is the AMX hardware ceiling for TinyLlama 1.1B on Apple Silicon CPU.
 See Plan 057 for full session summary.
+
+**Plan 078: MLX Studio-Inspired Optimizations (active)**
+- [x] Phase 0: BLAS benchmark — TinyLlama 1.42x, Qwen2 1.31x multi-core ratio. Headroom confirmed.
+- [x] Phase 1: Pipeline constant dedup (BLAKE3 `WeightStore` + resolve_deferred_constants).
+  - TinyLlama Q4: 5.0 GB → 1.7 GB (66% reduction), 37-41 tok/s (no regression)
+  - Qwen2 Q8: 5.5 GB → 1.4 GB (75% reduction), 19 → 65-71 tok/s (3.5x speedup!)
+  - hologram base: `from_graph_externalize_constants`, `resolve_deferred_constants`,
+    `dequant_f32_count`, offset-adjusted dedup in `build_with_shared_weights`
+  - hologram-ai: `externalize_graph_constants`, WeightStore pipeline, resolve at load
+  - Branch: `feat/archive-dedup-level-parallel` in both repos
+- [ ] Phase 2: Mixed-precision quantization (JANG-inspired, Q8 attention + Q4 MLP)
+- [ ] Phase 3: KV cache persistence / prefix caching (TTFT 300ms → 5ms)
+- [ ] Phase 4: Level-parallel tape execution (43 → ~56 tok/s, confirmed headroom)
+- [ ] Phase 5: Separate-model speculative decoding (56 → 67-84 tok/s)
 
 **Phase 1: Per-row Q4 + early-quant + prewarm — DONE (43 tok/s)**
 - [x] Per-row symmetric linear Q4 quantization (replaced global k-means)

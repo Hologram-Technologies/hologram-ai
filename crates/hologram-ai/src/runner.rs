@@ -133,6 +133,28 @@ impl HoloRunner {
         Self::from_storage(ArchiveStorage::Mmap(mmap))
     }
 
+    /// Pre-warm the OS page cache for the archive's mmap'd region.
+    ///
+    /// Issues `madvise(MADV_WILLNEED)` on the entire archive to tell the OS
+    /// to asynchronously fault pages into the page cache. This makes the first
+    /// inference call faster by overlapping I/O with model setup.
+    ///
+    /// Call this immediately after `load_from_path` for best effect — the OS
+    /// will begin paging in data while the caller sets up KV cache, tokenizer, etc.
+    pub fn prewarm_pages(&self) {
+        #[cfg(unix)]
+        {
+            let bytes: &[u8] = self._storage.as_ref();
+            if let ArchiveStorage::Mmap(ref mmap) = self._storage {
+                let _ = mmap.advise(memmap2::Advice::WillNeed);
+                tracing::debug!(
+                    archive_mb = bytes.len() / (1024 * 1024),
+                    "issued MADV_WILLNEED for archive pages"
+                );
+            }
+        }
+    }
+
     fn from_storage(storage: ArchiveStorage) -> anyhow::Result<Self> {
         let bytes: &[u8] = storage.as_ref();
 
@@ -208,6 +230,13 @@ impl HoloRunner {
                 }
             }
 
+            // Resolve externalized Deferred constants back to Bytes for fast
+            // zero-copy rkyv access during execution. Only runs when the plan
+            // has a non-empty weight blob (i.e., shared weights via dedup index).
+            if !plan.weights().is_empty() {
+                plan.resolve_deferred_constants();
+            }
+
             let shape_ctx = read_shape_context_from_plan(&plan, model_slice)?;
             let tape = hologram::build_tape_from_plan(&plan)
                 .map_err(|e| anyhow::anyhow!("building prefill tape: {e}"))?;
@@ -237,6 +266,9 @@ impl HoloRunner {
                     );
                 }
 
+                if !d_plan.weights().is_empty() {
+                    d_plan.resolve_deferred_constants();
+                }
                 let d_tape = hologram::build_tape_from_plan(&d_plan)
                     .map_err(|e| anyhow::anyhow!("building decode tape: {e}"))?;
                 info!("loaded decode model (seq=1) for LLM pipeline");
@@ -260,6 +292,9 @@ impl HoloRunner {
                     unsafe {
                         v_plan.set_weights_borrowed(plan.weights());
                     }
+                }
+                if !v_plan.weights().is_empty() {
+                    v_plan.resolve_deferred_constants();
                 }
                 let v_tape = hologram::build_tape_from_plan(&v_plan)
                     .map_err(|e| anyhow::anyhow!("building verify tape: {e}"))?;
@@ -323,6 +358,11 @@ impl HoloRunner {
                         wc.prewarm_q4(dt, dc, decode_weights);
                         wc.prewarm_q8(dt, dc, decode_weights);
                     }
+                    tracing::debug!(
+                        decode_weights_len = decode_weights.len(),
+                        cache_q4 = wc.dequant_f32_count(),
+                        "prewarm complete"
+                    );
                 }
             }
             Ok(runner)

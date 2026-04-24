@@ -571,57 +571,105 @@ impl ModelCompiler {
                     vec![] as Vec<ComponentConnection>,
                 );
 
-                // If all weights were encoded (Q4/Q8), the f32 weight source
-                // is no longer needed — all data is in Bytes constants inside
-                // the sub-archive. Skip streaming to avoid bloated archives.
-                let mut writer = if prefill_result.all_weights_encoded {
+                // Deduplicate externalized constants across sub-archives.
+                // Constants >= 1 MB were extracted from each sub-archive's graph
+                // bytes. Feed them through WeightStore for BLAKE3-based dedup,
+                // then use build_with_shared_weights for the pipeline archive.
+                let has_external = !prefill_result.external_constants.is_empty()
+                    || !decode_result.external_constants.is_empty()
+                    || !verify_result.external_constants.is_empty();
+
+                let model_meta = {
+                    use hologram::hologram_archive::section::EmbeddableSection;
+                    let mm = hologram::hologram_archive::section::model_meta::ModelMetaSection {
+                        kind: hologram::hologram_archive::section::model_meta::ModelKind::TextLlm,
+                        arch: pre_metadata.arch.clone(),
+                        description: pre_metadata.arch.clone(),
+                        max_seq_len: pre_metadata.context_len,
+                        supports_prompt: true,
+                        n_layers: pre_metadata.n_layers,
+                        n_kv_heads: pre_metadata.n_kv_heads,
+                        head_dim: pre_metadata.head_dim,
+                        kv_k_bits: 0,
+                        kv_v_bits: 0,
+                        kv_boundary_layers: 2,
+                        kv_wht: false,
+                    };
+                    (mm.section_kind(), mm.to_bytes())
+                };
+
+                if has_external {
+                    // Deduplicate via WeightStore (BLAKE3 content addressing).
+                    use hologram::hologram_archive::weight::dedup::WeightStore;
+                    let mut weight_store = WeightStore::new();
+                    weight_store.insert("prefill", "model", &prefill_result.external_constants);
+                    weight_store.insert("decode", "model", &decode_result.external_constants);
+                    weight_store.insert("verify", "model", &verify_result.external_constants);
+
+                    let (shared_blob, dedup_index) = weight_store.build();
+                    let shared_mb = shared_blob.len() / (1024 * 1024);
+                    let total_external_mb = (prefill_result.external_constants.len()
+                        + decode_result.external_constants.len()
+                        + verify_result.external_constants.len())
+                        / (1024 * 1024);
                     tracing::info!(
-                        "all weights encoded — skipping f32 weight stream"
+                        shared_mb,
+                        total_external_mb,
+                        dedup_savings_mb = total_external_mb.saturating_sub(shared_mb),
+                        "pipeline constant deduplication"
                     );
-                    PipelineWriter::new()
+
+                    let mut writer = PipelineWriter::new()
                         .add_model("prefill", prefill_result.archive)
                         .add_model("decode", decode_result.archive)
                         .add_model("verify", verify_result.archive)
                         .add_section(meta.section_kind(), meta.to_bytes())
+                        .add_section(model_meta.0, model_meta.1);
+
+                    for (kind, bytes) in &extra_sections {
+                        writer = writer.add_section(*kind, bytes.clone());
+                    }
+
+                    let pipeline_bytes = writer
+                        .build_with_shared_weights(shared_blob, &dedup_index)
+                        .map_err(|e| anyhow::anyhow!("building dedup LLM pipeline: {e}"))?;
+
+                    std::fs::write(&output_path, &pipeline_bytes)
+                        .context("writing dedup pipeline archive")?;
+                } else if prefill_result.all_weights_encoded {
+                    tracing::info!("all weights encoded — skipping f32 weight stream");
+                    let mut writer = PipelineWriter::new()
+                        .add_model("prefill", prefill_result.archive)
+                        .add_model("decode", decode_result.archive)
+                        .add_model("verify", verify_result.archive)
+                        .add_section(meta.section_kind(), meta.to_bytes())
+                        .add_section(model_meta.0, model_meta.1);
+
+                    for (kind, bytes) in &extra_sections {
+                        writer = writer.add_section(*kind, bytes.clone());
+                    }
+
+                    writer
+                        .build_to_file(&output_path, &scratch_path)
+                        .map_err(|e| anyhow::anyhow!("building LLM pipeline: {e}"))?;
+                    let _ = std::fs::remove_file(&scratch_path);
                 } else {
-                    PipelineWriter::new()
+                    let mut writer = PipelineWriter::new()
                         .add_model_streaming("prefill", prefill_result.archive, ws)
                         .add_model("decode", decode_result.archive)
                         .add_model("verify", verify_result.archive)
                         .add_section(meta.section_kind(), meta.to_bytes())
+                        .add_section(model_meta.0, model_meta.1);
+
+                    for (kind, bytes) in &extra_sections {
+                        writer = writer.add_section(*kind, bytes.clone());
+                    }
+
+                    writer
+                        .build_to_file(&output_path, &scratch_path)
+                        .map_err(|e| anyhow::anyhow!("building streaming LLM pipeline: {e}"))?;
+                    let _ = std::fs::remove_file(&scratch_path);
                 };
-
-                for (kind, bytes) in &extra_sections {
-                    writer = writer.add_section(*kind, bytes.clone());
-                }
-
-                // Add model_meta section for LLM detection at load time.
-                {
-                    use hologram::hologram_archive::section::EmbeddableSection;
-                    let model_meta =
-                        hologram::hologram_archive::section::model_meta::ModelMetaSection {
-                            kind:
-                                hologram::hologram_archive::section::model_meta::ModelKind::TextLlm,
-                            arch: pre_metadata.arch.clone(),
-                            description: pre_metadata.arch.clone(),
-                            max_seq_len: pre_metadata.context_len,
-                            supports_prompt: true,
-                            n_layers: pre_metadata.n_layers,
-                            n_kv_heads: pre_metadata.n_kv_heads,
-                            head_dim: pre_metadata.head_dim,
-                            kv_k_bits: 0,
-                            kv_v_bits: 0,
-                            kv_boundary_layers: 2,
-                            kv_wht: false,
-                        };
-                    writer = writer.add_section(model_meta.section_kind(), model_meta.to_bytes());
-                }
-
-                writer
-                    .build_to_file(&output_path, &scratch_path)
-                    .map_err(|e| anyhow::anyhow!("building streaming LLM pipeline: {e}"))?;
-
-                let _ = std::fs::remove_file(&scratch_path);
 
                 let archive_size = std::fs::metadata(&output_path)
                     .map(|m| m.len())
@@ -1471,6 +1519,63 @@ pub(crate) fn unpack_archive(archive: &[u8]) -> anyhow::Result<UnpackedArchive> 
     })
 }
 
+/// Externalize large constants from serialized graph bytes.
+///
+/// Deserializes the graph, replaces `ConstantData::Bytes` entries >= `threshold`
+/// with `ConstantData::Deferred`, collects the extracted bytes into a contiguous
+/// blob, and re-serializes. Returns `(new_graph_bytes, external_blob)`.
+///
+/// Used to avoid duplicating large constants (quantized weights, embeddings)
+/// across pipeline sub-archives. The external blob is fed through `WeightStore`
+/// for cross-component deduplication.
+fn externalize_graph_constants(
+    graph_bytes: &[u8],
+    threshold: usize,
+) -> anyhow::Result<(Vec<u8>, Vec<u8>)> {
+    use hologram::hologram_archive::format::graph::SerializedGraph;
+    use hologram::hologram_graph::constant::ConstantData;
+
+    let mut sg: SerializedGraph =
+        rkyv::from_bytes::<SerializedGraph, rkyv::rancor::Error>(graph_bytes)
+            .map_err(|e| anyhow::anyhow!("deserializing graph for constant externalization: {e}"))?;
+
+    let mut external_blob = Vec::new();
+    let n = sg.constants.len();
+    for i in 0..n {
+        let cid = hologram::ConstantId::new(i as u32);
+        let should_externalize = sg
+            .constants
+            .get(cid)
+            .map_or(false, |c| matches!(c, ConstantData::Bytes(b) if b.len() >= threshold));
+
+        if should_externalize {
+            if let Some(ConstantData::Bytes(data)) = sg.constants.get(cid) {
+                // Align each constant to 16 bytes for SIMD-friendly access.
+                // Without alignment, seed_arena copies Deferred constants into
+                // owned Vecs on every execution (4.5x decode regression).
+                let aligned_offset = (external_blob.len() + 15) & !15;
+                external_blob.resize(aligned_offset, 0);
+                let offset = external_blob.len() as u64;
+                let byte_size = data.len() as u64;
+                external_blob.extend_from_slice(data);
+                sg.constants.replace(
+                    cid,
+                    ConstantData::Deferred {
+                        byte_size,
+                        source_id: offset,
+                    },
+                );
+            }
+        }
+    }
+
+    let new_bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&sg)
+        .map_err(|e| anyhow::anyhow!("re-serializing graph after externalization: {e}"))?
+        .to_vec();
+
+    Ok((new_bytes, external_blob))
+}
+
 /// Build a final archive from unpacked components plus all modifications,
 /// using a single `HoloWriter::build()` call.
 ///
@@ -1657,12 +1762,15 @@ fn prepare_llm_component(
 
 /// Result from compiling a single component.
 struct ComponentResult {
-    /// The sub-archive bytes.
+    /// The sub-archive bytes (with large constants externalized).
     archive: Vec<u8>,
     /// True if all Deferred (f32) weight constants were replaced by
     /// quantized Bytes constants. When true, the streaming weight source
     /// is no longer needed for this component.
     all_weights_encoded: bool,
+    /// Externalized constants (large ConstantData::Bytes extracted from graph).
+    /// Fed through WeightStore for cross-component deduplication.
+    external_constants: Vec<u8>,
 }
 
 /// Compile a single AiGraph into a sub-archive ready for PipelineWriter.
@@ -1900,9 +2008,59 @@ fn compile_one_component(
         weight_index,
         &extra_sections,
     )?;
+
+    // Externalize large constants from the sub-archive for pipeline-level
+    // deduplication. Constants >= 1 MB are extracted and returned separately.
+    // The pipeline writer deduplicates identical blobs across sub-archives
+    // (prefill/decode/verify), reducing archive size by ~3x for LLM pipelines.
+    const EXTERNALIZE_THRESHOLD: usize = 1024 * 1024; // 1 MB
+    let (slim_archive, external_constants) = {
+        let plan = hologram::load_from_bytes(&archive)
+            .context("loading archive for constant externalization")?;
+        let h = plan.header();
+        let graph_bytes =
+            &archive[h.graph_offset as usize..(h.graph_offset + h.graph_size) as usize];
+        let (new_graph_bytes, external_blob) =
+            externalize_graph_constants(graph_bytes, EXTERNALIZE_THRESHOLD)?;
+
+        if external_blob.is_empty() {
+            (archive, Vec::new())
+        } else {
+            let ext_mb = external_blob.len() / (1024 * 1024);
+            let orig_mb = archive.len() / (1024 * 1024);
+            tracing::info!(
+                external_mb = ext_mb,
+                original_archive_mb = orig_mb,
+                "externalized constants from sub-archive"
+            );
+
+            // Rebuild the sub-archive with the slimmed graph (no large constants).
+            let weight_bytes = plan.weights().to_vec();
+            let mut sections = Vec::new();
+            for entry in &plan.sections().entries {
+                let offset = entry.offset as usize;
+                let size = entry.size as usize;
+                if offset + size <= archive.len() {
+                    sections.push((entry.kind, archive[offset..offset + size].to_vec()));
+                }
+            }
+            let mut writer = hologram::HoloWriter::new()
+                .set_graph_bytes_uncompressed(new_graph_bytes)
+                .set_weights(weight_bytes);
+            for (kind, bytes) in sections {
+                writer = writer.add_raw_section(kind, bytes);
+            }
+            let slim = writer
+                .build()
+                .map_err(|e| anyhow::anyhow!("rebuilding slim sub-archive: {e}"))?;
+            (slim, external_blob)
+        }
+    };
+
     Ok(ComponentResult {
-        archive,
+        archive: slim_archive,
         all_weights_encoded: all_weights_encoded || trimmed_weights.is_some(),
+        external_constants,
     })
 }
 

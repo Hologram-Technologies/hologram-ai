@@ -254,12 +254,45 @@ pub fn resolve_encodings(
             "encoded weight"
         );
     }
+    // Post-quantization cleanup: rebuild consumer counts and clear any
+    // Deferred constants that now have 0 consumers (their MatMul was replaced
+    // with MatMulLut4/8 which no longer references the original constant node).
+    if stats.encoded > 0 {
+        let mut post_cc: HashMap<ConstantId, usize> = HashMap::new();
+        for nid in graph.node_ids() {
+            if let Some(node) = graph.get(nid) {
+                if let GraphOp::Constant(cid) = &node.op {
+                    let n_consumers = graph.successors(nid).len();
+                    post_cc.insert(*cid, n_consumers);
+                }
+            }
+        }
+        let mut cleared = 0usize;
+        let mut cleared_bytes = 0u64;
+        for (&cid, &count) in &post_cc {
+            if count == 0 {
+                if let Some(ConstantData::Deferred { byte_size, .. }) = graph.get_constant(cid) {
+                    let bs = *byte_size;
+                    graph.replace_constant(cid, ConstantData::Bytes(vec![]));
+                    cleared += 1;
+                    cleared_bytes += bs;
+                }
+            }
+        }
+        if cleared > 0 {
+            tracing::info!(
+                cleared,
+                cleared_mb = cleared_bytes / (1024 * 1024),
+                "post-quantization: cleared orphaned Deferred constants"
+            );
+        }
+    }
     } // end if !skip_quantization
 
     // Inline remaining Deferred constants from the weight file.
     // Runs unconditionally (even without quantization) to eliminate streaming
     // overhead for small models that skip quantization.
-    const INLINE_BUDGET: u64 = 1500 * 1024 * 1024; // 1.5 GB max total inlined
+    let inline_budget: u64 = 4 * 1024 * 1024 * 1024; // 4 GB — inline all constants
     if let Some(wf) = weight_file {
         let store = graph.constant_store();
         let n = store.len();
@@ -302,12 +335,12 @@ pub fn resolve_encodings(
         deferred.sort_by_key(|&(_, _, size)| size);
 
         for (cid, source_id, byte_size) in deferred {
-            if inlined_bytes + byte_size > INLINE_BUDGET {
+            if inlined_bytes + byte_size > inline_budget {
                 tracing::debug!(
                     cid = cid.raw(),
                     byte_size,
                     inlined_bytes,
-                    budget = INLINE_BUDGET,
+                    budget = inline_budget,
                     "inline: skipping, would exceed budget"
                 );
                 continue;
@@ -335,7 +368,7 @@ pub fn resolve_encodings(
                 inlined,
                 inlined_mb = inlined_bytes / (1024 * 1024),
                 "inlined Deferred constants (budget: {} MB)",
-                INLINE_BUDGET / (1024 * 1024),
+                inline_budget / (1024 * 1024),
             );
         }
     }

@@ -50,6 +50,8 @@ impl BpeEncoder {
 
     /// Decode token IDs back to text.
     pub fn decode(&self, token_ids: &[u32]) -> String {
+        let is_byte_level = matches!(self.pre_tokenizer, PreTokenizerConfig::ByteLevel { .. });
+
         let mut bytes = Vec::new();
         for &id in token_ids {
             if let Some(token_bytes) = self.vocab.id_to_token.get(id as usize) {
@@ -67,12 +69,25 @@ impl BpeEncoder {
             }
         }
 
-        // Undo Metaspace encoding: replace ▁ (U+2581) with space
-        let text = String::from_utf8_lossy(&bytes);
-        let text = text.replace('\u{2581}', " ");
-        // Strip leading space from Metaspace prepend
-        let text = text.strip_prefix(' ').unwrap_or(&text);
-        text.to_string()
+        if is_byte_level {
+            // Byte-level BPE (GPT-2 / Qwen): the vocab stores Unicode-mapped
+            // characters. Reverse the byte_to_unicode mapping to recover the
+            // original bytes, then decode as UTF-8.
+            let unicode_to_byte = unicode_to_byte_table();
+            let text = String::from_utf8_lossy(&bytes);
+            let raw_bytes: Vec<u8> = text
+                .chars()
+                .filter_map(|c| unicode_to_byte.get(&c).copied())
+                .collect();
+            String::from_utf8_lossy(&raw_bytes).into_owned()
+        } else {
+            // Metaspace (SentencePiece) encoding: replace ▁ (U+2581) with space
+            let text = String::from_utf8_lossy(&bytes);
+            let text = text.replace('\u{2581}', " ");
+            // Strip leading space from Metaspace prepend
+            let text = text.strip_prefix(' ').unwrap_or(&text);
+            text.to_string()
+        }
     }
 
     pub fn vocab(&self) -> &VocabTable {
@@ -269,6 +284,19 @@ fn byte_to_unicode_table() -> [char; 256] {
         table[b as usize] = char::from_u32(ch).unwrap_or('?');
     }
     table
+}
+
+/// Reverse mapping: Unicode char → original byte value.
+///
+/// Inverts `byte_to_unicode_table()` for decoding byte-level BPE tokens
+/// back to raw bytes.
+fn unicode_to_byte_table() -> HashMap<char, u8> {
+    let forward = byte_to_unicode_table();
+    let mut reverse = HashMap::with_capacity(256);
+    for (byte_val, &ch) in forward.iter().enumerate() {
+        reverse.insert(ch, byte_val as u8);
+    }
+    reverse
 }
 
 /// Parse a byte-fallback token like `<0x41>` → Some(0x41).

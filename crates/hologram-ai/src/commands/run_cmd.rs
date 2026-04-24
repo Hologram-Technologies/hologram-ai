@@ -172,6 +172,21 @@ pub fn execute(mut args: RunArgs) -> anyhow::Result<()> {
                     args.max_tokens = Some(max as usize);
                 }
             }
+            // Override default temperature (0.7) with config value.
+            // CLI --temperature takes precedence but the default is
+            // indistinguishable from "not set", so config always applies.
+            if let Some(t) = run.get("temperature").and_then(|v| v.as_float()) {
+                args.temperature = t as f32;
+            }
+            if args.stop.is_empty() {
+                if let Some(stops) = run.get("stop").and_then(|v| v.as_array()) {
+                    for s in stops {
+                        if let Some(sv) = s.as_str() {
+                            args.stop.push(sv.to_string());
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -185,6 +200,10 @@ pub fn execute(mut args: RunArgs) -> anyhow::Result<()> {
         args.runtime_config.as_deref(),
     )
     .with_context(|| format!("loading archive {}", file.display()))?;
+    // Pre-warm OS page cache: issue MADV_WILLNEED so the OS begins
+    // asynchronously faulting archive pages while we set up tokenizer/KV.
+    runner.prewarm_pages();
+
     info!(
         "archive loaded in {:.1}ms",
         load_start.elapsed().as_secs_f64() * 1000.0
@@ -390,6 +409,9 @@ fn run_generation(
         "sampling: temperature={:.2}, top_k={}, rep_penalty=1.3 (generated tokens only)",
         config.temperature, config.top_k,
     );
+    if !config.stop.is_empty() {
+        info!("stop strings: {:?}", config.stop);
+    }
 
     let input_slot = plan
         .graph()
@@ -595,21 +617,20 @@ fn run_generation(
         let prev_len = encoder.decode(&token_ids[prompt_len..]).len();
         token_ids.push(next_token);
         let full = encoder.decode(&token_ids[prompt_len..]);
-        if prev_len <= full.len() && full.is_char_boundary(prev_len) {
+        // Check for stop string in the accumulated output BEFORE printing.
+        let stop_found = !config.stop.is_empty()
+            && config
+                .stop
+                .iter()
+                .any(|s| !s.is_empty() && full.contains(s.as_str()));
+
+        if prev_len <= full.len() && full.is_char_boundary(prev_len) && !stop_found {
             let new_text = &full[prev_len..];
             print!("{new_text}");
             std::io::stdout().flush().ok();
         }
 
-        // Stop if the decoded output ends with any user-provided stop string.
-        // The stop string is not stripped from output; the user sees it and
-        // can split on it in post-processing.
-        if !config.stop.is_empty()
-            && config
-                .stop
-                .iter()
-                .any(|s| !s.is_empty() && full.ends_with(s))
-        {
+        if stop_found {
             break;
         }
 

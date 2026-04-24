@@ -9,5 +9,7 @@ output = "../models/Qwen2-0.5B"
 quantize = "q4_0"
 
 [run]
-prompt = "The capital of France is"
-max_tokens = 30
+prompt = "<|im_start|>system\nYou are a helpful assistant<|im_end|>\n<|im_start|>user\nWhat is the capital of France?<|im_end|>\n<|im_start|>assistant\n"
+max_tokens = 60
+temperature = 0.0
+stop = ["<|im_end|>"]
