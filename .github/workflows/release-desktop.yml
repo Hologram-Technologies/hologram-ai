@@ -1,0 +1,147 @@
+name: release-desktop
+
+# Builds the hologram-ai-desktop Tauri app and publishes installers to a
+# GitHub Release. Triggered by pushing a tag matching `desktop-v*` so this
+# can be cut independently of library/CLI releases.
+#
+# The desktop app shells out to the `hologram-ai` CLI; we build the CLI for
+# both macOS arches first and stage them as Tauri sidecars so the resulting
+# `.dmg` is fully self-contained — a user double-clicks and it just works.
+#
+# macOS-only for now (the runtime crate enables the Accelerate framework
+# which is darwin-only). Linux/Windows can be added once the runtime stops
+# requiring Accelerate or a feature toggle is plumbed through the workspace.
+#
+# Security note: no `run:` block interpolates user-controllable input. The
+# only run blocks are static cargo/cp commands and a git clone using a
+# token in env. User-provided strings (workflow_dispatch tag input, ref
+# name) are only consumed by typed `with:` inputs to `tauri-action`.
+
+on:
+  push:
+    tags:
+      - 'desktop-v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag (e.g. desktop-v0.1.0). Leave blank to build artifacts only.'
+        required: false
+        default: ''
+
+jobs:
+  publish-desktop:
+    name: build + publish (macOS universal)
+    runs-on: macos-14
+    permissions:
+      contents: write
+    timeout-minutes: 90
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Generate GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.APP_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+          owner: Hologram-Technologies
+          repositories: hologram
+
+      - name: Checkout hologram (sibling dependency)
+        env:
+          TOKEN: ${{ steps.app-token.outputs.token }}
+        run: git clone --depth 1 "https://x-access-token:${TOKEN}@github.com/Hologram-Technologies/hologram.git" ../hologram
+
+      - name: Install protoc
+        uses: arduino/setup-protoc@v3
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release-desktop
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v3
+        with:
+          version: 9
+
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install frontend deps
+        working-directory: apps/desktop
+        run: pnpm install --no-frozen-lockfile
+
+      # Build the CLI for both macOS arches. These become the sidecar
+      # binaries Tauri picks up via `bundle.externalBin` and ships inside
+      # the .app bundle.
+      - name: Build hologram-ai (aarch64-apple-darwin)
+        run: cargo build --release --target aarch64-apple-darwin -p hologram-ai
+
+      - name: Build hologram-ai (x86_64-apple-darwin)
+        run: cargo build --release --target x86_64-apple-darwin -p hologram-ai
+
+      - name: Stage CLI sidecars
+        run: |
+          mkdir -p apps/desktop/src-tauri/binaries
+          cp target/aarch64-apple-darwin/release/hologram-ai \
+             apps/desktop/src-tauri/binaries/hologram-ai-aarch64-apple-darwin
+          cp target/x86_64-apple-darwin/release/hologram-ai \
+             apps/desktop/src-tauri/binaries/hologram-ai-x86_64-apple-darwin
+          chmod +x apps/desktop/src-tauri/binaries/hologram-ai-*
+          ls -la apps/desktop/src-tauri/binaries/
+
+      - name: Build + publish desktop app
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Apple signing/notarization secrets (optional). Without these,
+          # the .dmg is unsigned — users will need to right-click → Open
+          # the first time, or run:
+          #   xattr -dr com.apple.quarantine /Applications/hologram-ai-desktop.app
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        with:
+          projectPath: apps/desktop
+          tagName: ${{ github.event.inputs.tag || github.ref_name }}
+          releaseName: 'hologram-ai-desktop ${{ github.event.inputs.tag || github.ref_name }}'
+          releaseBody: |
+            **Download** the `.dmg` for your Mac:
+            - Apple Silicon (M-series) and Intel — universal build, single file.
+
+            First launch: macOS Gatekeeper will block an unsigned build.
+            Right-click the app and choose **Open** to confirm, or run:
+            ```
+            xattr -dr com.apple.quarantine /Applications/hologram-ai-desktop.app
+            ```
+          releaseDraft: true
+          prerelease: false
+          includeUpdaterJson: false
+          args: --target universal-apple-darwin
+
+      # When run via workflow_dispatch with no tag, tauri-action skips the
+      # publish step. Upload the artifacts so they're still downloadable
+      # from the run page for testing.
+      - name: Upload artifacts (dispatch builds)
+        if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.tag == '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: hologram-ai-desktop-macos-universal
+          path: |
+            target/universal-apple-darwin/release/bundle/dmg/*.dmg
+            target/universal-apple-darwin/release/bundle/macos/*.app.tar.gz
+          if-no-files-found: error

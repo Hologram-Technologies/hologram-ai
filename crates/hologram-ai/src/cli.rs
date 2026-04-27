@@ -49,6 +49,13 @@ enum Command {
         /// Output directory for the compiled `.holo` archive.
         #[arg(short, long, value_name = "DIR")]
         output: Option<PathBuf>,
+        /// Stem for the compiled archive filename (the `.holo` extension is
+        /// appended automatically). When omitted, the stem is the ONNX file
+        /// name unless that name is the generic `"model"` (the HuggingFace
+        /// convention) — in which case the parent directory's name is used
+        /// so archives are descriptive by default.
+        #[arg(long, value_name = "STEM")]
+        name: Option<String>,
         /// Path to tokenizer.json (auto-detected from model directory if omitted).
         #[arg(long, value_name = "FILE")]
         tokenizer: Option<PathBuf>,
@@ -143,6 +150,7 @@ fn main() -> anyhow::Result<()> {
             model,
             manifest,
             output,
+            name,
             tokenizer,
             seq_len,
             quantize,
@@ -261,10 +269,7 @@ fn main() -> anyhow::Result<()> {
                 );
             }
             std::fs::create_dir_all(&output)?;
-            let stem = model_path
-                .file_stem()
-                .and_then(|s| s.to_str())
-                .unwrap_or("model");
+            let stem = resolve_archive_stem(name.as_deref(), &model_path);
             let holo_path = output.join(format!("{stem}.holo"));
 
             // Resolve tokenizer path: explicit flag or auto-detect from model dir.
@@ -421,6 +426,41 @@ fn inspect_onnx(path: &std::path::Path) -> anyhow::Result<()> {
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
+
+/// Pick a descriptive filename stem for the compiled archive.
+///
+/// Precedence:
+/// 1. Explicit `--name` flag wins outright.
+/// 2. If the ONNX file_stem is the generic `"model"` (the HuggingFace
+///    convention — `<repo>/model.onnx`), use the parent directory name so
+///    `models/TinyLlama-1.1B-Chat-v1.0/model.onnx` produces
+///    `TinyLlama-1.1B-Chat-v1.0.holo` rather than `model.holo`.
+/// 3. Otherwise, use the ONNX file stem (preserves prior behavior for
+///    paths like `model_v2.onnx` or `tinyllama.onnx`).
+fn resolve_archive_stem(name: Option<&str>, model_path: &std::path::Path) -> String {
+    if let Some(n) = name {
+        let trimmed = n.trim();
+        if !trimmed.is_empty() {
+            return trimmed.to_string();
+        }
+    }
+    let stem = model_path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("model");
+    if stem == "model" {
+        if let Some(parent_name) = model_path
+            .parent()
+            .and_then(|p| p.file_name())
+            .and_then(|n| n.to_str())
+        {
+            if !parent_name.is_empty() {
+                return parent_name.to_string();
+            }
+        }
+    }
+    stem.to_string()
+}
 
 fn model_source_from_path(path: &std::path::Path) -> anyhow::Result<ModelSource> {
     let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
@@ -788,6 +828,48 @@ fn resolve_config_path(config_dir: &Option<PathBuf>, relative: &str) -> PathBuf 
     match config_dir {
         Some(dir) => dir.join(relative),
         None => PathBuf::from(relative),
+    }
+}
+
+#[cfg(test)]
+mod archive_stem_tests {
+    use super::resolve_archive_stem;
+    use std::path::PathBuf;
+
+    #[test]
+    fn explicit_name_wins() {
+        let p = PathBuf::from("models/Foo/bar.onnx");
+        assert_eq!(resolve_archive_stem(Some("custom"), &p), "custom");
+    }
+
+    #[test]
+    fn empty_name_falls_through_to_stem() {
+        let p = PathBuf::from("anywhere/tinyllama.onnx");
+        assert_eq!(resolve_archive_stem(Some("   "), &p), "tinyllama");
+    }
+
+    #[test]
+    fn generic_model_stem_uses_parent_dir() {
+        // The HuggingFace download convention puts `model.onnx` under a
+        // descriptive parent directory.
+        let p = PathBuf::from("models/TinyLlama-1.1B-Chat-v1.0/model.onnx");
+        assert_eq!(
+            resolve_archive_stem(None, &p),
+            "TinyLlama-1.1B-Chat-v1.0"
+        );
+    }
+
+    #[test]
+    fn descriptive_stem_is_kept() {
+        let p = PathBuf::from("models/Foo/tinyllama_q4.onnx");
+        assert_eq!(resolve_archive_stem(None, &p), "tinyllama_q4");
+    }
+
+    #[test]
+    fn generic_stem_with_no_parent_falls_back_to_stem() {
+        let p = PathBuf::from("model.onnx");
+        // No parent name → keep the original "model" stem rather than crash.
+        assert_eq!(resolve_archive_stem(None, &p), "model");
     }
 }
 
