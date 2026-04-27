@@ -99,25 +99,29 @@ fn propagate_shapes(mut graph: AiGraph, protect_settled: bool) -> anyhow::Result
             // input[1] and multiply by input spatial dims.
             AiOp::Resize { .. } => {
                 let inputs_ref = &graph.nodes[idx].inputs;
-                // ONNX Resize signature:
-                //   v10: Resize(X, scales)            — inputs[1] is scales (f32)
-                //   v11+: Resize(X, roi, scales, sizes) — inputs[3] is sizes (i64)
+                // ONNX Resize signature varies by opset:
+                //   v10:  Resize(X, scales)             — inputs[1] is f32 scales
+                //   v11+: Resize(X, roi, scales, sizes) — inputs[3] is i64 sizes
+                // The ONNX importer collapses to 2 inputs (X, scales-or-sizes),
+                // preferring i64 sizes when present, so sizes can end up at
+                // inputs[1] OR inputs[3].
                 //
-                // Only inputs[3] is unambiguously "sizes". inputs[1] could be
-                // scales OR sizes depending on opset, so we don't read it as
-                // sizes — we'd otherwise interpret f32 scales like [1.0, 1.0, 2.0, 2.0]
-                // (cast to i64 by DataPropagation as [1, 1, 2, 2]) as absolute
-                // output dimensions, producing tiny wrong shapes.
-                //
-                // If inputs[1] is actually sizes (rare), the scales fallback below
-                // will fail to read it as f32 and we keep input shape — safer than
-                // wrongly using scales as absolute sizes.
-                let sizes = inputs_ref.get(3).and_then(|tid| {
-                    graph
-                        .tensor_info
-                        .get(tid)
-                        .and_then(|ti| ti.known_i64_values.clone())
-                });
+                // To distinguish sizes (true i64) from scales (f32 cast-to-i64
+                // by DataPropagation as e.g. [1, 1, 2, 2]) we gate on
+                // logical_dtype — only treat known_i64_values as "sizes" if the
+                // source tensor is INT64.
+                let sizes_from = |tid: crate::ir::TensorId| -> Option<Vec<Option<i64>>> {
+                    let info = graph.tensor_info.get(&tid)?;
+                    if info.logical_dtype != DType::INT64 {
+                        return None;
+                    }
+                    info.known_i64_values.clone()
+                };
+                let sizes = inputs_ref
+                    .get(3)
+                    .copied()
+                    .and_then(sizes_from)
+                    .or_else(|| inputs_ref.get(1).copied().and_then(sizes_from));
                 if sizes.is_some() {
                     sizes
                 } else {
