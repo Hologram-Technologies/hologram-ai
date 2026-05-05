@@ -10,7 +10,8 @@
 
 use crate::lower::QuantStrategy;
 use hologram::hologram_graph::constant::ConstantData;
-use hologram::{ConstantId, FloatOp, Graph, GraphOp, NodeId};
+use hologram::hologram_core::op::FloatOp;
+use hologram::{ConstantId, Graph, GraphOp, NodeId};
 use std::collections::HashMap;
 
 /// A content-address entry for one encoded weight tensor.

@@ -3,7 +3,7 @@
 
 use crate::tolerance::{compare_outputs, tolerance_for, ComparisonResult, Tolerance};
 use hologram::hologram_exec::float_dispatch::dispatch_float;
-use hologram::FloatOp;
+use hologram::hologram_core::op::FloatOp;
 
 /// Run a FloatOp through dispatch_float and compare against expected output.
 pub fn verify_dispatch(

@@ -21,7 +21,8 @@ use super::op_resolver::{
 use crate::exec_context::{NodeShapeRecipe, ParamRecipe};
 use crate::ir::{AiOp, DimVarId, TensorId, TensorInfo};
 use anyhow::Result;
-use hologram::{FloatOp, GraphOp};
+use hologram::hologram_core::op::FloatOp;
+use hologram::GraphOp;
 use std::collections::HashMap;
 
 /// Result of lowering an op with a strategy.

@@ -5,7 +5,7 @@
 //! bit-for-bit on the same Q4_0 input.
 
 use hologram::hologram_exec::float_dispatch::dispatch_float;
-use hologram::FloatOp;
+use hologram::hologram_core::op::FloatOp;
 use hologram_ai_quant::{dequant_q4_0, Q4_0_BLOCK_SIZE};
 
 /// Build a Q4_0 block from scale (f16 bits) and quantized nibbles.

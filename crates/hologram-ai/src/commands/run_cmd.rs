@@ -7,6 +7,7 @@
 
 use anyhow::Context as _;
 use clap::Args;
+use hologram::hologram_archive::section::host_meta::{HostMetaSection, SECTION_HOST_META};
 use hologram::hologram_archive::section::model_meta::{ModelMetaSection, SECTION_MODEL_META};
 use hologram::hologram_archive::section::tokenizer::{
     MiniBpeEncoder, TokenizerSection, SECTION_TOKENIZER,
@@ -228,6 +229,12 @@ pub fn execute(mut args: RunArgs) -> anyhow::Result<()> {
                 .as_ref()
                 .and_then(|p| load_section::<ModelMetaSection>(raw, p, SECTION_MODEL_META))
         });
+    let host_meta = load_section::<HostMetaSection>(effective, runner.plan(), SECTION_HOST_META)
+        .or_else(|| {
+            raw_plan
+                .as_ref()
+                .and_then(|p| load_section::<HostMetaSection>(raw, p, SECTION_HOST_META))
+        });
 
     print_model_info(runner.plan(), &model_meta);
 
@@ -247,6 +254,34 @@ pub fn execute(mut args: RunArgs) -> anyhow::Result<()> {
                  recompile with --tokenizer to use --prompt"
             )
         })?;
+
+        // Apply the embedded prompt template if the archive carries one and
+        // the user didn't supply pre-formatted text. Without this the model
+        // sees raw user input and falls back to base-model continuation
+        // (e.g. TinyLlama-Chat hallucinating instead of answering).
+        let formatted_prompt = host_meta
+            .as_ref()
+            .and_then(|h| h.prompt_template.as_ref())
+            .map(|tmpl| {
+                let out = tmpl.replace("{prompt}", prompt);
+                info!("applied embedded prompt_template");
+                out
+            });
+        let effective_prompt: &str = formatted_prompt.as_deref().unwrap_or(prompt.as_str());
+
+        // Merge stop strings: explicit --stop wins, otherwise inherit from
+        // host_meta.sampling.stop. The EOS token is always honoured separately.
+        let mut effective_stop = args.stop.clone();
+        if effective_stop.is_empty() {
+            if let Some(stops) = host_meta
+                .as_ref()
+                .and_then(|h| h.sampling.as_ref())
+                .map(|s| &s.stop)
+            {
+                effective_stop = stops.clone();
+            }
+        }
+
         let gen_config = GenerationConfig {
             max_tokens: args.max_tokens,
             temperature: args.temperature,
@@ -257,9 +292,9 @@ pub fn execute(mut args: RunArgs) -> anyhow::Result<()> {
             kv_wht: args.kv_wht,
             speculative: args.speculative,
             draft_steps: args.draft_steps,
-            stop: args.stop.clone(),
+            stop: effective_stop,
         };
-        run_generation(&runner, tok, prompt, &gen_config, model_meta.as_ref())?;
+        run_generation(&runner, tok, effective_prompt, &gen_config, model_meta.as_ref())?;
     } else {
         let mut graph_inputs = parse_inputs(&args.inputs)?;
         load_file_inputs(&args.input_files, &mut graph_inputs)?;
@@ -984,6 +1019,13 @@ impl SectionDeserialize for ModelMetaSection {
     fn deserialize_section(bytes: &[u8]) -> anyhow::Result<Self> {
         ModelMetaSection::deserialize_from(bytes)
             .map_err(|e| anyhow::anyhow!("deserialize ModelMetaSection: {e}"))
+    }
+}
+
+impl SectionDeserialize for HostMetaSection {
+    fn deserialize_section(bytes: &[u8]) -> anyhow::Result<Self> {
+        HostMetaSection::deserialize_from(bytes)
+            .map_err(|e| anyhow::anyhow!("deserialize HostMetaSection: {e}"))
     }
 }
 

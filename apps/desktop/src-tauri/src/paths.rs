@@ -60,6 +60,12 @@ pub fn hologram_ai_bin() -> anyhow::Result<PathBuf> {
 /// AppImage/`/usr/bin/`, Windows next to the `.exe`). We resolve via
 /// `current_exe()` rather than the Tauri sidecar API to keep this helper
 /// usable from any context (no `AppHandle` needed).
+///
+/// In dev builds, `tauri-build` copies the externalBin entry from
+/// `binaries/hologram-ai-<triple>` to `target/debug/hologram-ai` next to
+/// the desktop binary — and `build.rs` writes a shell-script placeholder
+/// there when no real binary has been staged. We must skip that placeholder
+/// so the lookup falls through to `target/release/hologram-ai`.
 fn sidecar_bin() -> Option<PathBuf> {
     let our_exe = std::env::current_exe().ok()?;
     let dir = our_exe.parent()?;
@@ -69,9 +75,62 @@ fn sidecar_bin() -> Option<PathBuf> {
         "hologram-ai"
     };
     let candidate = dir.join(name);
-    if candidate.exists() && candidate != our_exe {
-        Some(candidate)
-    } else {
-        None
+    if !candidate.exists() || candidate == our_exe {
+        return None;
+    }
+    if is_placeholder_stub(&candidate) {
+        return None;
+    }
+    Some(candidate)
+}
+
+/// Returns true if `path` is the build-time placeholder stub written by
+/// `build.rs`. The stub is a tiny shell script; a real CLI binary is a
+/// platform executable (Mach-O / ELF / PE), never a `#!`-prefixed script.
+fn is_placeholder_stub(path: &Path) -> bool {
+    use std::io::Read;
+    let Ok(mut f) = std::fs::File::open(path) else {
+        return false;
+    };
+    let mut buf = [0u8; 2];
+    matches!(f.read(&mut buf), Ok(2)) && &buf == b"#!"
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn scratch_path(stem: &str) -> PathBuf {
+        let mut p = std::env::temp_dir();
+        p.push(format!(
+            "hologram-ai-paths-{stem}-{}",
+            std::process::id()
+        ));
+        p
+    }
+
+    #[test]
+    fn detects_shell_script_stub() {
+        let p = scratch_path("stub");
+        std::fs::write(&p, b"#!/bin/sh\necho stub\nexit 127\n").expect("write stub");
+        let detected = is_placeholder_stub(&p);
+        let _ = std::fs::remove_file(&p);
+        assert!(detected);
+    }
+
+    #[test]
+    fn binary_is_not_a_stub() {
+        let p = scratch_path("bin");
+        // Mach-O magic for a 64-bit arm64 binary; any non-`#!` start works.
+        std::fs::write(&p, [0xCFu8, 0xFA, 0xED, 0xFE, 0x0C, 0x00, 0x00, 0x01])
+            .expect("write fake binary");
+        let detected = is_placeholder_stub(&p);
+        let _ = std::fs::remove_file(&p);
+        assert!(!detected);
+    }
+
+    #[test]
+    fn missing_file_is_not_a_stub() {
+        assert!(!is_placeholder_stub(Path::new("/nonexistent/hologram-ai")));
     }
 }

@@ -8,7 +8,7 @@
 #![cfg(feature = "conformance")]
 
 use hologram::hologram_exec::float_dispatch::dispatch_float;
-use hologram::FloatOp;
+use hologram::hologram_core::op::FloatOp;
 use hologram_ai_conformance::ort_runner::{onnx_builder, runner::OrtInput};
 
 fn dispatch_f32(op: &FloatOp, inputs: &[&[f32]]) -> Vec<f32> {

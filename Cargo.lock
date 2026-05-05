@@ -1897,6 +1897,7 @@ dependencies = [
  "hologram-core",
  "hologram-exec",
  "hologram-graph",
+ "hologram-ops",
  "rkyv",
  "serde",
  "tokio",
@@ -2054,6 +2055,7 @@ version = "0.1.0"
 dependencies = [
  "bytemuck",
  "hologram-core",
+ "hologram-transform",
  "metal",
  "objc",
  "smallvec",
@@ -2130,6 +2132,7 @@ dependencies = [
  "hologram-backend",
  "hologram-core",
  "hologram-graph",
+ "hologram-ops",
  "hologram-ring",
  "hologram-shape",
  "libc",
@@ -2145,10 +2148,19 @@ name = "hologram-graph"
 version = "0.4.1"
 dependencies = [
  "hologram-core",
+ "hologram-ops",
  "rayon",
  "rkyv",
  "smallvec",
  "tinyvec",
+]
+
+[[package]]
+name = "hologram-ops"
+version = "0.4.1"
+dependencies = [
+ "libm",
+ "rkyv",
 ]
 
 [[package]]
@@ -2164,6 +2176,15 @@ name = "hologram-shape"
 version = "0.4.1"
 dependencies = [
  "hologram-core",
+ "smallvec",
+ "thiserror 2.0.18",
+]
+
+[[package]]
+name = "hologram-transform"
+version = "0.4.1"
+dependencies = [
+ "hologram-ops",
  "smallvec",
  "thiserror 2.0.18",
 ]

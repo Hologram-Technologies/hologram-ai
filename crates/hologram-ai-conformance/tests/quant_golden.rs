@@ -5,7 +5,7 @@
 //! for Q4_0 and Q8_0 dequantization, matching the ggml spec.
 
 use hologram::hologram_exec::float_dispatch::dispatch_float;
-use hologram::FloatOp;
+use hologram::hologram_core::op::FloatOp;
 use hologram_ai_quant::{dequant_q4_0, dequant_q8_0};
 use serde::Deserialize;
 

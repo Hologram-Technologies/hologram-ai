@@ -5,7 +5,7 @@
 //! then compare outputs using per-op tolerances.
 
 use hologram::hologram_exec::float_dispatch::dispatch_float;
-use hologram::FloatOp;
+use hologram::hologram_core::op::FloatOp;
 use hologram_ai_conformance::reference;
 use hologram_ai_conformance::tolerance::{compare_outputs, tolerance_for, Tolerance};
 

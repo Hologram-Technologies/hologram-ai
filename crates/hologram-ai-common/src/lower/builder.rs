@@ -15,7 +15,8 @@ use crate::exec_context::{
 use crate::ir::{AiGraph, AiNode, AiOp, Dim, DimVarId, TensorId, TensorInfo};
 use crate::mem::KvCacheLayout;
 use anyhow::Context;
-use hologram::{ConstantData, FloatOp, GraphBuilder, GraphOp, SubgraphDef};
+use hologram::hologram_core::op::FloatOp;
+use hologram::{ConstantData, GraphBuilder, GraphOp, SubgraphDef};
 use std::collections::HashMap;
 
 // ── Public types ──────────────────────────────────────────────────────────────

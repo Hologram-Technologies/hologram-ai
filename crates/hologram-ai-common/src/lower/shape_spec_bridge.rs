@@ -13,7 +13,7 @@
 
 use std::collections::{BTreeSet, HashMap};
 
-use hologram::FloatOp;
+use hologram::hologram_core::op::FloatOp;
 
 use crate::ir::AiOp;
 

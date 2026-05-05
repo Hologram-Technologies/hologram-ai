@@ -3,7 +3,8 @@
 use crate::exec_context::ParamRecipe;
 use crate::ir::{AiOp, DimExpr, DimVarId, TensorId, TensorInfo};
 use anyhow::Result;
-use hologram::{f32_to_bits, FloatDType, FloatOp};
+use hologram::hologram_core::op::FloatOp;
+use hologram::{f32_to_bits, FloatDType};
 use std::collections::HashMap;
 
 /// Resolve a single-size op: extract the concrete last-dim from input 0,

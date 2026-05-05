@@ -2,8 +2,7 @@
 //!
 //! Uses numpy `allclose` semantics: `|actual - expected| <= atol + rtol * |expected|`
 
-use hologram::hologram_core::op::OpCategory;
-use hologram::FloatOp;
+use hologram::hologram_core::op::{FloatOp, FloatOpShape};
 
 /// Absolute and relative tolerance for comparing kernel outputs.
 #[derive(Debug, Clone, Copy)]
@@ -28,25 +27,25 @@ impl Tolerance {
 /// Get the appropriate tolerance for a FloatOp.
 pub fn tolerance_for(op: &FloatOp) -> Tolerance {
     match op.category() {
-        OpCategory::UnaryElementwise => Tolerance {
+        FloatOpShape::UnaryElementwise => Tolerance {
             atol: 1e-6,
             rtol: 1e-5,
         },
-        OpCategory::BinaryElementwise => Tolerance {
+        FloatOpShape::BinaryElementwise => Tolerance {
             atol: 1e-6,
             rtol: 1e-5,
         },
-        OpCategory::BinaryCompare | OpCategory::BinaryByteBool | OpCategory::UnaryByteBool => {
+        FloatOpShape::BinaryCompare | FloatOpShape::BinaryByteBool | FloatOpShape::UnaryByteBool => {
             Tolerance {
                 atol: 0.0,
                 rtol: 0.0,
             }
         }
-        OpCategory::UnaryToU8 => Tolerance {
+        FloatOpShape::UnaryToU8 => Tolerance {
             atol: 0.0,
             rtol: 0.0,
         },
-        OpCategory::Custom => match op {
+        FloatOpShape::Custom => match op {
             FloatOp::MatMul { .. } | FloatOp::Gemm { .. } => Tolerance {
                 atol: 1e-4,
                 rtol: 1e-3,

@@ -4,7 +4,8 @@
 //! No `CustomOpRegistry` is needed — archives are fully self-describing.
 
 use crate::ir::AiOp;
-use hologram::{f32_to_bits, FloatOp, GraphOp};
+use hologram::hologram_core::op::FloatOp;
+use hologram::{f32_to_bits, GraphOp};
 use hologram_ai_quant::QuantScheme;
 
 /// Categorised dispatch target for a single `AiOp`.
