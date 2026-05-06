@@ -35,13 +35,18 @@ pub struct KnownModel {
     pub prompt_template: Option<&'static str>,
     /// Optional default stop strings for generation.
     pub stop: &'static [&'static str],
+    /// Multi-turn turn-separator: text inserted *between* prior user/assistant
+    /// pairs when the desktop UI builds a multi-turn `{prompt}` slot. The
+    /// literal `{response}` placeholder is substituted with the prior
+    /// assistant message. The `prompt_template`'s prefix/suffix wrap the
+    /// outer turn unchanged. `None` means single-turn only.
+    pub chat_turn_separator: Option<&'static str>,
 }
 
 #[derive(Clone, Copy, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Modality {
     TextChat,
-    TextBase,
 }
 
 /// Static catalogue. Add a new entry only after you've verified the full
@@ -58,13 +63,14 @@ pub const CATALOGUE: &[KnownModel] = &[
         quantize: "q4_0",
         prompt_template: Some("<|user|>\n{prompt}</s>\n<|assistant|>\n"),
         stop: &["</s>"],
+        chat_turn_separator: Some("</s>\n<|assistant|>\n{response}</s>\n<|user|>\n"),
     },
     KnownModel {
-        id: "qwen2-0.5b",
-        hf_id: "Qwen/Qwen2-0.5B",
-        display_name: "Qwen2 0.5B",
-        description: "Small base model — best for short factual completions.",
-        modality: Modality::TextBase,
+        id: "qwen2-0.5b-instruct",
+        hf_id: "Qwen/Qwen2-0.5B-Instruct",
+        display_name: "Qwen2 0.5B Instruct",
+        description: "Small chat-tuned model — follows instructions and answers questions.",
+        modality: Modality::TextChat,
         size: "0.5B",
         approx_archive_mb: 350,
         quantize: "q8_0",
@@ -72,6 +78,9 @@ pub const CATALOGUE: &[KnownModel] = &[
             "<|im_start|>system\nYou are a helpful assistant<|im_end|>\n<|im_start|>user\n{prompt}<|im_end|>\n<|im_start|>assistant\n",
         ),
         stop: &["<|im_end|>"],
+        chat_turn_separator: Some(
+            "<|im_end|>\n<|im_start|>assistant\n{response}<|im_end|>\n<|im_start|>user\n",
+        ),
     },
 ];
 

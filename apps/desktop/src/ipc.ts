@@ -8,7 +8,7 @@ export interface WorkspacePaths {
   hologramAiBin: string | null;
 }
 
-export type Modality = "text-chat" | "text-base";
+export type Modality = "text-chat";
 
 export interface KnownModelStatus {
   id: string;
@@ -21,6 +21,12 @@ export interface KnownModelStatus {
   quantize: string;
   promptTemplate: string | null;
   stop: string[];
+  /**
+   * Per-model "between turns" template, with `{response}` substituted by
+   * the prior assistant message. The desktop UI uses this to inject prior
+   * turns into the `{prompt}` slot of `promptTemplate` for multi-turn chat.
+   */
+  chatTurnSeparator: string | null;
   localDir: string | null;
   downloaded: boolean;
   compiledArchive: string | null;

@@ -4,6 +4,7 @@ import { HashRouter, NavLink, Navigate, Route, Routes } from "react-router-dom";
 import { Models } from "./pages/Models";
 import { Chat } from "./pages/Chat";
 import { Logs } from "./pages/Logs";
+import "katex/dist/katex.min.css";
 import "./styles.css";
 
 function Shell() {

@@ -60,9 +60,15 @@ pub async fn list_compiled_archives() -> Result<Vec<CompiledArchive>, String> {
             if p.is_dir() {
                 stack.push(p);
             } else if p.extension().and_then(|e| e.to_str()) == Some("holo") {
+                if is_pipeline_submodel(&p) {
+                    // Stable Diffusion submodels (text_encoder/unet/vae_decoder)
+                    // aren't standalone chat archives — hide them so the Chat
+                    // picker only lists usable models.
+                    continue;
+                }
                 let size = entry.metadata().await.map(|m| m.len()).unwrap_or(0);
                 out.push(CompiledArchive {
-                    name: p.file_name().and_then(|s| s.to_str()).unwrap_or("?").to_string(),
+                    name: archive_display_name(&p),
                     path: p,
                     size_bytes: size,
                 });
@@ -70,7 +76,50 @@ pub async fn list_compiled_archives() -> Result<Vec<CompiledArchive>, String> {
         }
     }
     out.sort_by(|a, b| a.name.cmp(&b.name));
+    out.dedup_by(|a, b| a.path == b.path);
     Ok(out)
+}
+
+/// Build a unique, human-friendly label for an archive. The CLI's
+/// `--name` flag normally yields a descriptive stem like `tinyllama-1.1b-chat`,
+/// but archives compiled directly from `<dir>/model.onnx` without `--name`
+/// land at `<dir>/model.holo` and would otherwise all show up as "model" in
+/// the dropdown. When that happens, fall back to `<parent>/model` (or
+/// `<grandparent>/<parent>/model` if the grandparent is descriptive).
+fn archive_display_name(p: &std::path::Path) -> String {
+    let stem = p.file_stem().and_then(|s| s.to_str()).unwrap_or("?");
+    if !stem.starts_with("model") {
+        return stem.to_string();
+    }
+    let parent = p
+        .parent()
+        .and_then(|pp| pp.file_name())
+        .and_then(|n| n.to_str());
+    let grandparent = p
+        .parent()
+        .and_then(|pp| pp.parent())
+        .and_then(|pp| pp.file_name())
+        .and_then(|n| n.to_str());
+    match (grandparent, parent) {
+        (Some(gp), Some(par)) if gp != "models" && gp != "output" => {
+            format!("{gp}/{par}/{stem}")
+        }
+        (_, Some(par)) => format!("{par}/{stem}"),
+        _ => stem.to_string(),
+    }
+}
+
+/// Returns true if this archive is a submodel of an SD-style pipeline that
+/// isn't usable on its own in the Chat tab. Detected by parent dir name.
+fn is_pipeline_submodel(p: &std::path::Path) -> bool {
+    let Some(parent) = p
+        .parent()
+        .and_then(|pp| pp.file_name())
+        .and_then(|n| n.to_str())
+    else {
+        return false;
+    };
+    matches!(parent, "text_encoder" | "unet" | "vae_decoder" | "vae_encoder")
 }
 
 #[derive(Deserialize)]
@@ -185,4 +234,63 @@ async fn find_first_onnx(dir: &std::path::Path) -> Option<PathBuf> {
         }
     }
     None
+}
+
+#[cfg(test)]
+mod display_name_tests {
+    use super::{archive_display_name, is_pipeline_submodel};
+    use std::path::PathBuf;
+
+    #[test]
+    fn descriptive_stem_is_kept_as_is() {
+        let p = PathBuf::from("/wrk/models/TinyLlama-1.1B-Chat-v1.0/tinyllama-1.1b-chat.holo");
+        assert_eq!(archive_display_name(&p), "tinyllama-1.1b-chat");
+    }
+
+    #[test]
+    fn generic_model_stem_includes_parent_dirs() {
+        let p = PathBuf::from("/wrk/models/stable-diffusion-v1-5/text_encoder/model.holo");
+        assert_eq!(
+            archive_display_name(&p),
+            "stable-diffusion-v1-5/text_encoder/model"
+        );
+    }
+
+    #[test]
+    fn model_prefixed_stem_disambiguates() {
+        let p = PathBuf::from("/wrk/models/stable-diffusion-v1-5/vae_decoder/model_pipeline.holo");
+        assert_eq!(
+            archive_display_name(&p),
+            "stable-diffusion-v1-5/vae_decoder/model_pipeline"
+        );
+    }
+
+    #[test]
+    fn model_in_top_level_models_dir_drops_the_models_prefix() {
+        let p = PathBuf::from("/wrk/models/Foo/model.holo");
+        assert_eq!(archive_display_name(&p), "Foo/model");
+    }
+
+    #[test]
+    fn detects_sd_submodels() {
+        assert!(is_pipeline_submodel(&PathBuf::from(
+            "/wrk/models/stable-diffusion-v1-5/text_encoder/model.holo"
+        )));
+        assert!(is_pipeline_submodel(&PathBuf::from(
+            "/wrk/models/stable-diffusion-v1-5/unet/model.holo"
+        )));
+        assert!(is_pipeline_submodel(&PathBuf::from(
+            "/wrk/models/stable-diffusion-v1-5/vae_decoder/model_small.holo"
+        )));
+    }
+
+    #[test]
+    fn does_not_flag_normal_archives_as_submodels() {
+        assert!(!is_pipeline_submodel(&PathBuf::from(
+            "/wrk/models/TinyLlama-1.1B-Chat-v1.0/tinyllama-1.1b-chat.holo"
+        )));
+        assert!(!is_pipeline_submodel(&PathBuf::from(
+            "/wrk/output/qwen2-0.5b.holo"
+        )));
+    }
 }
