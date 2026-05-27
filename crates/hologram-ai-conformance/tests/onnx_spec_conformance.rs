@@ -68,7 +68,7 @@ fn cache_dir() -> PathBuf {
 }
 
 /// Fetch `url` into `dest` (cached). Returns false if the resource is absent.
-fn fetch(url: &str, dest: &PathBuf) -> bool {
+fn fetch(url: &str, dest: &std::path::Path) -> bool {
     if dest.exists() {
         return true;
     }

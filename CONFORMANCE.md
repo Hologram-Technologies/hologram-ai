@@ -121,7 +121,8 @@ and are exempt from NS/ZA/ZM, exactly as hologram's CLI is a std host over its
 |---|---|---|---|---|
 | **EE-1** | A full multi-layer model (`mini_transformer`: 18 nodes — MatMul, Softmax attention, Sigmoid-gated FFN, residual Adds, Transposes) compiled + run through hologram-ai matches **ONNX Runtime** on the same input within tolerance (observed max relative error 2.2e-5). | `--features conformance` | `tests/ort_full_model_e2e.rs` | ✅ |
 | **EE-1b** | Operator-spec outputs match the official ONNX backend node-test corpus (relu/add/matmul/softmax/mul/sub). | `--features onnx-spec`, `HOLOGRAM_AI_LIVE=1` | `tests/onnx_spec_conformance.rs` | ✅ |
-| **EE-2** | Large published models (TinyLlama, ResNet-50, MobileNetV2, MiniLM) match ORT within tolerance end-to-end. | `--features conformance` + model downloads | (infra-bound: needs model fetch) | 🚧 |
+| **EE-2** | A real pretrained **Llama-family LLM** (authoritative onnx-community **SmolLM2-135M**: RoPE + causal grouped-query attention + RMSNorm + SwiGLU + tied LM head) compiles and **generates coherent, prompt-relevant, deterministic text** end-to-end through the real `generate_stream` loop. The with-past decoder export runs as an empty-past full-recompute prefill (no external KV-cache). Observed: `"The sun rises in the"` → `" sky, and the sky is a beautiful blue."` | `--features onnx-spec`, `HOLOGRAM_AI_LIVE=1` + model | `tests/real_model_generation.rs` | ✅ |
+| **EE-3** | Real-model logit parity vs ONNX Runtime (the with-past export run with an empty past). | `--features conformance` + model | (next: authoritative numeric check) | 🚧 |
 
 ## MA — Model addressing (external: uor-addr, TC-05 replay)
 
