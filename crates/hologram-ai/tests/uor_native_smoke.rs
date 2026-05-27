@@ -138,18 +138,31 @@ fn addressed_execution_matches_byte_execution() {
 
     // Addressed: intern each input to a κ-label, then execute on labels.
     let labels: Vec<_> = owned.iter().map(|v| runner.intern_input(v)).collect();
-    let out_labels = runner.execute_addressed(&labels).expect("addressed execute failed");
+    let out_labels = runner
+        .execute_addressed(&labels)
+        .expect("addressed execute failed");
     assert_eq!(out_labels.len(), byte_out.len(), "output arity mismatch");
 
     for (label, bytes_out) in out_labels.iter().zip(byte_out.iter()) {
-        let resolved = runner.resolve(label).expect("output label resolves to bytes");
-        assert_eq!(resolved, bytes_out.bytes.as_slice(), "addressed bytes != byte-level bytes");
+        let resolved = runner
+            .resolve(label)
+            .expect("output label resolves to bytes");
+        assert_eq!(
+            resolved,
+            bytes_out.bytes.as_slice(),
+            "addressed bytes != byte-level bytes"
+        );
     }
 
     // Re-running on the same input labels returns the same output labels
     // (deterministic content addresses → whole-graph memo / elision).
-    let again = runner.execute_addressed(&labels).expect("addressed re-run failed");
-    assert_eq!(again, out_labels, "output labels must be stable across runs");
+    let again = runner
+        .execute_addressed(&labels)
+        .expect("addressed re-run failed");
+    assert_eq!(
+        again, out_labels,
+        "output labels must be stable across runs"
+    );
 }
 
 #[test]

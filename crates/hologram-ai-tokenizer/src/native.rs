@@ -11,11 +11,11 @@ use alloc::vec::Vec;
 
 // ── Host-shell-only imports (JSON loading) ───────────────────────────────────
 #[cfg(feature = "std")]
-use alloc::string::ToString;
-#[cfg(feature = "std")]
 use crate::config::{NormalizationConfig, PreTokenizerConfig, SpecialTokens};
 #[cfg(feature = "std")]
 use crate::vocab::MergeRules;
+#[cfg(feature = "std")]
+use alloc::string::ToString;
 #[cfg(feature = "std")]
 use anyhow::{bail, Context, Result};
 #[cfg(feature = "std")]

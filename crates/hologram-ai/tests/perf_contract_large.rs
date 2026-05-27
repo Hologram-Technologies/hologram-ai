@@ -27,7 +27,11 @@ use hologram_ai_common::{shape_from_concrete, AiGraph, AiNode, AiOp, AiParam, DT
 fn rss_bytes() -> u64 {
     std::fs::read_to_string("/proc/self/statm")
         .ok()
-        .and_then(|s| s.split_whitespace().nth(1).and_then(|p| p.parse::<u64>().ok()))
+        .and_then(|s| {
+            s.split_whitespace()
+                .nth(1)
+                .and_then(|p| p.parse::<u64>().ok())
+        })
         .map(|pages| pages * 4096)
         .unwrap_or(0)
 }
@@ -48,7 +52,12 @@ fn matmul_stack(d: u64, layers: u64) -> AiGraph {
         tensor_info.insert(w, TensorInfo::new(DType::F32, weight.clone()));
         tensor_info.insert(out, TensorInfo::new(DType::F32, row.clone()));
         inputs.push(w);
-        nodes.push(AiNode::new(i as u32, AiOp::MatMul, vec![prev, w], vec![out]));
+        nodes.push(AiNode::new(
+            i as u32,
+            AiOp::MatMul,
+            vec![prev, w],
+            vec![out],
+        ));
         prev = out;
     }
     AiGraph {
@@ -85,15 +94,21 @@ fn full_weight_billion_param_forward_and_reuse() {
     let d = 8192u64;
     let layers = (target / (d * d)).max(1);
     let params = layers * d * d;
-    eprintln!("target {target} params → d={d}, {layers} layers = {params} params ({:.2} GB f32 weights)",
-        (params * 4) as f64 / 1e9);
+    eprintln!(
+        "target {target} params → d={d}, {layers} layers = {params} params ({:.2} GB f32 weights)",
+        (params * 4) as f64 / 1e9
+    );
 
     let graph = matmul_stack(d, layers);
     let t = Instant::now();
     let archive = ModelCompiler::default()
         .compile(ModelSource::AiGraph(graph))
         .expect("compile failed");
-    eprintln!("compiled in {:?} → {} archive bytes", t.elapsed(), archive.bytes.len());
+    eprintln!(
+        "compiled in {:?} → {} archive bytes",
+        t.elapsed(),
+        archive.bytes.len()
+    );
 
     let mut runner = HoloRunner::from_bytes(archive.bytes).expect("load failed");
 
@@ -108,7 +123,11 @@ fn full_weight_billion_param_forward_and_reuse() {
     // input order is [X, W_0 .. W_{layers-1}] (graph-input order).
     let sizes = runner.input_byte_sizes();
     let total_gb: f64 = sizes.iter().map(|&n| n as f64).sum::<f64>() / 1e9;
-    eprintln!("allocating {} input buffers, {:.2} GB total", sizes.len(), total_gb);
+    eprintln!(
+        "allocating {} input buffers, {:.2} GB total",
+        sizes.len(),
+        total_gb
+    );
 
     // Known input X[0, j] = (j mod 13) as f32 — varied and non-zero.
     let x: Vec<f32> = (0..d).map(|j| (j % 13) as f32).collect();
@@ -205,11 +224,24 @@ fn quant_matmul_stack(d: u64, layers: u64) -> (AiGraph, Vec<u8>) {
         ti.insert(sc, TensorInfo::new(DType::F32, shape_from_concrete(&[])));
         ti.insert(dq, TensorInfo::new(DType::F32, weight.clone()));
         ti.insert(mm, TensorInfo::new(DType::F32, row.clone()));
-        params.insert(sc, AiParam::inline(scale.to_le_bytes().to_vec(), ti[&sc].clone()));
+        params.insert(
+            sc,
+            AiParam::inline(scale.to_le_bytes().to_vec(), ti[&sc].clone()),
+        );
         inputs.push(wq);
         fills.push(fill as u8);
-        nodes.push(AiNode::new(2 * i as u32, AiOp::Dequantize { axis: -1 }, vec![wq, sc, zp], vec![dq]));
-        nodes.push(AiNode::new(2 * i as u32 + 1, AiOp::MatMul, vec![prev, dq], vec![mm]));
+        nodes.push(AiNode::new(
+            2 * i as u32,
+            AiOp::Dequantize { axis: -1 },
+            vec![wq, sc, zp],
+            vec![dq],
+        ));
+        nodes.push(AiNode::new(
+            2 * i as u32 + 1,
+            AiOp::MatMul,
+            vec![prev, dq],
+            vec![mm],
+        ));
         prev = mm;
     }
 
@@ -263,7 +295,11 @@ fn quantized_large_model_fits_and_runs() {
     let archive = ModelCompiler::default()
         .compile(ModelSource::AiGraph(graph))
         .expect("compile failed");
-    eprintln!("compiled in {:?} → {} archive bytes", t.elapsed(), archive.bytes.len());
+    eprintln!(
+        "compiled in {:?} → {} archive bytes",
+        t.elapsed(),
+        archive.bytes.len()
+    );
     let mut runner = HoloRunner::from_bytes(archive.bytes).expect("load failed");
 
     // Known input; the layer scaling preserves its mean through every layer.
@@ -282,13 +318,19 @@ fn quantized_large_model_fits_and_runs() {
     for i in 1..sizes.len() {
         buffers.push(vec![fills[i]; sizes[i]]); // W_q_{i-1}, distinct fill
     }
-    eprintln!("RSS after building input buffers: {:.2} GB", rss_bytes() as f64 / 1e9);
+    eprintln!(
+        "RSS after building input buffers: {:.2} GB",
+        rss_bytes() as f64 / 1e9
+    );
 
     let refs: Vec<&[u8]> = buffers.iter().map(|v| v.as_slice()).collect();
     let t = Instant::now();
     let out = runner.execute(&refs).expect("forward failed");
     let forward = t.elapsed();
-    eprintln!("RSS after forward (peak): {:.2} GB", rss_bytes() as f64 / 1e9);
+    eprintln!(
+        "RSS after forward (peak): {:.2} GB",
+        rss_bytes() as f64 / 1e9
+    );
 
     // Every Dequantize→MatMul fused: the i8 weight is read packed, in-register.
     assert_eq!(
@@ -415,7 +457,9 @@ fn address_native_scale_forward() {
         labels.extend(std::iter::repeat_n(label_w, layers as usize));
 
         let t = Instant::now();
-        let out_labels = runner.execute_addressed(&labels).expect("addressed forward failed");
+        let out_labels = runner
+            .execute_addressed(&labels)
+            .expect("addressed forward failed");
         let forward = t.elapsed();
 
         let y_bytes = runner.resolve(&out_labels[0]).expect("resolve output");

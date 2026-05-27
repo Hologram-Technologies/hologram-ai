@@ -30,7 +30,8 @@ fn load_vectors(name: &str) -> Vec<GoldenVector> {
     let path = fixture_path(name);
     let data = std::fs::read_to_string(&path)
         .unwrap_or_else(|e| panic!("failed to read {}: {e}", path.display()));
-    serde_json::from_str(&data).unwrap_or_else(|e| panic!("failed to parse {}: {e}", path.display()))
+    serde_json::from_str(&data)
+        .unwrap_or_else(|e| panic!("failed to parse {}: {e}", path.display()))
 }
 
 /// QZ-1: Q4_0 dequant equals the GGML reference over the golden vectors.
@@ -40,7 +41,12 @@ fn golden_q4_0_matches_reference() {
     assert!(!vectors.is_empty(), "no q4_0 golden vectors");
     for v in &vectors {
         let result = dequant_q4_0(&v.block_bytes);
-        assert_eq!(result.len(), v.expected.len(), "{}: length mismatch", v.name);
+        assert_eq!(
+            result.len(),
+            v.expected.len(),
+            "{}: length mismatch",
+            v.name
+        );
         for (i, (actual, &expected)) in result.iter().zip(v.expected.iter()).enumerate() {
             let expected = expected as f32;
             assert!(
@@ -59,7 +65,12 @@ fn golden_q8_0_matches_reference() {
     assert!(!vectors.is_empty(), "no q8_0 golden vectors");
     for v in &vectors {
         let result = dequant_q8_0(&v.block_bytes);
-        assert_eq!(result.len(), v.expected.len(), "{}: length mismatch", v.name);
+        assert_eq!(
+            result.len(),
+            v.expected.len(),
+            "{}: length mismatch",
+            v.name
+        );
         for (i, (actual, &expected)) in result.iter().zip(v.expected.iter()).enumerate() {
             let expected = expected as f32;
             assert!(

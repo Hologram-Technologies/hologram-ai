@@ -829,7 +829,13 @@ impl<'a> Ctx<'a> {
     /// compare multi-byte integers, so neither implicit broadcast nor an i64
     /// compare is valid — the operands must be materialized at full shape in a
     /// dtype the kernel supports. `Equal` then yields the 0/1 f32 mask directly.
-    fn one_hot(&mut self, indices: InputSource, rows: u64, depth: u64, idx_dtype: u8) -> InputSource {
+    fn one_hot(
+        &mut self,
+        indices: InputSource,
+        rows: u64,
+        depth: u64,
+        idx_dtype: u8,
+    ) -> InputSource {
         let f32t = DTypeId(DTYPE_F32);
         // iota as an f32 `[1, depth]` constant; indices cast to f32 `[rows]` then
         // reshaped to `[rows, 1]`. Both operands are then `Expand`ed to the full
@@ -861,7 +867,12 @@ impl<'a> Ctx<'a> {
         let (dtype, _) = self.out_dtype_shape(node)?;
         let out_dims = self.out_dims(node)?;
         let shape = self.intern(&out_dims);
-        let nid = self.add(GraphOp::Op(OpKind::Gather), SmallVec::from_iter([w, ids]), dtype, shape);
+        let nid = self.add(
+            GraphOp::Op(OpKind::Gather),
+            SmallVec::from_iter([w, ids]),
+            dtype,
+            shape,
+        );
         self.graph.set_gather_attrs(nid, GatherAttrs { axis: 0 });
         self.bind_out(node, InputSource::Node(nid))
     }
@@ -890,8 +901,14 @@ impl<'a> Ctx<'a> {
         let (dtype, _) = self.out_dtype_shape(node)?;
         let out_dims = self.out_dims(node)?;
         let shape = self.intern(&out_dims);
-        let nid = self.add(GraphOp::Op(OpKind::Gather), SmallVec::from_iter([data, idx]), dtype, shape);
-        self.graph.set_gather_attrs(nid, GatherAttrs { axis: axis as i32 });
+        let nid = self.add(
+            GraphOp::Op(OpKind::Gather),
+            SmallVec::from_iter([data, idx]),
+            dtype,
+            shape,
+        );
+        self.graph
+            .set_gather_attrs(nid, GatherAttrs { axis: axis as i32 });
         self.bind_out(node, InputSource::Node(nid))
     }
 
@@ -911,7 +928,13 @@ impl<'a> Ctx<'a> {
     /// Emit `Transpose(src)` by `perm` (synthesizing the i64 perm operand the
     /// compiler reads). `in_dims` is `src`'s shape; the output shape is the
     /// permuted dims.
-    fn transpose(&mut self, src: InputSource, dtype: DTypeId, in_dims: &[u64], perm: &[u32]) -> InputSource {
+    fn transpose(
+        &mut self,
+        src: InputSource,
+        dtype: DTypeId,
+        in_dims: &[u64],
+        perm: &[u32],
+    ) -> InputSource {
         let out: Vec<u64> = perm.iter().map(|&p| in_dims[p as usize]).collect();
         let perm_i64: Vec<i64> = perm.iter().map(|&p| p as i64).collect();
         let perm_op = self.const_i64(&perm_i64);
@@ -1109,7 +1132,12 @@ impl<'a> Ctx<'a> {
         let (dtype, _) = self.out_dtype_shape(node)?;
         let dims = self.out_dims(node)?;
         let shape = self.intern(&dims);
-        let nid = self.add(GraphOp::Op(OpKind::Cast), SmallVec::from_iter([data]), dtype, shape);
+        let nid = self.add(
+            GraphOp::Op(OpKind::Cast),
+            SmallVec::from_iter([data]),
+            dtype,
+            shape,
+        );
         self.bind_out(node, InputSource::Node(nid))
     }
 
@@ -1169,7 +1197,12 @@ impl<'a> Ctx<'a> {
                     );
                     self.graph.set_quant_attrs(
                         nid,
-                        QuantAttrs { quant_dtype, scale_bits: scale.to_bits(), zero_point, axis: -1 },
+                        QuantAttrs {
+                            quant_dtype,
+                            scale_bits: scale.to_bits(),
+                            zero_point,
+                            axis: -1,
+                        },
                     );
                     return self.bind_out(node, InputSource::Node(nid));
                 }
@@ -1178,9 +1211,8 @@ impl<'a> Ctx<'a> {
                 // vector operands; the channel axis is the op's declared `axis`.
                 let rank = x_dims.len() as i64;
                 let ax = if axis < 0 { axis + rank } else { axis };
-                let fits = ax >= 0
-                    && (ax as usize) < x_dims.len()
-                    && x_dims[ax as usize] == scale_len;
+                let fits =
+                    ax >= 0 && (ax as usize) < x_dims.len() && x_dims[ax as usize] == scale_len;
                 let zp_i32 = match zp_tid {
                     Some(zt) => self.param_as_i32_vec(zt).ok(),
                     None => Some(vec![0i32; scale_len as usize]),
@@ -1198,7 +1230,12 @@ impl<'a> Ctx<'a> {
                     );
                     self.graph.set_quant_attrs(
                         nid,
-                        QuantAttrs { quant_dtype, scale_bits: 0, zero_point: 0, axis: ax as i32 },
+                        QuantAttrs {
+                            quant_dtype,
+                            scale_bits: 0,
+                            zero_point: 0,
+                            axis: ax as i32,
+                        },
                     );
                     return self.bind_out(node, InputSource::Node(nid));
                 }
@@ -1226,7 +1263,11 @@ impl<'a> Ctx<'a> {
             return self.broadcast_to(src, f32t, dims, x_dims);
         }
         let mut aligned = vec![1u64; x_dims.len()];
-        let ax = if axis < 0 { axis + x_dims.len() as i64 } else { axis };
+        let ax = if axis < 0 {
+            axis + x_dims.len() as i64
+        } else {
+            axis
+        };
         if ax >= 0 && (ax as usize) < aligned.len() {
             aligned[ax as usize] = total;
         } else if let Some(last) = aligned.last_mut() {
@@ -1256,10 +1297,20 @@ impl<'a> Ctx<'a> {
         // toᶠ³²(x): Dequantize(x, scale 1, zp 0) — numeric int→f32, x stays packed.
         let mut acc = {
             let shape = self.intern(&x_dims);
-            let nid = self.add(GraphOp::Op(OpKind::Dequantize), SmallVec::from_iter([x_src]), f32t, shape);
+            let nid = self.add(
+                GraphOp::Op(OpKind::Dequantize),
+                SmallVec::from_iter([x_src]),
+                f32t,
+                shape,
+            );
             self.graph.set_quant_attrs(
                 nid,
-                QuantAttrs { quant_dtype, scale_bits: 1.0f32.to_bits(), zero_point: 0, axis: -1 },
+                QuantAttrs {
+                    quant_dtype,
+                    scale_bits: 1.0f32.to_bits(),
+                    zero_point: 0,
+                    axis: -1,
+                },
             );
             InputSource::Node(nid)
         };
@@ -1269,10 +1320,20 @@ impl<'a> Ctx<'a> {
             let zp_src = self.src(zt)?;
             let zp_dtype = self.dtype_of(zt).0;
             let zp_shape = self.intern(&zp_dims);
-            let zpf = self.add(GraphOp::Op(OpKind::Dequantize), SmallVec::from_iter([zp_src]), f32t, zp_shape);
+            let zpf = self.add(
+                GraphOp::Op(OpKind::Dequantize),
+                SmallVec::from_iter([zp_src]),
+                f32t,
+                zp_shape,
+            );
             self.graph.set_quant_attrs(
                 zpf,
-                QuantAttrs { quant_dtype: zp_dtype, scale_bits: 1.0f32.to_bits(), zero_point: 0, axis: -1 },
+                QuantAttrs {
+                    quant_dtype: zp_dtype,
+                    scale_bits: 1.0f32.to_bits(),
+                    zero_point: 0,
+                    axis: -1,
+                },
             );
             let zpf_b = self.channel_align(InputSource::Node(zpf), &zp_dims, axis, &x_dims);
             acc = self.op(OpKind::Sub, &[acc, zpf_b], f32t, &x_dims);
@@ -1307,10 +1368,14 @@ impl<'a> Ctx<'a> {
             DType::INT8 => *data.first().unwrap_or(&0) as i8 as i32,
             DType::U8 | DType::BOOL => *data.first().unwrap_or(&0) as i32,
             DType::INT32 => i32::from_le_bytes(
-                data.get(..4).and_then(|b| b.try_into().ok()).unwrap_or([0; 4]),
+                data.get(..4)
+                    .and_then(|b| b.try_into().ok())
+                    .unwrap_or([0; 4]),
             ),
             DType::INT64 => i64::from_le_bytes(
-                data.get(..8).and_then(|b| b.try_into().ok()).unwrap_or([0; 8]),
+                data.get(..8)
+                    .and_then(|b| b.try_into().ok())
+                    .unwrap_or([0; 8]),
             ) as i32,
             _ => 0,
         };
@@ -1323,7 +1388,9 @@ impl<'a> Ctx<'a> {
     fn param_as_i32_vec(&self, tid: TensorId) -> Result<Vec<i32>> {
         let (data, info) = match self.ai.params.get(&tid) {
             Some(AiParam::Inline { data, info }) => (data.as_slice(), info),
-            _ => anyhow::bail!("Dequantize per-channel zero-point T{tid} is not an inline constant"),
+            _ => {
+                anyhow::bail!("Dequantize per-channel zero-point T{tid} is not an inline constant")
+            }
         };
         let v = match info.logical_dtype {
             DType::INT8 => data.iter().map(|&b| b as i8 as i32).collect(),
@@ -1388,7 +1455,11 @@ impl<'a> Ctx<'a> {
     ) -> Result<()> {
         let in_dims = self.in_dims(node, 0)?;
         let dtype = self.dtype_of(node.inputs[0]);
-        let n_axes = if axes.is_empty() { in_dims.len() } else { axes.len() };
+        let n_axes = if axes.is_empty() {
+            in_dims.len()
+        } else {
+            axes.len()
+        };
         let x = self.src(node.inputs[0])?;
         let out_dims = self.out_dims(node)?;
         let out = self.reduce_trailing(x, dtype, &in_dims, n_axes, mean, &out_dims);
@@ -1401,7 +1472,11 @@ impl<'a> Ctx<'a> {
         let dtype = self.dtype_of(node.inputs[0]);
         let absx = self.op(OpKind::Abs, &[x], dtype, &in_dims);
         let out_dims = self.out_dims(node)?;
-        let n_axes = if axes.is_empty() { in_dims.len() } else { axes.len() };
+        let n_axes = if axes.is_empty() {
+            in_dims.len()
+        } else {
+            axes.len()
+        };
         let out = self.reduce_trailing(absx, dtype, &in_dims, n_axes, false, &out_dims);
         self.bind_out(node, out)
     }
@@ -1412,7 +1487,11 @@ impl<'a> Ctx<'a> {
         let dtype = self.dtype_of(node.inputs[0]);
         let sq = self.op(OpKind::Mul, &[x, x], dtype, &in_dims);
         let out_dims = self.out_dims(node)?;
-        let n_axes = if axes.is_empty() { in_dims.len() } else { axes.len() };
+        let n_axes = if axes.is_empty() {
+            in_dims.len()
+        } else {
+            axes.len()
+        };
         let sum = self.reduce_trailing(sq, dtype, &in_dims, n_axes, false, &out_dims);
         let root = self.op(OpKind::Sqrt, &[sum], dtype, &out_dims);
         self.bind_out(node, root)
@@ -1798,7 +1877,8 @@ impl<'a> Ctx<'a> {
                     .subgraphs
                     .get(then_branch)
                     .with_context(|| format!("If then_branch '{then_branch}' not found"))?;
-                let then_outs = self.inline_subgraph(then_sub, Self::bind_inputs(then_sub, &feed))?;
+                let then_outs =
+                    self.inline_subgraph(then_sub, Self::bind_inputs(then_sub, &feed))?;
 
                 match else_branch {
                     Some(else_name) => {
@@ -1899,7 +1979,6 @@ impl<'a> Ctx<'a> {
         Ok(())
     }
 }
-
 
 // ── shared raw helpers (free fns so desugar modules can reuse them) ──────────
 

@@ -18,7 +18,9 @@ fn info(dtype: DType, dims: &[u64]) -> TensorInfo {
 
 /// i8 weight values [K, N], a deterministic spread.
 fn weights() -> Vec<i8> {
-    (0..K * N).map(|i| ((i as i64 * 5 % 17) - 8) as i8).collect()
+    (0..K * N)
+        .map(|i| ((i as i64 * 5 % 17) - 8) as i8)
+        .collect()
 }
 
 fn input() -> Vec<f32> {
@@ -32,17 +34,28 @@ fn run(graph: AiGraph, x: &[f32], expect_fused: Option<usize>) -> Vec<f32> {
         .expect("compile must not fail for a valid quantized model");
     let mut runner = HoloRunner::from_bytes(archive.bytes).expect("load");
     if let Some(f) = expect_fused {
-        assert_eq!(runner.dequant_matmul_fused_count(), f, "MatMulDequant fusion count");
+        assert_eq!(
+            runner.dequant_matmul_fused_count(),
+            f,
+            "MatMulDequant fusion count"
+        );
     }
     let xb: Vec<u8> = x.iter().flat_map(|v| v.to_le_bytes()).collect();
     let out = runner.execute(&[&xb]).expect("execute must not fail");
-    out[0].bytes.chunks_exact(4).map(|c| f32::from_le_bytes(c.try_into().unwrap())).collect()
+    out[0]
+        .bytes
+        .chunks_exact(4)
+        .map(|c| f32::from_le_bytes(c.try_into().unwrap()))
+        .collect()
 }
 
 fn assert_close(got: &[f32], reference: &[f32], what: &str) {
     assert_eq!(got.len(), reference.len(), "{what}: length");
     for (j, (&g, &r)) in got.iter().zip(reference).enumerate() {
-        assert!((g - r).abs() <= 1e-2 + r.abs() * 1e-3, "{what}: out[{j}] {g} != ref {r}");
+        assert!(
+            (g - r).abs() <= 1e-2 + r.abs() * 1e-3,
+            "{what}: out[{j}] {g} != ref {r}"
+        );
     }
 }
 
@@ -100,9 +113,9 @@ fn per_tensor_asymmetric_and_unsigned_zero_points() {
     let scale = 0.05f32;
     // (zp_dtype, zp_value as i32, stored bytes)
     let cases: &[(DType, i32, Vec<u8>)] = &[
-        (DType::INT8, 7, vec![7u8]),                 // asymmetric signed
-        (DType::U8, 200, vec![200u8]),               // unsigned, large zp
-        (DType::INT8, -4, vec![(-4i8) as u8]),       // negative zp
+        (DType::INT8, 7, vec![7u8]),           // asymmetric signed
+        (DType::U8, 200, vec![200u8]),         // unsigned, large zp
+        (DType::INT8, -4, vec![(-4i8) as u8]), // negative zp
     ];
     for (zp_dt, zp, zp_bytes) in cases {
         let (_p, ti) = base_graph("pt");
@@ -111,8 +124,14 @@ fn per_tensor_asymmetric_and_unsigned_zero_points() {
         ti.insert(1, info(DType::INT8, &[K as u64, N as u64]));
         ti.insert(2, info(DType::F32, &[]));
         ti.insert(3, info(*zp_dt, &[]));
-        params.insert(1, AiParam::inline(w.iter().map(|&v| v as u8).collect(), ti[&1].clone()));
-        params.insert(2, AiParam::inline(scale.to_le_bytes().to_vec(), ti[&2].clone()));
+        params.insert(
+            1,
+            AiParam::inline(w.iter().map(|&v| v as u8).collect(), ti[&1].clone()),
+        );
+        params.insert(
+            2,
+            AiParam::inline(scale.to_le_bytes().to_vec(), ti[&2].clone()),
+        );
         params.insert(3, AiParam::inline(zp_bytes.clone(), ti[&3].clone()));
         let g = assemble(params, ti, vec![0], vec![1, 2, 3], -1);
         let got = run(g, &x, Some(1)); // per-tensor const ⇒ packed, fuses
@@ -135,9 +154,21 @@ fn per_channel_along_axis_0_and_1() {
         ti.insert(1, info(DType::INT8, &[K as u64, N as u64]));
         ti.insert(2, info(DType::F32, &[chan as u64]));
         ti.insert(3, info(DType::INT8, &[chan as u64]));
-        params.insert(1, AiParam::inline(w.iter().map(|&v| v as u8).collect(), ti[&1].clone()));
-        params.insert(2, AiParam::inline(scales.iter().flat_map(|v| v.to_le_bytes()).collect(), ti[&2].clone()));
-        params.insert(3, AiParam::inline(zps.iter().map(|&z| z as i8 as u8).collect(), ti[&3].clone()));
+        params.insert(
+            1,
+            AiParam::inline(w.iter().map(|&v| v as u8).collect(), ti[&1].clone()),
+        );
+        params.insert(
+            2,
+            AiParam::inline(
+                scales.iter().flat_map(|v| v.to_le_bytes()).collect(),
+                ti[&2].clone(),
+            ),
+        );
+        params.insert(
+            3,
+            AiParam::inline(zps.iter().map(|&z| z as i8 as u8).collect(), ti[&3].clone()),
+        );
         let g = assemble(params, ti, vec![0], vec![1, 2, 3], axis);
         let got = run(g, &x, Some(1)); // per-channel const ⇒ packed, fuses
         let c = |k: usize, n: usize| if axis == 0 { k } else { n };
@@ -165,7 +196,13 @@ fn per_channel_i4_weight() {
     ti.insert(2, info(DType::F32, &[N as u64]));
     ti.insert(3, info(DType::INT8, &[N as u64]));
     params.insert(1, AiParam::inline(packed, ti[&1].clone()));
-    params.insert(2, AiParam::inline(scales.iter().flat_map(|v| v.to_le_bytes()).collect(), ti[&2].clone()));
+    params.insert(
+        2,
+        AiParam::inline(
+            scales.iter().flat_map(|v| v.to_le_bytes()).collect(),
+            ti[&2].clone(),
+        ),
+    );
     params.insert(3, AiParam::inline(vec![0u8; N], ti[&3].clone()));
     let g = assemble(params, ti, vec![0], vec![1, 2, 3], 1);
     let got = run(g, &x, Some(1));
@@ -186,7 +223,10 @@ fn runtime_scale_uses_primitive_path_without_panic() {
     ti.insert(0u32, info(DType::F32, &[1, K as u64])); // X
     ti.insert(1, info(DType::INT8, &[K as u64, N as u64])); // W (const)
     ti.insert(2, info(DType::F32, &[])); // scale — a runtime INPUT (scalar)
-    params.insert(1, AiParam::inline(w.iter().map(|&v| v as u8).collect(), ti[&1].clone()));
+    params.insert(
+        1,
+        AiParam::inline(w.iter().map(|&v| v as u8).collect(), ti[&1].clone()),
+    );
     // inputs = [X, scale]; Dequantize(W, scale) with no zp.
     let g = assemble(params, ti, vec![0, 2], vec![1, 2], -1);
 
@@ -198,7 +238,11 @@ fn runtime_scale_uses_primitive_path_without_panic() {
     let sb: Vec<u8> = scale.to_le_bytes().to_vec();
     // input order = graph.inputs = [X(0), scale(2)].
     let out = runner.execute(&[&xb, &sb]).expect("execute must not fail");
-    let got: Vec<f32> = out[0].bytes.chunks_exact(4).map(|c| f32::from_le_bytes(c.try_into().unwrap())).collect();
+    let got: Vec<f32> = out[0]
+        .bytes
+        .chunks_exact(4)
+        .map(|c| f32::from_le_bytes(c.try_into().unwrap()))
+        .collect();
     let r = reference(&x, |k, n| w[k * N + n] as f64 * scale as f64);
     assert_close(&got, &r, "runtime-scale primitive");
 }

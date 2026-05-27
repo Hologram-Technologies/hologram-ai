@@ -48,8 +48,7 @@ fn smollm2_onnx_path() -> Option<PathBuf> {
         return p.exists().then_some(p);
     }
     // CARGO_MANIFEST_DIR = <workspace>/crates/hologram-ai-conformance
-    let p = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../models/smollm2-135m/model.onnx");
+    let p = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../models/smollm2-135m/model.onnx");
     p.exists().then_some(p)
 }
 

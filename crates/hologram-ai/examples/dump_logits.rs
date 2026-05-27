@@ -21,8 +21,12 @@ fn i64_le(vals: &[i64]) -> Vec<u8> {
 
 fn main() -> anyhow::Result<()> {
     let mut args = std::env::args().skip(1);
-    let model = args.next().expect("usage: dump_logits <model.onnx> <out.f32>");
-    let out_path = args.next().expect("usage: dump_logits <model.onnx> <out.f32>");
+    let model = args
+        .next()
+        .expect("usage: dump_logits <model.onnx> <out.f32>");
+    let out_path = args
+        .next()
+        .expect("usage: dump_logits <model.onnx> <out.f32>");
     let s = TOKENS.len();
 
     let archive = ModelCompiler {
@@ -49,7 +53,11 @@ fn main() -> anyhow::Result<()> {
 
     std::fs::write(&out_path, logits)?;
     println!("tokens={TOKENS:?} seq_len={s}");
-    println!("wrote {} logit bytes ({} f32) to {out_path}", logits.len(), logits.len() / 4);
+    println!(
+        "wrote {} logit bytes ({} f32) to {out_path}",
+        logits.len(),
+        logits.len() / 4
+    );
 
     // Dump any extra named outputs requested via HOLO_DUMP_OUTPUTS (comma-sep),
     // e.g. RoPE cos/sin exposed as graph outputs, to localize a divergence.

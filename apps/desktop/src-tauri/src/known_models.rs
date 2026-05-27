@@ -117,8 +117,7 @@ pub async fn list_with_status() -> Vec<KnownModelStatus> {
 
         // Look for a compiled archive in two places: alongside the model
         // (the `examples/*.toml` convention) and in the workspace `output/`.
-        let compiled_archive =
-            first_archive_for(&local_dir, &output_dir, local_name, m.id).await;
+        let compiled_archive = first_archive_for(&local_dir, &output_dir, local_name, m.id).await;
 
         out.push(KnownModelStatus {
             model: m.clone(),
@@ -154,11 +153,7 @@ async fn migrate_generic_archive(local_dir: &std::path::Path, id: &str) {
             descriptive.display(),
         );
     } else {
-        tracing::info!(
-            "renamed {} → {}",
-            generic.display(),
-            descriptive.display(),
-        );
+        tracing::info!("renamed {} → {}", generic.display(), descriptive.display(),);
     }
 }
 

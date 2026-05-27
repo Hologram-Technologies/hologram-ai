@@ -102,10 +102,7 @@ mod tests {
 
     fn scratch_path(stem: &str) -> PathBuf {
         let mut p = std::env::temp_dir();
-        p.push(format!(
-            "hologram-ai-paths-{stem}-{}",
-            std::process::id()
-        ));
+        p.push(format!("hologram-ai-paths-{stem}-{}", std::process::id()));
         p
     }
 

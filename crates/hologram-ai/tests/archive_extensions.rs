@@ -17,8 +17,7 @@ const TOK_PRETTY: &str = r#"{
   "added_tokens": [ {"id": 0, "content": "</s>", "special": true} ],
   "model": { "type": "BPE", "vocab": {"</s>": 0, "a": 1, "b": 2, "ab": 3}, "merges": ["a b"] }
 }"#;
-const TOK_COMPACT: &str =
-    r#"{"model":{"merges":["a b"],"type":"BPE","vocab":{"a":1,"</s>":0,"ab":3,"b":2}},"added_tokens":[{"content":"</s>","id":0,"special":true}]}"#;
+const TOK_COMPACT: &str = r#"{"model":{"merges":["a b"],"type":"BPE","vocab":{"a":1,"</s>":0,"ab":3,"b":2}},"added_tokens":[{"content":"</s>","id":0,"special":true}]}"#;
 
 /// Single-input `[1,4]·[4,4 identity]` matmul — a host for the extension.
 fn matmul_graph() -> AiGraph {
@@ -56,16 +55,31 @@ fn matmul_graph() -> AiGraph {
 fn uor_addr_json_canonicalization_is_deterministic() {
     let a = uor_addr::json::canonicalize(TOK_PRETTY.as_bytes()).unwrap();
     let b = uor_addr::json::canonicalize(TOK_COMPACT.as_bytes()).unwrap();
-    assert_eq!(a, b, "JCS canonical form is independent of whitespace + key order");
-    let ka = uor_addr::json::address(&a).unwrap().address.as_str().to_string();
-    let kb = uor_addr::json::address(&b).unwrap().address.as_str().to_string();
+    assert_eq!(
+        a, b,
+        "JCS canonical form is independent of whitespace + key order"
+    );
+    let ka = uor_addr::json::address(&a)
+        .unwrap()
+        .address
+        .as_str()
+        .to_string();
+    let kb = uor_addr::json::address(&b)
+        .unwrap()
+        .address
+        .as_str()
+        .to_string();
     assert_eq!(ka, kb, "identical content ⇒ identical κ-label");
 }
 
 #[test]
 fn tokenizer_bakes_into_archive_and_loads_back_verified() {
     let canonical = uor_addr::json::canonicalize(TOK_PRETTY.as_bytes()).unwrap();
-    let kappa = uor_addr::json::address(&canonical).unwrap().address.as_str().to_string();
+    let kappa = uor_addr::json::address(&canonical)
+        .unwrap()
+        .address
+        .as_str()
+        .to_string();
 
     let mut sections = ArchiveSections::new();
     sections.add_extension(TOKENIZER_EXT, canonical.clone());
@@ -77,8 +91,14 @@ fn tokenizer_bakes_into_archive_and_loads_back_verified() {
     let runner = HoloRunner::from_bytes(archive.bytes).expect("load");
 
     // The extension roundtrips byte-exact (canonical form preserved end to end).
-    assert_eq!(runner.extension(TOKENIZER_EXT).unwrap(), canonical.as_slice());
-    assert_eq!(runner.extension(TOKENIZER_KAPPA_EXT).unwrap(), kappa.as_bytes());
+    assert_eq!(
+        runner.extension(TOKENIZER_EXT).unwrap(),
+        canonical.as_slice()
+    );
+    assert_eq!(
+        runner.extension(TOKENIZER_KAPPA_EXT).unwrap(),
+        kappa.as_bytes()
+    );
 
     // Its content address re-verifies against the stored κ-label.
     let readdr = uor_addr::json::address(runner.extension(TOKENIZER_EXT).unwrap())
@@ -86,13 +106,19 @@ fn tokenizer_bakes_into_archive_and_loads_back_verified() {
         .address
         .as_str()
         .to_string();
-    assert_eq!(readdr, kappa, "embedded tokenizer content address matches its κ-label");
+    assert_eq!(
+        readdr, kappa,
+        "embedded tokenizer content address matches its κ-label"
+    );
 
     // And it parses into a working tokenizer from the archived bytes (no file).
     let tok = NativeTokenizer::from_tokenizer_json_bytes(runner.extension(TOKENIZER_EXT).unwrap())
         .expect("parse embedded tokenizer");
     assert_eq!(tok.vocab_size(), 4);
-    assert!(!tok.encode("ab").is_empty(), "tokenizer encodes from archived bytes");
+    assert!(
+        !tok.encode("ab").is_empty(),
+        "tokenizer encodes from archived bytes"
+    );
 }
 
 #[test]

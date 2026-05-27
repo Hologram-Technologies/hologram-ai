@@ -46,7 +46,9 @@ fn mini_transformer_matches_ort() {
     .compile(ModelSource::OnnxBytes(model.clone()))
     .expect("hologram-ai compile failed");
     let mut runner = HoloRunner::from_bytes(archive.bytes).expect("load failed");
-    let out = runner.execute(&[&f32_to_le(&x)]).expect("hologram-ai execute failed");
+    let out = runner
+        .execute(&[&f32_to_le(&x)])
+        .expect("hologram-ai execute failed");
     assert_eq!(out.len(), 1, "expected one output");
     let holo = le_to_f32(&out[0].bytes);
 

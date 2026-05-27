@@ -68,7 +68,10 @@ fn cache_dir() -> PathBuf {
 }
 
 fn file_sha256_hex(path: &PathBuf) -> String {
-    let out = Command::new("sha256sum").arg(path).output().expect("run sha256sum");
+    let out = Command::new("sha256sum")
+        .arg(path)
+        .output()
+        .expect("run sha256sum");
     assert!(out.status.success(), "sha256sum failed");
     String::from_utf8(out.stdout).unwrap()[..64].to_string()
 }
@@ -113,7 +116,11 @@ fn local_onnx_fixture_addresses_and_witness_verifies() {
 
     // Deterministic: re-addressing the same bytes yields the same label.
     let again = model_kappa(ModelFormat::Onnx, &bytes).expect("onnx address (again)");
-    assert_eq!(again.address.as_str(), label, "addressing must be deterministic");
+    assert_eq!(
+        again.address.as_str(),
+        label,
+        "addressing must be deterministic"
+    );
 
     // TC-05 witness replays to the same κ-label.
     assert_eq!(
@@ -131,7 +138,11 @@ fn compile_populates_model_kappa_label() {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../hologram-ai-conformance/fixtures/layer_norm.onnx");
     let bytes = std::fs::read(&path).unwrap();
-    let expected = model_kappa(ModelFormat::Onnx, &bytes).unwrap().address.as_str().to_string();
+    let expected = model_kappa(ModelFormat::Onnx, &bytes)
+        .unwrap()
+        .address
+        .as_str()
+        .to_string();
 
     // Model κ-labeling is opt-in: full uor-addr canonicalization is kept off the
     // compile critical path by default (pathologically slow on large ONNX), so
@@ -181,7 +192,13 @@ fn multi_component_composition_is_order_independent() {
 
     // Three-component: every permutation yields the same identity.
     let canonical = compose_model(&[ka, kb, kc]).unwrap();
-    for perm in [[ka, kc, kb], [kb, ka, kc], [kb, kc, ka], [kc, ka, kb], [kc, kb, ka]] {
+    for perm in [
+        [ka, kc, kb],
+        [kb, ka, kc],
+        [kb, kc, ka],
+        [kc, ka, kb],
+        [kc, kb, ka],
+    ] {
         assert_eq!(
             compose_model(&perm).unwrap(),
             canonical,

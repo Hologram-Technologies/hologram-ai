@@ -144,7 +144,10 @@ mod tests {
 
     #[test]
     fn detect_gguf_magic() {
-        assert_eq!(ModelFormat::detect(b"GGUF\x03\0\0\0"), Some(ModelFormat::Gguf));
+        assert_eq!(
+            ModelFormat::detect(b"GGUF\x03\0\0\0"),
+            Some(ModelFormat::Gguf)
+        );
     }
 
     #[test]

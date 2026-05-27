@@ -48,7 +48,10 @@ impl<W: Workspace> Backend for DiagBackend<W> {
             Err(e) => {
                 let mut slot = self.fail.lock().unwrap();
                 if slot.is_none() {
-                    let msg = format!("call #{}: {call:?}\n  -> BackendError: {e}", *self.n.lock().unwrap());
+                    let msg = format!(
+                        "call #{}: {call:?}\n  -> BackendError: {e}",
+                        *self.n.lock().unwrap()
+                    );
                     eprintln!("DIAG BACKEND FAIL {msg}");
                     *slot = Some(msg);
                 }
@@ -111,7 +114,10 @@ fn smollm2_forward_surfaces_backend_error() {
         })
         .collect();
     let bufs_owned: Vec<Vec<u8>> = sizes.iter().map(|&s| vec![0u8; s]).collect();
-    let bufs: Vec<InputBuffer> = bufs_owned.iter().map(|b| InputBuffer { bytes: b }).collect();
+    let bufs: Vec<InputBuffer> = bufs_owned
+        .iter()
+        .map(|b| InputBuffer { bytes: b })
+        .collect();
 
     let result = session.execute(&bufs);
     match result {
@@ -120,7 +126,9 @@ fn smollm2_forward_surfaces_backend_error() {
             let detail = fail.lock().unwrap().clone();
             panic!(
                 "forward failed: {e:?}\nfirst backend failure detail:\n{}",
-                detail.unwrap_or_else(|| "<no kernel-level error captured — failure was outside dispatch>".into())
+                detail.unwrap_or_else(|| {
+                    "<no kernel-level error captured — failure was outside dispatch>".into()
+                })
             );
         }
     }

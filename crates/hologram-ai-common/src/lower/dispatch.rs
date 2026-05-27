@@ -198,7 +198,10 @@ pub enum DesugarKind {
     /// Normalization: reshape the input to rank-2 `[rows, feature]` (hologram
     /// derives `feature` only from a rank-2 operand), apply `op` with the γ/β
     /// (and optional residual) operands, then reshape back to the output shape.
-    Norm { op: OpKind, residual: bool },
+    Norm {
+        op: OpKind,
+        residual: bool,
+    },
     /// A `Constant`/`ConstantOfShape` value materialized into the `ConstantStore`.
     Constant,
 }

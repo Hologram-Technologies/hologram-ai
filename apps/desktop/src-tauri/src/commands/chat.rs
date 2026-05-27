@@ -86,17 +86,10 @@ pub async fn generate(
     }
 
     let logs = state.logs.clone();
-    let result = process_runner::spawn_streaming(
-        app,
-        bin,
-        args,
-        cwd,
-        logs,
-        "chat://line",
-        cancel_rx,
-    )
-    .await
-    .map_err(|e| e.to_string());
+    let result =
+        process_runner::spawn_streaming(app, bin, args, cwd, logs, "chat://line", cancel_rx)
+            .await
+            .map_err(|e| e.to_string());
 
     state.active_generation.lock().take();
     result

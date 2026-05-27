@@ -41,7 +41,8 @@ static A: PeakAlloc = PeakAlloc {
 };
 
 fn reset_peak() {
-    A.peak.store(A.live.load(Ordering::Relaxed), Ordering::Relaxed);
+    A.peak
+        .store(A.live.load(Ordering::Relaxed), Ordering::Relaxed);
 }
 fn peak() -> usize {
     A.peak.load(Ordering::Relaxed)
@@ -61,7 +62,10 @@ fn quant_stack(d: u64, layers: u64) -> AiGraph {
     ti.insert(zp, TensorInfo::new(DType::INT8, shape_from_concrete(&[])));
     ti.insert(sc, TensorInfo::new(DType::F32, shape_from_concrete(&[])));
     params.insert(zp, AiParam::inline(vec![0u8], ti[&zp].clone()));
-    params.insert(sc, AiParam::inline(1.0f32.to_le_bytes().to_vec(), ti[&sc].clone()));
+    params.insert(
+        sc,
+        AiParam::inline(1.0f32.to_le_bytes().to_vec(), ti[&sc].clone()),
+    );
     let mut inputs = vec![0u32];
     let mut next = 3u32;
     let mut prev = 0u32;
@@ -74,8 +78,18 @@ fn quant_stack(d: u64, layers: u64) -> AiGraph {
         ti.insert(dq, TensorInfo::new(DType::F32, weight.clone()));
         ti.insert(mm, TensorInfo::new(DType::F32, row.clone()));
         inputs.push(wq);
-        nodes.push(AiNode::new(2 * i as u32, AiOp::Dequantize { axis: -1 }, vec![wq, sc, zp], vec![dq]));
-        nodes.push(AiNode::new(2 * i as u32 + 1, AiOp::MatMul, vec![prev, dq], vec![mm]));
+        nodes.push(AiNode::new(
+            2 * i as u32,
+            AiOp::Dequantize { axis: -1 },
+            vec![wq, sc, zp],
+            vec![dq],
+        ));
+        nodes.push(AiNode::new(
+            2 * i as u32 + 1,
+            AiOp::MatMul,
+            vec![prev, dq],
+            vec![mm],
+        ));
         prev = mm;
     }
     AiGraph {
@@ -115,7 +129,13 @@ fn forward_peak(d: u64, layers: u64) -> (usize, usize) {
     let buffers: Vec<Vec<u8>> = sizes
         .iter()
         .enumerate()
-        .map(|(i, &n)| if i == 0 { vec![0u8; n] } else { vec![(i % 7 + 1) as u8; n] })
+        .map(|(i, &n)| {
+            if i == 0 {
+                vec![0u8; n]
+            } else {
+                vec![(i % 7 + 1) as u8; n]
+            }
+        })
         .collect();
     let refs: Vec<&[u8]> = buffers.iter().map(|v| v.as_slice()).collect();
     runner.execute(&refs).expect("warm forward"); // resident + steady state
@@ -142,15 +162,30 @@ fn f32_stack(d: u64, layers: u64) -> AiGraph {
         ti.insert(w, TensorInfo::new(DType::F32, weight.clone()));
         ti.insert(out, TensorInfo::new(DType::F32, row.clone()));
         inputs.push(w);
-        nodes.push(AiNode::new(i as u32, AiOp::MatMul, vec![prev, w], vec![out]));
+        nodes.push(AiNode::new(
+            i as u32,
+            AiOp::MatMul,
+            vec![prev, w],
+            vec![out],
+        ));
         prev = out;
     }
     AiGraph {
-        name: format!("f_d{d}_l{layers}"), nodes, inputs, outputs: vec![prev],
-        input_names: Vec::new(), output_names: Vec::new(), params: HashMap::new(),
-        tensor_info: ti, metadata: HashMap::new(), warnings: Vec::new(),
-        dim_vars: Default::default(), shape_constraints: Default::default(),
-        subgraphs: HashMap::new(), tensor_names: HashMap::new(), topo_cache: Default::default(),
+        name: format!("f_d{d}_l{layers}"),
+        nodes,
+        inputs,
+        outputs: vec![prev],
+        input_names: Vec::new(),
+        output_names: Vec::new(),
+        params: HashMap::new(),
+        tensor_info: ti,
+        metadata: HashMap::new(),
+        warnings: Vec::new(),
+        dim_vars: Default::default(),
+        shape_constraints: Default::default(),
+        subgraphs: HashMap::new(),
+        tensor_names: HashMap::new(),
+        topo_cache: Default::default(),
     }
 }
 
@@ -172,8 +207,11 @@ fn f32_forward_peak(d: u64, layers: u64) -> usize {
 fn quantized_forward_workspace_is_characterized() {
     let d = 2048u64; // i8 weight = 4 MiB/layer; a dense-f32 [d,d] would be 16 MiB
     let mut prev: Option<(u64, usize)> = None;
-    println!("d={d}: i8 weight = {} MiB/layer, dense-f32 [d,d] = {} MiB/layer",
-        d * d / (1 << 20), d * d * 4 / (1 << 20));
+    println!(
+        "d={d}: i8 weight = {} MiB/layer, dense-f32 [d,d] = {} MiB/layer",
+        d * d / (1 << 20),
+        d * d * 4 / (1 << 20)
+    );
     for layers in [2u64, 4, 8, 16] {
         let (fwd, resident) = forward_peak(d, layers);
         let slope = prev.map(|(pl, pp)| (fwd as i64 - pp as i64) / (layers as i64 - pl as i64));
@@ -181,7 +219,9 @@ fn quantized_forward_workspace_is_characterized() {
             "layers={layers:2}: forward peak {:6.1} MiB, resident {:6.1} MiB{}",
             fwd as f64 / (1 << 20) as f64,
             resident as f64 / (1 << 20) as f64,
-            slope.map(|s| format!(", +{:.1} MiB/layer", s as f64 / (1 << 20) as f64)).unwrap_or_default(),
+            slope
+                .map(|s| format!(", +{:.1} MiB/layer", s as f64 / (1 << 20) as f64))
+                .unwrap_or_default(),
         );
         prev = Some((layers, fwd));
     }

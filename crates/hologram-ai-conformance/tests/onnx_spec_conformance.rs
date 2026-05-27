@@ -39,25 +39,64 @@ struct NodeTest {
 /// The pinned authoritative corpus — single-op spec cases hologram-ai lowers
 /// canonically. Pinned to the `onnx/onnx` `main` node-test layout.
 const CASES: &[NodeTest] = &[
-    NodeTest { dir: "relu", n_inputs: 1, op: "Relu" },
-    NodeTest { dir: "add", n_inputs: 2, op: "Add" },
-    NodeTest { dir: "matmul_2d", n_inputs: 2, op: "MatMul" },
-    NodeTest { dir: "softmax_example", n_inputs: 1, op: "Softmax" },
-    NodeTest { dir: "mul", n_inputs: 2, op: "Mul" },
-    NodeTest { dir: "sub", n_inputs: 2, op: "Sub" },
+    NodeTest {
+        dir: "relu",
+        n_inputs: 1,
+        op: "Relu",
+    },
+    NodeTest {
+        dir: "add",
+        n_inputs: 2,
+        op: "Add",
+    },
+    NodeTest {
+        dir: "matmul_2d",
+        n_inputs: 2,
+        op: "MatMul",
+    },
+    NodeTest {
+        dir: "softmax_example",
+        n_inputs: 1,
+        op: "Softmax",
+    },
+    NodeTest {
+        dir: "mul",
+        n_inputs: 2,
+        op: "Mul",
+    },
+    NodeTest {
+        dir: "sub",
+        n_inputs: 2,
+        op: "Sub",
+    },
     // Quantized weights / activations against the spec's own vectors (class QZ):
     // x, scale, zero-point are graph inputs in these cases, so they exercise the
     // canonical Dequantize path end to end.
-    NodeTest { dir: "dequantizelinear", n_inputs: 3, op: "Dequantize" },
-    NodeTest { dir: "dequantizelinear_axis", n_inputs: 3, op: "Dequantize" },
+    NodeTest {
+        dir: "dequantizelinear",
+        n_inputs: 3,
+        op: "Dequantize",
+    },
+    NodeTest {
+        dir: "dequantizelinear_axis",
+        n_inputs: 3,
+        op: "Dequantize",
+    },
     // First-class Gather (embedding lookup): data + integer indices are graph
     // inputs, exercising the runtime-indexed Gather kernel vs ONNX's own output.
-    NodeTest { dir: "gather_0", n_inputs: 2, op: "Gather" },
-    NodeTest { dir: "gather_1", n_inputs: 2, op: "Gather" },
+    NodeTest {
+        dir: "gather_0",
+        n_inputs: 2,
+        op: "Gather",
+    },
+    NodeTest {
+        dir: "gather_1",
+        n_inputs: 2,
+        op: "Gather",
+    },
 ];
 
-const BASE: &str =
-    "https://raw.githubusercontent.com/onnx/onnx/main/onnx/backend/test/data/node";
+const BASE: &str = "https://raw.githubusercontent.com/onnx/onnx/main/onnx/backend/test/data/node";
 
 fn cache_dir() -> PathBuf {
     let mut p = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -94,7 +133,10 @@ fn run_case(c: &NodeTest) {
     for i in 0..c.n_inputs {
         let p = root.join(format!("input_{i}.pb"));
         assert!(
-            fetch(&format!("{BASE}/test_{}/test_data_set_0/input_{i}.pb", c.dir), &p),
+            fetch(
+                &format!("{BASE}/test_{}/test_data_set_0/input_{i}.pb", c.dir),
+                &p
+            ),
             "[{}] could not fetch authoritative input_{i}.pb",
             c.dir
         );
@@ -107,7 +149,10 @@ fn run_case(c: &NodeTest) {
     // Authoritative expected output.
     let out_path = root.join("output_0.pb");
     assert!(
-        fetch(&format!("{BASE}/test_{}/test_data_set_0/output_0.pb", c.dir), &out_path),
+        fetch(
+            &format!("{BASE}/test_{}/test_data_set_0/output_0.pb", c.dir),
+            &out_path
+        ),
         "[{}] could not fetch authoritative output_0.pb",
         c.dir
     );
@@ -144,7 +189,11 @@ fn run_case(c: &NodeTest) {
             tol.rtol
         );
     }
-    println!("[{}] OK — matches ONNX spec output ({} elems)", c.dir, expected.len());
+    println!(
+        "[{}] OK — matches ONNX spec output ({} elems)",
+        c.dir,
+        expected.len()
+    );
 }
 
 #[test]

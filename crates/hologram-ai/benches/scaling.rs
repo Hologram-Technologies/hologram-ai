@@ -19,7 +19,7 @@
 //! prove no arbitrary limit throttles a larger model (see `tests/perf_floor.rs`
 //! for the asserted floor). Run: `cargo bench -p hologram-ai --bench scaling`.
 
-use criterion::{criterion_group, criterion_main, BenchmarkId, BatchSize, Criterion, Throughput};
+use criterion::{criterion_group, criterion_main, BatchSize, BenchmarkId, Criterion, Throughput};
 use hologram_ai::{HoloRunner, ModelCompiler, ModelSource};
 use hologram_ai_conformance::ort_runner::onnx_builder;
 
@@ -35,7 +35,11 @@ fn compile(model: Vec<u8>) -> HoloRunner {
 /// Zeroed input buffers sized to the model's ports, plus a mutable copy used to
 /// perturb bytes (forcing a novel κ-label → real recompute) for the cold path.
 fn zeroed_inputs(runner: &HoloRunner) -> Vec<Vec<u8>> {
-    runner.input_byte_sizes().iter().map(|&n| vec![0u8; n]).collect()
+    runner
+        .input_byte_sizes()
+        .iter()
+        .map(|&n| vec![0u8; n])
+        .collect()
 }
 
 fn bench_matmul_compile(c: &mut Criterion) {
@@ -102,7 +106,8 @@ fn bench_matmul_reuse_hit(c: &mut Criterion) {
 fn bench_imported_forward(c: &mut Criterion) {
     // Real-world verification: a complete imported transformer, not a synthetic
     // single op. Skips cleanly if the fixture is absent.
-    let Some(model) = hologram_ai_conformance::ort_runner::fixtures::load("mini_transformer") else {
+    let Some(model) = hologram_ai_conformance::ort_runner::fixtures::load("mini_transformer")
+    else {
         return;
     };
     let mut runner = {

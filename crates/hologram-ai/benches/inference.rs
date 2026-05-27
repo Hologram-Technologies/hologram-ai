@@ -62,7 +62,10 @@ fn bench_forward(c: &mut Criterion, name: &str, model: &mut BenchModel) {
     group.bench_function(BenchmarkId::new("execute", name), |b| {
         let input_refs: Vec<&[u8]> = model.inputs.iter().map(|v| v.as_slice()).collect();
         b.iter(|| {
-            model.runner.execute(&input_refs).expect("forward pass failed");
+            model
+                .runner
+                .execute(&input_refs)
+                .expect("forward pass failed");
         });
     });
 

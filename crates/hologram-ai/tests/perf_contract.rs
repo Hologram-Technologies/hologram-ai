@@ -83,10 +83,10 @@ fn matmul_stack(d: u64, layers: u64) -> AiGraph {
 fn billion_parameter_architectures_compile_without_arbitrary_limits() {
     // (label, d, layers) → param count = layers · d².
     let configs = [
-        ("1B", 8192u64, 15u64),  // 15 · 8192²  ≈ 1.01 B
-        ("3B", 8192, 45),        // 45 · 8192²  ≈ 3.02 B
-        ("5B", 8192, 75),        // 75 · 8192²  ≈ 5.03 B
-        ("20B", 16384, 75),      // 75 · 16384² ≈ 20.1 B
+        ("1B", 8192u64, 15u64), // 15 · 8192²  ≈ 1.01 B
+        ("3B", 8192, 45),       // 45 · 8192²  ≈ 3.02 B
+        ("5B", 8192, 75),       // 75 · 8192²  ≈ 5.03 B
+        ("20B", 16384, 75),     // 75 · 16384² ≈ 20.1 B
     ];
     for (label, d, layers) in configs {
         let params = layers * d * d;
@@ -94,7 +94,9 @@ fn billion_parameter_architectures_compile_without_arbitrary_limits() {
         let t = Instant::now();
         let archive = ModelCompiler::default()
             .compile(ModelSource::AiGraph(graph))
-            .unwrap_or_else(|e| panic!("[{label}] {params}-param architecture failed to compile: {e:#}"));
+            .unwrap_or_else(|e| {
+                panic!("[{label}] {params}-param architecture failed to compile: {e:#}")
+            });
         let dt = t.elapsed();
         assert!(!archive.bytes.is_empty(), "[{label}] empty archive");
         println!(
@@ -113,11 +115,15 @@ fn compile_cost_is_independent_of_parameter_count() {
     let large = matmul_stack(9216, 24); // ~2.0 B (≈5× params, same 24 layers)
 
     let t = Instant::now();
-    ModelCompiler::default().compile(ModelSource::AiGraph(small)).unwrap();
+    ModelCompiler::default()
+        .compile(ModelSource::AiGraph(small))
+        .unwrap();
     let small_dt = t.elapsed();
 
     let t = Instant::now();
-    ModelCompiler::default().compile(ModelSource::AiGraph(large)).unwrap();
+    ModelCompiler::default()
+        .compile(ModelSource::AiGraph(large))
+        .unwrap();
     let large_dt = t.elapsed();
 
     println!("compile: 0.4B {small_dt:?} vs 2.0B {large_dt:?}");
@@ -161,7 +167,10 @@ fn content_addressed_reuse_beats_recompute() {
             let off = (r * n + c) * 4;
             let v = f32::from_le_bytes(reference[off..off + 4].try_into().unwrap());
             let want = if r == c { 1.0 } else { 0.0 };
-            assert!((v - want).abs() <= 1e-5, "I·I wrong at [{r},{c}]: {v} != {want}");
+            assert!(
+                (v - want).abs() <= 1e-5,
+                "I·I wrong at [{r},{c}]: {v} != {want}"
+            );
         }
     }
 
@@ -169,8 +178,14 @@ fn content_addressed_reuse_beats_recompute() {
     // returns the *identical* bytes (content-addressing correctness, not just speed).
     let labels: Vec<_> = base.iter().map(|v| runner.intern_input(v)).collect();
     let reuse_labels = runner.execute_addressed(&labels).expect("warm");
-    let reused_bytes = runner.resolve(&reuse_labels[0]).expect("resolve reuse output");
-    assert_eq!(reused_bytes, reference.as_slice(), "memo hit returned different bytes");
+    let reused_bytes = runner
+        .resolve(&reuse_labels[0])
+        .expect("resolve reuse output");
+    assert_eq!(
+        reused_bytes,
+        reference.as_slice(),
+        "memo hit returned different bytes"
+    );
     let reuse = {
         let t = Instant::now();
         for _ in 0..50 {
@@ -251,10 +266,20 @@ fn runtime_weight_footprint_is_the_deduplicated_set() {
     );
 
     // Distinct: ~layers weight bodies resident.
-    assert!(distinct_bytes >= layers as usize * body, "distinct must hold every body");
-    assert_eq!(distinct_count, layers as usize + 1, "X + {layers} distinct weights");
+    assert!(
+        distinct_bytes >= layers as usize * body,
+        "distinct must hold every body"
+    );
+    assert_eq!(
+        distinct_count,
+        layers as usize + 1,
+        "X + {layers} distinct weights"
+    );
     // Shared: a single weight body (plus the tiny X), regardless of layer count.
-    assert!(shared_bytes <= body + 65536, "shared must collapse to one body");
+    assert!(
+        shared_bytes <= body + 65536,
+        "shared must collapse to one body"
+    );
     assert_eq!(shared_count, 2, "X + 1 shared weight");
     // The dedup is dramatic: ~layers× less memory for the same nominal model.
     assert!(shared_bytes * (layers as usize / 2) < distinct_bytes);
@@ -269,10 +294,20 @@ fn matmul_sweep_runs_at_every_size() {
             .compile(ModelSource::OnnxBytes(onnx_builder::matmul(n, n, n)))
             .unwrap_or_else(|e| panic!("matmul {n}³ compile failed: {e:#}"));
         let mut runner = HoloRunner::from_bytes(archive.bytes).expect("load");
-        let ins: Vec<Vec<u8>> = runner.input_byte_sizes().iter().map(|&b| vec![0u8; b]).collect();
+        let ins: Vec<Vec<u8>> = runner
+            .input_byte_sizes()
+            .iter()
+            .map(|&b| vec![0u8; b])
+            .collect();
         let refs: Vec<&[u8]> = ins.iter().map(|v| v.as_slice()).collect();
-        let out = runner.execute(&refs).unwrap_or_else(|e| panic!("matmul {n}³ execute failed: {e:#}"));
+        let out = runner
+            .execute(&refs)
+            .unwrap_or_else(|e| panic!("matmul {n}³ execute failed: {e:#}"));
         assert_eq!(out.len(), 1, "matmul {n}³: expected one output");
-        assert_eq!(out[0].bytes.len(), n * n * 4, "matmul {n}³: output [{n},{n}] f32");
+        assert_eq!(
+            out[0].bytes.len(),
+            n * n * 4,
+            "matmul {n}³: output [{n},{n}] f32"
+        );
     }
 }

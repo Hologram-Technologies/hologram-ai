@@ -25,14 +25,21 @@ fn ensure_sidecar_placeholder() {
             return;
         }
     }
-    let suffix = if target.contains("windows") { ".exe" } else { "" };
+    let suffix = if target.contains("windows") {
+        ".exe"
+    } else {
+        ""
+    };
     let path = dir.join(format!("hologram-ai-{target}{suffix}"));
     if path.exists() {
         return;
     }
     let stub = b"#!/bin/sh\necho 'hologram-ai sidecar placeholder - rebuild for production' >&2\nexit 127\n";
     if let Err(e) = std::fs::write(&path, stub) {
-        println!("cargo:warning=write sidecar placeholder {}: {e}", path.display());
+        println!(
+            "cargo:warning=write sidecar placeholder {}: {e}",
+            path.display()
+        );
         return;
     }
     #[cfg(unix)]
@@ -44,5 +51,8 @@ fn ensure_sidecar_placeholder() {
             let _ = std::fs::set_permissions(&path, perms);
         }
     }
-    println!("cargo:warning=staged sidecar placeholder at {}", path.display());
+    println!(
+        "cargo:warning=staged sidecar placeholder at {}",
+        path.display()
+    );
 }

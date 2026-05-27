@@ -91,38 +91,59 @@ fn one_in_two_out() -> AiGraph {
 #[test]
 fn fill_ones_runs_multi_input_model_and_reports_typed_output() {
     let path = compile_to_temp(matmul_2in(), "mm2");
-    let (ok, out) = run(&[
-        "run",
-        path.to_str().unwrap(),
-        "--fill",
-        "ones",
-        "--verbose",
-    ]);
+    let (ok, out) = run(&["run", path.to_str().unwrap(), "--fill", "ones", "--verbose"]);
     assert!(ok, "run failed:\n{out}");
     // Port description lines.
-    assert!(out.contains("2 input(s), 1 output(s)"), "missing port summary:\n{out}");
-    assert!(out.contains("input[0]: f32 × 4"), "missing input desc:\n{out}");
+    assert!(
+        out.contains("2 input(s), 1 output(s)"),
+        "missing port summary:\n{out}"
+    );
+    assert!(
+        out.contains("input[0]: f32 × 4"),
+        "missing input desc:\n{out}"
+    );
     // MatMul(ones[1,4], ones[4,4]) = [4,4,4,4]; typed f32 preview.
-    assert!(out.contains("output[0]: f32 × 4"), "missing output desc:\n{out}");
+    assert!(
+        out.contains("output[0]: f32 × 4"),
+        "missing output desc:\n{out}"
+    );
     assert!(out.contains("[4, 4, 4, 4]"), "wrong output preview:\n{out}");
 }
 
 #[test]
 fn fill_zeros_runs_any_model_multi_output() {
     let path = compile_to_temp(one_in_two_out(), "split");
-    let (ok, out) = run(&["run", path.to_str().unwrap(), "--fill", "zeros", "--verbose"]);
+    let (ok, out) = run(&[
+        "run",
+        path.to_str().unwrap(),
+        "--fill",
+        "zeros",
+        "--verbose",
+    ]);
     assert!(ok, "run failed:\n{out}");
     // Two outputs, both zero (relu(0)=0, 0+0=0).
-    assert!(out.contains("output[0]: f32 × 4"), "missing output[0]:\n{out}");
-    assert!(out.contains("output[1]: f32 × 4"), "missing output[1]:\n{out}");
-    assert!(out.contains("[0, 0, 0, 0]"), "expected zero outputs:\n{out}");
+    assert!(
+        out.contains("output[0]: f32 × 4"),
+        "missing output[0]:\n{out}"
+    );
+    assert!(
+        out.contains("output[1]: f32 × 4"),
+        "missing output[1]:\n{out}"
+    );
+    assert!(
+        out.contains("[0, 0, 0, 0]"),
+        "expected zero outputs:\n{out}"
+    );
 }
 
 #[test]
 fn explicit_input_overrides_and_numeric_fill_compose() {
     // x = [1,2,3,4] (explicit), W = fill 1.0 → MatMul = [10,10,10,10].
     let path = compile_to_temp(matmul_2in(), "mm2b");
-    let x: Vec<u8> = [1.0f32, 2.0, 3.0, 4.0].iter().flat_map(|v| v.to_le_bytes()).collect();
+    let x: Vec<u8> = [1.0f32, 2.0, 3.0, 4.0]
+        .iter()
+        .flat_map(|v| v.to_le_bytes())
+        .collect();
     let hex: String = x.iter().map(|b| format!("{b:02x}")).collect();
     let (ok, out) = run(&[
         "run",
@@ -134,7 +155,10 @@ fn explicit_input_overrides_and_numeric_fill_compose() {
         "--verbose",
     ]);
     assert!(ok, "run failed:\n{out}");
-    assert!(out.contains("[10, 10, 10, 10]"), "wrong composed output:\n{out}");
+    assert!(
+        out.contains("[10, 10, 10, 10]"),
+        "wrong composed output:\n{out}"
+    );
 }
 
 #[test]
@@ -142,7 +166,10 @@ fn missing_input_without_fill_is_a_clear_error() {
     let path = compile_to_temp(matmul_2in(), "mm2c");
     let (ok, out) = run(&["run", path.to_str().unwrap()]);
     assert!(!ok, "expected failure when inputs are missing");
-    assert!(out.contains("--fill zeros"), "error should suggest --fill:\n{out}");
+    assert!(
+        out.contains("--fill zeros"),
+        "error should suggest --fill:\n{out}"
+    );
 }
 
 #[test]
@@ -158,5 +185,8 @@ fn wrong_size_explicit_input_is_rejected() {
         "zeros",
     ]);
     assert!(!ok, "expected size-mismatch failure");
-    assert!(out.contains("expects 16"), "error should state expected size:\n{out}");
+    assert!(
+        out.contains("expects 16"),
+        "error should state expected size:\n{out}"
+    );
 }

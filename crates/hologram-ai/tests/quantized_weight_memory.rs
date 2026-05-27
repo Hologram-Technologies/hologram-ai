@@ -49,7 +49,10 @@ fn quantized_graph() -> AiGraph {
     ti.insert(5, info(DType::F32, &[1, N as u64]));
 
     params.insert(1, AiParam::inline(w_bytes, ti[&1].clone()));
-    params.insert(2, AiParam::inline(SCALE.to_le_bytes().to_vec(), ti[&2].clone()));
+    params.insert(
+        2,
+        AiParam::inline(SCALE.to_le_bytes().to_vec(), ti[&2].clone()),
+    );
     params.insert(3, AiParam::inline(vec![0u8], ti[&3].clone()));
 
     AiGraph {
@@ -147,7 +150,10 @@ fn quantized_weight_stays_packed_and_is_correct() {
 
     // (2) Correctness: quantized path matches the f64 reference (and the f32 path).
     for (j, (&q, &r)) in q_out.iter().zip(reference.iter()).enumerate() {
-        assert!((q - r).abs() <= 1e-3 + r.abs() * 1e-4, "quant out[{j}] {q} != ref {r}");
+        assert!(
+            (q - r).abs() <= 1e-3 + r.abs() * 1e-4,
+            "quant out[{j}] {q} != ref {r}"
+        );
     }
     for (j, (&q, &f)) in q_out.iter().zip(f_out.iter()).enumerate() {
         assert!((q - f).abs() <= 1e-4, "quant[{j}] {q} != f32 baseline {f}");
@@ -267,7 +273,10 @@ fn i4_graph() -> (AiGraph, Vec<i8>) {
     ti.insert(4, info(DType::F32, &[K as u64, N as u64]));
     ti.insert(5, info(DType::F32, &[1, N as u64]));
     params.insert(1, AiParam::inline(packed, ti[&1].clone()));
-    params.insert(2, AiParam::inline(SCALE.to_le_bytes().to_vec(), ti[&2].clone()));
+    params.insert(
+        2,
+        AiParam::inline(SCALE.to_le_bytes().to_vec(), ti[&2].clone()),
+    );
     params.insert(3, AiParam::inline(vec![0u8], ti[&3].clone()));
 
     let g = AiGraph {
@@ -307,9 +316,16 @@ fn i4_weight_packs_to_half_byte_and_is_correct() {
         .collect();
 
     let (runner, out) = run(graph, &x);
-    assert_eq!(runner.dequant_matmul_fused_count(), 1, "i4 Dequantize→MatMul must fuse");
+    assert_eq!(
+        runner.dequant_matmul_fused_count(),
+        1,
+        "i4 Dequantize→MatMul must fuse"
+    );
     for (n, (&o, &r)) in out.iter().zip(reference.iter()).enumerate() {
-        assert!((o - r).abs() <= 1e-3 + r.abs() * 1e-3, "i4 out[{n}] {o} != ref {r}");
+        assert!(
+            (o - r).abs() <= 1e-3 + r.abs() * 1e-3,
+            "i4 out[{n}] {o} != ref {r}"
+        );
     }
 
     // The i4 weight is K·N/2 bytes resident vs f32's K·N·4 → ~8× smaller.

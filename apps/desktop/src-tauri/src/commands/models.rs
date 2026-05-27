@@ -119,7 +119,10 @@ fn is_pipeline_submodel(p: &std::path::Path) -> bool {
     else {
         return false;
     };
-    matches!(parent, "text_encoder" | "unet" | "vae_decoder" | "vae_encoder")
+    matches!(
+        parent,
+        "text_encoder" | "unet" | "vae_decoder" | "vae_encoder"
+    )
 }
 
 #[derive(Deserialize)]
