@@ -1,18 +1,25 @@
-//! Content-based constant deduplication.
+//! Content-addressed constant deduplication.
 //!
-//! Scans all `AiParam::Inline` constants, hashes their bytes, and merges
-//! duplicates by remapping TensorIds. This eliminates cross-layer duplication
-//! that op+inputTID CSE cannot catch (e.g., 22 transformer layers each
-//! independently computing the same RoPE constants from shared weights).
+//! Addresses every `AiParam::Inline` weight to its **uor-addr content
+//! fingerprint** — the canonical BLAKE3 content address
+//! ([`hologram_archive::WeightFingerprint`], the same address hologram's
+//! `WeightStore` dedups by and the same hasher family as a model's κ-label) —
+//! and merges weights that share an address by remapping TensorIds. A weight's
+//! identity is thus its uor-address, not its bytes: structurally-equal weights
+//! collapse to one, consistent with the canonical-forms model (the IR operates
+//! over addresses, not values). This catches cross-layer duplication that
+//! op+inputTID CSE cannot (e.g. 22 transformer layers independently
+//! materializing the same RoPE table, or tied embed/unembed weights).
 //!
 //! Runs after ConstantEvaluation + ConstantFolding so that all materializable
 //! constants have been produced and dead intermediates removed.
 
 use super::pipeline::Pass;
-use crate::ir::{AiGraph, AiParam, TensorId};
+use crate::ir::{AiGraph, AiParam, DType, TensorId};
+use hologram_archive::WeightFingerprint;
 use std::collections::HashMap;
 
-/// Deduplicate inline constants by content hash.
+/// Deduplicate inline constants by their uor-addr content fingerprint.
 pub struct ConstantDeduplication;
 
 impl Pass for ConstantDeduplication {
@@ -21,10 +28,13 @@ impl Pass for ConstantDeduplication {
     }
 
     fn run(&self, mut graph: AiGraph) -> anyhow::Result<AiGraph> {
-        // Build a map: content hash → canonical TensorId.
-        // We use (len, dtype, partial_hash) as the key for fast comparison,
-        // then do a full byte comparison to confirm.
-        let mut canonical: HashMap<ContentKey, TensorId> = HashMap::new();
+        // Canonical owner per (content address, dtype). Equal address ⇒ equal
+        // content (BLAKE3 is collision-resistant — the premise of content
+        // addressing, and exactly what hologram's WeightStore relies on), so no
+        // byte re-comparison is needed. The dtype scopes the address so two
+        // weights with identical bytes but different dtype interpretations stay
+        // distinct (the IR merge carries the param's dtype with it).
+        let mut canonical: HashMap<(WeightFingerprint, DType), TensorId> = HashMap::new();
         let mut remap: HashMap<TensorId, TensorId> = HashMap::new();
 
         // Collect param TIDs sorted so we get deterministic canonical choices.
@@ -32,28 +42,20 @@ impl Pass for ConstantDeduplication {
         param_tids.sort();
 
         for &tid in &param_tids {
-            let param = match graph.params.get(&tid) {
+            let (data, info) = match graph.params.get(&tid) {
                 Some(AiParam::Inline { data, info }) => (data.as_slice(), info),
                 _ => continue,
             };
-            let (data, info) = param;
 
             // Skip small constants (dedup overhead not worth it).
             if data.len() < 256 {
                 continue;
             }
 
-            let key = ContentKey::from_bytes(data, info.logical_dtype);
+            let key = (WeightFingerprint::of(data), info.logical_dtype);
 
             if let Some(&canon_tid) = canonical.get(&key) {
-                // Verify full byte equality (hash collision guard).
-                let canon_data = match graph.params.get(&canon_tid) {
-                    Some(AiParam::Inline { data, .. }) => data.as_slice(),
-                    _ => continue,
-                };
-                if data == canon_data {
-                    remap.insert(tid, canon_tid);
-                }
+                remap.insert(tid, canon_tid);
             } else {
                 canonical.insert(key, tid);
             }
@@ -110,31 +112,6 @@ impl Pass for ConstantDeduplication {
         );
 
         Ok(graph)
-    }
-}
-
-/// Hash key for constant content: uses FNV-style hash of the full byte content
-/// plus dtype to avoid false matches across different interpretations.
-#[derive(Hash, PartialEq, Eq, Clone)]
-struct ContentKey {
-    len: usize,
-    dtype_tag: u8,
-    hash: u64,
-}
-
-impl ContentKey {
-    fn from_bytes(data: &[u8], dtype: crate::ir::DType) -> Self {
-        // FNV-1a hash of the full content.
-        let mut h: u64 = 0xcbf29ce484222325;
-        for &b in data {
-            h ^= b as u64;
-            h = h.wrapping_mul(0x100000001b3);
-        }
-        Self {
-            len: data.len(),
-            dtype_tag: dtype as u8,
-            hash: h,
-        }
     }
 }
 
