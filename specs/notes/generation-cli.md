@@ -27,7 +27,21 @@ hologram-ai run <archive.holo> \
   --max-tokens N --temperature T --top-k K --stop "<s>" [--stop "<s2>" …] [--eos ID]
 ```
 
-When `--prompt` is absent, `run` keeps its raw `--input INDEX:HEX` behavior.
+When `--prompt` is absent, `run` is a raw forward pass that executes **any**
+compiled model:
+
+```
+hologram-ai run <archive.holo> [--input I:HEX] [--input-file I:PATH] [--fill zeros|ones|N] [--verbose]
+```
+
+On load it prints each input port (`index: dtype × element_count = bytes`).
+Inputs not given explicitly are synthesized from `--fill` (`zeros` is valid for
+every dtype; `ones`/numeric encode per the port dtype) — so an arbitrary
+multi-input model runs with one command. Explicit inputs are size-checked
+against their port; missing inputs without `--fill` are a clear error (no silent
+zero-fill). Outputs report `dtype × element_count` and, with `--verbose`, a typed
+value preview (f32/f64/i32/i64) or hex. Verified on multi-input / multi-output /
+mixed-dtype models in `tests/run_arbitrary_models.rs`.
 
 ## LM contract (resolved positionally)
 
