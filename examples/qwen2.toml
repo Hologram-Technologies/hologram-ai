@@ -19,10 +19,23 @@
 #     --prompt-template "<|im_start|>user\n{prompt}<|im_end|>\n<|im_start|>assistant\n" \
 #     --max-tokens 60 --temperature 0.0 --stop "<|im_end|>"
 #
-# NOTE: real LMs use int64 `input_ids`; end-to-end generation against them needs
-# the upstream hologram embedding widening (Dequantize over i32/i64 indices) —
-# see specs/notes/generation-cli.md. The generation loop itself is verified on a
-# synthetic i8-vocab LM (tests/generation_synthetic.rs).
+# STATUS: compile + a full forward pass are verified end-to-end on real
+# Llama-family ONNX (the authoritative onnx-community SmolLM2-135M runs through
+# the canonical OpKind pipeline — embedding Gather, causal grouped-query
+# attention, RoPE, RMSNorm, SwiGLU, LM head). int64 `input_ids` work via the
+# first-class `Gather` (no i8≤127 limit).
+#
+# The greedy/sampled generation loop is verified end-to-end — see the runnable
+# `cargo run -p hologram-ai --example text_generation` (deterministic, checked
+# against a closed-form expectation) and `tests/generation_synthetic.rs`.
+#
+# Generating from a *pretrained* checkpoint additionally needs a **no-past**
+# forward export: hologram-ai replaces the mutable KV-cache with content-addressed
+# κ-label elision, so `run --prompt` recomputes the growing token window and
+# reuses the unchanged prefix by content address. The default HF/onnx-community
+# exports are *with-past decode-step* graphs (input_ids[1,1] + past KV per step),
+# which `generate_stream` does not drive; converting such a graph to its no-past
+# recompute form is the remaining step for one-command real-LM chat.
 
 [model]
 hf_id = "Qwen/Qwen2-0.5B-Instruct"
