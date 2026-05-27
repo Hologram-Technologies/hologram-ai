@@ -87,7 +87,7 @@ and are exempt from NS/ZA/ZM, exactly as hologram's CLI is a std host over its
 |---|---|---|---|---|
 | **LW-1** | Every `AiOp` lowers to a **canonical** `hologram_ops::OpKind` (or a desugared pipeline); the compiled+run output equals the **ONNX operator spec's** authoritative expected output. | live ONNX node-test corpus | `onnx_spec_conformance.rs` | 🟡 |
 | **LW-2** | Every `AiOp` has a complete canonical realization — mapped to an `OpKind`, attrs/operands attached, or desugared into a canonical `OpKind` pipeline. There are **no** unsupported ops and no runtime failure path. Each desugaring equals an independent f64 reference of the op it replaces. | exhaustive `AiOp` lowering test vs f64 ref | `hologram-ai-common` | 🚧 |
-| **LW-3** | Fused AI ops (attention, SwiGLU, RoPE) lower to hologram's canonical fused `OpKind`s (`Attention`, `FusedSwiGlu`, `RotaryEmbedding`), not hand-rolled custom handlers. | lowering test | `hologram-ai-common` | 🚧 |
+| **LW-3** | Fused AI ops (attention, SwiGLU, RoPE) lower to hologram's canonical fused `OpKind`s, not hand-rolled custom handlers. **Attention**: MHA/GQA → `OpKind::Attention` with `AttentionAttrs` (causal + scale; kv_heads derived from K) on hologram's faithful causal-grouped-query SDPA kernel. **SwiGLU**: `silu(gate)·up` → canonical `Silu`+`Mul` (hologram's `FusedSwiGlu` op is an unimplemented two-weight matmul stub) + 2-D down-proj MatMul. **RoPE**: still decomposed (rotate_half via Gather/Concat/Neg/Mul) — fusing to `RotaryEmbedding` is pending. The authoritative SmolLM2-135M forward runs end-to-end through this path. | lowering test + `diag_smollm2_backend` | `hologram-ai-common` | 🟡 |
 
 ## CF — Canonical-forms-only
 
