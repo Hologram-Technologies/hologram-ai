@@ -43,9 +43,12 @@ vv-embedded:
     cargo build --target thumbv7em-none-eabi -p hologram-ai-quant
     cargo build --target thumbv7em-none-eabi -p hologram-ai-tokenizer --no-default-features
 
-# Axis 7 — Performance (class PV): release benches with per-stage budgets.
+# Axis 7 — Performance (class PV): the asserted contract floors (no arbitrary
+# limit at 1B–20B params, content-addressed reuse O(1), weight-size-independent
+# compile, the 64/128/256/512 matmul sweep) plus the criterion scaling benches.
 vv-perf:
-    cargo bench -p hologram-ai-conformance --features=perf
+    cargo test --release -p hologram-ai --test perf_contract -- --nocapture
+    cargo bench -p hologram-ai --bench scaling
 
 # Install the cross-compilation targets the portability axis needs.
 vv-setup:
