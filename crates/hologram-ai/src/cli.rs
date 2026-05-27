@@ -95,6 +95,7 @@ fn compile(
         quant_strategy,
         spatial_scale,
         patch_budget_ratio: Some(0.75),
+        address_model: false,
     };
 
     let stem = name.unwrap_or_else(|| {

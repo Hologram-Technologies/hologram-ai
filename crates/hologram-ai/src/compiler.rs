@@ -192,6 +192,12 @@ pub struct ModelCompiler {
     /// Range: `(0.0, 1.0]`. Default: `Some(0.75)`.
     /// Set to `None` to disable patch pruning entirely.
     pub patch_budget_ratio: Option<f32>,
+    /// Mint the model's uor-addr κ-label (MA dedup/warm-start identity) during
+    /// compile. **Off by default**: it canonicalizes the *entire* model via
+    /// uor-addr, which is prohibitively slow for large models (minutes for a
+    /// 0.5 GB ONNX) and is not needed for a working `.holo`. Enable only when the
+    /// κ-label is actually required (addressing/dedup tooling).
+    pub address_model: bool,
 }
 
 impl Default for ModelCompiler {
@@ -202,6 +208,7 @@ impl Default for ModelCompiler {
             spatial_scale: None,
             quant_strategy: hologram_ai_common::lower::QuantStrategy::Auto,
             patch_budget_ratio: Some(0.75),
+            address_model: false,
         }
     }
 }
@@ -247,7 +254,13 @@ impl ModelCompiler {
 
         // Address the source model to its κ-label before import consumes it
         // (architecture §8 — the model's canonical dedup / warm-start identity).
-        let kappa_label = source_kappa_label(&source);
+        // Opt-in: full-model uor-addr canonicalization is too slow for large
+        // models to sit on the compile critical path.
+        let kappa_label = if self.address_model {
+            source_kappa_label(&source)
+        } else {
+            None
+        };
 
         // Step 1 — import.
         let mut ai_graph = self.import(source)?;
