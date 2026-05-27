@@ -11,7 +11,9 @@ use std::collections::HashMap;
 
 use anyhow::{Context, Result};
 use hologram_graph::constant::ConstantEntry;
-use hologram_graph::node::{ConvAttrs, GatherAttrs, GemmAttrs, LrnAttrs, Node, QuantAttrs};
+use hologram_graph::node::{
+    AttentionAttrs, ConvAttrs, GatherAttrs, GemmAttrs, LrnAttrs, Node, QuantAttrs,
+};
 use hologram_graph::registry::{DTypeId, ShapeDescriptor, ShapeId};
 use hologram_graph::{Graph, GraphOp, InputSource, NodeId, OpKind};
 use smallvec::SmallVec;
@@ -495,6 +497,9 @@ impl<'a> Ctx<'a> {
     fn desugar(&mut self, node: &AiNode, kind: DesugarKind) -> Result<()> {
         match kind {
             DesugarKind::MatMul => self.desugar_matmul(node),
+            DesugarKind::Attention { causal, scale_bits } => {
+                self.desugar_attention(node, causal, scale_bits)
+            }
             DesugarKind::Constant => self.desugar_constant(node),
             DesugarKind::Split { axis, sizes } => self.desugar_split(node, axis, &sizes),
             DesugarKind::Gather { axis } => self.desugar_gather(node, axis),
@@ -552,6 +557,7 @@ impl<'a> Ctx<'a> {
                 split_sizes,
                 has_residual_add,
             } => self.desugar_norm_projection(node, epsilon, &split_sizes, has_residual_add),
+            DesugarKind::SwiGlu => self.desugar_swiglu(node),
             DesugarKind::SwiGluProjection => self.desugar_swiglu_projection(node),
             DesugarKind::Norm { op, residual } => self.desugar_norm(node, op, residual),
         }
@@ -885,6 +891,19 @@ impl<'a> Ctx<'a> {
         let shape = self.intern(&out_dims);
         let nid = self.add(GraphOp::Op(OpKind::Gather), SmallVec::from_iter([data, idx]), dtype, shape);
         self.graph.set_gather_attrs(nid, GatherAttrs { axis: axis as i32 });
+        self.bind_out(node, InputSource::Node(nid))
+    }
+
+    /// Lower MultiHead/GroupedQuery attention to the canonical `Attention` op,
+    /// attaching `AttentionAttrs` (causal masking + softmax scale). Q/K/V (and
+    /// any norm/rope operands) flow through as the node's inputs; the compiler
+    /// derives heads/seq/head_dim from Q's shape and `kv_heads` from K's, so a
+    /// grouped-query K/V with fewer heads is handled by the kernel directly (no
+    /// hand-rolled repeat_kv expansion).
+    fn desugar_attention(&mut self, node: &AiNode, causal: bool, scale_bits: u32) -> Result<()> {
+        let nid = self.emit_simple(node, OpKind::Attention)?;
+        self.graph
+            .set_attention_attrs(nid, AttentionAttrs { causal, scale_bits });
         self.bind_out(node, InputSource::Node(nid))
     }
 
@@ -1409,16 +1428,50 @@ impl<'a> Ctx<'a> {
         Ok(())
     }
 
+    /// SwiGLU activation `silu(gate) · up` over canonical primitives. hologram's
+    /// `OpKind::FusedSwiGlu` is an unimplemented two-weight matmul fusion (fails
+    /// loud), and the activation form is just element-wise `Silu` then `Mul`, so
+    /// the canonical realization is exact and fully supported. `gate`/`up` share
+    /// `dims`; `Mul` is hologram's strict element-wise kernel (same shape).
+    fn swiglu_activation(
+        &mut self,
+        gate: InputSource,
+        up: InputSource,
+        dtype: DTypeId,
+        dims: &[u64],
+    ) -> InputSource {
+        let silu = self.op(OpKind::Silu, &[gate], dtype, dims);
+        self.op(OpKind::Mul, &[silu, up], dtype, dims)
+    }
+
+    fn desugar_swiglu(&mut self, node: &AiNode) -> Result<()> {
+        // [gate, up] → silu(gate) · up (element-wise).
+        let dtype = self.dtype_of(node.inputs[0]);
+        let gate = self.src(node.inputs[0])?;
+        let up = self.src(node.inputs[1])?;
+        let dims = self.out_dims(node)?;
+        let act = self.swiglu_activation(gate, up, dtype, &dims);
+        self.bind_out(node, act)
+    }
+
     fn desugar_swiglu_projection(&mut self, node: &AiNode) -> Result<()> {
-        // [gate, up, W_down]: FusedSwiGlu(gate, up) then MatMul with W_down.
+        // [gate, up, W_down]: silu(gate)·up, then the down projection MatMul.
         let dtype = self.dtype_of(node.inputs[0]);
         let gate = self.src(node.inputs[0])?;
         let up = self.src(node.inputs[1])?;
         let wdown = self.src(node.inputs[2])?;
         let gate_dims = self.in_dims(node, 0)?;
-        let swig = self.op(OpKind::FusedSwiGlu, &[gate, up], dtype, &gate_dims);
+        let act = self.swiglu_activation(gate, up, dtype, &gate_dims);
+        // Down projection: act[.., intermediate] · W_down[intermediate, hidden].
+        // Fold any batch dims into the matmul rows (hologram MatMul is 2-D).
         let out_dims = self.out_dims(node)?;
-        let out = self.op(OpKind::MatMul, &[swig, wdown], dtype, &out_dims);
+        let inter = gate_dims.last().copied().unwrap_or(1).max(1);
+        let rows: u64 = gate_dims.iter().product::<u64>() / inter;
+        let wdown_dims = self.in_dims(node, 2)?;
+        let hidden = wdown_dims.last().copied().unwrap_or(1);
+        let act2d = self.reshape_to(act, dtype, &[rows, inter]);
+        let prod = self.op(OpKind::MatMul, &[act2d, wdown], dtype, &[rows, hidden]);
+        let out = self.reshape_to(prod, dtype, &out_dims);
         self.bind_out(node, out)
     }
 

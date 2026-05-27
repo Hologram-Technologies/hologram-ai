@@ -103,6 +103,33 @@ fn infer_custom_output_shapes(
             }
         }
 
+        // SwiGLU activation `silu(gate)·up` — element-wise, output = gate shape.
+        AiOp::FusedSwiGLU => {
+            if !inputs.is_empty() && !inputs[0].is_empty() {
+                vec![Shape::from(inputs[0].clone())]
+            } else {
+                vec![Shape::new()]
+            }
+        }
+
+        // SwiGLU + down projection: `(silu(gate)·up) · W_down`. gate/up are
+        // `[..., intermediate]`; W_down is `[intermediate, hidden]`. Output keeps
+        // gate's leading (batch/seq) dims and replaces the last with W_down's N —
+        // a matmul shape, NOT a broadcast (the default Custom rule returns empty,
+        // which then heals to a wrong batch=seq shape).
+        AiOp::FusedSwiGluProjection => {
+            match (inputs.first(), inputs.get(2)) {
+                (Some(gate), Some(wdown))
+                    if !gate.is_empty() && wdown.len() >= 2 =>
+                {
+                    let mut out: Vec<DimExpr> = gate[..gate.len() - 1].to_vec();
+                    out.push(wdown[wdown.len() - 1].clone());
+                    vec![Shape::from(out)]
+                }
+                _ => vec![Shape::new()],
+            }
+        }
+
         // Reductions.
         AiOp::ReduceSum { axes, keepdims }
         | AiOp::ReduceMean { axes, keepdims }

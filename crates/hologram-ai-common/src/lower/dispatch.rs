@@ -52,6 +52,12 @@ pub enum DesugarKind {
     /// `MatMul`/`BatchMatMul` → 2-D `MatMul`, folding any rank≥3 batch dims of A
     /// into the row dimension (hologram's MatMul kernel is strictly 2-D).
     MatMul,
+    /// `MultiHeadAttention`/`GroupedQueryAttention` → canonical `Attention` op
+    /// with `AttentionAttrs` (causal + softmax scale) attached.
+    Attention {
+        causal: bool,
+        scale_bits: u32,
+    },
     /// `Split(axis, sizes)` → N `Slice` nodes.
     Split {
         axis: i64,
@@ -177,7 +183,10 @@ pub enum DesugarKind {
         split_sizes: Vec<usize>,
         has_residual_add: bool,
     },
-    /// Legacy SwiGLU→down fusion → `FusedSwiGlu` + `MatMul`.
+    /// SwiGLU activation `silu(gate)·up` → canonical `Silu` + `Mul` (hologram's
+    /// `FusedSwiGlu` op is an unimplemented two-weight matmul fusion).
+    SwiGlu,
+    /// SwiGLU→down fusion → `Silu` + `Mul` + down-projection `MatMul`.
     SwiGluProjection,
     /// Normalization: reshape the input to rank-2 `[rows, feature]` (hologram
     /// derives `feature` only from a rank-2 operand), apply `op` with the γ/β
@@ -262,9 +271,16 @@ pub fn dispatch(op: &AiOp) -> OpPlan {
         A::BatchNorm { epsilon, .. } => P::Desugar(DesugarKind::BatchNorm { epsilon: *epsilon }),
 
         // ── Attention (Q/K/V + optional norm/rope tables are operands) ───────
-        A::MultiHeadAttention { .. } | A::GroupedQueryAttention { .. } | A::FlashAttentionHint => {
-            P::Operandized(OpKind::Attention)
-        }
+        // Causal masking + softmax scale ride on `AttentionAttrs` (the kernel is
+        // a faithful SDPA: causal + grouped-query + scale). kv_heads is derived
+        // by the compiler from the K operand's head dim. FlashAttentionHint
+        // carries no semantics → default (non-causal, 1/√d).
+        A::MultiHeadAttention { scale, causal, .. }
+        | A::GroupedQueryAttention { scale, causal, .. } => P::Desugar(DesugarKind::Attention {
+            causal: *causal,
+            scale_bits: scale.map(|s| s.to_bits()).unwrap_or(0),
+        }),
+        A::FlashAttentionHint => P::Operandized(OpKind::Attention),
 
         // ── Positional encoding ─────────────────────────────────────────────
         A::RotaryEmbedding { .. } => P::Operandized(OpKind::RotaryEmbedding),
@@ -478,7 +494,7 @@ pub fn dispatch(op: &AiOp) -> OpPlan {
         A::Embed => P::Desugar(DesugarKind::Embed),
 
         // ── Canonical composites (hologram desugars/fuses structurally) ─────
-        A::FusedSwiGLU => P::Operandized(OpKind::FusedSwiGlu),
+        A::FusedSwiGLU => P::Desugar(DesugarKind::SwiGlu),
         A::FusedLayerNormResidual { .. } => P::Desugar(DesugarKind::Norm {
             op: OpKind::AddRmsNorm,
             residual: true,
