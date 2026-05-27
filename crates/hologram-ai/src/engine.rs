@@ -26,11 +26,9 @@
 //! (the unchanged prefix is recognized by address and not recomputed) — the
 //! UOR-native replacement for a mutable KV-cache (architecture §5.3, class CE).
 
-use std::path::PathBuf;
-
 use anyhow::{bail, Context, Result};
 
-use crate::compiler::{ModelCompiler, ModelSource, PreparedModel};
+use crate::compiler::PreparedModel;
 use crate::runner::HoloRunner;
 
 /// Smallest window a [`GrowableSession`] compiles — avoids tiny graphs and gives
@@ -100,47 +98,36 @@ impl SessionProvider for FixedSession {
     }
 }
 
-/// A length-adaptive provider: compiles the window on demand from the model
-/// source, growing geometrically up to the model's `context_length` and keeping
-/// only the current window resident.
+/// A length-adaptive provider: compiles the window on demand from a retained
+/// prepared (imported + optimized) model, growing geometrically up to the
+/// model's `context_length` and keeping only the current window resident.
 ///
-/// Each window is compiled by `prepare → compile_window` and the prepared graph
-/// is **consumed** (not retained), so a long generation's steady-state memory is
-/// ~one loaded session — not a session plus a full weight-bearing template. A
-/// regrow re-imports the source (cheap relative to the per-length concretize),
-/// which happens only O(log N) times as the window doubles.
+/// The prepared model is imported + optimized **once** and held; each window is
+/// minted by cloning it and `compile_window` (consuming the clone), so a regrow
+/// never re-parses the source (the protobuf parse is the largest transient). The
+/// old window is dropped before the new one compiles, so peak memory is the
+/// prepared template + one compile, not two sessions.
 pub struct GrowableSession {
-    /// The model source — re-prepared on each regrow.
-    onnx: PathBuf,
-    /// Compiler knobs (quantization, spatial scale, …) used for every window.
-    compiler: ModelCompiler,
+    /// Imported + optimized model, cloned to mint each window.
+    prepared: PreparedModel,
     /// The model's trained context length — the window ceiling.
     max_window: usize,
-    /// The construction-time prepared model, consumed by the first compile so
-    /// the opening `prepare` isn't wasted (subsequent regrows re-prepare).
-    pending: Option<PreparedModel>,
     /// The currently-resident `(window_len, session)`, if any window is compiled.
     current: Option<(usize, HoloRunner)>,
 }
 
 impl GrowableSession {
-    /// Open a growable session over an ONNX model source, importing + optimizing
-    /// it once up front (to learn its context length and to seed the first
-    /// window's compile). The window then grows up to the model's real context.
-    pub fn open(compiler: ModelCompiler, onnx: PathBuf) -> Result<Self> {
-        let prepared = compiler
-            .prepare(ModelSource::OnnxPath(onnx.clone()))
-            .with_context(|| format!("importing model {onnx:?}"))?;
+    /// Build from a prepared model (import + optimize already done once). The
+    /// window grows up to the model's real `context_length`.
+    pub fn new(prepared: PreparedModel) -> Self {
         // The ceiling is the model's real trained context — never more (positions
         // beyond it are out of the model's range), never artificially less.
         let max_window = (prepared.context_length() as usize).max(1);
-        Ok(Self {
-            onnx,
-            compiler,
+        Self {
+            prepared,
             max_window,
-            pending: Some(prepared),
             current: None,
-        })
+        }
     }
 
     /// The smallest window ≥ `want`: geometric doubling from [`MIN_WINDOW`],
@@ -165,19 +152,12 @@ impl SessionProvider for GrowableSession {
         if !fits {
             let window = self.window_for(want);
             tracing::info!(window, want, "compiling generation window");
-            // Drop the previous window first so peak resident memory is ~one
-            // session, not two, during the regrow.
+            // Drop the previous window first so peak resident memory is the
+            // prepared template + one compile, not two sessions.
             self.current = None;
-            // Use the opening prepare for the first window; re-prepare (re-import)
-            // for later regrows so no weight-bearing template is held meanwhile.
-            let prepared = match self.pending.take() {
-                Some(p) => p,
-                None => self
-                    .compiler
-                    .prepare(ModelSource::OnnxPath(self.onnx.clone()))
-                    .with_context(|| format!("re-importing model {:?}", self.onnx))?,
-            };
-            let archive = prepared
+            let archive = self
+                .prepared
+                .clone()
                 .compile_window(window as u64)
                 .with_context(|| format!("compiling a {window}-token window"))?;
             let runner = HoloRunner::from_bytes(archive.bytes)

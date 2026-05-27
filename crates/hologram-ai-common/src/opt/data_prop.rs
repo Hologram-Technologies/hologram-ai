@@ -34,8 +34,22 @@ impl Pass for DataPropagation {
             .collect();
 
         // Seed known values from constant params (AiParam::Inline with integer dtype).
+        //
+        // Only shape/index data feeds data propagation: small integer vectors
+        // (reshape targets, axes, slice bounds, gather indices). A model's
+        // weights are large constants that are *never* shape operands, so skip
+        // any param above a generous shape-data ceiling — materializing a
+        // multi-MB weight as `Vec<Option<i64>>` (16 B/elem) would blow up memory
+        // by an order of magnitude for values that propagation never reads (a
+        // 135M-param f32 model would otherwise seed ~2 GB here).
+        const MAX_SHAPE_DATA_BYTES: usize = 256 * 1024;
         let mut known: HashMap<TensorId, KnownValues> = HashMap::new();
         for (&tid, param) in &graph.params {
+            if let AiParam::Inline { data, .. } = param {
+                if data.len() > MAX_SHAPE_DATA_BYTES {
+                    continue;
+                }
+            }
             if let Some(vals) = extract_i64_param(param) {
                 tracing::trace!(tid, ?vals, "DataProp: seeded param");
                 known.insert(tid, vals.into_iter().map(Some).collect());

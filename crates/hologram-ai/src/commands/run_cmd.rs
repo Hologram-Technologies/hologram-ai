@@ -332,7 +332,10 @@ fn generate_cmd(args: RunArgs) -> Result<()> {
                     quant_strategy: parse_quant(args.quantize.as_deref())?,
                     ..Default::default()
                 };
-                (Box::new(GrowableSession::open(compiler, onnx)?), tokenizer)
+                let prepared = compiler
+                    .prepare(crate::compiler::ModelSource::OnnxPath(onnx.clone()))
+                    .with_context(|| format!("importing model {onnx:?}"))?;
+                (Box::new(GrowableSession::new(prepared)), tokenizer)
             }
         };
 

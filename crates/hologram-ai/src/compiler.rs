@@ -315,11 +315,12 @@ impl ModelCompiler {
 /// A model imported and optimized but **not yet concretized to a sequence
 /// length** — the reusable, length-independent result of [`ModelCompiler::prepare`].
 ///
-/// `Clone` of the held graph is cheap (weights are `AiParam::Mmap` — a path +
-/// offset, not bytes), so [`Self::compile_at`] can mint a concrete `.holo` at
-/// any window size by cloning, concretizing, and lowering — without paying the
-/// import/optimize cost again. The length-adaptive generation engine uses this
-/// to grow its window on demand (see `engine::GrowableSession`).
+/// Held by the length-adaptive generation engine and cloned to mint a concrete
+/// `.holo` at any window size (clone → concretize → lower → compile), so growing
+/// the window never re-imports the source (the protobuf parse is the largest
+/// transient). Cloning copies any inline weights; for an externally-stored model
+/// (`AiParam::Mmap`) it is just a path + offset. See `engine::GrowableSession`.
+#[derive(Clone)]
 pub struct PreparedModel {
     compiler: ModelCompiler,
     /// The optimized graph with symbolic sequence dims intact.

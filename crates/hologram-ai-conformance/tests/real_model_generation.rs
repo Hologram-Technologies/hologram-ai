@@ -18,7 +18,7 @@
 use std::path::PathBuf;
 
 use hologram_ai::commands::generate::{generate_stream, GenConfig};
-use hologram_ai::{GrowableSession, ModelCompiler};
+use hologram_ai::{GrowableSession, ModelCompiler, ModelSource};
 use hologram_ai_tokenizer::NativeTokenizer;
 
 fn model_path() -> Option<PathBuf> {
@@ -50,7 +50,10 @@ fn smollm2_generates_coherent_text() {
     // window is compiled on demand and grows up to the model's real context —
     // no baked seq_len, no artificial cap on prompt or output length. This is
     // the production `run <source> --prompt` path.
-    let mut provider = GrowableSession::open(ModelCompiler::default(), onnx).expect("open SmolLM2");
+    let prepared = ModelCompiler::default()
+        .prepare(ModelSource::OnnxPath(onnx))
+        .expect("prepare SmolLM2");
+    let mut provider = GrowableSession::new(prepared);
     let tok = NativeTokenizer::from_tokenizer_json(&tok_path).expect("load tokenizer");
 
     // Greedy (temperature 0) ⇒ deterministic, so the output is a stable witness.
