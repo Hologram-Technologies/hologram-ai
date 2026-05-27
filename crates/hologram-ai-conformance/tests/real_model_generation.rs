@@ -64,13 +64,14 @@ fn smollm2_generates_coherent_text() {
         generate_stream(&mut runner, &tok, prompt, &cfg, &mut sink).expect("generate")
     };
 
-    // Relevance: a factual prompt continues on-topic (mentions France).
+    // Correctness: greedy decoding must produce the factually-correct answer
+    // (this exact continuation is verified to match ONNX Runtime token-for-token
+    // by EE-3 / scripts/verify_logits_vs_ort.py).
     let france = gen("The capital of France is");
     println!("[gen] The capital of France is →{france}");
-    assert!(!france.trim().is_empty(), "generation produced no text");
     assert!(
-        france.contains("France") || france.contains("Paris"),
-        "expected an on-topic continuation, got: {france:?}"
+        france.contains("Paris"),
+        "expected the correct answer (Paris), got: {france:?}"
     );
 
     // Coherence: a real continuation is multi-word English (not a single token,
