@@ -1,0 +1,4 @@
+# esbuild ships a platform binary via a postinstall build script; allow it so
+# `vite build` works in CI and locally.
+allowBuilds:
+  esbuild: true

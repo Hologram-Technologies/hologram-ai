@@ -165,6 +165,13 @@ and are exempt from NS/ZA/ZM, exactly as hologram's CLI is a std host over its
 | **NS-1** | The runtime core (`hologram-ai-quant` dequant + `hologram-ai-tokenizer` encode/decode, `--no-default-features`) builds on `wasm32-unknown-unknown`, `no_std`. | `just vv-wasm` | CI | ✅ |
 | **NS-2** | The runtime core builds on `thumbv7em-none-eabi`, `no_std`. | `just vv-embedded` | CI | ✅ |
 | **NS-3** | The runtime-core crates declare `#![no_std]` and pull no transitive `std`-only dependency: `hologram-ai-quant` (`half` w/o `std`); `hologram-ai-tokenizer` core (`hashbrown` + `regex-automata`, both `no_std`+`alloc`), with JSON loading / archive sections behind the `std` feature. | cross-target build | `just vv-portability` | ✅ |
+| **NS-4** | The full **inference path** builds on `wasm32-unknown-unknown` and **executes a compiled `.holo` in the browser**: `hologram-ai-common` lowering + hologram's `exec`/`backend` (`parallel` off — rayon can't spawn threads on wasm). Verified by running the engine under node, output checked. This is the substrate of the browser GUI (ADR-0017). | `wasm-pack test --node` | `hologram-ai-wasm` (`describe`/`run` tests) | ✅ |
+
+> **NS-4** extends NS from "the runtime core *builds* on wasm" to "the engine
+> *runs a model* on wasm". `parallel` is now an opt-in feature (default-on for
+> the native lib/CLI, off for `hologram-ai-wasm`), not a workspace pin. The
+> browser GUI (`apps/web`) is the React app served as a static bundle, calling
+> the real pipeline through `hologram-ai-wasm` — the same code paths as the CLI.
 
 > The on-device runtime core is `hologram-ai-quant` (dequant) and the tokenizer
 > encode/decode path; import/lowering/quantization are **compile-time host**
