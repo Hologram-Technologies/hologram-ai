@@ -718,7 +718,17 @@ fn concretize_all_dims(
             continue;
         }
         let name_lower = entry.name.to_lowercase();
-        if name_lower.contains("seq")
+        if name_lower.contains("past") {
+            // `past_sequence_length` & friends → 0: hologram-ai has no external
+            // KV-cache (reuse is content-addressed κ-label elision), so a
+            // with-past decoder export is run as a full-recompute *prefill* with
+            // an empty past. `Concat(past[…,0,…], cur)` then collapses to `cur`,
+            // and the past-length position offset is 0 — the graph becomes
+            // `input_ids[1,S] → logits[1,S,V]`. (Must precede the seq-like check;
+            // "past_sequence_length" also contains "sequence"/"length".)
+            debug!(var = %entry.name, value = 0, "concretizing past-length dim → 0 (empty past)");
+            entry.fixed = Some(0);
+        } else if name_lower.contains("seq")
             || name_lower.contains("length")
             || name_lower.contains("position")
         {

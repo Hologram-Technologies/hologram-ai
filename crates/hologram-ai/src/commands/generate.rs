@@ -73,11 +73,20 @@ enum AuxKind {
     AttentionMask,
     /// `position_ids`: `0..cur_len`, padding 0.
     PositionIds,
+    /// `past_key_values.*`: an empty (zero-length) past — hologram-ai runs a
+    /// with-past decoder export as a full-recompute prefill (no external
+    /// KV-cache; reuse is content-addressed κ-label elision). The port is
+    /// concretized to a 0-length sequence, so the synthesized buffer is empty.
+    EmptyPast,
 }
 
 struct AuxInput {
     index: usize,
     dtype: u8,
+    /// The port's declared element count — the synthesized buffer's length. Not
+    /// every aux is `seq_len`-sized (e.g. an empty past is 0; a `[1, past+1]`
+    /// mask shrinks with an empty past).
+    element_count: usize,
     kind: AuxKind,
 }
 
@@ -147,12 +156,21 @@ impl LmContract {
             let kind = match p.name.as_str() {
                 "attention_mask" => AuxKind::AttentionMask,
                 "position_ids" => AuxKind::PositionIds,
+                name if name.starts_with("past_key_values") || name.starts_with("past.") => {
+                    AuxKind::EmptyPast
+                }
                 other => bail!(
                     "generation can't synthesize input[{i}] {other:?}; only input_ids, \
-                     attention_mask, and position_ids are auto-filled — supply it via the raw path"
+                     attention_mask, position_ids, and (empty) past_key_values are auto-filled — \
+                     supply it via the raw path"
                 ),
             };
-            aux.push(AuxInput { index: i, dtype: p.dtype, kind });
+            aux.push(AuxInput {
+                index: i,
+                dtype: p.dtype,
+                element_count: p.element_count,
+                kind,
+            });
         }
 
         Ok(Self { n_inputs: ins.len(), ids_index, id_dtype, seq_len, logits_index, vocab, aux })
@@ -285,11 +303,17 @@ pub fn generate_stream(
         let mut bufs: Vec<Vec<u8>> = (0..lm.n_inputs).map(|_| Vec::new()).collect();
         bufs[lm.ids_index] = encode_vals(&win, lm.seq_len, lm.id_dtype);
         for a in &lm.aux {
-            let vals: Vec<f64> = match a.kind {
-                AuxKind::AttentionMask => vec![1.0; cur_len],
-                AuxKind::PositionIds => (0..cur_len).map(|p| p as f64).collect(),
+            bufs[a.index] = match a.kind {
+                // Empty past (no external KV-cache) → zero-length buffer.
+                AuxKind::EmptyPast => Vec::new(),
+                AuxKind::AttentionMask => {
+                    encode_vals(&vec![1.0; cur_len], a.element_count, a.dtype)
+                }
+                AuxKind::PositionIds => {
+                    let vals: Vec<f64> = (0..cur_len).map(|p| p as f64).collect();
+                    encode_vals(&vals, a.element_count, a.dtype)
+                }
             };
-            bufs[a.index] = encode_vals(&vals, lm.seq_len, a.dtype);
         }
         let refs: Vec<&[u8]> = bufs.iter().map(|b| b.as_slice()).collect();
         let outputs = runner.execute(&refs).context("forward pass failed")?;
