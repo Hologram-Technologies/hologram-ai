@@ -2051,6 +2051,8 @@ name = "hologram-ai-wasm"
 version = "0.1.0"
 dependencies = [
  "console_error_panic_hook",
+ "half",
+ "hologram-archive",
  "hologram-backend",
  "hologram-exec",
  "serde",

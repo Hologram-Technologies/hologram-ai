@@ -81,8 +81,10 @@ fn successor_lm(seq_len: usize, vocab: usize) -> AiGraph {
         nodes: vec![AiNode::new(0, AiOp::Gather { axis: 0 }, vec![w, ids], vec![logits])],
         inputs: vec![ids],
         outputs: vec![logits],
-        input_names: Vec::new(),
-        output_names: Vec::new(),
+        // Named ports — generation binds input_ids/logits by name (no positional
+        // guessing), exactly as a real ONNX import does.
+        input_names: vec!["input_ids".into()],
+        output_names: vec!["logits".into()],
         params,
         tensor_info,
         metadata: HashMap::new(),

@@ -192,11 +192,19 @@ impl<'a> Ctx<'a> {
     // ── graph I/O ─────────────────────────────────────────────────────────────
 
     fn emit_inputs(&mut self) -> Result<()> {
-        for &tid in self.ai.inputs.clone().iter() {
+        // `input_names[i]` is the name of `inputs[i]` (index-aligned at import).
+        // Carry it onto the canonical graph input so the compiled archive's port
+        // is identifiable by name (e.g. "input_ids") rather than positionally.
+        let inputs = self.ai.inputs.clone();
+        let names = self.ai.input_names.clone();
+        for (i, &tid) in inputs.iter().enumerate() {
             let dtype = self.dtype_of(tid);
             let shape = self.shape_of(tid)?;
             let nid = self.add(GraphOp::Input, SmallVec::new(), dtype, shape);
-            self.graph.add_input(nid);
+            match names.get(i) {
+                Some(name) if !name.is_empty() => self.graph.add_named_input(nid, name.clone()),
+                _ => self.graph.add_input(nid),
+            }
             self.tid_to_src.insert(tid, InputSource::Node(nid));
         }
         Ok(())
@@ -225,12 +233,17 @@ impl<'a> Ctx<'a> {
     }
 
     fn emit_outputs(&mut self) -> Result<()> {
-        for &tid in self.ai.outputs.clone().iter() {
+        let outputs = self.ai.outputs.clone();
+        let names = self.ai.output_names.clone();
+        for (i, &tid) in outputs.iter().enumerate() {
             let src = self.src(tid)?;
             let dtype = self.dtype_of(tid);
             let shape = self.shape_of(tid)?;
             let nid = self.add(GraphOp::Output, SmallVec::from_iter([src]), dtype, shape);
-            self.graph.add_output(nid);
+            match names.get(i) {
+                Some(name) if !name.is_empty() => self.graph.add_named_output(nid, name.clone()),
+                _ => self.graph.add_output(nid),
+            }
         }
         Ok(())
     }

@@ -14,6 +14,8 @@ crate-type = ["cdylib", "rlib"]
 [dependencies]
 hologram-exec.workspace    = true
 hologram-backend.workspace = true
+hologram-archive.workspace = true
+half.workspace             = true
 
 wasm-bindgen = "0.2"
 serde = { workspace = true, features = ["derive"] }

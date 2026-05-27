@@ -54,10 +54,10 @@ export function App() {
           <h2>Ports</h2>
           <p>
             <strong>inputs:</strong>{" "}
-            {info.inputs.map((p, i) => `[${i}] ${p.dtype_name}×${p.element_count}`).join(", ") || "none"}
+            {info.inputs.map((p, i) => `${p.name || `[${i}]`}: ${p.dtype_name}×${p.element_count}`).join(", ") || "none"}
             <br />
             <strong>outputs:</strong>{" "}
-            {info.outputs.map((p, i) => `[${i}] ${p.dtype_name}×${p.element_count}`).join(", ") || "none"}
+            {info.outputs.map((p, i) => `${p.name || `[${i}]`}: ${p.dtype_name}×${p.element_count}`).join(", ") || "none"}
           </p>
           <label>
             fill{" "}
@@ -80,7 +80,7 @@ export function App() {
                 output[{i}]: {o.dtype_name}×{o.element_count}
               </code>
               <pre style={{ background: "#f4f4f4", padding: "0.5rem", overflowX: "auto" }}>
-                {o.decoded ? `[${o.values.slice(0, 64).join(", ")}${o.values.length > 64 ? ", …" : ""}]` : "(binary)"}
+                {`[${o.values.slice(0, 64).join(", ")}${o.values.length > 64 ? ", …" : ""}]`}
               </pre>
             </div>
           ))}

@@ -14,14 +14,20 @@ use hologram_backend::CpuBackend;
 use hologram_exec::{BufferArena, InferenceSession, InputBuffer, OutputBuffer};
 use std::path::Path;
 
-/// Shape/dtype facts about one graph port: the backend dtype tag
-/// (`hologram_backend::cpu::dtype` encoding) and the logical element count.
-#[derive(Debug, Clone, Copy)]
+/// Shape/dtype facts about one graph port: its semantic name (e.g.
+/// `"input_ids"`; empty if unnamed), the backend dtype tag
+/// (`hologram_backend::cpu::dtype` encoding), the logical element count, and the
+/// full row-major shape (empty if the rank wasn't registered).
+#[derive(Debug, Clone)]
 pub struct PortInfo {
+    /// Semantic port name, or empty string if the port is unnamed.
+    pub name: String,
     /// Backend dtype tag (e.g. `5` = I64, `8` = F32; see [`port_byte_size`]).
     pub dtype: u8,
     /// Logical element count (product of the port's concrete dims).
     pub element_count: usize,
+    /// Full row-major shape; empty when the rank wasn't registered.
+    pub shape: Vec<usize>,
 }
 
 /// A loaded model ready for inference.
@@ -77,28 +83,33 @@ impl HoloRunner {
             .collect()
     }
 
-    /// `(dtype tag, element count)` for each graph input, in graph-input order.
-    /// The compiled archive carries no tensor *names* (a port is identified by
-    /// position), so a caller infers roles by convention — e.g. a causal LM's
-    /// single integer input is `input_ids` of shape `[1, seq_len]`, so its
-    /// element count is the fixed sequence length.
+    /// Per-input [`PortInfo`] (name, dtype, element count, shape), in graph-input
+    /// order. Compiled archives now carry port **names**, so a caller can find a
+    /// role by name (e.g. `"input_ids"`) via [`Self::input_index_by_name`]
+    /// instead of relying on position.
     pub fn input_port_info(&self) -> Vec<PortInfo> {
-        self.session
-            .input_ports()
-            .iter()
-            .map(|p| PortInfo { dtype: p.dtype, element_count: p.element_count as usize })
-            .collect()
+        self.session.input_ports().iter().map(port_info).collect()
     }
 
-    /// `(dtype tag, element count)` for each graph output, in graph-output order.
-    /// For a causal LM the single output is `logits` of shape `[1, seq_len,
-    /// vocab_size]`, so `element_count / seq_len` recovers the vocabulary size.
+    /// Per-output [`PortInfo`], in graph-output order (e.g. `"logits"`).
     pub fn output_port_info(&self) -> Vec<PortInfo> {
-        self.session
-            .output_ports()
-            .iter()
-            .map(|p| PortInfo { dtype: p.dtype, element_count: p.element_count as usize })
-            .collect()
+        self.session.output_ports().iter().map(port_info).collect()
+    }
+
+    /// Index of the input port named `name` (e.g. `"input_ids"`), or `None`.
+    pub fn input_index_by_name(&self, name: &str) -> Option<usize> {
+        self.session.input_port_by_name(name).map(|(i, _)| i)
+    }
+
+    /// Index of the output port named `name` (e.g. `"logits"`), or `None`.
+    pub fn output_index_by_name(&self, name: &str) -> Option<usize> {
+        self.session.output_port_by_name(name).map(|(i, _)| i)
+    }
+
+    /// Open producer metadata stored in the archive under `key` (an extension
+    /// section): tokenizer, generation config, … `None` if absent.
+    pub fn extension(&self, key: &str) -> Option<&[u8]> {
+        self.session.extension(key)
     }
 
     /// Execute one forward pass. `inputs[i]` is the little-endian byte image of
@@ -172,6 +183,17 @@ impl HoloRunner {
     /// weights packed at runtime (architecture §6, class QZ).
     pub fn dequant_matmul_fused_count(&self) -> usize {
         self.session.dequant_fused_count()
+    }
+}
+
+/// Build a [`PortInfo`] from an archive [`PortDescriptor`] (name + dtype +
+/// element count + shape).
+fn port_info(p: &hologram_archive::PortDescriptor) -> PortInfo {
+    PortInfo {
+        name: p.name.clone(),
+        dtype: p.dtype,
+        element_count: p.element_count as usize,
+        shape: p.shape.iter().map(|&d| d as usize).collect(),
     }
 }
 

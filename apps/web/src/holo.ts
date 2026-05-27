@@ -5,9 +5,11 @@
 import init, { describe as wasmDescribe, run as wasmRun } from "./wasm/hologram_ai_wasm.js";
 
 export interface Port {
+  name: string;
   dtype: number;
   dtype_name: string;
   element_count: number;
+  shape: number[];
   bytes: number;
 }
 export interface ModelInfo {
@@ -19,7 +21,6 @@ export interface Output {
   dtype_name: string;
   element_count: number;
   values: number[];
-  decoded: boolean;
 }
 
 let ready: Promise<unknown> | null = null;

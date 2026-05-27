@@ -66,49 +66,69 @@ pub fn apply_template(template: Option<&str>, prompt: &str) -> String {
     }
 }
 
-/// The fixed LM port contract resolved from the compiled archive.
+/// A standard auxiliary LM input synthesized each step (the model carries it as
+/// a named port alongside `input_ids`).
+enum AuxKind {
+    /// `attention_mask`: 1 for real positions, 0 for padding.
+    AttentionMask,
+    /// `position_ids`: `0..cur_len`, padding 0.
+    PositionIds,
+}
+
+struct AuxInput {
+    index: usize,
+    dtype: u8,
+    kind: AuxKind,
+}
+
+/// The fixed LM port contract resolved from the compiled archive. Every port is
+/// bound **by name** (`input_ids`, `logits`, `attention_mask`, `position_ids`) —
+/// archives carry names end to end (importer → lowering → archive), so an
+/// unidentifiable port is a hard error, never a positional guess.
 struct LmContract {
-    /// Fixed sequence length (input_ids element count).
-    seq_len: usize,
-    /// input_ids dtype tag (I32 = 4, I64 = 5).
+    n_inputs: usize,
+    ids_index: usize,
     id_dtype: u8,
-    /// Vocabulary size (logits element count / seq_len).
+    seq_len: usize,
+    logits_index: usize,
     vocab: usize,
+    aux: Vec<AuxInput>,
 }
 
 impl LmContract {
     fn resolve(runner: &HoloRunner) -> Result<Self> {
         let ins = runner.input_port_info();
         let outs = runner.output_port_info();
-        if ins.len() != 1 {
-            bail!(
-                "generation expects a causal LM with a single `input_ids` input, but the model \
-                 has {} inputs; use the raw `--input INDEX:HEX` path for multi-input models",
-                ins.len()
-            );
-        }
-        if outs.len() != 1 {
-            bail!(
-                "generation expects a single `logits` output, but the model has {} outputs",
-                outs.len()
-            );
-        }
-        let id_dtype = ins[0].dtype;
+
+        // Bind input_ids and logits strictly by name — no positional guess.
+        let ids_index = runner.input_index_by_name("input_ids").ok_or_else(|| {
+            anyhow::anyhow!(
+                "no input named `input_ids` (the model's input ports are {:?}); generation \
+                 requires named ports — recompile so the token input is named `input_ids`",
+                ins.iter().map(|p| p.name.as_str()).collect::<Vec<_>>()
+            )
+        })?;
+        let logits_index = runner.output_index_by_name("logits").ok_or_else(|| {
+            anyhow::anyhow!(
+                "no output named `logits` (the model's output ports are {:?}); generation \
+                 requires the logits output to be named `logits`",
+                outs.iter().map(|p| p.name.as_str()).collect::<Vec<_>>()
+            )
+        })?;
+
+        let id_dtype = ins[ids_index].dtype;
         // Integer id dtypes (hologram_backend::cpu::dtype): U8=1, I8=2, I32=4, I64=5.
         if !matches!(id_dtype, 1 | 2 | 4 | 5) {
-            bail!(
-                "input_ids must be an integer tensor (U8/I8/I32/I64), got dtype tag {id_dtype}"
-            );
+            bail!("input_ids must be an integer tensor (U8/I8/I32/I64), got dtype tag {id_dtype}");
         }
-        // logits must be f32 (tag 8).
-        if outs[0].dtype != 8 {
-            bail!("logits output must be f32 (dtype tag 8), got tag {}", outs[0].dtype);
+        if outs[logits_index].dtype != 8 {
+            bail!("logits output must be f32 (dtype tag 8), got tag {}", outs[logits_index].dtype);
         }
-        let seq_len = ins[0].element_count;
+        let seq_len = ins[ids_index].element_count;
         if seq_len == 0 {
             bail!("input_ids has zero elements — model was compiled with an empty sequence length");
         }
-        let logit_count = outs[0].element_count;
+        let logit_count = outs[logits_index].element_count;
         if !logit_count.is_multiple_of(seq_len) {
             bail!(
                 "logits element count {logit_count} is not divisible by seq_len {seq_len}; \
@@ -116,26 +136,48 @@ impl LmContract {
             );
         }
         let vocab = logit_count / seq_len;
-        Ok(Self { seq_len, id_dtype, vocab })
+
+        // Any other input must be a recognized auxiliary we can synthesize —
+        // otherwise fail loud (no silent zero-fill of an unknown semantic input).
+        let mut aux = Vec::new();
+        for (i, p) in ins.iter().enumerate() {
+            if i == ids_index {
+                continue;
+            }
+            let kind = match p.name.as_str() {
+                "attention_mask" => AuxKind::AttentionMask,
+                "position_ids" => AuxKind::PositionIds,
+                other => bail!(
+                    "generation can't synthesize input[{i}] {other:?}; only input_ids, \
+                     attention_mask, and position_ids are auto-filled — supply it via the raw path"
+                ),
+            };
+            aux.push(AuxInput { index: i, dtype: p.dtype, kind });
+        }
+
+        Ok(Self { n_inputs: ins.len(), ids_index, id_dtype, seq_len, logits_index, vocab, aux })
     }
 }
 
-/// Encode a `[1, seq_len]` token-id input buffer: positions `0..tokens.len()`
-/// hold the window, the rest are padded with 0. A causal LM's logits at the
-/// last real position attend only to `0..pos`, so padding never affects them.
-fn encode_ids(tokens: &[u32], seq_len: usize, dtype: u8) -> Vec<u8> {
+/// Encode a `[1, seq_len]` input buffer: `vals` fill positions `0..vals.len()`,
+/// the rest are padded with 0, in the port's dtype (int or float). A causal LM's
+/// logits at the last real position attend only to `0..pos`, so padding never
+/// affects them.
+fn encode_vals(vals: &[f64], seq_len: usize, dtype: u8) -> Vec<u8> {
     let width = match dtype {
-        1 | 2 => 1, // U8 / I8
-        5 => 8,     // I64
-        _ => 4,     // I32 (and default)
+        1 | 2 => 1,     // U8 / I8
+        5 | 9 => 8,     // I64 / F64
+        _ => 4,         // I32 / F32 (and default)
     };
     let mut buf = vec![0u8; seq_len * width];
-    for (i, &tok) in tokens.iter().take(seq_len).enumerate() {
+    for (i, &v) in vals.iter().take(seq_len).enumerate() {
         let off = i * width;
         match dtype {
-            1 | 2 => buf[off] = tok as u8,
-            5 => buf[off..off + 8].copy_from_slice(&(tok as i64).to_le_bytes()),
-            _ => buf[off..off + 4].copy_from_slice(&(tok as i32).to_le_bytes()),
+            1 | 2 => buf[off] = v as u8,                                   // u8 / i8
+            5 => buf[off..off + 8].copy_from_slice(&(v as i64).to_le_bytes()), // i64
+            9 => buf[off..off + 8].copy_from_slice(&v.to_le_bytes()),      // f64
+            8 => buf[off..off + 4].copy_from_slice(&(v as f32).to_le_bytes()), // f32
+            _ => buf[off..off + 4].copy_from_slice(&(v as i32).to_le_bytes()), // i32 (and width-4 default)
         }
     }
     buf
@@ -236,9 +278,22 @@ pub fn generate_stream(
         let window = &sequence[start..];
         let cur_len = window.len();
 
-        let ids = encode_ids(window, lm.seq_len, lm.id_dtype);
-        let outputs = runner.execute(&[&ids]).context("forward pass failed")?;
-        let logits: &[f32] = bytemuck::cast_slice(&outputs[0].bytes);
+        // Build every graph input: the token window at `input_ids`, and each
+        // recognized auxiliary (attention_mask = 1s, position_ids = 0..cur_len)
+        // synthesized at its named port.
+        let win: Vec<f64> = window.iter().map(|&t| t as f64).collect();
+        let mut bufs: Vec<Vec<u8>> = (0..lm.n_inputs).map(|_| Vec::new()).collect();
+        bufs[lm.ids_index] = encode_vals(&win, lm.seq_len, lm.id_dtype);
+        for a in &lm.aux {
+            let vals: Vec<f64> = match a.kind {
+                AuxKind::AttentionMask => vec![1.0; cur_len],
+                AuxKind::PositionIds => (0..cur_len).map(|p| p as f64).collect(),
+            };
+            bufs[a.index] = encode_vals(&vals, lm.seq_len, a.dtype);
+        }
+        let refs: Vec<&[u8]> = bufs.iter().map(|b| b.as_slice()).collect();
+        let outputs = runner.execute(&refs).context("forward pass failed")?;
+        let logits: &[f32] = bytemuck::cast_slice(&outputs[lm.logits_index].bytes);
 
         // Next-token distribution is the logit row at the last real position.
         let pos = cur_len - 1;
