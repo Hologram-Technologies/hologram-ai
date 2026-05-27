@@ -1973,6 +1973,7 @@ dependencies = [
  "hologram-ai-common",
  "hologram-ai-onnx",
  "hologram-ai-quant",
+ "hologram-ai-tokenizer",
  "hologram-archive",
  "hologram-exec",
  "hologram-graph",

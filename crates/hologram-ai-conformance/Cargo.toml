@@ -22,13 +22,14 @@ ort = { version = "2.0.0-rc.12", optional = true }
 ndarray = { version = "0.16", optional = true }
 hologram-ai = { path = "../hologram-ai", optional = true }
 hologram-ai-onnx = { workspace = true, optional = true }
+hologram-ai-tokenizer = { workspace = true, optional = true }
 
 [features]
-conformance = ["ort", "ndarray", "hologram-ai", "hologram-ai-onnx"]
+conformance = ["ort", "ndarray", "hologram-ai", "hologram-ai-onnx", "hologram-ai-tokenizer"]
 # Authoritative ONNX operator-spec conformance (classes IM/LW/EE): imports the
 # official ONNX backend node-test corpus and validates compile+run against the
 # spec's expected outputs. No ORT needed — the corpus ships the outputs.
-onnx-spec = ["hologram-ai", "hologram-ai-onnx"]
+onnx-spec = ["hologram-ai", "hologram-ai-onnx", "hologram-ai-tokenizer"]
 # Structural V&V (classes ZA/ZM/CE): counting-allocator harness + zero-movement
 # instrumentation. See CONFORMANCE.md.
 structural = []
