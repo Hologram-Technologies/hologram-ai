@@ -32,22 +32,24 @@ pub struct PortInfo {
 
 /// A loaded model ready for inference.
 pub struct HoloRunner {
-    /// The archive bytes (kept so callers can re-address / inspect the model).
-    archive: Vec<u8>,
     /// The execution session (owns its decoded plan + buffer pool).
     session: InferenceSession<CpuBackend<BufferArena>>,
 }
 
 impl HoloRunner {
     /// Load a runner from in-memory `.holo` archive bytes.
+    ///
+    /// The session decodes its plan into owned storage, so the archive bytes are
+    /// dropped here rather than retained — for a multi-hundred-MB model that
+    /// halves resident memory (the session interns weights into its own pool; a
+    /// second copy of the archive would just sit idle), which is what lets the
+    /// length-adaptive engine hold the prepared model and a live window at once.
     pub fn from_bytes(bytes: Vec<u8>) -> anyhow::Result<Self> {
         let backend = CpuBackend::new();
         let session = InferenceSession::load(&bytes, backend)
             .map_err(|e| anyhow::anyhow!("loading .holo archive: {e:?}"))?;
-        Ok(Self {
-            archive: bytes,
-            session,
-        })
+        drop(bytes);
+        Ok(Self { session })
     }
 
     /// Load a runner from a `.holo` file. (`_config` is accepted for CLI
@@ -66,11 +68,6 @@ impl HoloRunner {
     /// Number of graph outputs the model produces.
     pub fn output_count(&self) -> usize {
         self.session.output_count()
-    }
-
-    /// The raw archive bytes.
-    pub fn archive_bytes(&self) -> &[u8] {
-        &self.archive
     }
 
     /// Byte size of each graph input (element count × dtype width), in
@@ -221,8 +218,8 @@ fn port_byte_size(element_count: usize, tag: u8) -> usize {
 /// by [`port_byte_size`], not here.
 fn dtype_byte_width(tag: u8) -> usize {
     match tag {
-        0..=2 => 1, // Bool, U8, I8
-        6 | 7 => 2, // F16, BF16
+        0..=2 => 1,     // Bool, U8, I8
+        6 | 7 => 2,     // F16, BF16
         4 => 4,         // I32
         8 => 4,         // F32
         3 | 5 | 9 => 8, // U64, I64, F64

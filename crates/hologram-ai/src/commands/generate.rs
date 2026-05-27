@@ -1,14 +1,18 @@
-//! Autoregressive text generation over a compiled `.holo` causal LM.
+//! Autoregressive text generation over a compiled causal LM.
 //!
 //! The UOR-native runtime has no KV-cache: each decode step is one forward
 //! `execute` over the whole window, and the repeated prefix is recognized by
 //! κ-label and elided inside the session (architecture §5.3) — so generation
 //! is a plain loop of forward passes, not a host-managed cache walk.
 //!
-//! The compiled archive carries **no tokenizer and no tensor names** (the
-//! `.holo` section set is closed; a port is identified only by position and
-//! dtype). So the tokenizer and generation metadata are supplied by the caller
-//! at run time (CLI flags), and the LM contract is taken by convention:
+//! Arbitrary length comes from a [`SessionProvider`](crate::engine): the loop
+//! asks for a window at least as long as the running sequence, and the provider
+//! supplies (growing/recompiling) a session that can run it — up to the model's
+//! real context length. So the prompt and the generated continuation are bounded
+//! only by the model, never by an archive's baked `seq_len`. A sequence longer
+//! than the model's context slides within it (the model's genuine finite window).
+//!
+//! The LM contract is taken by convention from the session's named ports:
 //!
 //! - input port 0 — `input_ids`, shape `[1, seq_len]`, integer dtype; its
 //!   element count is the fixed sequence length baked at compile time;
@@ -25,6 +29,7 @@ use std::io::Write;
 use anyhow::{bail, Context, Result};
 use hologram_ai_tokenizer::Tokenizer;
 
+use crate::engine::SessionProvider;
 use crate::runner::HoloRunner;
 
 /// Sampling / stopping configuration for one generation request.
@@ -131,7 +136,10 @@ impl LmContract {
             bail!("input_ids must be an integer tensor (U8/I8/I32/I64), got dtype tag {id_dtype}");
         }
         if outs[logits_index].dtype != 8 {
-            bail!("logits output must be f32 (dtype tag 8), got tag {}", outs[logits_index].dtype);
+            bail!(
+                "logits output must be f32 (dtype tag 8), got tag {}",
+                outs[logits_index].dtype
+            );
         }
         let seq_len = ins[ids_index].element_count;
         if seq_len == 0 {
@@ -173,7 +181,15 @@ impl LmContract {
             });
         }
 
-        Ok(Self { n_inputs: ins.len(), ids_index, id_dtype, seq_len, logits_index, vocab, aux })
+        Ok(Self {
+            n_inputs: ins.len(),
+            ids_index,
+            id_dtype,
+            seq_len,
+            logits_index,
+            vocab,
+            aux,
+        })
     }
 }
 
@@ -183,17 +199,17 @@ impl LmContract {
 /// affects them.
 fn encode_vals(vals: &[f64], seq_len: usize, dtype: u8) -> Vec<u8> {
     let width = match dtype {
-        1 | 2 => 1,     // U8 / I8
-        5 | 9 => 8,     // I64 / F64
-        _ => 4,         // I32 / F32 (and default)
+        1 | 2 => 1, // U8 / I8
+        5 | 9 => 8, // I64 / F64
+        _ => 4,     // I32 / F32 (and default)
     };
     let mut buf = vec![0u8; seq_len * width];
     for (i, &v) in vals.iter().take(seq_len).enumerate() {
         let off = i * width;
         match dtype {
-            1 | 2 => buf[off] = v as u8,                                   // u8 / i8
+            1 | 2 => buf[off] = v as u8, // u8 / i8
             5 => buf[off..off + 8].copy_from_slice(&(v as i64).to_le_bytes()), // i64
-            9 => buf[off..off + 8].copy_from_slice(&v.to_le_bytes()),      // f64
+            9 => buf[off..off + 8].copy_from_slice(&v.to_le_bytes()), // f64
             8 => buf[off..off + 4].copy_from_slice(&(v as f32).to_le_bytes()), // f32
             _ => buf[off..off + 4].copy_from_slice(&(v as i32).to_le_bytes()), // i32 (and width-4 default)
         }
@@ -233,12 +249,19 @@ fn sample(logits: &[f32], temperature: f32, top_k: Option<usize>, rng: &mut u64)
     }
     // Indices sorted by descending logit, truncated to top-k.
     let mut idx: Vec<usize> = (0..logits.len()).collect();
-    idx.sort_unstable_by(|&a, &b| logits[b].partial_cmp(&logits[a]).unwrap_or(std::cmp::Ordering::Equal));
+    idx.sort_unstable_by(|&a, &b| {
+        logits[b]
+            .partial_cmp(&logits[a])
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
     let k = top_k.map(|k| k.clamp(1, idx.len())).unwrap_or(idx.len());
     let keep = &idx[..k];
 
     // Softmax over the kept logits (shifted by max for numerical stability).
-    let max = keep.iter().map(|&i| logits[i] / temperature).fold(f32::NEG_INFINITY, f32::max);
+    let max = keep
+        .iter()
+        .map(|&i| logits[i] / temperature)
+        .fold(f32::NEG_INFINITY, f32::max);
     let exps: Vec<f64> = keep
         .iter()
         .map(|&i| ((logits[i] / temperature - max) as f64).exp())
@@ -262,26 +285,30 @@ fn sample(logits: &[f32], temperature: f32, top_k: Option<usize>, rng: &mut u64)
 ///
 /// `prompt` is the already-templated text. Generation stops at `max_tokens`,
 /// the eos token, or the first `stop` string in the decoded suffix.
+///
+/// The window grows with the sequence via the [`SessionProvider`], so the
+/// prompt and continuation are bounded only by the model's context length — a
+/// sequence beyond it slides within the model's finite window.
 pub fn generate_stream(
-    runner: &mut HoloRunner,
+    provider: &mut dyn SessionProvider,
     tokenizer: &dyn Tokenizer,
     prompt: &str,
     cfg: &GenConfig,
     out: &mut dyn Write,
 ) -> Result<String> {
-    let lm = LmContract::resolve(runner)?;
     let eos = cfg.eos.unwrap_or_else(|| tokenizer.eos_token_id());
+    let max_window = provider.max_window();
 
     let prompt_tokens = tokenizer.encode(prompt);
     if prompt_tokens.is_empty() {
         bail!("prompt encoded to zero tokens");
     }
-    if prompt_tokens.len() >= lm.seq_len {
+    if prompt_tokens.len() > max_window {
         bail!(
-            "prompt is {} tokens but the model's fixed sequence length is {}; \
-             leave room for at least one generated token",
+            "prompt is {} tokens but the model's context length is {}; the model cannot attend \
+             to a prompt longer than its trained context",
             prompt_tokens.len(),
-            lm.seq_len
+            max_window
         );
     }
 
@@ -291,14 +318,25 @@ pub fn generate_stream(
     let mut rng = cfg.seed;
 
     for _ in 0..cfg.max_tokens {
-        // The window is the last `seq_len` tokens of the running sequence.
-        let start = sequence.len().saturating_sub(lm.seq_len);
-        let window = &sequence[start..];
-        let cur_len = window.len();
+        // The window is the running sequence, capped at the model's context: a
+        // longer sequence slides to its last `max_window` tokens (the model's
+        // genuine finite window). The provider yields a session whose compiled
+        // window is at least this long.
+        let cur_len = sequence.len().min(max_window);
+        let window = &sequence[sequence.len() - cur_len..];
+
+        let runner = provider.session_for(cur_len)?;
+        let lm = LmContract::resolve(runner)?;
+        debug_assert!(
+            lm.seq_len >= cur_len,
+            "provider must serve a window >= request"
+        );
 
         // Build every graph input: the token window at `input_ids`, and each
         // recognized auxiliary (attention_mask = 1s, position_ids = 0..cur_len)
-        // synthesized at its named port.
+        // synthesized at its named port. The window is padded to the session's
+        // compiled `seq_len`; a causal LM's logits at the last real position
+        // attend only to real positions, so trailing padding never affects them.
         let win: Vec<f64> = window.iter().map(|&t| t as f64).collect();
         let mut bufs: Vec<Vec<u8>> = (0..lm.n_inputs).map(|_| Vec::new()).collect();
         bufs[lm.ids_index] = encode_vals(&win, lm.seq_len, lm.id_dtype);
@@ -342,7 +380,11 @@ pub fn generate_stream(
         }
 
         // Stop strings: halt once the decoded text contains one.
-        if cfg.stop.iter().any(|s| !s.is_empty() && text.contains(s.as_str())) {
+        if cfg
+            .stop
+            .iter()
+            .any(|s| !s.is_empty() && text.contains(s.as_str()))
+        {
             break;
         }
     }

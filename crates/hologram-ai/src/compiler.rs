@@ -164,6 +164,7 @@ impl CompiledModel {
 ///
 /// Pipeline:
 ///   import → optimize → validate → plan memory → lower → compile → embed weights
+#[derive(Clone)]
 pub struct ModelCompiler {
     /// Use memory-mapping for weight loading when possible.
     pub mmap: bool,
@@ -243,10 +244,24 @@ impl ModelCompiler {
     pub fn compile_with_sections(
         &self,
         source: ModelSource,
-        mut sections: ArchiveSections,
+        sections: ArchiveSections,
     ) -> anyhow::Result<HoloArchive> {
-        use hologram_compiler::{compile, BackendKind};
+        self.prepare(source)?
+            .compile_at(self.seq_len_override, sections)
+    }
 
+    /// Run the **length-independent** prefix of compilation once — import the
+    /// model and optimize it — leaving the result with symbolic sequence dims so
+    /// it can be concretized to *any* length later via
+    /// [`PreparedModel::compile_at`].
+    ///
+    /// Import (ONNX protobuf parse) and optimization are ~⅓ of compile cost and
+    /// do not depend on `seq_len`; the dominant per-length cost is shape
+    /// concretization + repair. Splitting here lets the length-adaptive
+    /// generation engine compile a fresh graph at each window size without
+    /// re-importing or re-optimizing — the basis of arbitrary-length I/O on a
+    /// static-shape backend (architecture §5, class EE/PV).
+    pub fn prepare(&self, source: ModelSource) -> anyhow::Result<PreparedModel> {
         let model_dir = match &source {
             ModelSource::OnnxPath(p) => p.parent().map(|d| d.to_path_buf()),
             _ => None,
@@ -268,15 +283,118 @@ impl ModelCompiler {
             seed_metadata_from_config_json(&mut ai_graph, dir);
         }
 
-        // Step 2 — optimize (pipeline chosen by model topology).
+        // Step 2 — optimize (pipeline chosen by model topology). Both run on the
+        // symbolic graph, before any sequence length is chosen.
         let pipeline = select_pipeline(&ai_graph, self.patch_budget_ratio);
         let mut ai_graph = pipeline.run(ai_graph).context("optimization pass failed")?;
         infer_llm_metadata_from_graph(&mut ai_graph);
 
+        Ok(PreparedModel {
+            compiler: self.clone(),
+            graph: ai_graph,
+            model_dir,
+            kappa_label,
+        })
+    }
+
+    fn import(&self, source: ModelSource) -> anyhow::Result<AiGraph> {
+        match source {
+            ModelSource::OnnxPath(path) => {
+                hologram_ai_onnx::import_onnx_path(&path, Default::default())
+                    .with_context(|| format!("importing ONNX from {path:?}"))
+            }
+            ModelSource::OnnxBytes(bytes) => {
+                hologram_ai_onnx::import_onnx(&bytes, Default::default())
+                    .context("importing ONNX from bytes")
+            }
+            ModelSource::AiGraph(g) => Ok(g),
+        }
+    }
+}
+
+/// A model imported and optimized but **not yet concretized to a sequence
+/// length** — the reusable, length-independent result of [`ModelCompiler::prepare`].
+///
+/// `Clone` of the held graph is cheap (weights are `AiParam::Mmap` — a path +
+/// offset, not bytes), so [`Self::compile_at`] can mint a concrete `.holo` at
+/// any window size by cloning, concretizing, and lowering — without paying the
+/// import/optimize cost again. The length-adaptive generation engine uses this
+/// to grow its window on demand (see `engine::GrowableSession`).
+pub struct PreparedModel {
+    compiler: ModelCompiler,
+    /// The optimized graph with symbolic sequence dims intact.
+    graph: AiGraph,
+    /// Directory of the source model (for the companion `tokenizer.json`), if any.
+    model_dir: Option<PathBuf>,
+    /// Source κ-label (class MA), if minted.
+    kappa_label: Option<String>,
+}
+
+impl PreparedModel {
+    /// The model's trained context length — the ceiling a generation window may
+    /// grow to. From `config.json`'s `max_position_embeddings` (seeded at
+    /// prepare) or model metadata; falls back to 2048 when unknown.
+    pub fn context_length(&self) -> u32 {
+        meta_u32(&self.graph, "context_length").unwrap_or(2048)
+    }
+
+    /// The source model's directory (holds the companion `tokenizer.json`), if
+    /// the model was prepared from a path.
+    pub fn model_dir(&self) -> Option<&std::path::Path> {
+        self.model_dir.as_deref()
+    }
+
+    /// Concretize this prepared model to a concrete sequence length and compile
+    /// it to a `.holo` archive — the **length-dependent** suffix of compilation
+    /// (concretize → repair → lower → compile).
+    ///
+    /// Consumes `self`: the (large, weight-bearing) graph is moved through the
+    /// pipeline rather than cloned, so peak memory holds one copy, not two — the
+    /// length-adaptive engine re-`prepare`s for each new window instead of
+    /// retaining a copy, keeping a long generation's resident memory at ~one
+    /// session.
+    ///
+    /// `seq_len_override` is the window length to bake; `None` uses the model's
+    /// `context_length`. When `bake_tokenizer` is set and the model has a
+    /// companion `tokenizer.json`, it is canonicalized (uor-addr JCS) and
+    /// embedded so the archive is self-describing; the length-adaptive engine
+    /// skips this (it discards each window's archive and loads the tokenizer
+    /// once, separately).
+    pub fn compile_at(
+        self,
+        seq_len_override: Option<u64>,
+        sections: ArchiveSections,
+    ) -> anyhow::Result<HoloArchive> {
+        self.compile_at_inner(seq_len_override, sections, true)
+    }
+
+    /// Like [`Self::compile_at`] but consuming for a single window with no
+    /// tokenizer baking (the engine recompiles per window and loads the
+    /// tokenizer once, separately).
+    pub fn compile_window(self, seq_len: u64) -> anyhow::Result<HoloArchive> {
+        self.compile_at_inner(Some(seq_len), ArchiveSections::new(), false)
+    }
+
+    fn compile_at_inner(
+        self,
+        seq_len_override: Option<u64>,
+        mut sections: ArchiveSections,
+        bake_tokenizer: bool,
+    ) -> anyhow::Result<HoloArchive> {
+        use hologram_compiler::{compile, BackendKind};
+
+        // Move the graph out of `self` (no clone — peak memory holds one copy).
+        let PreparedModel {
+            compiler,
+            graph: ai_graph,
+            model_dir,
+            kappa_label,
+        } = self;
+
         // Step 3 — concretize every dim so the canonical graph carries concrete
         // shapes; hologram's compiler derives op params from them (architecture §5.1).
         let (ai_graph, _zeroed) =
-            concretize_all_dims(ai_graph, self.seq_len_override, self.spatial_scale)
+            concretize_all_dims(ai_graph, seq_len_override, compiler.spatial_scale)
                 .context("dimension concretization failed")?;
         let ai_graph =
             post_concretization_repair(ai_graph).context("post-concretization repair failed")?;
@@ -286,30 +404,38 @@ impl ModelCompiler {
         let import_warnings = ai_graph.warnings.len();
         let node_count = ai_graph.nodes.len();
 
-        // Step 4 — lower to a canonical hologram graph.
-        let mut lowered = lower(&ai_graph, &self.lowering_options(), &LowerPhase::Forward)
-            .context("lowering to canonical graph failed")?;
+        // Step 4 — lower to a canonical hologram graph, then free the source
+        // graph immediately so its weights don't coexist with the archive.
+        let mut lowered = lower(
+            &ai_graph,
+            &compiler.lowering_options(),
+            &LowerPhase::Forward,
+        )
+        .context("lowering to canonical graph failed")?;
+        drop(ai_graph);
 
         // Step 4b — bake the model's tokenizer into the archive as an open
         // extension, canonicalized via uor-addr (JCS-RFC8785 + NFC) so it is a
         // deterministic, content-addressed artifact — the `.holo` is then
         // self-describing and `run --prompt` needs no external tokenizer file.
-        if let Some(dir) = &model_dir {
-            let tok = dir.join("tokenizer.json");
-            if tok.exists() && !sections.contains(TOKENIZER_EXT) {
-                let raw = std::fs::read(&tok)
-                    .with_context(|| format!("reading tokenizer {tok:?}"))?;
-                let canonical = uor_addr::json::canonicalize(&raw)
-                    .map_err(|e| anyhow::anyhow!("tokenizer.json is not valid JSON: {e:?}"))?;
-                // Content address (κ-label) of the canonical form, for integrity
-                // verification + dedup at load (class MA), stored alongside it.
-                let kappa = uor_addr::json::address(&canonical)
-                    .map_err(|e| anyhow::anyhow!("addressing tokenizer.json: {e:?}"))?
-                    .address
-                    .as_str()
-                    .to_string();
-                sections.add_extension(TOKENIZER_EXT, canonical);
-                sections.add_extension(TOKENIZER_KAPPA_EXT, kappa.into_bytes());
+        if bake_tokenizer {
+            if let Some(dir) = &model_dir {
+                let tok = dir.join("tokenizer.json");
+                if tok.exists() && !sections.contains(TOKENIZER_EXT) {
+                    let raw = std::fs::read(&tok)
+                        .with_context(|| format!("reading tokenizer {tok:?}"))?;
+                    let canonical = uor_addr::json::canonicalize(&raw)
+                        .map_err(|e| anyhow::anyhow!("tokenizer.json is not valid JSON: {e:?}"))?;
+                    // Content address (κ-label) of the canonical form, for
+                    // integrity verification + dedup at load (class MA).
+                    let kappa = uor_addr::json::address(&canonical)
+                        .map_err(|e| anyhow::anyhow!("addressing tokenizer.json: {e:?}"))?
+                        .address
+                        .as_str()
+                        .to_string();
+                    sections.add_extension(TOKENIZER_EXT, canonical);
+                    sections.add_extension(TOKENIZER_KAPPA_EXT, kappa.into_bytes());
+                }
             }
         }
         for (key, bytes) in sections.into_inner() {
@@ -331,20 +457,6 @@ impl ModelCompiler {
                 node_count,
             },
         })
-    }
-
-    fn import(&self, source: ModelSource) -> anyhow::Result<AiGraph> {
-        match source {
-            ModelSource::OnnxPath(path) => {
-                hologram_ai_onnx::import_onnx_path(&path, Default::default())
-                    .with_context(|| format!("importing ONNX from {path:?}"))
-            }
-            ModelSource::OnnxBytes(bytes) => {
-                hologram_ai_onnx::import_onnx(&bytes, Default::default())
-                    .context("importing ONNX from bytes")
-            }
-            ModelSource::AiGraph(g) => Ok(g),
-        }
     }
 }
 
@@ -426,6 +538,21 @@ fn seed_metadata_from_config_json(graph: &mut AiGraph, model_dir: &std::path::Pa
             .metadata
             .entry("vocab_size".into())
             .or_insert(MetaValue::Int(vocab));
+    }
+
+    // context_length ← `max_position_embeddings` (HF) / `n_positions` (GPT-2
+    // family). This is the model's real trained context; the length-adaptive
+    // generation engine uses it as the ceiling its window may grow to, so a long
+    // prompt/output is bounded only by the model — not by an arbitrary default.
+    if let Some(ctx) = json
+        .get("max_position_embeddings")
+        .or_else(|| json.get("n_positions"))
+        .and_then(|v| v.as_i64())
+    {
+        graph
+            .metadata
+            .entry("context_length".into())
+            .or_insert(MetaValue::Int(ctx));
     }
 
     info!(

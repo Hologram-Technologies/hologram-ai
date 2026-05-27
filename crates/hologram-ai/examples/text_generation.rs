@@ -24,7 +24,7 @@
 use std::collections::HashMap;
 
 use hologram_ai::commands::generate::{generate_stream, GenConfig};
-use hologram_ai::{HoloRunner, ModelCompiler, ModelSource};
+use hologram_ai::{FixedSession, HoloRunner, ModelCompiler, ModelSource};
 use hologram_ai_common::{shape_from_concrete, AiGraph, AiNode, AiOp, AiParam, DType, TensorInfo};
 use hologram_ai_tokenizer::Tokenizer;
 
@@ -37,10 +37,16 @@ struct IntTokenizer {
 
 impl Tokenizer for IntTokenizer {
     fn encode(&self, text: &str) -> Vec<u32> {
-        text.split_whitespace().filter_map(|w| w.parse().ok()).collect()
+        text.split_whitespace()
+            .filter_map(|w| w.parse().ok())
+            .collect()
     }
     fn decode(&self, tokens: &[u32]) -> String {
-        tokens.iter().map(|t| t.to_string()).collect::<Vec<_>>().join(" ")
+        tokens
+            .iter()
+            .map(|t| t.to_string())
+            .collect::<Vec<_>>()
+            .join(" ")
     }
     fn eos_token_id(&self) -> u32 {
         self.eos
@@ -64,11 +70,23 @@ impl Tokenizer for IntTokenizer {
 fn successor_lm(seq_len: usize, vocab: usize) -> AiGraph {
     let (ids, w, logits) = (0u32, 1u32, 2u32);
     let mut tensor_info: HashMap<u32, TensorInfo> = HashMap::new();
-    tensor_info.insert(ids, TensorInfo::new(DType::INT64, shape_from_concrete(&[1, seq_len as u64])));
-    tensor_info.insert(w, TensorInfo::new(DType::F32, shape_from_concrete(&[vocab as u64, vocab as u64])));
+    tensor_info.insert(
+        ids,
+        TensorInfo::new(DType::INT64, shape_from_concrete(&[1, seq_len as u64])),
+    );
+    tensor_info.insert(
+        w,
+        TensorInfo::new(
+            DType::F32,
+            shape_from_concrete(&[vocab as u64, vocab as u64]),
+        ),
+    );
     tensor_info.insert(
         logits,
-        TensorInfo::new(DType::F32, shape_from_concrete(&[1, seq_len as u64, vocab as u64])),
+        TensorInfo::new(
+            DType::F32,
+            shape_from_concrete(&[1, seq_len as u64, vocab as u64]),
+        ),
     );
 
     let mut w_bytes = vec![0u8; vocab * vocab * 4];
@@ -81,7 +99,12 @@ fn successor_lm(seq_len: usize, vocab: usize) -> AiGraph {
 
     AiGraph {
         name: "successor_lm".into(),
-        nodes: vec![AiNode::new(0, AiOp::Gather { axis: 0 }, vec![w, ids], vec![logits])],
+        nodes: vec![AiNode::new(
+            0,
+            AiOp::Gather { axis: 0 },
+            vec![w, ids],
+            vec![logits],
+        )],
         inputs: vec![ids],
         outputs: vec![logits],
         // Named ports — generation binds `input_ids`/`logits` by name, exactly
@@ -104,7 +127,8 @@ fn main() -> anyhow::Result<()> {
     let (seq_len, vocab) = (16usize, 256usize);
 
     // ── Compile: AiGraph → canonical hologram graph → .holo archive ──────────
-    let archive = ModelCompiler::default().compile(ModelSource::AiGraph(successor_lm(seq_len, vocab)))?;
+    let archive =
+        ModelCompiler::default().compile(ModelSource::AiGraph(successor_lm(seq_len, vocab)))?;
     println!(
         "compiled successor-LM → {} nodes, {} archive bytes",
         archive.stats.node_count,
@@ -112,19 +136,32 @@ fn main() -> anyhow::Result<()> {
     );
 
     // ── Load + generate (greedy, temperature 0) ──────────────────────────────
-    let mut runner = HoloRunner::from_bytes(archive.bytes)?;
-    let tok = IntTokenizer { vocab, eos: vocab as u32 - 1 };
-    let cfg = GenConfig { max_tokens: 8, temperature: 0.0, ..Default::default() };
+    let runner = HoloRunner::from_bytes(archive.bytes)?;
+    // A precompiled archive is a fixed-window session; the model-source path
+    // (`run <dir> --prompt …`) instead grows the window on demand.
+    let mut session = FixedSession::new(runner);
+    let tok = IntTokenizer {
+        vocab,
+        eos: vocab as u32 - 1,
+    };
+    let cfg = GenConfig {
+        max_tokens: 8,
+        temperature: 0.0,
+        ..Default::default()
+    };
 
     let prompt = "100";
     let mut sink = Vec::new();
-    let out = generate_stream(&mut runner, &tok, prompt, &cfg, &mut sink)?;
+    let out = generate_stream(&mut session, &tok, prompt, &cfg, &mut sink)?;
     println!("prompt   : {prompt}");
     println!("generated: {out}");
 
     // ── Verify against the closed-form expectation ───────────────────────────
     let expected = "101 102 103 104 105 106 107 108";
-    assert_eq!(out, expected, "greedy successor decode must be deterministic");
+    assert_eq!(
+        out, expected,
+        "greedy successor decode must be deterministic"
+    );
     println!("verified : output equals the closed-form successor sequence ✓");
     Ok(())
 }

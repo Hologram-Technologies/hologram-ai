@@ -3,20 +3,23 @@
 # hologram-ai uses explicit CLI flags (there is no `--config` mode). The fields
 # below are reference values; the exact commands are:
 #
-# Download (lays out model.onnx + tokenizer.json under models/…):
+# Download (lays out model.onnx + tokenizer.json + config.json under models/…):
 #   cargo run --release -- download TinyLlama/TinyLlama-1.1B-Chat-v1.0
 #
-# Compile (model.onnx → model.holo; q4_0 keeps weights packed at ~½ byte/param):
+# Generate from the model source — arbitrary length, q4 weights (~½ byte/param).
+# The window grows on demand up to the model's real context; greedy at temp 0:
+#   cargo run --release -- run models/TinyLlama-1.1B-Chat-v1.0 \
+#     --quantize q4_0 \
+#     --prompt "The capital of France is" \
+#     --prompt-template "<|user|>\n{prompt}</s>\n<|assistant|>\n" \
+#     --max-tokens 60 --stop "</s>"
+#
+# Or precompile a fixed-window .holo (bakes the tokenizer beside the model):
 #   cargo run --release -- compile \
 #     --model models/TinyLlama-1.1B-Chat-v1.0/model.onnx \
-#     --output models/TinyLlama-1.1B-Chat-v1.0 \
-#     --quantize q4_0
-#
-# Generate (the tokenizer is supplied at run time — the .holo carries no
-# tokenizer section; greedy decoding at temperature 0):
+#     --output models/TinyLlama-1.1B-Chat-v1.0 --quantize q4_0 --seq-len 256
 #   cargo run --release -- run models/TinyLlama-1.1B-Chat-v1.0/model.holo \
 #     --prompt "The capital of France is" \
-#     --tokenizer models/TinyLlama-1.1B-Chat-v1.0/tokenizer.json \
 #     --prompt-template "<|user|>\n{prompt}</s>\n<|assistant|>\n" \
 #     --max-tokens 60 --stop "</s>"
 #

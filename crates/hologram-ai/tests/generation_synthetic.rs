@@ -11,7 +11,7 @@
 use std::collections::HashMap;
 
 use hologram_ai::commands::generate::{generate_stream, GenConfig};
-use hologram_ai::{HoloRunner, ModelCompiler, ModelSource};
+use hologram_ai::{FixedSession, HoloRunner, ModelCompiler, ModelSource};
 use hologram_ai_common::{shape_from_concrete, AiGraph, AiNode, AiOp, AiParam, DType, TensorInfo};
 use hologram_ai_tokenizer::Tokenizer;
 
@@ -24,10 +24,16 @@ struct IntTok {
 
 impl Tokenizer for IntTok {
     fn encode(&self, text: &str) -> Vec<u32> {
-        text.split_whitespace().filter_map(|w| w.parse().ok()).collect()
+        text.split_whitespace()
+            .filter_map(|w| w.parse().ok())
+            .collect()
     }
     fn decode(&self, tokens: &[u32]) -> String {
-        tokens.iter().map(|t| t.to_string()).collect::<Vec<_>>().join(" ")
+        tokens
+            .iter()
+            .map(|t| t.to_string())
+            .collect::<Vec<_>>()
+            .join(" ")
     }
     fn eos_token_id(&self) -> u32 {
         self.eos
@@ -58,11 +64,23 @@ fn successor_lm(seq_len: usize, vocab: usize) -> AiGraph {
     // Token ids as INT64 — the real-LM dtype. Embedding lowers to the
     // first-class `OpKind::Gather` (no one-hot, no int→float cast), so the vocab
     // is unconstrained (no i8 ≤ 127 limit).
-    tensor_info.insert(ids, TensorInfo::new(DType::INT64, shape_from_concrete(&[1, seq_len as u64])));
-    tensor_info.insert(w, TensorInfo::new(DType::F32, shape_from_concrete(&[vocab as u64, vocab as u64])));
+    tensor_info.insert(
+        ids,
+        TensorInfo::new(DType::INT64, shape_from_concrete(&[1, seq_len as u64])),
+    );
+    tensor_info.insert(
+        w,
+        TensorInfo::new(
+            DType::F32,
+            shape_from_concrete(&[vocab as u64, vocab as u64]),
+        ),
+    );
     tensor_info.insert(
         logits,
-        TensorInfo::new(DType::F32, shape_from_concrete(&[1, seq_len as u64, vocab as u64])),
+        TensorInfo::new(
+            DType::F32,
+            shape_from_concrete(&[1, seq_len as u64, vocab as u64]),
+        ),
     );
 
     // W[t, (t+1) % V] = 1.0
@@ -78,7 +96,12 @@ fn successor_lm(seq_len: usize, vocab: usize) -> AiGraph {
 
     AiGraph {
         name: "successor_lm".into(),
-        nodes: vec![AiNode::new(0, AiOp::Gather { axis: 0 }, vec![w, ids], vec![logits])],
+        nodes: vec![AiNode::new(
+            0,
+            AiOp::Gather { axis: 0 },
+            vec![w, ids],
+            vec![logits],
+        )],
         inputs: vec![ids],
         outputs: vec![logits],
         // Named ports — generation binds input_ids/logits by name (no positional
@@ -97,11 +120,12 @@ fn successor_lm(seq_len: usize, vocab: usize) -> AiGraph {
     }
 }
 
-fn compile_runner(seq_len: usize, vocab: usize) -> HoloRunner {
+fn compile_runner(seq_len: usize, vocab: usize) -> FixedSession {
     let archive = ModelCompiler::default()
         .compile(ModelSource::AiGraph(successor_lm(seq_len, vocab)))
         .expect("compile synthetic LM");
-    HoloRunner::from_bytes(archive.bytes).expect("load synthetic LM")
+    let runner = HoloRunner::from_bytes(archive.bytes).expect("load synthetic LM");
+    FixedSession::new(runner)
 }
 
 #[test]
@@ -112,7 +136,11 @@ fn greedy_generation_predicts_successor_sequence() {
     let mut runner = compile_runner(seq_len, vocab);
     let tok = IntTok { vocab, eos: 999 }; // eos out of range — never sampled
 
-    let cfg = GenConfig { max_tokens: 5, temperature: 0.0, ..Default::default() };
+    let cfg = GenConfig {
+        max_tokens: 5,
+        temperature: 0.0,
+        ..Default::default()
+    };
     let mut sink = Vec::new();
     let out = generate_stream(&mut runner, &tok, "150", &cfg, &mut sink).unwrap();
 
@@ -129,7 +157,11 @@ fn eos_token_halts_generation() {
     // eos = 8: from prompt 5 → 6,7, then 8 is eos and generation stops before it.
     let tok = IntTok { vocab, eos: 8 };
 
-    let cfg = GenConfig { max_tokens: 10, temperature: 0.0, ..Default::default() };
+    let cfg = GenConfig {
+        max_tokens: 10,
+        temperature: 0.0,
+        ..Default::default()
+    };
     let mut sink = Vec::new();
     let out = generate_stream(&mut runner, &tok, "5", &cfg, &mut sink).unwrap();
     assert_eq!(out, "6 7", "eos must halt before emitting the eos token");
@@ -173,16 +205,40 @@ fn temperature_sampling_with_top_k_one_is_deterministic_successor() {
 }
 
 #[test]
+fn prompt_equal_to_context_slides_not_errors() {
+    // A prompt exactly as long as the window is valid: predict from the last
+    // position, then the window slides (the model's genuine finite context).
+    let (seq_len, vocab) = (4usize, 16usize);
+    let mut runner = compile_runner(seq_len, vocab);
+    let tok = IntTok { vocab, eos: 99 };
+    let cfg = GenConfig {
+        max_tokens: 3,
+        temperature: 0.0,
+        ..Default::default()
+    };
+    let mut sink = Vec::new();
+    // 4 prompt tokens == window. Successor LM: from "…4" → 5, then window slides
+    // to [2,3,4,5] → 6, → 7. No error, deterministic successor sequence.
+    let out = generate_stream(&mut runner, &tok, "1 2 3 4", &cfg, &mut sink).unwrap();
+    assert_eq!(
+        out, "5 6 7",
+        "prompt == window must slide and predict successors"
+    );
+}
+
+#[test]
 fn rejects_prompt_longer_than_context() {
     let (seq_len, vocab) = (4usize, 16usize);
     let mut runner = compile_runner(seq_len, vocab);
     let tok = IntTok { vocab, eos: 99 };
     let cfg = GenConfig::default();
     let mut sink = Vec::new();
-    // 4 prompt tokens == seq_len leaves no room → clear error, no panic.
-    let err = generate_stream(&mut runner, &tok, "1 2 3 4", &cfg, &mut sink).unwrap_err();
+    // 5 prompt tokens > window of 4: the model cannot attend to it → clear
+    // error, no panic. (A growable session would instead recompile a larger
+    // window; a fixed window cannot.)
+    let err = generate_stream(&mut runner, &tok, "1 2 3 4 5", &cfg, &mut sink).unwrap_err();
     assert!(
-        err.to_string().contains("sequence length"),
+        err.to_string().contains("context length"),
         "expected a context-length error, got: {err}"
     );
 }

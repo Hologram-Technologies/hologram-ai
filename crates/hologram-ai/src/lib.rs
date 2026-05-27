@@ -13,6 +13,7 @@ pub mod compiler;
 /// the wasm build (`--no-default-features`).
 #[cfg(feature = "native")]
 pub mod download;
+pub mod engine;
 pub mod runner;
 pub mod validate;
 
@@ -23,7 +24,9 @@ pub use address::{
 };
 pub use compiler::{
     CompileStats, CompiledModel, DebugMap, HoloArchive, ModelCompiler, ModelMetadata, ModelSource,
+    PreparedModel,
 };
+pub use engine::{FixedSession, GrowableSession, SessionProvider};
 pub use hologram_ai_common::{AiGraph, AiNode, AiOp, DType, NodeId, Shape, TensorId, TensorInfo};
 pub use hologram_ai_onnx::{import_onnx, import_onnx_path, OnnxImportOptions};
 pub use hologram_ai_quant::{QuantDescriptor, QuantScheme};

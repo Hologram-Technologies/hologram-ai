@@ -447,7 +447,7 @@ fn resolve_dynamic_op_params(
                 let starts_vals = extract_i64_const(node.inputs[1], params, tensor_info);
                 let ends_vals = extract_i64_const(node.inputs[2], params, tensor_info);
                 if starts_vals.is_none() || ends_vals.is_none() {
-                    tracing::warn!(
+                    tracing::debug!(
                         node_id = node.id,
                         n_inputs = node.inputs.len(),
                         starts_tid = node.inputs[1],
@@ -483,7 +483,10 @@ fn resolve_dynamic_op_params(
                         node.inputs.truncate(1);
                     }
                     _ => {
-                        tracing::warn!(
+                        // Expected for dynamic/with-past slices (resolved later by
+                        // SliceToGather after concretization); recorded structurally
+                        // in `warnings`, so keep the per-node log at debug.
+                        tracing::debug!(
                             node_id = node.id,
                             starts_tid = node.inputs.get(1).copied().unwrap_or(0),
                             ends_tid = node.inputs.get(2).copied().unwrap_or(0),
@@ -500,26 +503,28 @@ fn resolve_dynamic_op_params(
                 }
             }
 
-            AiOp::Unsqueeze { axes } if axes.is_empty()
+            AiOp::Unsqueeze { axes }
+                if axes.is_empty()
                 // ONNX opset 13+: Unsqueeze(data, axes)
-                && node.inputs.len() >= 2 => {
-                    if let Some(axes_vals) = extract_i64_const(node.inputs[1], params, tensor_info)
-                    {
-                        node.op = AiOp::Unsqueeze { axes: axes_vals };
-                        node.inputs.truncate(1);
-                    }
+                && node.inputs.len() >= 2 =>
+            {
+                if let Some(axes_vals) = extract_i64_const(node.inputs[1], params, tensor_info) {
+                    node.op = AiOp::Unsqueeze { axes: axes_vals };
+                    node.inputs.truncate(1);
                 }
+            }
 
-            AiOp::Squeeze { axes } if axes.is_empty()
+            AiOp::Squeeze { axes }
+                if axes.is_empty()
                 // ONNX opset 13+: Squeeze(data, [axes])
-                && node.inputs.len() >= 2 => {
-                    if let Some(axes_vals) = extract_i64_const(node.inputs[1], params, tensor_info)
-                    {
-                        node.op = AiOp::Squeeze { axes: axes_vals };
-                        node.inputs.truncate(1);
-                    }
+                && node.inputs.len() >= 2 =>
+            {
+                if let Some(axes_vals) = extract_i64_const(node.inputs[1], params, tensor_info) {
+                    node.op = AiOp::Squeeze { axes: axes_vals };
+                    node.inputs.truncate(1);
                 }
-                // If only 1 input, Squeeze with empty axes = squeeze all size-1 dims (already correct).
+            }
+            // If only 1 input, Squeeze with empty axes = squeeze all size-1 dims (already correct).
 
             // ONNX opset 18+: ReduceMean/Sum/Max/Min(data, axes) — axes as input tensor.
             AiOp::ReduceMean { axes, keepdims } if axes.is_empty() => {
@@ -578,30 +583,28 @@ fn resolve_dynamic_op_params(
             // ONNX opset 11+: Pad(data, pads, constant_value?)
             // FloatOp::PadOp expects arity 2: [data, pads].
             // Drop optional constant_value input (input[2]).
-            AiOp::Pad { .. }
-                if node.inputs.len() > 2 => {
-                    node.inputs.truncate(2);
-                }
+            AiOp::Pad { .. } if node.inputs.len() > 2 => {
+                node.inputs.truncate(2);
+            }
 
             // ONNX opset 11+: Resize(X, roi, scales, sizes)
             // Empty-name inputs are already filtered, so we may have 2-4 inputs.
             // FloatOp::Resize expects arity 2: [data, scales_or_sizes].
             // Prefer sizes (i64) over scales (f32); drop roi.
-            AiOp::Resize { .. }
-                if node.inputs.len() > 2 => {
-                    let data = node.inputs[0];
-                    // Find the best param: prefer i64 (sizes) over f32 (scales).
-                    let mut best = node.inputs[node.inputs.len() - 1];
-                    for &tid in &node.inputs[1..] {
-                        if let Some(info) = tensor_info.get(&tid) {
-                            if info.logical_dtype == DType::INT64 {
-                                best = tid;
-                                break;
-                            }
+            AiOp::Resize { .. } if node.inputs.len() > 2 => {
+                let data = node.inputs[0];
+                // Find the best param: prefer i64 (sizes) over f32 (scales).
+                let mut best = node.inputs[node.inputs.len() - 1];
+                for &tid in &node.inputs[1..] {
+                    if let Some(info) = tensor_info.get(&tid) {
+                        if info.logical_dtype == DType::INT64 {
+                            best = tid;
+                            break;
                         }
                     }
-                    node.inputs = vec![data, best];
                 }
+                node.inputs = vec![data, best];
+            }
 
             // ONNX opset 11+: Clip(input, min?, max?)
             // Empty-name inputs are filtered, so we may have 1-3 inputs.

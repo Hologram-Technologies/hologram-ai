@@ -11,7 +11,7 @@
 //! `run` (arbitrary forward pass, `--fill`-style), `generate` (autoregressive).
 
 use hologram_ai::commands::generate::{apply_template, generate_stream, GenConfig};
-use hologram_ai::{HoloRunner, ModelCompiler, ModelSource};
+use hologram_ai::{FixedSession, HoloRunner, ModelCompiler, ModelSource};
 use hologram_ai_tokenizer::NativeTokenizer;
 use serde::{Deserialize, Serialize};
 use wasm_bindgen::prelude::*;
@@ -59,8 +59,18 @@ pub struct ModelInfo {
 
 fn dtype_name(tag: u8) -> &'static str {
     match tag {
-        0 => "bool", 1 => "u8", 2 => "i8", 3 => "u64", 4 => "i32", 5 => "i64",
-        6 => "f16", 7 => "bf16", 8 => "f32", 9 => "f64", 10 => "i4", _ => "?",
+        0 => "bool",
+        1 => "u8",
+        2 => "i8",
+        3 => "u64",
+        4 => "i32",
+        5 => "i64",
+        6 => "f16",
+        7 => "bf16",
+        8 => "f32",
+        9 => "f64",
+        10 => "i4",
+        _ => "?",
     }
 }
 
@@ -102,7 +112,9 @@ pub struct Output {
 /// Synthesize an input buffer from a fill value (`None` ⇒ zeros). Total over
 /// every dtype, so any port is fillable.
 fn synth(byte_size: usize, element_count: usize, dtype: u8, fill: Option<f64>) -> Vec<u8> {
-    let Some(v) = fill else { return vec![0u8; byte_size] };
+    let Some(v) = fill else {
+        return vec![0u8; byte_size];
+    };
     if dtype == 10 {
         let nib = (v as i64 as u8) & 0x0F;
         return vec![nib | (nib << 4); byte_size];
@@ -126,15 +138,20 @@ fn synth(byte_size: usize, element_count: usize, dtype: u8, fill: Option<f64>) -
 
 /// Decode an output buffer to `f64` values for every dtype (total).
 fn decode(bytes: &[u8], dtype: u8) -> Vec<f64> {
-    let conv = |w: usize, f: &dyn Fn(&[u8]) -> f64| bytes.chunks_exact(w).map(f).collect::<Vec<_>>();
+    let conv =
+        |w: usize, f: &dyn Fn(&[u8]) -> f64| bytes.chunks_exact(w).map(f).collect::<Vec<_>>();
     match dtype {
         0 | 1 => bytes.iter().map(|&b| b as f64).collect(),
         2 => bytes.iter().map(|&b| b as i8 as f64).collect(),
         3 => conv(8, &|c| u64::from_le_bytes(c.try_into().unwrap()) as f64),
         4 => conv(4, &|c| i32::from_le_bytes(c.try_into().unwrap()) as f64),
         5 => conv(8, &|c| i64::from_le_bytes(c.try_into().unwrap()) as f64),
-        6 => conv(2, &|c| f64::from(half::f16::from_le_bytes(c.try_into().unwrap()))),
-        7 => conv(2, &|c| f64::from(half::bf16::from_le_bytes(c.try_into().unwrap()))),
+        6 => conv(2, &|c| {
+            f64::from(half::f16::from_le_bytes(c.try_into().unwrap()))
+        }),
+        7 => conv(2, &|c| {
+            f64::from(half::bf16::from_le_bytes(c.try_into().unwrap()))
+        }),
         8 => conv(4, &|c| f32::from_le_bytes(c.try_into().unwrap()) as f64),
         9 => conv(8, &|c| f64::from_le_bytes(c.try_into().unwrap())),
         10 => bytes
@@ -162,7 +179,11 @@ pub fn run(holo: &[u8], inputs: JsValue, fill: Option<f64>) -> Result<JsValue, J
     let in_info = runner.input_port_info();
     let in_sizes = runner.input_byte_sizes();
     if !provided.is_empty() && provided.len() != in_info.len() {
-        return Err(err(format!("expected {} input(s), got {}", in_info.len(), provided.len())));
+        return Err(err(format!(
+            "expected {} input(s), got {}",
+            in_info.len(),
+            provided.len()
+        )));
     }
 
     let mut owned: Vec<Vec<u8>> = Vec::with_capacity(in_info.len());
@@ -170,13 +191,20 @@ pub fn run(holo: &[u8], inputs: JsValue, fill: Option<f64>) -> Result<JsValue, J
         let want = in_sizes[i];
         match provided.get(i).filter(|b| !b.is_empty()) {
             Some(b) if b.len() == want => owned.push(b.clone()),
-            Some(b) => return Err(err(format!("input[{i}] is {} bytes but the model expects {want}", b.len()))),
+            Some(b) => {
+                return Err(err(format!(
+                    "input[{i}] is {} bytes but the model expects {want}",
+                    b.len()
+                )))
+            }
             None => owned.push(synth(want, p.element_count, p.dtype, fill)),
         }
     }
 
     let refs: Vec<&[u8]> = owned.iter().map(|v| v.as_slice()).collect();
-    let outputs = runner.execute(&refs).map_err(|e| err(format!("execute: {e:#}")))?;
+    let outputs = runner
+        .execute(&refs)
+        .map_err(|e| err(format!("execute: {e:#}")))?;
     let out_info = runner.output_port_info();
     let results: Vec<Output> = outputs
         .iter()
@@ -224,14 +252,14 @@ pub fn generate(
     } else {
         serde_wasm_bindgen::from_value(opts).map_err(err)?
     };
-    let mut runner = HoloRunner::from_bytes(holo.to_vec()).map_err(err)?;
+    let runner = HoloRunner::from_bytes(holo.to_vec()).map_err(err)?;
 
     let tokenizer = match tokenizer_json {
         Some(bytes) => NativeTokenizer::from_tokenizer_json_bytes(&bytes).map_err(err)?,
         None => {
-            let embedded = runner
-                .extension("tokenizer.json")
-                .ok_or_else(|| err("no tokenizer: none embedded in the archive and none supplied"))?;
+            let embedded = runner.extension("tokenizer.json").ok_or_else(|| {
+                err("no tokenizer: none embedded in the archive and none supplied")
+            })?;
             NativeTokenizer::from_tokenizer_json_bytes(embedded).map_err(err)?
         }
     };
@@ -246,8 +274,10 @@ pub fn generate(
     };
     let templated = apply_template(opts.prompt_template.as_deref(), prompt);
 
+    // A precompiled `.holo` is a fixed-window session.
+    let mut session = FixedSession::new(runner);
     let mut sink: Vec<u8> = Vec::new();
-    generate_stream(&mut runner, &tokenizer, &templated, &cfg, &mut sink)
+    generate_stream(&mut session, &tokenizer, &templated, &cfg, &mut sink)
         .map_err(|e| err(format!("generate: {e:#}")))?;
     String::from_utf8(sink).map_err(err)
 }
@@ -256,7 +286,9 @@ pub fn generate(
 mod tests {
     use super::*;
     use hologram_ai::compiler::ArchiveSections;
-    use hologram_ai_common::{shape_from_concrete, AiGraph, AiNode, AiOp, AiParam, DType, TensorInfo};
+    use hologram_ai_common::{
+        shape_from_concrete, AiGraph, AiNode, AiOp, AiParam, DType, TensorInfo,
+    };
     use std::collections::HashMap;
     use wasm_bindgen_test::*;
 
@@ -318,7 +350,12 @@ mod tests {
         params.insert(w, AiParam::inline(wb, t[&w].clone()));
         let g = AiGraph {
             name: "lm".into(),
-            nodes: vec![AiNode::new(0, AiOp::Gather { axis: 0 }, vec![w, ids], vec![logits])],
+            nodes: vec![AiNode::new(
+                0,
+                AiOp::Gather { axis: 0 },
+                vec![w, ids],
+                vec![logits],
+            )],
             inputs: vec![ids],
             outputs: vec![logits],
             input_names: vec!["input_ids".into()],
@@ -344,7 +381,8 @@ mod tests {
 
     #[wasm_bindgen_test]
     fn describe_in_wasm() {
-        let info: ModelInfo = serde_wasm_bindgen::from_value(describe(&matmul_onnxless()).unwrap()).unwrap();
+        let info: ModelInfo =
+            serde_wasm_bindgen::from_value(describe(&matmul_onnxless()).unwrap()).unwrap();
         assert_eq!(info.inputs.len(), 1);
         assert_eq!(info.inputs[0].dtype_name, "f32");
         assert_eq!(info.inputs[0].element_count, 4);
@@ -367,7 +405,10 @@ mod tests {
         let opts = serde_wasm_bindgen::to_value(&serde_json::json!({"max_tokens": 3})).unwrap();
         let out = generate(&holo, None, "a", opts).unwrap();
         // Every step argmaxes to token 1 ("a") ⇒ output is all 'a', non-empty.
-        assert!(!out.is_empty() && out.chars().all(|c| c == 'a'), "got {out:?}");
+        assert!(
+            !out.is_empty() && out.chars().all(|c| c == 'a'),
+            "got {out:?}"
+        );
         // Deterministic (greedy).
         let opts2 = serde_wasm_bindgen::to_value(&serde_json::json!({"max_tokens": 3})).unwrap();
         assert_eq!(generate(&holo, None, "a", opts2).unwrap(), out);

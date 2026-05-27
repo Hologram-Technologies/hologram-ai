@@ -6,12 +6,13 @@
 //! archive carries concrete shapes and a schedule, and content-addressed
 //! elision handles repeated computation (architecture §5.3, §7).
 
-use anyhow::{Context as _, Result};
+use anyhow::{bail, Context as _, Result};
 use clap::Args;
 use std::io::Write;
 use std::path::PathBuf;
 
 use crate::commands::generate::{self, GenConfig};
+use crate::engine::{FixedSession, GrowableSession, SessionProvider};
 use crate::runner::HoloRunner;
 use hologram_ai_tokenizer::NativeTokenizer;
 
@@ -43,9 +44,15 @@ pub struct RunArgs {
     #[arg(long)]
     pub prompt: Option<String>,
     /// HuggingFace `tokenizer.json` override; defaults to the one baked into the
-    /// archive (a compiled model is self-describing).
+    /// archive (a compiled model is self-describing), or the one beside the model
+    /// source.
     #[arg(long, value_name = "FILE")]
     pub tokenizer: Option<PathBuf>,
+    /// Weight quantization for the growable (model-source) generation path:
+    /// `none`/`f32`, `q4_0`, `q8_0`, `q2_0`. Ignored when running a precompiled
+    /// `.holo` (it is already quantized as compiled).
+    #[arg(long, value_name = "SCHEME")]
+    pub quantize: Option<String>,
     /// Prompt template with a `{prompt}` placeholder (e.g. a chat template).
     #[arg(long, value_name = "TEMPLATE")]
     pub prompt_template: Option<String>,
@@ -140,7 +147,12 @@ pub fn execute(args: RunArgs) -> Result<()> {
             );
         };
         for &i in &missing {
-            slots[i] = Some(synth_input(in_sizes[i], in_ports[i].element_count, in_ports[i].dtype, fill)?);
+            slots[i] = Some(synth_input(
+                in_sizes[i],
+                in_ports[i].element_count,
+                in_ports[i].dtype,
+                fill,
+            )?);
         }
     }
 
@@ -153,7 +165,11 @@ pub fn execute(args: RunArgs) -> Result<()> {
     for (i, out) in outputs.iter().enumerate() {
         let dt = out_ports.get(i).map(|p| p.dtype).unwrap_or(8);
         let elems = out_ports.get(i).map(|p| p.element_count).unwrap_or(0);
-        println!("output[{i}]: {} × {elems} ({} bytes)", dtype_name(dt), out.bytes.len());
+        println!(
+            "output[{i}]: {} × {elems} ({} bytes)",
+            dtype_name(dt),
+            out.bytes.len()
+        );
         if args.verbose {
             println!("  {}", preview(&out.bytes, dt));
         }
@@ -231,10 +247,16 @@ fn dtype_name(tag: u8) -> &'static str {
 fn preview(bytes: &[u8], dtype: u8) -> String {
     const MAX: usize = 16;
     match dtype {
-        8 => fmt_vals(bytes, 4, MAX, |c| f32::from_le_bytes(c.try_into().unwrap()) as f64),
+        8 => fmt_vals(bytes, 4, MAX, |c| {
+            f32::from_le_bytes(c.try_into().unwrap()) as f64
+        }),
         9 => fmt_vals(bytes, 8, MAX, |c| f64::from_le_bytes(c.try_into().unwrap())),
-        4 => fmt_vals(bytes, 4, MAX, |c| i32::from_le_bytes(c.try_into().unwrap()) as f64),
-        5 => fmt_vals(bytes, 8, MAX, |c| i64::from_le_bytes(c.try_into().unwrap()) as f64),
+        4 => fmt_vals(bytes, 4, MAX, |c| {
+            i32::from_le_bytes(c.try_into().unwrap()) as f64
+        }),
+        5 => fmt_vals(bytes, 8, MAX, |c| {
+            i64::from_le_bytes(c.try_into().unwrap()) as f64
+        }),
         _ => {
             let shown = bytes.len().min(MAX * 4);
             let more = if bytes.len() > shown { " …" } else { "" };
@@ -257,24 +279,62 @@ fn fmt_vals(bytes: &[u8], width: usize, max: usize, decode: impl Fn(&[u8]) -> f6
         })
         .collect();
     let n = bytes.len() / width;
-    let more = if n > max { format!(" … ({n} total)") } else { String::new() };
+    let more = if n > max {
+        format!(" … ({n} total)")
+    } else {
+        String::new()
+    };
     format!("[{}{more}]", vals.join(", "))
 }
 
 /// `run --prompt …` — autoregressive text generation over a causal LM.
+///
+/// The model argument may be either a precompiled `.holo` (a fixed window) or a
+/// model **source** — an `.onnx` file or a directory holding `model.onnx` +
+/// `tokenizer.json`. A source drives the length-adaptive [`GrowableSession`]:
+/// the window grows with the sequence up to the model's context length, so the
+/// prompt and the continuation are bounded only by the model.
 fn generate_cmd(args: RunArgs) -> Result<()> {
-    let prompt = args.prompt.as_deref().expect("generate_cmd requires --prompt");
-    let mut runner = HoloRunner::from_path(&args.file, None)
-        .with_context(|| format!("loading model {:?}", args.file))?;
+    let prompt = args
+        .prompt
+        .as_deref()
+        .expect("generate_cmd requires --prompt");
 
-    // Tokenizer source: an explicit `--tokenizer` file overrides; otherwise the
-    // one baked into the archive (canonicalized, content-addressed). The `.holo`
-    // is self-describing, so no external file is needed for a compiled model.
-    let tokenizer = match args.tokenizer.as_ref() {
-        Some(path) => NativeTokenizer::from_tokenizer_json(path)
-            .with_context(|| format!("loading tokenizer {path:?}"))?,
-        None => load_archived_tokenizer(&runner)?,
-    };
+    // Resolve the model argument and the tokenizer, then build the matching
+    // session provider. `--tokenizer` always overrides; otherwise a `.holo`
+    // self-describes (baked tokenizer) and a source uses the `tokenizer.json`
+    // beside it.
+    let (mut provider, tokenizer): (Box<dyn SessionProvider>, NativeTokenizer) =
+        match resolve_model_arg(&args.file)? {
+            ModelArg::Holo(path) => {
+                let runner = HoloRunner::from_path(&path, None)
+                    .with_context(|| format!("loading model {path:?}"))?;
+                let tokenizer = match args.tokenizer.as_ref() {
+                    Some(p) => NativeTokenizer::from_tokenizer_json(p)
+                        .with_context(|| format!("loading tokenizer {p:?}"))?,
+                    None => load_archived_tokenizer(&runner)?,
+                };
+                (Box::new(FixedSession::new(runner)), tokenizer)
+            }
+            ModelArg::Source {
+                onnx,
+                tokenizer_json,
+            } => {
+                let tok_path = args.tokenizer.clone().unwrap_or(tokenizer_json);
+                let tokenizer =
+                    NativeTokenizer::from_tokenizer_json(&tok_path).with_context(|| {
+                        format!(
+                        "loading tokenizer {tok_path:?} (a model source needs a tokenizer.json \
+                         beside it, or pass --tokenizer)"
+                    )
+                    })?;
+                let compiler = crate::compiler::ModelCompiler {
+                    quant_strategy: parse_quant(args.quantize.as_deref())?,
+                    ..Default::default()
+                };
+                (Box::new(GrowableSession::open(compiler, onnx)?), tokenizer)
+            }
+        };
 
     let cfg = GenConfig {
         max_tokens: args.max_tokens,
@@ -292,9 +352,72 @@ fn generate_cmd(args: RunArgs) -> Result<()> {
     // the generated continuation token-by-token from inside generate_stream.
     print!("{prompt}");
     stdout.flush().ok();
-    generate::generate_stream(&mut runner, &tokenizer, &templated, &cfg, &mut stdout)?;
+    generate::generate_stream(provider.as_mut(), &tokenizer, &templated, &cfg, &mut stdout)?;
     println!();
     Ok(())
+}
+
+/// How the model argument to `run --prompt` was interpreted.
+enum ModelArg {
+    /// A precompiled `.holo` archive (fixed window).
+    Holo(PathBuf),
+    /// A model source — an importable `.onnx` plus the `tokenizer.json` to use.
+    Source {
+        onnx: PathBuf,
+        tokenizer_json: PathBuf,
+    },
+}
+
+/// Classify the `run` model argument: a `.holo` file, an `.onnx` file, or a
+/// directory laid out as `model.onnx` + `tokenizer.json` (the `download`
+/// layout). A directory is searched for `model.onnx` then `onnx/model.onnx`.
+fn resolve_model_arg(path: &std::path::Path) -> Result<ModelArg> {
+    if path.is_dir() {
+        let candidates = [
+            path.join("model.onnx"),
+            path.join("onnx").join("model.onnx"),
+        ];
+        let onnx = candidates
+            .iter()
+            .find(|p| p.exists())
+            .cloned()
+            .with_context(|| {
+                format!("no model.onnx (or onnx/model.onnx) found in directory {path:?}")
+            })?;
+        let tokenizer_json = path.join("tokenizer.json");
+        return Ok(ModelArg::Source {
+            onnx,
+            tokenizer_json,
+        });
+    }
+    match path.extension().and_then(|e| e.to_str()) {
+        Some("holo") => Ok(ModelArg::Holo(path.to_path_buf())),
+        Some("onnx") => {
+            let dir = path.parent().unwrap_or_else(|| std::path::Path::new("."));
+            Ok(ModelArg::Source {
+                onnx: path.to_path_buf(),
+                tokenizer_json: dir.join("tokenizer.json"),
+            })
+        }
+        _ => bail!(
+            "unrecognized model {path:?}; expected a compiled .holo, an .onnx file, or a \
+             directory containing model.onnx + tokenizer.json"
+        ),
+    }
+}
+
+/// Parse a quantization scheme name (matches the `compile` subcommand's flag).
+fn parse_quant(s: Option<&str>) -> Result<hologram_ai_common::lower::QuantStrategy> {
+    use hologram_ai_common::lower::QuantStrategy;
+    Ok(match s.map(|s| s.to_ascii_lowercase()).as_deref() {
+        None | Some("none") | Some("f32") => QuantStrategy::None,
+        Some("q2_0") => QuantStrategy::Q2_0,
+        Some("q4_0") => QuantStrategy::Q4_0,
+        Some("q8_0") => QuantStrategy::Q8_0,
+        Some(other) => {
+            bail!("unknown quantization scheme {other:?} (expected none/q2_0/q4_0/q8_0)")
+        }
+    })
 }
 
 /// Load the tokenizer baked into the archive (canonical `tokenizer.json`
@@ -403,11 +526,17 @@ mod tests {
     fn numeric_fill_encodes_per_dtype() {
         // f32 ones: 4 elems × 1.0
         let f = synth_input(16, 4, 8, Fill::Value(1.0)).unwrap();
-        let v: Vec<f32> = f.chunks_exact(4).map(|c| f32::from_le_bytes(c.try_into().unwrap())).collect();
+        let v: Vec<f32> = f
+            .chunks_exact(4)
+            .map(|c| f32::from_le_bytes(c.try_into().unwrap()))
+            .collect();
         assert_eq!(v, vec![1.0; 4]);
         // i64 value 5
         let g = synth_input(16, 2, 5, Fill::Value(5.0)).unwrap();
-        let w: Vec<i64> = g.chunks_exact(8).map(|c| i64::from_le_bytes(c.try_into().unwrap())).collect();
+        let w: Vec<i64> = g
+            .chunks_exact(8)
+            .map(|c| i64::from_le_bytes(c.try_into().unwrap()))
+            .collect();
         assert_eq!(w, vec![5i64; 2]);
         // unsupported numeric dtype (bf16) errors rather than mis-encoding
         assert!(synth_input(4, 2, 7, Fill::Value(1.0)).is_err());
@@ -415,7 +544,10 @@ mod tests {
 
     #[test]
     fn f32_preview_decodes_values() {
-        let bytes: Vec<u8> = [1.0f32, 2.0, 3.5].iter().flat_map(|v| v.to_le_bytes()).collect();
+        let bytes: Vec<u8> = [1.0f32, 2.0, 3.5]
+            .iter()
+            .flat_map(|v| v.to_le_bytes())
+            .collect();
         assert_eq!(preview(&bytes, 8), "[1, 2, 3.5000]");
     }
 

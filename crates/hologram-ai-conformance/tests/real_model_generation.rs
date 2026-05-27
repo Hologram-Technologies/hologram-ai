@@ -18,7 +18,7 @@
 use std::path::PathBuf;
 
 use hologram_ai::commands::generate::{generate_stream, GenConfig};
-use hologram_ai::{HoloRunner, ModelCompiler, ModelSource};
+use hologram_ai::{GrowableSession, ModelCompiler};
 use hologram_ai_tokenizer::NativeTokenizer;
 
 fn model_path() -> Option<PathBuf> {
@@ -46,22 +46,23 @@ fn smollm2_generates_coherent_text() {
         return;
     }
 
-    // Compile at a recompute window large enough for prompt + generated tokens.
-    let archive = ModelCompiler {
-        seq_len_override: Some(48),
-        ..Default::default()
-    }
-    .compile(ModelSource::OnnxPath(onnx))
-    .expect("compile SmolLM2");
-    let mut runner = HoloRunner::from_bytes(archive.bytes).expect("load .holo");
+    // Drive the length-adaptive engine straight from the model source: the
+    // window is compiled on demand and grows up to the model's real context —
+    // no baked seq_len, no artificial cap on prompt or output length. This is
+    // the production `run <source> --prompt` path.
+    let mut provider = GrowableSession::open(ModelCompiler::default(), onnx).expect("open SmolLM2");
     let tok = NativeTokenizer::from_tokenizer_json(&tok_path).expect("load tokenizer");
 
     // Greedy (temperature 0) ⇒ deterministic, so the output is a stable witness.
-    let cfg = GenConfig { max_tokens: 10, temperature: 0.0, ..Default::default() };
+    let cfg = GenConfig {
+        max_tokens: 10,
+        temperature: 0.0,
+        ..Default::default()
+    };
 
     let mut gen = |prompt: &str| {
         let mut sink = Vec::new();
-        generate_stream(&mut runner, &tok, prompt, &cfg, &mut sink).expect("generate")
+        generate_stream(&mut provider, &tok, prompt, &cfg, &mut sink).expect("generate")
     };
 
     // Correctness: greedy decoding must produce the factually-correct answer
@@ -84,5 +85,9 @@ fn smollm2_generates_coherent_text() {
     );
 
     // Determinism: greedy decoding is reproducible run-to-run.
-    assert_eq!(gen("The sun rises in the"), sun, "greedy decoding must be deterministic");
+    assert_eq!(
+        gen("The sun rises in the"),
+        sun,
+        "greedy decoding must be deterministic"
+    );
 }

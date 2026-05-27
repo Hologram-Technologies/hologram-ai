@@ -125,12 +125,22 @@ fn import_onnx_inner(
         );
     }
 
-    // Surface warnings.
-    for w in &ai_graph.warnings {
-        if let Some(ref node) = w.node_name {
-            tracing::warn!(node = %node, "{}", w.message);
-        } else {
-            tracing::warn!("{}", w.message);
+    // Surface warnings: a single summary at warn (so the count is visible
+    // without scrolling), and each individual warning at debug. Real transformer
+    // imports legitimately produce dozens of per-node warnings (e.g. dynamic
+    // Slice bounds resolved later by SliceToGather), so logging each at warn
+    // floods the CLI; the structured list stays on `graph.warnings` for callers.
+    if !ai_graph.warnings.is_empty() {
+        tracing::warn!(
+            count = ai_graph.warnings.len(),
+            "import produced warnings (run with -v / RUST_LOG=debug for detail)"
+        );
+        for w in &ai_graph.warnings {
+            if let Some(ref node) = w.node_name {
+                tracing::debug!(node = %node, "{}", w.message);
+            } else {
+                tracing::debug!("{}", w.message);
+            }
         }
     }
 
