@@ -19,7 +19,7 @@ use std::collections::HashMap;
 use std::time::Instant;
 
 use hologram_ai::{HoloRunner, ModelCompiler, ModelSource};
-use hologram_ai_common::{shape_from_concrete, AiGraph, AiNode, AiOp, DType, TensorInfo};
+use hologram_ai_common::{shape_from_concrete, AiGraph, AiNode, AiOp, AiParam, DType, TensorInfo};
 
 /// `layers` chained `[d, d]` matmuls; weights are graph inputs (tids 1..=layers)
 /// supplied at execution. Param count = `layers · d²`.
@@ -158,5 +158,159 @@ fn full_weight_billion_param_forward_and_reuse() {
     eprintln!(
         "PV-5 OK: {params}-param full-weight forward {forward:?}, reuse {reuse:?} ({:.0}× faster)",
         forward.as_secs_f64() / reuse.as_secs_f64().max(1e-9)
+    );
+}
+
+/// `layers` chained `Dequantize(W_i8) → MatMul`, weights supplied as packed i8
+/// graph inputs (1 byte/param). Per-layer scale `1/(d·fill)` with uniform fill
+/// `fill_i` makes each dequantized weight ≈ `1/d` uniform, so the composition
+/// preserves the input mean (a checkable result) while keeping every layer's
+/// packed bytes distinct (so the resident pool reflects the true packed set).
+fn quant_matmul_stack(d: u64, layers: u64) -> (AiGraph, Vec<u8>) {
+    let mut nodes = Vec::new();
+    let mut ti: HashMap<u32, TensorInfo> = HashMap::new();
+    let mut params: HashMap<u32, AiParam> = HashMap::new();
+    let row = shape_from_concrete(&[1, d]);
+    let weight = shape_from_concrete(&[d, d]);
+
+    ti.insert(0, TensorInfo::new(DType::F32, row.clone())); // X
+    let zp = 1u32;
+    ti.insert(zp, TensorInfo::new(DType::INT8, shape_from_concrete(&[])));
+    params.insert(zp, AiParam::inline(vec![0u8], ti[&zp].clone()));
+
+    let mut next = 2u32;
+    let mut inputs = vec![0u32];
+    let mut fills = vec![0u8]; // index 0 unused (X is provided separately)
+    let mut prev = 0u32;
+    for i in 0..layers {
+        let fill = (i % 100 + 1) as i8; // small, nonzero
+        let scale = 1.0f32 / (d as f32 * fill as f32);
+        let wq = next;
+        let sc = next + 1;
+        let dq = next + 2;
+        let mm = next + 3;
+        next += 4;
+        ti.insert(wq, TensorInfo::new(DType::INT8, weight.clone()));
+        ti.insert(sc, TensorInfo::new(DType::F32, shape_from_concrete(&[])));
+        ti.insert(dq, TensorInfo::new(DType::F32, weight.clone()));
+        ti.insert(mm, TensorInfo::new(DType::F32, row.clone()));
+        params.insert(sc, AiParam::inline(scale.to_le_bytes().to_vec(), ti[&sc].clone()));
+        inputs.push(wq);
+        fills.push(fill as u8);
+        nodes.push(AiNode::new(2 * i as u32, AiOp::Dequantize { axis: -1 }, vec![wq, sc, zp], vec![dq]));
+        nodes.push(AiNode::new(2 * i as u32 + 1, AiOp::MatMul, vec![prev, dq], vec![mm]));
+        prev = mm;
+    }
+
+    let g = AiGraph {
+        name: format!("quant_mm_stack_d{d}_l{layers}"),
+        nodes,
+        inputs,
+        outputs: vec![prev],
+        input_names: Vec::new(),
+        output_names: Vec::new(),
+        params,
+        tensor_info: ti,
+        metadata: HashMap::new(),
+        warnings: Vec::new(),
+        dim_vars: Default::default(),
+        shape_constraints: Default::default(),
+        subgraphs: HashMap::new(),
+        tensor_names: HashMap::new(),
+        topo_cache: Default::default(),
+    };
+    (g, fills)
+}
+
+#[test]
+fn quantized_large_model_fits_and_runs() {
+    if std::env::var("HOLOGRAM_AI_LARGE").as_deref() != Ok("1") {
+        eprintln!("SKIP: set HOLOGRAM_AI_LARGE=1 to run the large quantized model");
+        return;
+    }
+    // Default 1B — runs in <1 GB of resident weights (i8 = 1 B/param) vs the
+    // 3.76 GB the f32 path needs for the same model. HOLOGRAM_AI_PARAMS scales
+    // it up on hosts with more RAM (the packed weight set grows linearly; the
+    // per-layer dense-f32 dequant scratch at d=8192 is the gating term in a
+    // constrained box, not the packed weights).
+    let target: u64 = std::env::var("HOLOGRAM_AI_PARAMS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(1_000_000_000);
+    let d = 8192u64;
+    let layers = (target / (d * d)).max(1);
+    let params = layers * d * d;
+    eprintln!(
+        "quantized target {target} → d={d}, {layers} layers = {params} params \
+         ({:.2} GB i8 weights vs {:.2} GB f32)",
+        params as f64 / 1e9,
+        (params * 4) as f64 / 1e9
+    );
+
+    let (graph, fills) = quant_matmul_stack(d, layers);
+    let t = Instant::now();
+    let archive = ModelCompiler::default()
+        .compile(ModelSource::AiGraph(graph))
+        .expect("compile failed");
+    eprintln!("compiled in {:?} → {} archive bytes", t.elapsed(), archive.bytes.len());
+    let mut runner = HoloRunner::from_bytes(archive.bytes).expect("load failed");
+
+    // Known input; the layer scaling preserves its mean through every layer.
+    let x: Vec<f32> = (0..d).map(|j| (j % 13) as f32).collect();
+    let mean = x.iter().sum::<f32>() / d as f32;
+
+    // Packed i8 weight inputs: each layer a distinct uniform fill (1 B/param).
+    let sizes = runner.input_byte_sizes();
+    eprintln!(
+        "allocating {} input buffers, {:.2} GB total (packed i8)",
+        sizes.len(),
+        sizes.iter().sum::<usize>() as f64 / 1e9
+    );
+    let mut buffers: Vec<Vec<u8>> = Vec::with_capacity(sizes.len());
+    buffers.push(x.iter().flat_map(|v| v.to_le_bytes()).collect()); // X (input 0)
+    for i in 1..sizes.len() {
+        buffers.push(vec![fills[i]; sizes[i]]); // W_q_{i-1}, distinct fill
+    }
+
+    let refs: Vec<&[u8]> = buffers.iter().map(|v| v.as_slice()).collect();
+    let t = Instant::now();
+    let out = runner.execute(&refs).expect("forward failed");
+    let forward = t.elapsed();
+
+    // Every Dequantize→MatMul fused: the i8 weight is read packed, in-register.
+    assert_eq!(
+        runner.dequant_matmul_fused_count(),
+        layers as usize,
+        "all {layers} layers must fuse to MatMulDequant (weights stay packed)"
+    );
+
+    // Output preserves the input mean (per-layer scaling), so it's checkable.
+    let y: Vec<f32> = out[0]
+        .bytes
+        .chunks_exact(4)
+        .map(|c| f32::from_le_bytes(c.try_into().unwrap()))
+        .collect();
+    let max_err = y.iter().map(|&v| (v - mean).abs()).fold(0.0f32, f32::max);
+    assert!(
+        max_err <= 1e-2 + mean.abs() * 1e-2,
+        "quantized forward wrong: max |y - mean(X)={mean}| = {max_err}"
+    );
+
+    // Runtime weight footprint is the PACKED i8 set (≈ 1 B/param), not 4×.
+    let resident = runner.resident_bytes();
+    eprintln!(
+        "forward {forward:?}, output VERIFIED (max |err| {max_err:.2e}), resident {:.2} GB \
+         (i8 packed; dense f32 would be {:.2} GB)",
+        resident as f64 / 1e9,
+        (params * 4) as f64 / 1e9
+    );
+    // Bounded: the content-addressed pool rolls generations, so the resident
+    // footprint stays at (a fraction of) the packed weight set — never the
+    // dense f32. The packed-weight reuse contract itself is covered by
+    // `full_weight_billion_param_forward_and_reuse` (f32) and the per-tensor /
+    // per-channel / i4 cases in `quantized_weight_memory.rs`.
+    assert!(
+        (resident as u64) < params * 2,
+        "resident {resident} B should be ~packed (≈{params} B), not dense f32"
     );
 }
