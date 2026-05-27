@@ -21,6 +21,17 @@ use std::time::Instant;
 use hologram_ai::{HoloRunner, ModelCompiler, ModelSource};
 use hologram_ai_common::{shape_from_concrete, AiGraph, AiNode, AiOp, AiParam, DType, TensorInfo};
 
+/// Process resident set size (bytes), from `/proc/self/statm` — a coarse but
+/// honest measure of the *peak* memory the box must hold, used to locate where
+/// a large model's memory actually goes (V&V: understand the limit).
+fn rss_bytes() -> u64 {
+    std::fs::read_to_string("/proc/self/statm")
+        .ok()
+        .and_then(|s| s.split_whitespace().nth(1).and_then(|p| p.parse::<u64>().ok()))
+        .map(|pages| pages * 4096)
+        .unwrap_or(0)
+}
+
 /// `layers` chained `[d, d]` matmuls; weights are graph inputs (tids 1..=layers)
 /// supplied at execution. Param count = `layers · d²`.
 fn matmul_stack(d: u64, layers: u64) -> AiGraph {
@@ -271,11 +282,13 @@ fn quantized_large_model_fits_and_runs() {
     for i in 1..sizes.len() {
         buffers.push(vec![fills[i]; sizes[i]]); // W_q_{i-1}, distinct fill
     }
+    eprintln!("RSS after building input buffers: {:.2} GB", rss_bytes() as f64 / 1e9);
 
     let refs: Vec<&[u8]> = buffers.iter().map(|v| v.as_slice()).collect();
     let t = Instant::now();
     let out = runner.execute(&refs).expect("forward failed");
     let forward = t.elapsed();
+    eprintln!("RSS after forward (peak): {:.2} GB", rss_bytes() as f64 / 1e9);
 
     // Every Dequantize→MatMul fused: the i8 weight is read packed, in-register.
     assert_eq!(
