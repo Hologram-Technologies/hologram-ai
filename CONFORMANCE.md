@@ -177,7 +177,7 @@ and are exempt from NS/ZA/ZM, exactly as hologram's CLI is a std host over its
 | **PV-2** | **Content-addressed reuse is the win.** Re-executing an unchanged graph on the same inputs is a κ-label memo hit (O(1), no compute/copy) — far faster than recompute. Observed (256³ matmul): cold 1.93 ms vs reuse 176 ns (~11000×). | `tests/perf_contract.rs` (`content_addressed_reuse_beats_recompute`) | `just vv-perf` | ✅ |
 | **PV-3** | **Bounded, weight-size-independent compile.** Compile cost tracks graph structure, not parameter count (weights never materialize at compile). | `tests/perf_contract.rs` (`compile_cost_is_independent_of_parameter_count`) | `just vv-perf` | ✅ |
 | **PV-4** | Matmul throughput holds its efficiency across the 64/128/256/512 sweep (mirrors hologram's matmul scaling); every size compiles + runs end to end. | `bench scaling` + `tests/perf_contract.rs` (`matmul_sweep_runs_at_every_size`) | `just vv-perf` | ✅ |
-| **PV-5** | Full-weight execution of billion-parameter models (1B ≈ 4 GB … 20B ≈ 80 GB of weights). Hardware-bound (RAM/IO), not an hologram-ai limit; the compile path is validated at full scale by PV-1 and the streaming/bounded-carrier addressing by uor-addr (MA-1b). | release run on sized hardware | (infra-bound) | 🚧 |
+| **PV-5** | **Full-weight billion-parameter execution.** A real forward pass over ~1B f32 weights (3.76 GB, weights resident in the content-addressed pool) runs end to end, and the κ-label reuse contract holds with weights resident. Observed (939M params): cold forward 4.41 s vs reuse 479 ns (**~9.2 M×**). Scales with host RAM via `HOLOGRAM_AI_PARAMS`. | `HOLOGRAM_AI_LARGE=1` release test | `tests/perf_contract_large.rs` (`just vv-perf-large`) | ✅ |
 
 ---
 

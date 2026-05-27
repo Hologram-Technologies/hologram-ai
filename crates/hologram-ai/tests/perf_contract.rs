@@ -140,11 +140,37 @@ fn content_addressed_reuse_beats_recompute() {
     let mut runner = HoloRunner::from_bytes(archive.bytes).expect("load");
 
     let sizes = runner.input_byte_sizes();
-    let base: Vec<Vec<u8>> = sizes.iter().map(|&n| vec![0u8; n]).collect();
+    // Non-trivial known input so the reference output is not all-zero: A and B
+    // each set to the identity matrix, so Y = A·B = identity.
+    let n = 256usize;
+    let identity_bytes = {
+        let mut v = vec![0u8; n * n * 4];
+        for k in 0..n {
+            v[(k * n + k) * 4..(k * n + k) * 4 + 4].copy_from_slice(&1.0f32.to_le_bytes());
+        }
+        v
+    };
+    let base: Vec<Vec<u8>> = sizes.iter().map(|_| identity_bytes.clone()).collect();
 
-    // Warm + measure reuse (fixed labels → memo hit).
+    // Reference output from a byte-level forward (independent of the reuse path).
+    let refs0: Vec<&[u8]> = base.iter().map(|v| v.as_slice()).collect();
+    let reference: Vec<u8> = runner.execute(&refs0).expect("reference")[0].bytes.clone();
+    // I·I = I: diagonal 1.0, off-diagonal 0.0 — confirms the forward is correct.
+    for r in 0..n {
+        for c in 0..n {
+            let off = (r * n + c) * 4;
+            let v = f32::from_le_bytes(reference[off..off + 4].try_into().unwrap());
+            let want = if r == c { 1.0 } else { 0.0 };
+            assert!((v - want).abs() <= 1e-5, "I·I wrong at [{r},{c}]: {v} != {want}");
+        }
+    }
+
+    // Warm + measure reuse (fixed labels → memo hit), and verify the memo hit
+    // returns the *identical* bytes (content-addressing correctness, not just speed).
     let labels: Vec<_> = base.iter().map(|v| runner.intern_input(v)).collect();
-    runner.execute_addressed(&labels).expect("warm");
+    let reuse_labels = runner.execute_addressed(&labels).expect("warm");
+    let reused_bytes = runner.resolve(&reuse_labels[0]).expect("resolve reuse output");
+    assert_eq!(reused_bytes, reference.as_slice(), "memo hit returned different bytes");
     let reuse = {
         let t = Instant::now();
         for _ in 0..50 {

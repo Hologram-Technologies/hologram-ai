@@ -50,6 +50,11 @@ vv-perf:
     cargo test --release -p hologram-ai --test perf_contract -- --nocapture
     cargo bench -p hologram-ai --bench scaling
 
+# PV-5 — full-weight billion-parameter execution (real ~4 GB weight set).
+# Hardware-bound: needs RAM ≳ weight set. HOLOGRAM_AI_PARAMS scales the target.
+vv-perf-large:
+    HOLOGRAM_AI_LARGE=1 cargo test --release -p hologram-ai --test perf_contract_large -- --nocapture --test-threads=1
+
 # Install the cross-compilation targets the portability axis needs.
 vv-setup:
     rustup target add wasm32-unknown-unknown thumbv7em-none-eabi
