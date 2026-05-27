@@ -2099,6 +2099,7 @@ dependencies = [
  "hologram-graph",
  "hologram-host",
  "hologram-ops",
+ "hologram-types",
  "smallvec",
  "thiserror 2.0.18",
  "uor-foundation",
