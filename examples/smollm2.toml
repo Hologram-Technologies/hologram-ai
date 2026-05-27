@@ -1,0 +1,45 @@
+# SmolLM2-135M-Instruct — compile + real text generation (verified).
+#
+# This is the reference end-to-end example: a real pretrained Llama-family model
+# (RoPE + grouped-query attention + RMSNorm + SwiGLU) compiled and generated
+# through hologram-ai's canonical UOR-native pipeline. hologram-ai uses explicit
+# CLI flags (there is no `--config` mode); the exact commands are:
+#
+# Download (lays out model.onnx + tokenizer.json under models/…):
+#   cargo run --release -- download HuggingFaceTB/SmolLM2-135M-Instruct
+#
+# Compile (model.onnx → model.holo). `--seq-len` sets the recompute window
+# (prompt + generated tokens must fit). The tokenizer is baked into the .holo,
+# so generation needs no external tokenizer file:
+#   cargo run --release -- compile \
+#     --model models/SmolLM2-135M-Instruct/model.onnx \
+#     --output models/SmolLM2-135M-Instruct \
+#     --seq-len 64
+#
+# Generate (greedy, temperature 0 — deterministic):
+#   cargo run --release -- run models/SmolLM2-135M-Instruct/model.holo \
+#     --prompt "The sun rises in the" --max-tokens 10
+#
+# Observed output (greedy, this 135M base model):
+#   "The sun rises in the"      → " sky, and the sky is a beautiful blue."
+#   "The capital of France is"  → " the capital of France."
+#   "Once upon a time"          → ", the snail will climb 3 feet each day"
+#
+# HOW IT RUNS: the onnx-community export is a *with-past* decoder graph (input_ids
+# + past KV per step). hologram-ai has no external KV-cache — autoregressive reuse
+# is content-addressed κ-label elision — so it runs the export as a full-recompute
+# prefill with an EMPTY past (`Concat(past[…,0,…], cur) = cur`). `run --prompt`
+# recomputes the growing token window each step; the unchanged prefix is recognized
+# by content address and elided. See `cargo run -p hologram-ai --example
+# text_generation` for the same loop on a deterministic, closed-form-verified LM.
+
+[model]
+hf_id = "HuggingFaceTB/SmolLM2-135M-Instruct"
+
+[compile]
+seq_len = 64
+
+[run]
+prompt = "The sun rises in the"
+max_tokens = 10
+temperature = 0.0

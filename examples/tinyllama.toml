@@ -30,13 +30,12 @@
 # `cargo run -p hologram-ai --example text_generation` (deterministic, checked
 # against a closed-form expectation) and `tests/generation_synthetic.rs`.
 #
-# Generating from a *pretrained* checkpoint additionally needs a **no-past**
-# forward export: hologram-ai replaces the mutable KV-cache with content-addressed
-# κ-label elision, so `run --prompt` recomputes the growing token window and
-# reuses the unchanged prefix by content address. The default HF/onnx-community
-# exports are *with-past decode-step* graphs (input_ids[1,1] + past KV per step),
-# which `generate_stream` does not drive; converting such a graph to its no-past
-# recompute form is the remaining step for one-command real-LM chat.
+# Real generation works on the standard *with-past* HF/onnx-community exports:
+# hologram-ai replaces the mutable KV-cache with content-addressed κ-label
+# elision, so it runs the with-past decoder as a full-recompute prefill with an
+# empty past (`Concat(past[…,0,…], cur) = cur`) and `run --prompt` recomputes the
+# growing token window, eliding the unchanged prefix by content address. Verified
+# end-to-end on SmolLM2-135M — see `examples/smollm2.toml`.
 
 [model]
 hf_id = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"

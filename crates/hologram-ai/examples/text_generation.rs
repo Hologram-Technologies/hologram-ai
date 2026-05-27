@@ -14,12 +14,12 @@
 //! model that exercises the entire generation loop (encode → forward → argmax →
 //! detokenize → stop) through the canonical compile + execute path.
 //!
-//! For real pretrained LLMs the same code applies, but the model must be a
-//! **no-past** forward export (`input_ids[1,S] → logits[1,S,V]`): hologram-ai
-//! replaces the mutable KV-cache with content-addressed κ-label elision, so it
-//! recomputes the growing token window each step and reuses the unchanged prefix
-//! by content address. With-past *decode-step* exports (input_ids[1,1] + past
-//! KV) do not fit this loop — see `examples/tinyllama.toml`.
+//! The same `run --prompt` path drives real pretrained LLMs: hologram-ai replaces
+//! the mutable KV-cache with content-addressed κ-label elision, so it runs even a
+//! standard *with-past* decoder export as a full-recompute prefill with an empty
+//! past and recomputes the growing token window each step, reusing the unchanged
+//! prefix by content address. Verified on SmolLM2-135M — see
+//! `examples/smollm2.toml` for the real-model commands and sample output.
 
 use std::collections::HashMap;
 
