@@ -50,6 +50,10 @@ const CASES: &[NodeTest] = &[
     // canonical Dequantize path end to end.
     NodeTest { dir: "dequantizelinear", n_inputs: 3, op: "Dequantize" },
     NodeTest { dir: "dequantizelinear_axis", n_inputs: 3, op: "Dequantize" },
+    // First-class Gather (embedding lookup): data + integer indices are graph
+    // inputs, exercising the runtime-indexed Gather kernel vs ONNX's own output.
+    NodeTest { dir: "gather_0", n_inputs: 2, op: "Gather" },
+    NodeTest { dir: "gather_1", n_inputs: 2, op: "Gather" },
 ];
 
 const BASE: &str =

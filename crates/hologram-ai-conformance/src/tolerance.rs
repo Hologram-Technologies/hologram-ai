@@ -28,9 +28,10 @@ impl Tolerance {
 /// integer/boolean ops get zero tolerance.
 pub fn tolerance_for(op_name: &str) -> Tolerance {
     match op_name {
-        // Exact: comparisons, boolean, integer-index ops.
+        // Exact: comparisons, boolean, integer-index ops. Gather copies values
+        // verbatim (a row select), so it is bit-exact.
         "Equal" | "Less" | "LessOrEqual" | "Greater" | "GreaterOrEqual" | "And" | "Or" | "Xor"
-        | "Bnot" | "Sign" | "IsNaN" => Tolerance {
+        | "Bnot" | "Sign" | "IsNaN" | "Gather" => Tolerance {
             atol: 0.0,
             rtol: 0.0,
         },

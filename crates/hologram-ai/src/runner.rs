@@ -83,6 +83,15 @@ impl HoloRunner {
             .collect()
     }
 
+    /// Byte size of each graph output, in graph-output order.
+    pub fn output_byte_sizes(&self) -> Vec<usize> {
+        self.session
+            .output_ports()
+            .iter()
+            .map(|p| port_byte_size(p.element_count as usize, p.dtype))
+            .collect()
+    }
+
     /// Per-input [`PortInfo`] (name, dtype, element count, shape), in graph-input
     /// order. Compiled archives now carry port **names**, so a caller can find a
     /// role by name (e.g. `"input_ids"`) via [`Self::input_index_by_name`]

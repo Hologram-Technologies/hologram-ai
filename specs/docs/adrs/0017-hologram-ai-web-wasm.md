@@ -76,13 +76,22 @@ on `hologram-exec`/`hologram-backend`. Instead:
 This matches class NS (a no_std / non-parallel runtime-core build is a
 first-class target) and the hologram repo's own `default-features = false` stance.
 
-### 3. The run + generate logic is shared, not duplicated
+### 3. The wasm crate reuses the facade — no duplicated core
 
-The generation loop (LM port contract, sampling, stop handling, the decode
-loop) is factored to operate over a minimal `Forward` capability
-(`input_port_info` / `output_port_info` / `execute`) so both the CLI's
-`HoloRunner` and the wasm runner drive **one** implementation. "Reuse as much as
-possible" applies to the Rust core, not just the UI.
+Rather than extract a separate run/generate core, `hologram-ai` itself is made
+wasm-buildable: its native-only pieces (the model downloader + its toolchain:
+reqwest/tokio/indicatif/dirs/which/sha2/tempfile, and CLI logging) move behind a
+default-on `native` feature, and the `download` module is `#[cfg(feature =
+"native")]`. The compile/run/generate core has no native dependency. So
+`hologram-ai-wasm` depends on `hologram-ai` with `default-features = false` and
+calls the **real** `ModelCompiler`, `HoloRunner`, and `generate_stream` — all
+four browser verbs (`compile`, `describe`, `run`, `generate`) are the CLI's own
+code paths, not reimplementations.
+
+**Status: implemented + verified.** `compile`/`describe`/`run`/`generate` run
+under node via `wasm-pack test` (the test even compiles an LM + tokenizer
+*in-wasm*, then generates). The first-class `Gather` lowering is verified against
+the **ONNX node-test corpus** (`gather_0`/`gather_1`, exact match).
 
 ### 4. The web frontend reuses the React app; only the command layer changes
 

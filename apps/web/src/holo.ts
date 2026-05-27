@@ -2,7 +2,12 @@
 // Tauri `invoke()` backend. The browser GUI calls these functions; they drive
 // the REAL hologram-ai pipeline compiled to WebAssembly (`hologram-ai-wasm`),
 // not a reimplementation. Build the wasm package first: `pnpm wasm`.
-import init, { describe as wasmDescribe, run as wasmRun } from "./wasm/hologram_ai_wasm.js";
+import init, {
+  describe as wasmDescribe,
+  run as wasmRun,
+  compile as wasmCompile,
+  generate as wasmGenerate,
+} from "./wasm/hologram_ai_wasm.js";
 
 export interface Port {
   name: string;
@@ -50,22 +55,34 @@ export async function run(
   return wasmRun(holo, inputs, fill ?? undefined) as Output[];
 }
 
-// ── Pending platform verbs ────────────────────────────────────────────────────
-// Surfaced honestly (they throw), not faked — consistent with the V&V
-// no-silent-fallback ethos. Wired once the shared compile/run core is factored
-// out of the native facade, and (for chat) the int64-embedding upstream fix
-// lands. See ADR-0017 §3 and specs/notes/upstream-request-int-embedding.md.
-
-export async function compile(_onnx: Uint8Array): Promise<Uint8Array> {
-  throw new Error(
-    "compile() in-browser is pending the shared compile-core extraction (ADR-0017 §3). " +
-      "Until then, compile with the CLI and load the .holo here.",
-  );
+/** Compile an ONNX model (bytes) → a `.holo` archive (bytes), in the browser. */
+export async function compile(onnx: Uint8Array): Promise<Uint8Array> {
+  await ensureReady();
+  return wasmCompile(onnx);
 }
 
-export async function generate(): Promise<never> {
-  throw new Error(
-    "generate() is pending the run-core extraction and the int64 token-embedding " +
-      "upstream fix (specs/notes/upstream-request-int-embedding.md).",
-  );
+/** Generation options (all optional). */
+export interface GenOpts {
+  prompt_template?: string;
+  max_tokens?: number;
+  temperature?: number;
+  top_k?: number;
+  stop?: string[];
+  eos?: number;
+  seed?: number;
+}
+
+/**
+ * Autoregressive text generation over a compiled causal LM. The tokenizer is
+ * read from the archive's baked-in extension unless `tokenizer` (a
+ * `tokenizer.json`'s bytes) is given. Returns the generated text.
+ */
+export async function generate(
+  holo: Uint8Array,
+  prompt: string,
+  opts: GenOpts = {},
+  tokenizer?: Uint8Array,
+): Promise<string> {
+  await ensureReady();
+  return wasmGenerate(holo, tokenizer ?? undefined, prompt, opts);
 }

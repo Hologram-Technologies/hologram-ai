@@ -9,6 +9,7 @@ use anyhow::Context as _;
 use clap::Parser;
 use hologram_ai::commands::run_cmd::{execute as run_execute, RunArgs};
 use hologram_ai::compiler::{ModelCompiler, ModelSource};
+#[cfg(feature = "native")]
 use hologram_ai::download::{self, DownloadArgs};
 use hologram_ai_common::lower::QuantStrategy;
 use std::path::PathBuf;
@@ -51,10 +52,12 @@ enum Command {
     /// Execute a compiled `.holo` archive.
     Run(RunArgs),
     /// Download a model.
+    #[cfg(feature = "native")]
     Download(DownloadArgs),
 }
 
 fn main() -> anyhow::Result<()> {
+    #[cfg(feature = "native")]
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -72,6 +75,7 @@ fn main() -> anyhow::Result<()> {
             spatial_scale,
         } => compile(model, output, name, seq_len, quantize, spatial_scale),
         Command::Run(args) => run_execute(args),
+        #[cfg(feature = "native")]
         Command::Download(args) => download::run(args),
     }
 }

@@ -1922,7 +1922,6 @@ dependencies = [
  "indicatif",
  "memmap2",
  "parking_lot",
- "rayon",
  "reqwest 0.12.28",
  "rkyv",
  "serde",
@@ -2052,11 +2051,12 @@ version = "0.1.0"
 dependencies = [
  "console_error_panic_hook",
  "half",
- "hologram-archive",
- "hologram-backend",
- "hologram-exec",
+ "hologram-ai",
+ "hologram-ai-common",
+ "hologram-ai-tokenizer",
  "serde",
  "serde-wasm-bindgen",
+ "serde_json",
  "wasm-bindgen",
  "wasm-bindgen-test",
 ]

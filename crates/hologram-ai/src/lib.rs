@@ -9,6 +9,9 @@
 pub mod address;
 pub mod commands;
 pub mod compiler;
+/// Model downloader — native only (HTTP + tokio + local toolchain). Absent from
+/// the wasm build (`--no-default-features`).
+#[cfg(feature = "native")]
 pub mod download;
 pub mod runner;
 pub mod validate;
