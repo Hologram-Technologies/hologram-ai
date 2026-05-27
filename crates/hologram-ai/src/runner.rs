@@ -131,6 +131,14 @@ impl HoloRunner {
     pub fn resident_count(&self) -> usize {
         self.session.resident_count()
     }
+
+    /// Number of `dequantize → matmul` pairs hologram fused into
+    /// `MatMulDequant` — the quantized weight read in-register, with the dense
+    /// f32 weight never materialized. Non-zero means a quantized model keeps its
+    /// weights packed at runtime (architecture §6, class QZ).
+    pub fn dequant_matmul_fused_count(&self) -> usize {
+        self.session.dequant_fused_count()
+    }
 }
 
 /// Byte width of a canonical dtype tag (`hologram_backend::cpu::dtype` encoding).

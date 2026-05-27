@@ -11,7 +11,7 @@ use std::collections::HashMap;
 
 use anyhow::{Context, Result};
 use hologram_graph::constant::ConstantEntry;
-use hologram_graph::node::{ConvAttrs, GemmAttrs, LrnAttrs, Node};
+use hologram_graph::node::{ConvAttrs, GemmAttrs, LrnAttrs, Node, QuantAttrs};
 use hologram_graph::registry::{DTypeId, ShapeDescriptor, ShapeId};
 use hologram_graph::{Graph, GraphOp, InputSource, NodeId, OpKind};
 use smallvec::SmallVec;
@@ -521,6 +521,7 @@ impl<'a> Ctx<'a> {
             } => self.desugar_reverse_sequence(node, batch_axis, time_axis),
             DesugarKind::Scatter { .. } => self.desugar_scatter(node),
             DesugarKind::Quantize => self.desugar_quantize(node),
+            DesugarKind::Dequantize => self.desugar_dequantize(node),
             DesugarKind::MatMulActivation { activation } => {
                 self.desugar_matmul_act(node, activation)
             }
@@ -918,6 +919,113 @@ impl<'a> Ctx<'a> {
         // runtime Quantize is the identity on already-encoded values.
         let data = self.src(node.inputs[0])?;
         self.bind_out(node, data)
+    }
+
+    /// `Dequantize` (ONNX `DequantizeLinear`, inputs `[x_quant, scale, zp?]`) →
+    /// canonical `OpKind::Dequantize` over the **packed** quantized operand.
+    /// The scale/zero-point are attached as `QuantAttrs` (per-tensor: scalar
+    /// scale folded into the node; per-channel: scale/zp vectors as trailing
+    /// operands, channel axis inferred from the scale length). Crucially the
+    /// quantized weight `x` stays operand 0 at its quantum width (i8 = 1 B/param,
+    /// i4 = ½), so hologram's `fuse_dequant_matmul → MatMulDequant` and
+    /// `fuse_dequant_activation → DequantActivation` dequantize it **in-register**
+    /// — the dense f32 weight is never materialized (architecture §6, class QZ).
+    fn desugar_dequantize(&mut self, node: &AiNode) -> Result<()> {
+        let x_tid = *node.inputs.first().context("Dequantize missing input")?;
+        let quant_dtype = self.dtype_of(x_tid).0;
+        let (out_dtype, out_shape) = self.out_dtype_shape(node)?;
+        let x_src = self.src(x_tid)?;
+
+        let scale_tid = node.inputs.get(1).copied();
+        let zp_tid = node.inputs.get(2).copied();
+        let scale_len = scale_tid
+            .and_then(|t| self.tensor_dims(t).ok())
+            .map(|d| d.iter().product::<u64>())
+            .unwrap_or(1);
+
+        if scale_len <= 1 {
+            // Per-tensor: scalar scale/zero-point fold into the node's QuantAttrs;
+            // hologram reads them directly (no scale/zp operands).
+            let scale = match scale_tid {
+                Some(t) => self.const_scalar_f32(t)?,
+                None => 1.0,
+            };
+            let zero_point = match zp_tid {
+                Some(t) => self.const_scalar_i32(t)?,
+                None => 0,
+            };
+            let nid = self.add(
+                GraphOp::Op(OpKind::Dequantize),
+                SmallVec::from_iter([x_src]),
+                out_dtype,
+                out_shape,
+            );
+            self.graph.set_quant_attrs(
+                nid,
+                QuantAttrs {
+                    quant_dtype,
+                    scale_bits: scale.to_bits(),
+                    zero_point,
+                    axis: -1,
+                },
+            );
+            self.bind_out(node, InputSource::Node(nid))
+        } else {
+            // Per-channel: scale (and zero-point) are vectors passed as operands;
+            // the channel axis is the x dimension the scale vector sizes.
+            let scale_src = self.src(scale_tid.expect("scale_len > 1 ⇒ scale operand"))?;
+            let x_dims = self.tensor_dims(x_tid)?;
+            let axis = x_dims
+                .iter()
+                .position(|&d| d == scale_len)
+                .map(|p| p as i32)
+                .unwrap_or(0);
+            let mut inputs: SmallVec<[InputSource; 4]> = SmallVec::from_iter([x_src, scale_src]);
+            if let Some(zt) = zp_tid {
+                inputs.push(self.src(zt)?);
+            }
+            let nid = self.add(GraphOp::Op(OpKind::Dequantize), inputs, out_dtype, out_shape);
+            self.graph.set_quant_attrs(
+                nid,
+                QuantAttrs {
+                    quant_dtype,
+                    scale_bits: 0,
+                    zero_point: 0,
+                    axis,
+                },
+            );
+            self.bind_out(node, InputSource::Node(nid))
+        }
+    }
+
+    /// First element of an inline constant param as `f32` (per-tensor scale).
+    fn const_scalar_f32(&self, tid: TensorId) -> Result<f32> {
+        self.ai
+            .params
+            .get(&tid)
+            .and_then(|p| p.as_f32_slice().and_then(|s| s.first().copied()))
+            .with_context(|| format!("Dequantize scale T{tid} is not an f32 constant"))
+    }
+
+    /// First element of an inline integer constant param as `i32` (zero-point,
+    /// stored as the quantized dtype — i8 / u8 / i32 / i64).
+    fn const_scalar_i32(&self, tid: TensorId) -> Result<i32> {
+        let (data, info) = match self.ai.params.get(&tid) {
+            Some(AiParam::Inline { data, info }) => (data.as_slice(), info),
+            _ => anyhow::bail!("Dequantize zero-point T{tid} is not an inline constant"),
+        };
+        let v = match info.logical_dtype {
+            DType::INT8 => *data.first().unwrap_or(&0) as i8 as i32,
+            DType::U8 | DType::BOOL => *data.first().unwrap_or(&0) as i32,
+            DType::INT32 => i32::from_le_bytes(
+                data.get(..4).and_then(|b| b.try_into().ok()).unwrap_or([0; 4]),
+            ),
+            DType::INT64 => i64::from_le_bytes(
+                data.get(..8).and_then(|b| b.try_into().ok()).unwrap_or([0; 8]),
+            ) as i32,
+            _ => 0,
+        };
+        Ok(v)
     }
 
     // ── reductions ────────────────────────────────────────────────────────────

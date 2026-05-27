@@ -149,6 +149,12 @@ pub enum DesugarKind {
     },
     /// `Quantize(scheme)` → `Div`/`Round`/`Clip`/`Mul` over the primitives.
     Quantize,
+    /// `Dequantize` (ONNX `DequantizeLinear`) → canonical `OpKind::Dequantize`
+    /// reading the **packed** quantized operand, with scale/zero-point attached
+    /// as `QuantAttrs` (per-tensor) or trailing operands (per-channel) so
+    /// hologram's `MatMulDequant` / `DequantActivation` fusions consume the
+    /// weight at its quantum width — the dense f32 is never materialized (§6).
+    Dequantize,
     /// Legacy matmul+activation fusion → unfused `MatMul` then the activation,
     /// so hologram fuses structurally (architecture §5.3).
     MatMulActivation {
@@ -457,7 +463,7 @@ pub fn dispatch(op: &AiOp) -> OpPlan {
 
         // ── Type / quant / lookup ───────────────────────────────────────────
         A::Cast { to } => P::Desugar(DesugarKind::Cast { to: *to }),
-        A::Dequantize => P::Direct(OpKind::Dequantize),
+        A::Dequantize => P::Desugar(DesugarKind::Dequantize),
         A::Quantize { .. } => P::Desugar(DesugarKind::Quantize),
         A::Embed => P::Desugar(DesugarKind::Embed),
 
