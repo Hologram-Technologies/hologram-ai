@@ -45,6 +45,11 @@ const CASES: &[NodeTest] = &[
     NodeTest { dir: "softmax_example", n_inputs: 1, op: "Softmax" },
     NodeTest { dir: "mul", n_inputs: 2, op: "Mul" },
     NodeTest { dir: "sub", n_inputs: 2, op: "Sub" },
+    // Quantized weights / activations against the spec's own vectors (class QZ):
+    // x, scale, zero-point are graph inputs in these cases, so they exercise the
+    // canonical Dequantize path end to end.
+    NodeTest { dir: "dequantizelinear", n_inputs: 3, op: "Dequantize" },
+    NodeTest { dir: "dequantizelinear_axis", n_inputs: 3, op: "Dequantize" },
 ];
 
 const BASE: &str =

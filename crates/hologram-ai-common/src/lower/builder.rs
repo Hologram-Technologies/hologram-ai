@@ -921,100 +921,170 @@ impl<'a> Ctx<'a> {
         self.bind_out(node, data)
     }
 
-    /// `Dequantize` (ONNX `DequantizeLinear`, inputs `[x_quant, scale, zp?]`) →
-    /// canonical `OpKind::Dequantize` over the **packed** quantized operand.
-    /// The scale/zero-point are attached as `QuantAttrs` (per-tensor: scalar
-    /// scale folded into the node; per-channel: scale/zp vectors as trailing
-    /// operands, channel axis inferred from the scale length). Crucially the
-    /// quantized weight `x` stays operand 0 at its quantum width (i8 = 1 B/param,
-    /// i4 = ½), so hologram's `fuse_dequant_matmul → MatMulDequant` and
-    /// `fuse_dequant_activation → DequantActivation` dequantize it **in-register**
-    /// — the dense f32 weight is never materialized (architecture §6, class QZ).
+    /// `Dequantize` (ONNX `DequantizeLinear`, inputs `[x_quant, scale, zp?]`).
+    ///
+    /// Two canonical realizations, chosen by what the model provides — never a
+    /// panic or a hard failure on a valid graph:
+    ///
+    /// 1. **Packed** (the weight case — constant scale + zero-point): emit
+    ///    `OpKind::Dequantize` over the **packed** quantized operand, with
+    ///    scale/zp as `QuantAttrs` (per-tensor scalar) or i32/f32 vector operands
+    ///    (per-channel along the op's declared axis). The quantized weight stays
+    ///    operand 0 at its quantum width (i8 = 1 B/param, i4 = ½), so hologram
+    ///    fuses `Dequantize→MatMul`/`→activation` and reads it **in-register** —
+    ///    the dense f32 is never materialized (architecture §6, class QZ).
+    /// 2. **Primitive** (anything the packed kernel can't express — e.g. a
+    ///    runtime/dynamic scale): the canonical arithmetic
+    ///    `(toᶠ³²(x) − toᶠ³²(zp)) · scale` over `Dequantize`(scale 1)/`Sub`/`Mul`,
+    ///    correct for arbitrary scale/zp shapes and dtypes (§5.2).
     fn desugar_dequantize(&mut self, node: &AiNode, axis: i64) -> Result<()> {
         let x_tid = *node.inputs.first().context("Dequantize missing input")?;
         let quant_dtype = self.dtype_of(x_tid).0;
-        let (out_dtype, out_shape) = self.out_dtype_shape(node)?;
-        let x_src = self.src(x_tid)?;
-
         let scale_tid = node.inputs.get(1).copied();
         let zp_tid = node.inputs.get(2).copied();
-        let scale_len = scale_tid
+
+        // Eligibility for the packed kernel — computed without failing, so an
+        // ineligible case routes to the primitive form instead of erroring.
+        let scale_is_const = scale_tid.is_none_or(|t| self.ai.params.contains_key(&t));
+        let zp_is_const = zp_tid.is_none_or(|t| self.ai.params.contains_key(&t));
+        let scale_len: u64 = scale_tid
             .and_then(|t| self.tensor_dims(t).ok())
-            .map(|d| d.iter().product::<u64>())
+            .map(|d| d.iter().product())
             .unwrap_or(1);
 
-        if scale_len <= 1 {
-            // Per-tensor: scalar scale/zero-point fold into the node's QuantAttrs;
-            // hologram reads them directly (no scale/zp operands).
-            let scale = match scale_tid {
-                Some(t) => self.const_scalar_f32(t)?,
-                None => 1.0,
-            };
-            let zero_point = match zp_tid {
-                Some(t) => self.const_scalar_i32(t)?,
-                None => 0,
-            };
-            let nid = self.add(
-                GraphOp::Op(OpKind::Dequantize),
-                SmallVec::from_iter([x_src]),
-                out_dtype,
-                out_shape,
-            );
-            self.graph.set_quant_attrs(
-                nid,
-                QuantAttrs {
-                    quant_dtype,
-                    scale_bits: scale.to_bits(),
-                    zero_point,
-                    axis: -1,
-                },
-            );
-            self.bind_out(node, InputSource::Node(nid))
-        } else {
-            // Per-channel: scale (and zero-point) are vectors passed as operands;
-            // the channel axis is the op's declared `axis` (ONNX semantics),
-            // normalized against the operand rank. A mismatch between the scale
-            // length and the axis extent is a malformed model — surface it
-            // rather than guessing.
-            let x_dims = self.tensor_dims(x_tid)?;
-            let rank = x_dims.len() as i64;
-            let norm_axis = if axis < 0 { axis + rank } else { axis };
-            if norm_axis < 0 || norm_axis as usize >= x_dims.len() {
-                anyhow::bail!("Dequantize axis {axis} out of range for rank {rank}");
+        if scale_is_const && zp_is_const {
+            if scale_len <= 1 {
+                // Per-tensor: scalar scale/zp fold into QuantAttrs (channels = 0).
+                if let (Some(scale), Some(zero_point)) = (
+                    scale_tid.map_or(Some(1.0), |t| self.const_scalar_f32(t).ok()),
+                    zp_tid.map_or(Some(0), |t| self.const_scalar_i32(t).ok()),
+                ) {
+                    let (out_dtype, out_shape) = self.out_dtype_shape(node)?;
+                    let x_src = self.src(x_tid)?;
+                    let nid = self.add(
+                        GraphOp::Op(OpKind::Dequantize),
+                        SmallVec::from_iter([x_src]),
+                        out_dtype,
+                        out_shape,
+                    );
+                    self.graph.set_quant_attrs(
+                        nid,
+                        QuantAttrs { quant_dtype, scale_bits: scale.to_bits(), zero_point, axis: -1 },
+                    );
+                    return self.bind_out(node, InputSource::Node(nid));
+                }
+            } else if let Ok(x_dims) = self.tensor_dims(x_tid) {
+                // Per-channel: scale (f32) and zero-point (widened to i32) are
+                // vector operands; the channel axis is the op's declared `axis`.
+                let rank = x_dims.len() as i64;
+                let ax = if axis < 0 { axis + rank } else { axis };
+                let fits = ax >= 0
+                    && (ax as usize) < x_dims.len()
+                    && x_dims[ax as usize] == scale_len;
+                let zp_i32 = match zp_tid {
+                    Some(zt) => self.param_as_i32_vec(zt).ok(),
+                    None => Some(vec![0i32; scale_len as usize]),
+                };
+                if let (true, Some(zp_i32), Some(scale_tid)) = (fits, zp_i32, scale_tid) {
+                    let (out_dtype, out_shape) = self.out_dtype_shape(node)?;
+                    let x_src = self.src(x_tid)?;
+                    let scale_src = self.src(scale_tid)?;
+                    let zp_src = self.const_i32(&zp_i32);
+                    let nid = self.add(
+                        GraphOp::Op(OpKind::Dequantize),
+                        SmallVec::from_iter([x_src, scale_src, zp_src]),
+                        out_dtype,
+                        out_shape,
+                    );
+                    self.graph.set_quant_attrs(
+                        nid,
+                        QuantAttrs { quant_dtype, scale_bits: 0, zero_point: 0, axis: ax as i32 },
+                    );
+                    return self.bind_out(node, InputSource::Node(nid));
+                }
             }
-            let chan = x_dims[norm_axis as usize];
-            if chan != scale_len {
-                anyhow::bail!(
-                    "Dequantize per-channel scale length {scale_len} != axis {norm_axis} extent {chan}"
-                );
-            }
-            // hologram's per-channel dequant reads `scales` as f32[ch] (ONNX
-            // scale is already f32 — passed through) and `zero_points` as
-            // i32[ch]; ONNX stores the zero-point at the quantized dtype
-            // (i8/u8), so widen it to i32 here (absent ⇒ zeros).
-            let scale_src = self.src(scale_tid.expect("per-channel ⇒ scale operand"))?;
-            let zp_i32: Vec<i32> = match zp_tid {
-                Some(zt) => self.param_as_i32_vec(zt)?,
-                None => vec![0i32; chan as usize],
-            };
-            let zp_src = self.const_i32(&zp_i32);
-            let nid = self.add(
-                GraphOp::Op(OpKind::Dequantize),
-                SmallVec::from_iter([x_src, scale_src, zp_src]),
-                out_dtype,
-                out_shape,
-            );
-            self.graph.set_quant_attrs(
-                nid,
-                QuantAttrs {
-                    quant_dtype,
-                    scale_bits: 0,
-                    zero_point: 0,
-                    axis: norm_axis as i32,
-                },
-            );
-            self.bind_out(node, InputSource::Node(nid))
         }
+
+        // General canonical form for everything else (runtime scale, or shapes
+        // the packed kernel can't carry). Correct for any model; no panic.
+        self.desugar_dequant_primitive(node, x_tid, quant_dtype, scale_tid, zp_tid, axis)
+    }
+
+    /// Reshape a scalar/per-channel scale-or-zp operand so it broadcasts
+    /// correctly against `x_dims` along `axis`: a length-`C` vector becomes
+    /// `[1,…,C,…,1]` (C at `axis`), a scalar broadcasts as-is.
+    fn channel_align(
+        &mut self,
+        src: InputSource,
+        dims: &[u64],
+        axis: i64,
+        x_dims: &[u64],
+    ) -> InputSource {
+        let f32t = DTypeId(DTYPE_F32);
+        let total: u64 = dims.iter().product();
+        if total <= 1 {
+            return self.broadcast_to(src, f32t, dims, x_dims);
+        }
+        let mut aligned = vec![1u64; x_dims.len()];
+        let ax = if axis < 0 { axis + x_dims.len() as i64 } else { axis };
+        if ax >= 0 && (ax as usize) < aligned.len() {
+            aligned[ax as usize] = total;
+        } else if let Some(last) = aligned.last_mut() {
+            *last = total; // ONNX default axis 1 collapses to trailing for rank ≤ 1
+        }
+        let reshaped = self.reshape_to(src, f32t, &aligned);
+        self.broadcast_to(reshaped, f32t, &aligned, x_dims)
+    }
+
+    /// `(toᶠ³²(x) − toᶠ³²(zp)) · scale` over canonical primitives. `toᶠ³²` of a
+    /// quantized integer is `Dequantize`(scale 1, zp 0) — the in-register
+    /// int→f32 numeric conversion — so this realizes `DequantizeLinear` for an
+    /// arbitrary (incl. runtime) scale/zero-point without materializing a packed
+    /// kernel it can't express.
+    fn desugar_dequant_primitive(
+        &mut self,
+        node: &AiNode,
+        x_tid: TensorId,
+        quant_dtype: u8,
+        scale_tid: Option<TensorId>,
+        zp_tid: Option<TensorId>,
+        axis: i64,
+    ) -> Result<()> {
+        let f32t = DTypeId(DTYPE_F32);
+        let x_dims = self.tensor_dims(x_tid)?;
+        let x_src = self.src(x_tid)?;
+        // toᶠ³²(x): Dequantize(x, scale 1, zp 0) — numeric int→f32, x stays packed.
+        let mut acc = {
+            let shape = self.intern(&x_dims);
+            let nid = self.add(GraphOp::Op(OpKind::Dequantize), SmallVec::from_iter([x_src]), f32t, shape);
+            self.graph.set_quant_attrs(
+                nid,
+                QuantAttrs { quant_dtype, scale_bits: 1.0f32.to_bits(), zero_point: 0, axis: -1 },
+            );
+            InputSource::Node(nid)
+        };
+        // − toᶠ³²(zp), aligned to the quantization axis and broadcast to x.
+        if let Some(zt) = zp_tid {
+            let zp_dims = self.tensor_dims(zt)?;
+            let zp_src = self.src(zt)?;
+            let zp_dtype = self.dtype_of(zt).0;
+            let zp_shape = self.intern(&zp_dims);
+            let zpf = self.add(GraphOp::Op(OpKind::Dequantize), SmallVec::from_iter([zp_src]), f32t, zp_shape);
+            self.graph.set_quant_attrs(
+                zpf,
+                QuantAttrs { quant_dtype: zp_dtype, scale_bits: 1.0f32.to_bits(), zero_point: 0, axis: -1 },
+            );
+            let zpf_b = self.channel_align(InputSource::Node(zpf), &zp_dims, axis, &x_dims);
+            acc = self.op(OpKind::Sub, &[acc, zpf_b], f32t, &x_dims);
+        }
+        // · scale, aligned to the quantization axis and broadcast to x.
+        if let Some(st) = scale_tid {
+            let s_dims = self.tensor_dims(st)?;
+            let s_src = self.src(st)?;
+            let s_b = self.channel_align(s_src, &s_dims, axis, &x_dims);
+            acc = self.op(OpKind::Mul, &[acc, s_b], f32t, &x_dims);
+        }
+        self.bind_out(node, acc)
     }
 
     /// First element of an inline constant param as `f32` (per-tensor scale).
