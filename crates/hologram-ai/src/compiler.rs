@@ -752,17 +752,24 @@ fn concretize_all_dims(
 
     // Apply substitutions and replace any remaining non-concrete dims.
     for info in graph.tensor_info.values_mut() {
-        for dim in info.shape.iter_mut() {
+        for (axis, dim) in info.shape.iter_mut().enumerate() {
             for (var_id, replacement) in &subs {
                 *dim = dim.substitute(*var_id, replacement);
             }
             if let Some(v) = dim.evaluate() {
                 *dim = Dim::Concrete(v);
             }
-            // Any remaining Dynamic or Var dims get context_length (seq-like)
-            // rather than 0-sentinel. This ensures all shapes are fully concrete.
+            // A dim that is still unresolved lost its symbolic var to `Dynamic`
+            // somewhere in shape inference. Concretize it by position: axis 0 is
+            // the batch dim (LLM prefill batch = 1, matching the `Var(batch-like)
+            // → 1` policy above); any inner unresolved dim is sequence-like →
+            // `context_length`. Forcing *every* remaining dim to `context_length`
+            // (the old behavior) made a leading batch dim that lost its var take
+            // the sequence length, desyncing every downstream broadcast (e.g. an
+            // activation `[Dynamic, Dynamic, hidden]` became `[seq, seq, hidden]`
+            // instead of `[1, seq, hidden]`).
             if matches!(dim, Dim::Dynamic | Dim::Var(_)) {
-                *dim = Dim::Concrete(context_len);
+                *dim = Dim::Concrete(if axis == 0 { 1 } else { context_len });
             }
         }
     }

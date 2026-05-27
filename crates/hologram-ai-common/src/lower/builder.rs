@@ -948,25 +948,62 @@ impl<'a> Ctx<'a> {
                 "MatMul contraction mismatch: A {a_dims:?} (K={k}) vs B {b_dims:?} (K={bk})"
             );
         }
-        if b_dims[..b_rank - 2].iter().any(|&d| d != 1) {
-            anyhow::bail!(
-                "batched MatMul with a distinct-per-batch B {b_dims:?} is not representable by \
-                 hologram's 2-D MatMul; such patterns must be fused (e.g. attention) before lowering"
-            );
-        }
-        let batch: u64 = a_dims[..a_rank - 2].iter().product();
-
         let (out_dtype, _) = self.out_dtype_shape(node)?;
         let out_dims = self.out_dims(node)?;
         let a = self.src(a_tid)?;
         let b = self.src(b_tid)?;
         let a_dt = self.dtype_of(a_tid);
         let b_dt = self.dtype_of(b_tid);
-        // Fold batch into rows of A; collapse B's all-1 batch dims to [K,N].
-        let a2 = self.reshape_to(a, a_dt, &[batch * m, k]);
-        let b2 = self.reshape_to(b, b_dt, &[k, n]);
-        let prod = self.op(OpKind::MatMul, &[a2, b2], out_dtype, &[batch * m, n]);
-        let out = self.reshape_to(prod, out_dtype, &out_dims);
+
+        // B is a single shared matrix (all batch dims 1): fold A's batch into the
+        // matmul rows — one 2-D MatMul. The universal transformer case (weight
+        // projections, RoPE freqs).
+        if b_dims[..b_rank - 2].iter().all(|&d| d == 1) {
+            let batch: u64 = a_dims[..a_rank - 2].iter().product();
+            let a2 = self.reshape_to(a, a_dt, &[batch * m, k]);
+            let b2 = self.reshape_to(b, b_dt, &[k, n]);
+            let prod = self.op(OpKind::MatMul, &[a2, b2], out_dtype, &[batch * m, n]);
+            let out = self.reshape_to(prod, out_dtype, &out_dims);
+            return self.bind_out(node, out);
+        }
+
+        // Distinct-per-batch B (a genuine batched matmul, e.g. an *unfused*
+        // attention QKᵀ / P·V): hologram's MatMul is 2-D, so decompose into one
+        // 2-D MatMul per batch index and concatenate. Real LLM attention is fused
+        // into OpKind::Attention and never reaches here; this keeps arbitrary
+        // models (unfused batched matmuls) correct rather than silently wrong.
+        let a_batch: u64 = a_dims[..a_rank - 2].iter().product();
+        let b_batch: u64 = b_dims[..b_rank - 2].iter().product();
+        if a_batch != b_batch {
+            anyhow::bail!(
+                "batched MatMul with broadcast batch dims (A {a_dims:?} vs B {b_dims:?}) is unsupported"
+            );
+        }
+        let a3 = self.reshape_to(a, a_dt, &[a_batch, m, k]);
+        let b3 = self.reshape_to(b, b_dt, &[b_batch, k, n]);
+        let mut acc: Option<InputSource> = None;
+        for bi in 0..a_batch as i64 {
+            // Axis-0 contiguous slice [bi:bi+1] as the 3-operand form hologram
+            // realizes as a zero-movement view (data, starts, ends).
+            let (s0, e0) = (self.const_i64(&[bi]), self.const_i64(&[bi + 1]));
+            let a_sl = self.op(OpKind::Slice, &[a3, s0, e0], a_dt, &[1, m, k]);
+            let (s1, e1) = (self.const_i64(&[bi]), self.const_i64(&[bi + 1]));
+            let b_sl = self.op(OpKind::Slice, &[b3, s1, e1], b_dt, &[1, k, n]);
+            let a2 = self.reshape_to(a_sl, a_dt, &[m, k]);
+            let b2 = self.reshape_to(b_sl, b_dt, &[k, n]);
+            let p = self.op(OpKind::MatMul, &[a2, b2], out_dtype, &[m, n]);
+            let p3 = self.reshape_to(p, out_dtype, &[1, m, n]);
+            acc = Some(match acc {
+                None => p3,
+                Some(prev) => {
+                    // Running concat along the batch axis.
+                    let rows = (bi as u64) + 1;
+                    self.op(OpKind::Concat, &[prev, p3], out_dtype, &[rows, m, n])
+                }
+            });
+        }
+        let cat = acc.expect("batched matmul has ≥1 batch");
+        let out = self.reshape_to(cat, out_dtype, &out_dims);
         self.bind_out(node, out)
     }
 
