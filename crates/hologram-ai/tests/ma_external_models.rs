@@ -133,8 +133,12 @@ fn compile_populates_model_kappa_label() {
     let bytes = std::fs::read(&path).unwrap();
     let expected = model_kappa(ModelFormat::Onnx, &bytes).unwrap().address.as_str().to_string();
 
+    // Model κ-labeling is opt-in: full uor-addr canonicalization is kept off the
+    // compile critical path by default (pathologically slow on large ONNX), so
+    // request it explicitly to verify the identity is carried when asked.
     let compiler = ModelCompiler {
         seq_len_override: Some(4),
+        address_model: true,
         ..Default::default()
     };
     let archive = compiler
@@ -144,7 +148,7 @@ fn compile_populates_model_kappa_label() {
     assert_eq!(
         archive.metadata.kappa_label.as_deref(),
         Some(expected.as_str()),
-        "compile must carry the source model's κ-label"
+        "compile must carry the source model's κ-label when address_model is set"
     );
 }
 
