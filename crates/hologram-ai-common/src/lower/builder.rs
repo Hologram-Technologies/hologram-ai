@@ -494,6 +494,7 @@ impl<'a> Ctx<'a> {
 
     fn desugar(&mut self, node: &AiNode, kind: DesugarKind) -> Result<()> {
         match kind {
+            DesugarKind::MatMul => self.desugar_matmul(node),
             DesugarKind::Constant => self.desugar_constant(node),
             DesugarKind::Split { axis, sizes } => self.desugar_split(node, axis, &sizes),
             DesugarKind::Gather { axis } => self.desugar_gather(node, axis),
@@ -891,6 +892,63 @@ impl<'a> Ctx<'a> {
         // GatherND with a constant index set flattens to a row gather over the
         // leading dimension; reuse the canonical Gather on flattened indices.
         self.desugar_gather(node, 0)
+    }
+
+    /// Lower MatMul / BatchMatMul. hologram's MatMul kernel is strictly 2-D
+    /// (`[M,K]·[K,N] → [M,N]`); a rank≥3 batched matmul (ONNX `A[..,M,K] ·
+    /// B[..,K,N]`) folds A's batch dims into its row dimension. This is exact
+    /// when B is a single shared matrix (all its batch dims are 1) — the
+    /// universal transformer case: weight projections `[b,s,h]·[h,h']`, and
+    /// RoPE's `inv_freq[1,d/2,1] · pos[1,1,seq]`. A genuinely per-batch B is a
+    /// pattern hologram's 2-D kernel cannot represent (it must be fused, e.g.
+    /// attention, before lowering), so we fail loud rather than fold silently.
+    fn desugar_matmul(&mut self, node: &AiNode) -> Result<()> {
+        let a_tid = *node.inputs.first().context("MatMul needs operand A")?;
+        let b_tid = *node.inputs.get(1).context("MatMul needs operand B")?;
+        let a_dims = self.tensor_dims(a_tid)?;
+        let b_dims = self.tensor_dims(b_tid)?;
+
+        // 2-D (or lower) on both sides: hologram handles it directly — emit the
+        // canonical MatMul exactly as the Direct plan would.
+        if a_dims.len() <= 2 && b_dims.len() <= 2 {
+            let nid = self.emit_simple(node, OpKind::MatMul)?;
+            return self.bind_out(node, InputSource::Node(nid));
+        }
+
+        let (a_rank, b_rank) = (a_dims.len(), b_dims.len());
+        if a_rank < 2 || b_rank < 2 {
+            anyhow::bail!(
+                "MatMul with a rank<2 operand against a rank≥3 partner is unsupported \
+                 (A T{a_tid} {a_dims:?} · B T{b_tid} {b_dims:?})"
+            );
+        }
+        let (m, k) = (a_dims[a_rank - 2], a_dims[a_rank - 1]);
+        let (bk, n) = (b_dims[b_rank - 2], b_dims[b_rank - 1]);
+        if bk != k {
+            anyhow::bail!(
+                "MatMul contraction mismatch: A {a_dims:?} (K={k}) vs B {b_dims:?} (K={bk})"
+            );
+        }
+        if b_dims[..b_rank - 2].iter().any(|&d| d != 1) {
+            anyhow::bail!(
+                "batched MatMul with a distinct-per-batch B {b_dims:?} is not representable by \
+                 hologram's 2-D MatMul; such patterns must be fused (e.g. attention) before lowering"
+            );
+        }
+        let batch: u64 = a_dims[..a_rank - 2].iter().product();
+
+        let (out_dtype, _) = self.out_dtype_shape(node)?;
+        let out_dims = self.out_dims(node)?;
+        let a = self.src(a_tid)?;
+        let b = self.src(b_tid)?;
+        let a_dt = self.dtype_of(a_tid);
+        let b_dt = self.dtype_of(b_tid);
+        // Fold batch into rows of A; collapse B's all-1 batch dims to [K,N].
+        let a2 = self.reshape_to(a, a_dt, &[batch * m, k]);
+        let b2 = self.reshape_to(b, b_dt, &[k, n]);
+        let prod = self.op(OpKind::MatMul, &[a2, b2], out_dtype, &[batch * m, n]);
+        let out = self.reshape_to(prod, out_dtype, &out_dims);
+        self.bind_out(node, out)
     }
 
     fn desugar_one_hot(&mut self, node: &AiNode, axis: i64) -> Result<()> {

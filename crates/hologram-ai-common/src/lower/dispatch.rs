@@ -49,6 +49,9 @@ pub enum AttrSpec {
 /// emits the pipeline; there is no escape hatch (architecture §5.2).
 #[derive(Debug, Clone)]
 pub enum DesugarKind {
+    /// `MatMul`/`BatchMatMul` → 2-D `MatMul`, folding any rank≥3 batch dims of A
+    /// into the row dimension (hologram's MatMul kernel is strictly 2-D).
+    MatMul,
     /// `Split(axis, sizes)` → N `Slice` nodes.
     Split {
         axis: i64,
@@ -205,7 +208,10 @@ pub fn dispatch(op: &AiOp) -> OpPlan {
 
     match op {
         // ── Linear algebra (m/k/n derived from operand shapes) ──────────────
-        A::MatMul | A::BatchMatMul => P::Direct(OpKind::MatMul),
+        // hologram's MatMul kernel is 2-D (`[M,K]·[K,N]`); the desugar folds a
+        // rank≥3 batched matmul's batch dims into the rows of A (B must be a
+        // single shared matrix) so the canonical op stays 2-D.
+        A::MatMul | A::BatchMatMul => P::Desugar(DesugarKind::MatMul),
         // A quantized matmul is a plain MatMul whose weight carries QuantAttrs
         // (attached by the encoding pass, §6).
         A::QuantizedMatMul { .. } => P::Direct(OpKind::MatMul),

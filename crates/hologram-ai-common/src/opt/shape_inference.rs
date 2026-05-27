@@ -226,16 +226,22 @@ fn infer_custom_output_shapes(
             }
         }
 
-        // Transpose: permute dims.
+        // Transpose: permute dims. An empty `perm` is the ONNX default —
+        // *reverse* all axes (not identity); leaving the shape unchanged is
+        // wrong (e.g. a tied-embedding LM head `Transpose(W[V,H]) → [H,V]`
+        // would keep [V,H], breaking the downstream matmul contraction).
         AiOp::Transpose { perm } => {
             if let Some(input) = inputs.first() {
-                if input.is_empty() || perm.is_empty() {
+                if input.is_empty() {
                     return inputs.first().cloned().into_iter().collect();
                 }
-                let shape: Vec<DimExpr> = perm
-                    .iter()
-                    .map(|&p| input.get(p as usize).cloned().unwrap_or(DimExpr::Dynamic))
-                    .collect();
+                let shape: Vec<DimExpr> = if perm.is_empty() {
+                    input.iter().rev().cloned().collect()
+                } else {
+                    perm.iter()
+                        .map(|&p| input.get(p as usize).cloned().unwrap_or(DimExpr::Dynamic))
+                        .collect()
+                };
                 vec![Shape::from(shape)]
             } else {
                 vec![Shape::new()]
