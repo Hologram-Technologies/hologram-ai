@@ -1,13 +1,18 @@
 //! Convert Slice ops to Gather ops.
 //!
-//! The hologram runtime doesn't have a native Slice operation. Slice is
-//! currently dispatched as Identity (pass-through), which is wrong for any
-//! non-trivial slice. This pass converts Slice nodes to Gather nodes with
-//! constant index tensors, which the runtime handles correctly.
+//! hologram's compiler realizes `Slice` only as an **axis-0 contiguous** view
+//! (`slice_view_bytes`); any slice along a non-zero axis — which is the common
+//! case in real transformer graphs (RoPE `rotate_half` and the QKV / gate-up
+//! projection splits both slice the *last* axis) — cannot be expressed that
+//! way and would fail compilation. This pass rewrites those slices into the
+//! first-class `Gather` op, which flattens the data to `[outer, axis_dim,
+//! inner]` around the gather axis and so handles an arbitrary-axis, batched
+//! select correctly.
 //!
-//! Only converts simple cases: single-axis slices with step=1 where the
-//! slice dimension is concrete. Complex slices (multi-axis, non-unit steps)
-//! are left as-is (the lowering will handle them or error).
+//! Only converts the cases Gather can represent exactly: single-axis slices
+//! with step=1 where the sliced dimension is concrete. Complex slices
+//! (multi-axis, non-unit steps) are left as-is (the lowering will handle them
+//! or error — no silent-wrong).
 
 use super::pipeline::Pass;
 use crate::ir::{shape_from_concrete, AiGraph, AiOp, AiParam, DType, SemanticHint, TensorInfo};
@@ -76,20 +81,14 @@ impl Pass for SliceToGather {
                         return None;
                     }
 
-                    // Only convert to Gather when hologram's row-based Gather
-                    // can handle it: all dimensions BEFORE the axis must be 1
-                    // (i.e., no batching). hologram's Gather treats data as
-                    // [total/dim, dim] which doesn't support batched axis gathers.
-                    let pre_axis_product: u64 = info.shape[..norm_axis]
-                        .iter()
-                        .filter_map(|d| d.as_concrete())
-                        .product::<u64>()
-                        .max(1);
-                    if pre_axis_product != 1 {
-                        tracing::debug!(axis, ?info.shape, pre_axis_product, "slice-to-gather: skipping non-trivial pre-axis");
-                        return None;
-                    }
-
+                    // The first-class hologram `Gather` flattens the data to
+                    // `[outer, axis_dim, inner]` around the gather axis (outer =
+                    // ∏ dims before the axis), so it handles batched axis gathers
+                    // directly — no "pre-axis must be 1" restriction. This covers
+                    // the LLM cases that dominate real graphs: RoPE rotate_half
+                    // (slice head_dim along the last axis) and the QKV / gate-up
+                    // projection splits (also last-axis), which the compiler's
+                    // axis-0-only Slice view cannot represent.
                     let indices: Vec<i64> = (s..e).collect();
                     Some((idx, axis, indices))
                 } else {

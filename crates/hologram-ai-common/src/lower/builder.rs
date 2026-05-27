@@ -376,8 +376,13 @@ impl<'a> Ctx<'a> {
         use crate::ir::AiOp;
         Ok(match &node.op {
             // Transpose: perm is operand 1 (absent ⇒ axis reversal). Only
-            // synthesize when the importer left perm as an attribute.
-            AiOp::Transpose { perm } if node.inputs.len() == 1 => {
+            // synthesize when the importer left perm as an attribute *and* it
+            // is non-empty. An empty `perm` is the ONNX default (reverse all
+            // axes); we must omit operand 1 entirely so the compiler's
+            // `transpose_plan` takes its reverse-all-axes branch — emitting a
+            // zero-length perm constant instead sends it down the
+            // read-i64-from-bytes path, which fails on the empty buffer.
+            AiOp::Transpose { perm } if node.inputs.len() == 1 && !perm.is_empty() => {
                 let perm_i64: Vec<i64> = perm.iter().map(|&p| p as i64).collect();
                 vec![self.const_i64(&perm_i64)]
             }

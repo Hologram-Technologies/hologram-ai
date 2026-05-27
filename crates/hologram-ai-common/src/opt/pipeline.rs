@@ -38,7 +38,8 @@ impl OptPipeline {
             rmsnorm_fusion::RmsNormFusion, scalar_absorption::ScalarAbsorption,
             semantic_prop::SemanticPropagation, shape_prop::ShapePropagation,
             shared_input_projection_fusion::SharedInputProjectionFusion,
-            swiglu_fusion::SwiGluFusion, swiglu_projection_fusion::SwiGluProjectionFusion,
+            slice_to_gather::SliceToGather, swiglu_fusion::SwiGluFusion,
+            swiglu_projection_fusion::SwiGluProjectionFusion,
             transpose_matmul_fusion::TransposeMatMulFusion,
         };
         Self::new(vec![
@@ -102,6 +103,11 @@ impl OptPipeline {
             Box::new(PositionIdsInjection),
             Box::new(AttentionFusion { force_causal: None }),
             Box::new(KvSlotInjection),
+            // Rewrite non-axis-0 slices (RoPE rotate_half, QKV/gate-up splits)
+            // into first-class Gather. Runs after AttentionFusion so it can't
+            // disturb SDPA pattern matching, and after SharedInputProjectionFusion
+            // so the projection-split slices it introduces are converted too.
+            Box::new(SliceToGather),
             // Infer semantic hints (Embedding, AttentionWeight, Residual, etc.)
             // from op types. Runs after all fusion passes so fused ops are present.
             Box::new(SemanticPropagation),
