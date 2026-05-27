@@ -55,11 +55,10 @@ fn successor_lm(seq_len: usize, vocab: usize) -> AiGraph {
     let logits = 2u32;
 
     let mut tensor_info: HashMap<u32, TensorInfo> = HashMap::new();
-    // Token ids as I8: the backend's int→f32 converter (Dequantize) supports the
-    // quantum widths (i8/i4/u8), so the synthetic vocab stays ≤ 127. Real LMs use
-    // i64 ids; running those end-to-end needs the upstream Dequantize widening
-    // tracked in the generation notes.
-    tensor_info.insert(ids, TensorInfo::new(DType::INT8, shape_from_concrete(&[1, seq_len as u64])));
+    // Token ids as INT64 — the real-LM dtype. Embedding lowers to the
+    // first-class `OpKind::Gather` (no one-hot, no int→float cast), so the vocab
+    // is unconstrained (no i8 ≤ 127 limit).
+    tensor_info.insert(ids, TensorInfo::new(DType::INT64, shape_from_concrete(&[1, seq_len as u64])));
     tensor_info.insert(w, TensorInfo::new(DType::F32, shape_from_concrete(&[vocab as u64, vocab as u64])));
     tensor_info.insert(
         logits,
@@ -105,18 +104,20 @@ fn compile_runner(seq_len: usize, vocab: usize) -> HoloRunner {
 
 #[test]
 fn greedy_generation_predicts_successor_sequence() {
-    let (seq_len, vocab) = (8usize, 32usize);
+    // Vocab 200 (> 127) with int64 ids — exercises the real Gather embedding at
+    // token values impossible under the old i8 ≤ 127 workaround.
+    let (seq_len, vocab) = (8usize, 200usize);
     let mut runner = compile_runner(seq_len, vocab);
-    let tok = IntTok { vocab, eos: 99 }; // eos out of range — never sampled
+    let tok = IntTok { vocab, eos: 999 }; // eos out of range — never sampled
 
     let cfg = GenConfig { max_tokens: 5, temperature: 0.0, ..Default::default() };
     let mut sink = Vec::new();
-    let out = generate_stream(&mut runner, &tok, "5", &cfg, &mut sink).unwrap();
+    let out = generate_stream(&mut runner, &tok, "150", &cfg, &mut sink).unwrap();
 
-    // From token 5, greedy successor LM must emit 6,7,8,9,10.
-    assert_eq!(out, "6 7 8 9 10", "greedy decode mismatch");
+    // From token 150, greedy successor LM must emit 151..155.
+    assert_eq!(out, "151 152 153 154 155", "greedy decode mismatch");
     // Streamed bytes equal the final text (streamed incrementally as deltas).
-    assert_eq!(String::from_utf8(sink).unwrap(), "6 7 8 9 10");
+    assert_eq!(String::from_utf8(sink).unwrap(), "151 152 153 154 155");
 }
 
 #[test]

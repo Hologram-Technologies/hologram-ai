@@ -11,7 +11,7 @@ use std::collections::HashMap;
 
 use anyhow::{Context, Result};
 use hologram_graph::constant::ConstantEntry;
-use hologram_graph::node::{ConvAttrs, GemmAttrs, LrnAttrs, Node, QuantAttrs};
+use hologram_graph::node::{ConvAttrs, GatherAttrs, GemmAttrs, LrnAttrs, Node, QuantAttrs};
 use hologram_graph::registry::{DTypeId, ShapeDescriptor, ShapeId};
 use hologram_graph::{Graph, GraphOp, InputSource, NodeId, OpKind};
 use smallvec::SmallVec;
@@ -779,17 +779,16 @@ impl<'a> Ctx<'a> {
     /// canonical `toᶠ³²` used by the dequant primitive. The backend's dequant
     /// kernel is the integer→float converter (`(q − z)·s`); it supports the
     /// quantum widths (i8/i4/u8). `dims` is `src`'s shape, `src_dtype` its tag.
-    fn cast_f32(&mut self, src: InputSource, dims: &[u64], src_dtype: u8) -> InputSource {
+    fn cast_f32(&mut self, src: InputSource, dims: &[u64], _src_dtype: u8) -> InputSource {
+        // Numeric int→f32 via the first-class `OpKind::Cast` (ONNX Cast
+        // semantics, V&V'd in the backend). `_src_dtype` is no longer needed —
+        // Cast reads the operand's dtype from the graph.
         let shape = self.intern(dims);
         let nid = self.add(
-            GraphOp::Op(OpKind::Dequantize),
+            GraphOp::Op(OpKind::Cast),
             SmallVec::from_iter([src]),
             DTypeId(DTYPE_F32),
             shape,
-        );
-        self.graph.set_quant_attrs(
-            nid,
-            QuantAttrs { quant_dtype: src_dtype, scale_bits: 1.0f32.to_bits(), zero_point: 0, axis: -1 },
         );
         InputSource::Node(nid)
     }
@@ -828,21 +827,17 @@ impl<'a> Ctx<'a> {
     fn desugar_embed(&mut self, node: &AiNode) -> Result<()> {
         // inputs: [token_ids, weight[vocab, dim]] (or [weight, ids] — ids are
         // the integer operand). Embed = OneHot(ids) · W.
+        // Embedding lookup = `Gather(table, ids, axis=0)` — a first-class op now
+        // (the integer ids stay int; no one-hot, no int→float cast).
         let (ids_tid, w_tid) = self.embed_operands(node)?;
         let ids = self.src(ids_tid)?;
         let w = self.src(w_tid)?;
-        let w_dims = self.tensor_dims(w_tid)?;
-        let (vocab, dim) = (w_dims[0], w_dims[1]);
-        let id_dims = self.tensor_dims(ids_tid)?;
-        let rows: u64 = id_dims.iter().product();
-        let id_dtype = self.dtype_of(ids_tid).0;
-        let onehot = self.one_hot(ids, rows, vocab, id_dtype);
         let (dtype, _) = self.out_dtype_shape(node)?;
-        let mm = self.op(OpKind::MatMul, &[onehot, w], dtype, &[rows, dim]);
-        // Reshape to the declared output shape (ids.shape ++ [dim]).
         let out_dims = self.out_dims(node)?;
-        let out = self.reshape_to(mm, dtype, &out_dims);
-        self.bind_out(node, out)
+        let shape = self.intern(&out_dims);
+        let nid = self.add(GraphOp::Op(OpKind::Gather), SmallVec::from_iter([w, ids]), dtype, shape);
+        self.graph.set_gather_attrs(nid, GatherAttrs { axis: 0 });
+        self.bind_out(node, InputSource::Node(nid))
     }
 
     /// Identify the (indices, table) operands of an embedding node.
@@ -859,57 +854,24 @@ impl<'a> Ctx<'a> {
     }
 
     fn desugar_gather(&mut self, node: &AiNode, axis: i64) -> Result<()> {
-        // Gather(data, indices, axis): select rows along `axis`. For axis 0 this
-        // is OneHot(indices) · data; general axis is a Transpose to axis-0,
-        // gather, Transpose back.
-        let data_tid = node.inputs[0];
-        let idx_tid = *node.inputs.get(1).context("Gather needs indices")?;
-        let data_dims = self.tensor_dims(data_tid)?;
-        let ax = Self::norm_axis(axis, data_dims.len());
-        let dtype = self.dtype_of(data_tid);
-        let idx_dims = self.tensor_dims(idx_tid)?;
-        let rows: u64 = idx_dims.iter().product();
-        let depth = data_dims[ax];
-
-        let data = self.src(data_tid)?;
-        let idx = self.src(idx_tid)?;
-        let idx_dtype = self.dtype_of(idx_tid).0;
-        let onehot = self.one_hot(idx, rows, depth, idx_dtype); // [rows, depth]
-
-        // Bring axis to front: [depth, rest]; matmul one-hot; restore.
-        let rest: u64 = data_dims
-            .iter()
-            .enumerate()
-            .filter(|(i, _)| *i != ax)
-            .map(|(_, &d)| d)
-            .product();
-        let perm: Vec<u32> = std::iter::once(ax as u32)
-            .chain((0..data_dims.len() as u32).filter(|&i| i as usize != ax))
-            .collect();
-        let mut permuted_dims = vec![depth];
-        permuted_dims.extend(
-            data_dims
-                .iter()
-                .enumerate()
-                .filter(|(i, _)| *i != ax)
-                .map(|(_, &d)| d),
-        );
-        let perm_c = {
-            let v: Vec<i64> = perm.iter().map(|&p| p as i64).collect();
-            self.const_i64(&v)
-        };
-        let dt = self.op(OpKind::Transpose, &[data, perm_c], dtype, &permuted_dims); // [depth, rest]
-        let dt2 = self.reshape_to(dt, dtype, &[depth, rest]);
-        let gathered = self.op(OpKind::MatMul, &[onehot, dt2], dtype, &[rows, rest]); // [rows, rest]
-                                                                                      // Final output shape is declared on the node.
+        // ONNX `Gather(data, indices, axis)` is a first-class op: a runtime
+        // integer-indexed row select. The indices stay integer (no one-hot, no
+        // int→float cast), and the axis rides on `GatherAttrs` (negative axes are
+        // normalized against the data rank in the compiler).
+        let data = self.src(node.inputs[0])?;
+        let idx = *node.inputs.get(1).context("Gather needs indices")?;
+        let idx = self.src(idx)?;
+        let (dtype, _) = self.out_dtype_shape(node)?;
         let out_dims = self.out_dims(node)?;
-        let out = self.reshape_to(gathered, dtype, &out_dims);
-        self.bind_out(node, out)
+        let shape = self.intern(&out_dims);
+        let nid = self.add(GraphOp::Op(OpKind::Gather), SmallVec::from_iter([data, idx]), dtype, shape);
+        self.graph.set_gather_attrs(nid, GatherAttrs { axis: axis as i32 });
+        self.bind_out(node, InputSource::Node(nid))
     }
 
     fn desugar_gather_nd(&mut self, node: &AiNode, _batch_dims: i64) -> Result<()> {
         // GatherND with a constant index set flattens to a row gather over the
-        // leading dimension; reuse the one-hot selection on flattened indices.
+        // leading dimension; reuse the canonical Gather on flattened indices.
         self.desugar_gather(node, 0)
     }
 
@@ -930,16 +892,17 @@ impl<'a> Ctx<'a> {
     // ── type / numeric ───────────────────────────────────────────────────────
 
     fn desugar_cast(&mut self, node: &AiNode, _to: DType) -> Result<()> {
-        // Numeric reinterpretation is realized by the backend at the dtype
-        // boundary; the canonical graph carries the new output dtype on a
-        // Reshape-identity (no element movement). Quantized sources go through
-        // Dequantize instead.
+        // Numeric dtype conversion via the first-class `OpKind::Cast` (ONNX Cast
+        // semantics, V&V'd in the backend) — a genuine value conversion, not a
+        // byte reinterpretation. The target dtype is the node's output dtype.
+        // (Casting *to* f64 fails loud in the engine, per hologram's dtype
+        // policy — the compute domain is f16/bf16/f32.)
         let data = self.src(node.inputs[0])?;
-        let (dtype, shape) = self.out_dtype_shape(node)?;
-        let _ = shape;
+        let (dtype, _) = self.out_dtype_shape(node)?;
         let dims = self.out_dims(node)?;
-        let out = self.reshape_to(data, dtype, &dims);
-        self.bind_out(node, out)
+        let shape = self.intern(&dims);
+        let nid = self.add(GraphOp::Op(OpKind::Cast), SmallVec::from_iter([data]), dtype, shape);
+        self.bind_out(node, InputSource::Node(nid))
     }
 
     fn desugar_quantize(&mut self, node: &AiNode) -> Result<()> {
