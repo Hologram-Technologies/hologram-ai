@@ -21,7 +21,10 @@
 use std::path::PathBuf;
 use std::process::Command;
 
-use hologram_ai::{model_kappa, ModelCompiler, ModelFormat, ModelSource};
+use hologram_ai::{
+    component_kappa, compose_model, compose_models, model_kappa, ModelCompiler, ModelFormat,
+    ModelSource,
+};
 
 struct Pinned {
     name: &'static str,
@@ -143,6 +146,53 @@ fn compile_populates_model_kappa_label() {
         Some(expected.as_str()),
         "compile must carry the source model's κ-label"
     );
+}
+
+fn fixture(name: &str) -> Vec<u8> {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../hologram-ai-conformance/fixtures")
+        .join(name);
+    std::fs::read(&path).unwrap_or_else(|e| panic!("reading {path:?}: {e}"))
+}
+
+/// MA-2: a multi-component model's identity is the E₈ composition of its
+/// components' κ-labels, and it is **independent of component order** — the
+/// same parts compose to the same label however they were assembled.
+#[test]
+fn multi_component_composition_is_order_independent() {
+    let a = fixture("layer_norm.onnx");
+    let b = fixture("rms_norm.onnx");
+    let c = fixture("softmax_dyn_seq.onnx");
+
+    let ka = component_kappa(&a).unwrap();
+    let kb = component_kappa(&b).unwrap();
+    let kc = component_kappa(&c).unwrap();
+
+    // Two-component commutativity.
+    assert_eq!(
+        compose_model(&[ka, kb]).unwrap(),
+        compose_model(&[kb, ka]).unwrap(),
+        "compose(a,b) must equal compose(b,a)"
+    );
+
+    // Three-component: every permutation yields the same identity.
+    let canonical = compose_model(&[ka, kb, kc]).unwrap();
+    for perm in [[ka, kc, kb], [kb, ka, kc], [kb, kc, ka], [kc, ka, kb], [kc, kb, ka]] {
+        assert_eq!(
+            compose_model(&perm).unwrap(),
+            canonical,
+            "composition must be order-independent across all permutations"
+        );
+    }
+
+    // The composed identity is distinct from any single component.
+    assert_ne!(canonical, ka);
+    assert_ne!(canonical, kb);
+    assert_ne!(canonical, kc);
+
+    // The bytes-level convenience wrapper agrees with the label-level compose.
+    let refs: [&[u8]; 3] = [&a, &b, &c];
+    assert_eq!(compose_models(&refs).unwrap(), canonical);
 }
 
 #[test]

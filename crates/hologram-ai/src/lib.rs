@@ -14,7 +14,10 @@ pub mod runner;
 pub mod validate;
 
 // Flat re-exports.
-pub use address::{model_kappa, model_kappa_label, ModelFormat, ModelOutcome};
+pub use address::{
+    component_kappa, compose_model, compose_models, model_kappa, model_kappa_label, ModelFormat,
+    ModelOutcome,
+};
 pub use compiler::{
     CompileStats, CompiledModel, DebugMap, HoloArchive, ModelCompiler, ModelMetadata, ModelSource,
 };

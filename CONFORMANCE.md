@@ -116,9 +116,9 @@ and are exempt from NS/ZA/ZM, exactly as hologram's CLI is a std host over its
 
 | ID | Statement | Enforcement | Witness | Status |
 |---|---|---|---|---|
-| **EE-1** | Full-model logits for TinyLlama (ONNX) match ONNX Runtime within tolerance. | `--features conformance` | `ort_conformance.rs` | 🚧 |
-| **EE-2** | Full-model logits for TinyLlama (GGUF) match the ONNX path (logit consistency). | exec test | `hologram-ai/tests` | 🚧 |
-| **EE-3** | ResNet-50 (ONNX) top-1 logits match ORT within tolerance. | `--features conformance` | `ort_conformance.rs` | 🚧 |
+| **EE-1** | A full multi-layer model (`mini_transformer`: 18 nodes — MatMul, Softmax attention, Sigmoid-gated FFN, residual Adds, Transposes) compiled + run through hologram-ai matches **ONNX Runtime** on the same input within tolerance (observed max relative error 2.2e-5). | `--features conformance` | `tests/ort_full_model_e2e.rs` | ✅ |
+| **EE-1b** | Operator-spec outputs match the official ONNX backend node-test corpus (relu/add/matmul/softmax/mul/sub). | `--features onnx-spec`, `HOLOGRAM_AI_LIVE=1` | `tests/onnx_spec_conformance.rs` | ✅ |
+| **EE-2** | Large published models (TinyLlama, ResNet-50, MobileNetV2, MiniLM) match ORT within tolerance end-to-end. | `--features conformance` + model downloads | (infra-bound: needs model fetch) | 🚧 |
 
 ## MA — Model addressing (external: uor-addr, TC-05 replay)
 
@@ -126,7 +126,7 @@ and are exempt from NS/ZA/ZM, exactly as hologram's CLI is a std host over its
 |---|---|---|---|---|
 | **MA-1** | A model addresses to a verifiable uor-addr κ-label via `uor_addr::{onnx,gguf,json}::address`; the TC-05 witness re-certifies to the same label. The label is carried in `HoloArchive.metadata` as the model's dedup / warm-start identity. | test | `hologram-ai` (`address.rs`, `tests/ma_external_models.rs`) | ✅ |
 | **MA-1b** | The minted κ-labels are **byte-identical** to uor-addr's authoritative pins (`tests/external_models.rs`) for published GGUF/ONNX models (Qwen2-0.5B, MobileNetV2-7, all-MiniLM-L6-v2). | live test (`HOLOGRAM_AI_LIVE=1` + network) | `hologram-ai` (`tests/ma_external_models.rs`) | ✅ |
-| **MA-2** | Multi-component models compose via `compose_model` (order-independent E₈ product). | test | `hologram-archive::address::compose_model` (re-exported; single-file models address directly) | 🟡 |
+| **MA-2** | Multi-component models compose via `compose_model` (order-independent E₈ product) — components addressed on the BLAKE3 axis, folded in canonical order so the identity is a pure function of the component *set*. | test | `hologram-ai` (`address.rs`: `component_kappa`/`compose_model`/`compose_models`; `tests/ma_external_models.rs`) | ✅ |
 
 ## CE — Content-addressed elision (replaces KV-cache)
 

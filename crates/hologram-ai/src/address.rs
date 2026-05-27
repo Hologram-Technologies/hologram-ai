@@ -80,6 +80,64 @@ pub fn model_kappa_label(bytes: &[u8]) -> Result<String> {
     Ok(model_kappa(format, bytes)?.address.as_str().to_string())
 }
 
+// ── Multi-component composition (MA-2, architecture §8) ──────────────────────
+//
+// A model assembled from several files (e.g. a diffusion pipeline's text
+// encoder + UNet + VAE, or a sharded LLM) has one identity: the E₈ categorical
+// composition of its components' κ-labels. Composition runs on hologram's
+// canonical BLAKE3 σ-axis (ADR-052), so component labels for composition are
+// minted on that axis ([`component_kappa`]) — distinct from the SHA-256
+// single-model identity that matches uor-addr's pinned corpus.
+
+/// hologram's content-address type (a BLAKE3-σ-axis κ-label, 71 bytes).
+pub use hologram_archive::ContentLabel;
+
+/// Address one component file (auto-detecting its format) on the BLAKE3 axis,
+/// yielding the κ-label used as a [`compose_model`] operand.
+pub fn component_kappa(bytes: &[u8]) -> Result<ContentLabel> {
+    let Some(format) = ModelFormat::detect(bytes) else {
+        bail!("unrecognized component format (not GGUF, JSON, or ONNX protobuf)");
+    };
+    let outcome = match format {
+        ModelFormat::Onnx => {
+            uor_addr::onnx::address_blake3(bytes).map_err(|e| anyhow::anyhow!("onnx: {e:?}"))?
+        }
+        ModelFormat::Gguf => {
+            uor_addr::gguf::address_blake3(bytes).map_err(|e| anyhow::anyhow!("gguf: {e:?}"))?
+        }
+        ModelFormat::Json => {
+            uor_addr::json::address_blake3(bytes).map_err(|e| anyhow::anyhow!("json: {e:?}"))?
+        }
+    };
+    Ok(outcome.address)
+}
+
+/// Compose component κ-labels into one model identity via the E₈ (CS-G2)
+/// product. The composed label is a deterministic, axis-homogeneous function of
+/// the component labels and is **independent of their order** (architecture §8,
+/// MA-2): a model assembled from the same parts addresses identically however
+/// it was put together.
+///
+/// The underlying CS-G2 product is pairwise-commutative but the fold over 3+
+/// operands is order-sensitive, so the parts are first put into a canonical
+/// (label-byte) order — that is what makes the composed identity a pure
+/// function of the *set* of components.
+pub fn compose_model(parts: &[ContentLabel]) -> Result<ContentLabel> {
+    let mut ordered: Vec<ContentLabel> = parts.to_vec();
+    ordered.sort_unstable_by(|a, b| a.as_bytes().cmp(b.as_bytes()));
+    hologram_archive::compose_model(&ordered).map_err(|e| anyhow::anyhow!("compose_model: {e:?}"))
+}
+
+/// Address each component file (BLAKE3 axis) and compose them into a single
+/// multi-component model identity.
+pub fn compose_models(components: &[&[u8]]) -> Result<ContentLabel> {
+    let parts = components
+        .iter()
+        .map(|b| component_kappa(b))
+        .collect::<Result<Vec<_>>>()?;
+    compose_model(&parts)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
