@@ -55,7 +55,7 @@ fn quantized_graph() -> AiGraph {
     AiGraph {
         name: "quant_linear".into(),
         nodes: vec![
-            AiNode::new(0, AiOp::Dequantize, vec![1, 2, 3], vec![4]),
+            AiNode::new(0, AiOp::Dequantize { axis: -1 }, vec![1, 2, 3], vec![4]),
             AiNode::new(1, AiOp::MatMul, vec![0, 4], vec![5]),
         ],
         inputs: vec![0],
@@ -166,5 +166,162 @@ fn quantized_weight_stays_packed_and_is_correct() {
     assert!(
         q_bytes * 3 <= f_bytes,
         "quantized weight footprint ({q_bytes} B) should be ~4× under f32 ({f_bytes} B)"
+    );
+}
+
+/// Per-channel (per-output-column) i8 weight: `Dequantize` carries the exact
+/// ONNX `axis`, and a distinct scale per column. Verifies the per-channel path
+/// is correct (no axis guessing) and still fuses + stays packed.
+fn per_channel_graph() -> AiGraph {
+    let w = weight_i8();
+    let w_bytes: Vec<u8> = w.iter().map(|&v| v as u8).collect();
+    let scales: Vec<f32> = (0..N).map(|n| 0.01 * (n as f32 + 1.0)).collect();
+    let scale_bytes: Vec<u8> = scales.iter().flat_map(|v| v.to_le_bytes()).collect();
+
+    let mut params: HashMap<u32, AiParam> = HashMap::new();
+    let mut ti: HashMap<u32, TensorInfo> = HashMap::new();
+    ti.insert(0, info(DType::F32, &[1, K as u64])); // X
+    ti.insert(1, info(DType::INT8, &[K as u64, N as u64])); // W_i8
+    ti.insert(2, info(DType::F32, &[N as u64])); // scale vector (per column)
+    ti.insert(3, info(DType::INT8, &[N as u64])); // zero-point vector (zeros)
+    ti.insert(4, info(DType::F32, &[K as u64, N as u64])); // W_f32 (dequant out)
+    ti.insert(5, info(DType::F32, &[1, N as u64])); // Y
+    params.insert(1, AiParam::inline(w_bytes, ti[&1].clone()));
+    params.insert(2, AiParam::inline(scale_bytes, ti[&2].clone()));
+    params.insert(3, AiParam::inline(vec![0u8; N], ti[&3].clone()));
+
+    AiGraph {
+        name: "per_channel_linear".into(),
+        // axis = 1 ⇒ per-output-channel (one scale per column of W[K, N]).
+        nodes: vec![
+            AiNode::new(0, AiOp::Dequantize { axis: 1 }, vec![1, 2, 3], vec![4]),
+            AiNode::new(1, AiOp::MatMul, vec![0, 4], vec![5]),
+        ],
+        inputs: vec![0],
+        outputs: vec![5],
+        input_names: Vec::new(),
+        output_names: Vec::new(),
+        params,
+        tensor_info: ti,
+        metadata: HashMap::new(),
+        warnings: Vec::new(),
+        dim_vars: Default::default(),
+        shape_constraints: Default::default(),
+        subgraphs: HashMap::new(),
+        tensor_names: HashMap::new(),
+        topo_cache: Default::default(),
+    }
+}
+
+#[test]
+fn per_channel_quantized_weight_is_correct() {
+    let x: Vec<f32> = (0..K).map(|i| ((i % 5) as f32 - 2.0) * 0.3).collect();
+    let w = weight_i8();
+    let scales: Vec<f32> = (0..N).map(|n| 0.01 * (n as f32 + 1.0)).collect();
+    // Y[n] = Σ_k x[k] · (w[k,n] · scale[n]).
+    let reference: Vec<f32> = (0..N)
+        .map(|n| {
+            let acc: f64 = (0..K)
+                .map(|k| x[k] as f64 * (w[k * N + n] as f64 * scales[n] as f64))
+                .sum();
+            acc as f32
+        })
+        .collect();
+
+    let (runner, out) = run(per_channel_graph(), &x);
+    assert_eq!(
+        runner.dequant_matmul_fused_count(),
+        1,
+        "per-channel Dequantize→MatMul must fuse (weight stays packed)"
+    );
+    for (n, (&o, &r)) in out.iter().zip(reference.iter()).enumerate() {
+        assert!(
+            (o - r).abs() <= 1e-3 + r.abs() * 1e-3,
+            "per-channel out[{n}] {o} != ref {r}"
+        );
+    }
+}
+
+/// Packed 4-bit (i4) weight: two nibbles per byte, sign-extended. Verifies true
+/// ½-byte packing — the i4 weight is `K·N/2` bytes (8× under dense f32) — and
+/// that the dequant is numerically correct.
+fn i4_graph() -> (AiGraph, Vec<i8>) {
+    // Small signed values in [-4, 3] so each fits a signed 4-bit nibble.
+    let vals: Vec<i8> = (0..K * N).map(|i| ((i as i64 % 8) - 4) as i8).collect();
+    // Pack: element 2k → low nibble, 2k+1 → high nibble.
+    let packed: Vec<u8> = vals
+        .chunks(2)
+        .map(|c| {
+            let lo = (c[0] as u8) & 0x0f;
+            let hi = (c.get(1).copied().unwrap_or(0) as u8) & 0x0f;
+            (hi << 4) | lo
+        })
+        .collect();
+
+    let mut params: HashMap<u32, AiParam> = HashMap::new();
+    let mut ti: HashMap<u32, TensorInfo> = HashMap::new();
+    ti.insert(0, info(DType::F32, &[1, K as u64]));
+    ti.insert(1, info(DType::INT4, &[K as u64, N as u64])); // packed i4 weight
+    ti.insert(2, info(DType::F32, &[]));
+    ti.insert(3, info(DType::INT8, &[]));
+    ti.insert(4, info(DType::F32, &[K as u64, N as u64]));
+    ti.insert(5, info(DType::F32, &[1, N as u64]));
+    params.insert(1, AiParam::inline(packed, ti[&1].clone()));
+    params.insert(2, AiParam::inline(SCALE.to_le_bytes().to_vec(), ti[&2].clone()));
+    params.insert(3, AiParam::inline(vec![0u8], ti[&3].clone()));
+
+    let g = AiGraph {
+        name: "i4_linear".into(),
+        nodes: vec![
+            AiNode::new(0, AiOp::Dequantize { axis: -1 }, vec![1, 2, 3], vec![4]),
+            AiNode::new(1, AiOp::MatMul, vec![0, 4], vec![5]),
+        ],
+        inputs: vec![0],
+        outputs: vec![5],
+        input_names: Vec::new(),
+        output_names: Vec::new(),
+        params,
+        tensor_info: ti,
+        metadata: HashMap::new(),
+        warnings: Vec::new(),
+        dim_vars: Default::default(),
+        shape_constraints: Default::default(),
+        subgraphs: HashMap::new(),
+        tensor_names: HashMap::new(),
+        topo_cache: Default::default(),
+    };
+    (g, vals)
+}
+
+#[test]
+fn i4_weight_packs_to_half_byte_and_is_correct() {
+    let x: Vec<f32> = (0..K).map(|i| ((i % 5) as f32 - 2.0) * 0.3).collect();
+    let (graph, vals) = i4_graph();
+    let reference: Vec<f32> = (0..N)
+        .map(|n| {
+            let acc: f64 = (0..K)
+                .map(|k| x[k] as f64 * (vals[k * N + n] as f64 * SCALE as f64))
+                .sum();
+            acc as f32
+        })
+        .collect();
+
+    let (runner, out) = run(graph, &x);
+    assert_eq!(runner.dequant_matmul_fused_count(), 1, "i4 Dequantize→MatMul must fuse");
+    for (n, (&o, &r)) in out.iter().zip(reference.iter()).enumerate() {
+        assert!((o - r).abs() <= 1e-3 + r.abs() * 1e-3, "i4 out[{n}] {o} != ref {r}");
+    }
+
+    // The i4 weight is K·N/2 bytes resident vs f32's K·N·4 → ~8× smaller.
+    let (f_runner, _) = run(f32_graph(), &x);
+    let q_bytes = runner.resident_bytes();
+    let f_bytes = f_runner.resident_bytes();
+    println!(
+        "linear [{K}×{N}]: i4-weight resident {q_bytes} B vs f32 {f_bytes} B  ({:.1}× smaller)",
+        f_bytes as f64 / q_bytes.max(1) as f64
+    );
+    assert!(
+        q_bytes * 6 <= f_bytes,
+        "i4 weight footprint ({q_bytes} B) should be ~8× under f32 ({f_bytes} B)"
     );
 }

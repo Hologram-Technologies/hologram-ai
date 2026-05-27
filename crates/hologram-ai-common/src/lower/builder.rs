@@ -17,7 +17,7 @@ use hologram_graph::{Graph, GraphOp, InputSource, NodeId, OpKind};
 use smallvec::SmallVec;
 
 use super::dispatch::{dispatch, AttrSpec, DesugarKind, OpPlan};
-use super::dtype::{ai_dtype_to_dtype_id, default_dtype_id, DTYPE_F32, DTYPE_I64};
+use super::dtype::{ai_dtype_to_dtype_id, default_dtype_id, DTYPE_F32, DTYPE_I32, DTYPE_I64};
 use super::LowerPhase;
 use crate::ir::{AiGraph, AiNode, AiParam, DType, Dim, TensorId, TensorInfo};
 
@@ -521,7 +521,7 @@ impl<'a> Ctx<'a> {
             } => self.desugar_reverse_sequence(node, batch_axis, time_axis),
             DesugarKind::Scatter { .. } => self.desugar_scatter(node),
             DesugarKind::Quantize => self.desugar_quantize(node),
-            DesugarKind::Dequantize => self.desugar_dequantize(node),
+            DesugarKind::Dequantize { axis } => self.desugar_dequantize(node, axis),
             DesugarKind::MatMulActivation { activation } => {
                 self.desugar_matmul_act(node, activation)
             }
@@ -930,7 +930,7 @@ impl<'a> Ctx<'a> {
     /// i4 = ½), so hologram's `fuse_dequant_matmul → MatMulDequant` and
     /// `fuse_dequant_activation → DequantActivation` dequantize it **in-register**
     /// — the dense f32 weight is never materialized (architecture §6, class QZ).
-    fn desugar_dequantize(&mut self, node: &AiNode) -> Result<()> {
+    fn desugar_dequantize(&mut self, node: &AiNode, axis: i64) -> Result<()> {
         let x_tid = *node.inputs.first().context("Dequantize missing input")?;
         let quant_dtype = self.dtype_of(x_tid).0;
         let (out_dtype, out_shape) = self.out_dtype_shape(node)?;
@@ -972,26 +972,45 @@ impl<'a> Ctx<'a> {
             self.bind_out(node, InputSource::Node(nid))
         } else {
             // Per-channel: scale (and zero-point) are vectors passed as operands;
-            // the channel axis is the x dimension the scale vector sizes.
-            let scale_src = self.src(scale_tid.expect("scale_len > 1 ⇒ scale operand"))?;
+            // the channel axis is the op's declared `axis` (ONNX semantics),
+            // normalized against the operand rank. A mismatch between the scale
+            // length and the axis extent is a malformed model — surface it
+            // rather than guessing.
             let x_dims = self.tensor_dims(x_tid)?;
-            let axis = x_dims
-                .iter()
-                .position(|&d| d == scale_len)
-                .map(|p| p as i32)
-                .unwrap_or(0);
-            let mut inputs: SmallVec<[InputSource; 4]> = SmallVec::from_iter([x_src, scale_src]);
-            if let Some(zt) = zp_tid {
-                inputs.push(self.src(zt)?);
+            let rank = x_dims.len() as i64;
+            let norm_axis = if axis < 0 { axis + rank } else { axis };
+            if norm_axis < 0 || norm_axis as usize >= x_dims.len() {
+                anyhow::bail!("Dequantize axis {axis} out of range for rank {rank}");
             }
-            let nid = self.add(GraphOp::Op(OpKind::Dequantize), inputs, out_dtype, out_shape);
+            let chan = x_dims[norm_axis as usize];
+            if chan != scale_len {
+                anyhow::bail!(
+                    "Dequantize per-channel scale length {scale_len} != axis {norm_axis} extent {chan}"
+                );
+            }
+            // hologram's per-channel dequant reads `scales` as f32[ch] (ONNX
+            // scale is already f32 — passed through) and `zero_points` as
+            // i32[ch]; ONNX stores the zero-point at the quantized dtype
+            // (i8/u8), so widen it to i32 here (absent ⇒ zeros).
+            let scale_src = self.src(scale_tid.expect("per-channel ⇒ scale operand"))?;
+            let zp_i32: Vec<i32> = match zp_tid {
+                Some(zt) => self.param_as_i32_vec(zt)?,
+                None => vec![0i32; chan as usize],
+            };
+            let zp_src = self.const_i32(&zp_i32);
+            let nid = self.add(
+                GraphOp::Op(OpKind::Dequantize),
+                SmallVec::from_iter([x_src, scale_src, zp_src]),
+                out_dtype,
+                out_shape,
+            );
             self.graph.set_quant_attrs(
                 nid,
                 QuantAttrs {
                     quant_dtype,
                     scale_bits: 0,
                     zero_point: 0,
-                    axis,
+                    axis: norm_axis as i32,
                 },
             );
             self.bind_out(node, InputSource::Node(nid))
@@ -1026,6 +1045,39 @@ impl<'a> Ctx<'a> {
             _ => 0,
         };
         Ok(v)
+    }
+
+    /// Read an inline integer constant param's elements as `i32` (per-channel
+    /// zero-point: i8 / u8 / i32 / i64, widened to the i32 vector hologram's
+    /// per-channel dequant kernel expects).
+    fn param_as_i32_vec(&self, tid: TensorId) -> Result<Vec<i32>> {
+        let (data, info) = match self.ai.params.get(&tid) {
+            Some(AiParam::Inline { data, info }) => (data.as_slice(), info),
+            _ => anyhow::bail!("Dequantize per-channel zero-point T{tid} is not an inline constant"),
+        };
+        let v = match info.logical_dtype {
+            DType::INT8 => data.iter().map(|&b| b as i8 as i32).collect(),
+            DType::U8 | DType::BOOL => data.iter().map(|&b| b as i32).collect(),
+            DType::INT32 => data
+                .chunks_exact(4)
+                .map(|c| i32::from_le_bytes(c.try_into().unwrap()))
+                .collect(),
+            DType::INT64 => data
+                .chunks_exact(8)
+                .map(|c| i64::from_le_bytes(c.try_into().unwrap()) as i32)
+                .collect(),
+            other => anyhow::bail!("unsupported per-channel zero-point dtype {other:?}"),
+        };
+        Ok(v)
+    }
+
+    /// Emit an `i32` 1-D constant (per-channel zero-point vector).
+    fn const_i32(&mut self, values: &[i32]) -> InputSource {
+        let mut bytes = Vec::with_capacity(values.len() * 4);
+        for v in values {
+            bytes.extend_from_slice(&v.to_le_bytes());
+        }
+        self.const_bytes(bytes, DTypeId(DTYPE_I32), &[values.len() as u64])
     }
 
     // ── reductions ────────────────────────────────────────────────────────────

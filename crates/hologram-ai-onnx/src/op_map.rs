@@ -425,7 +425,9 @@ pub fn map_op(ctx: &OpContext<'_>) -> anyhow::Result<Option<AiOp>> {
         "QuantizeLinear" => Quantize {
             scheme: hologram_ai_quant::QuantScheme::Q8_0,
         },
-        "DequantizeLinear" => Dequantize,
+        "DequantizeLinear" => Dequantize {
+            axis: ctx.attr_i_or("axis", 1),
+        },
 
         // ── Control flow (subgraphs imported by graph_builder) ────────
         // Branch names are placeholders; graph_builder rewrites them to

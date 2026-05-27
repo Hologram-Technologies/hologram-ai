@@ -154,7 +154,11 @@ pub enum DesugarKind {
     /// as `QuantAttrs` (per-tensor) or trailing operands (per-channel) so
     /// hologram's `MatMulDequant` / `DequantActivation` fusions consume the
     /// weight at its quantum width — the dense f32 is never materialized (§6).
-    Dequantize,
+    /// `axis` is the per-channel quantization axis (ignored when the scale is a
+    /// scalar / per-tensor).
+    Dequantize {
+        axis: i64,
+    },
     /// Legacy matmul+activation fusion → unfused `MatMul` then the activation,
     /// so hologram fuses structurally (architecture §5.3).
     MatMulActivation {
@@ -463,7 +467,7 @@ pub fn dispatch(op: &AiOp) -> OpPlan {
 
         // ── Type / quant / lookup ───────────────────────────────────────────
         A::Cast { to } => P::Desugar(DesugarKind::Cast { to: *to }),
-        A::Dequantize => P::Desugar(DesugarKind::Dequantize),
+        A::Dequantize { axis } => P::Desugar(DesugarKind::Dequantize { axis: *axis }),
         A::Quantize { .. } => P::Desugar(DesugarKind::Quantize),
         A::Embed => P::Desugar(DesugarKind::Embed),
 

@@ -103,7 +103,8 @@ and are exempt from NS/ZA/ZM, exactly as hologram's CLI is a std host over its
 |---|---|---|---|---|
 | **QZ-1** | Q4_0 dequant equals the GGML reference over the golden vectors. | test vs golden | `quant_golden.rs` | ✅ |
 | **QZ-2** | Q8_0 dequant equals the GGML reference over the golden vectors. | test vs golden | `quant_golden.rs` | ✅ |
-| **QZ-3** | Quantized matmul lowers to hologram's canonical `Dequantize` + `MatMul` (or LUT-GEMM `OpKind`), semantics-preserving vs f64 ref. | lowering+exec test | `hologram-ai-conformance` | 🚧 |
+| **QZ-3** | A quantized weight lowers to canonical `Dequantize → MatMul` carrying its scale/zero-point as `QuantAttrs`; hologram fuses it to `MatMulDequant`, which reads the **packed** weight in-register (dense f32 never materialized). Per-tensor (scalar scale folded into the node) and per-channel (exact ONNX axis, scale f32 / zero-point widened to i32 vectors). Output matches the f64 reference. | lowering+exec test | `hologram-ai` (`tests/quantized_weight_memory.rs`) | ✅ |
+| **QZ-4** | Quantized weights occupy their **packed** size at runtime — i8 ≈ ¼, i4 ≈ ⅛ of dense f32 (measured via `resident_bytes()`). i4 is genuinely sub-byte (two nibbles/byte). | exec test | `hologram-ai` (`tests/quantized_weight_memory.rs`) | ✅ |
 
 ## TK — Tokenization (external: reference tokenizer)
 

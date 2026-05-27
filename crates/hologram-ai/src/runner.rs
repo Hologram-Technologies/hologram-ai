@@ -63,7 +63,7 @@ impl HoloRunner {
         self.session
             .input_ports()
             .iter()
-            .map(|p| p.element_count as usize * dtype_byte_width(p.dtype))
+            .map(|p| port_byte_size(p.element_count as usize, p.dtype))
             .collect()
     }
 
@@ -141,14 +141,26 @@ impl HoloRunner {
     }
 }
 
-/// Byte width of a canonical dtype tag (`hologram_backend::cpu::dtype` encoding).
+/// Byte size of a port holding `element_count` elements of the given dtype
+/// tag, honoring sub-byte packing (I4 is two nibbles per byte) — mirrors the
+/// backend's `div_ceil(n, 2)` sizing so an i4 input/weight is not over-reported.
+fn port_byte_size(element_count: usize, tag: u8) -> usize {
+    match tag {
+        10 => element_count.div_ceil(2), // I4: 2 nibbles/byte (packed)
+        _ => element_count * dtype_byte_width(tag),
+    }
+}
+
+/// Byte width of a canonical (whole-byte) dtype tag
+/// (`hologram_backend::cpu::dtype` encoding). Sub-byte dtypes (I4) are handled
+/// by [`port_byte_size`], not here.
 fn dtype_byte_width(tag: u8) -> usize {
     match tag {
-        0 | 1 | 2 | 10 => 1, // Bool, U8, I8, I4 (packed → byte-addressed)
-        6 | 7 => 2,          // F16, BF16
-        4 => 4,              // I32
-        8 => 4,              // F32
-        3 | 5 | 9 => 8,      // U64, I64, F64
+        0..=2 => 1, // Bool, U8, I8
+        6 | 7 => 2, // F16, BF16
+        4 => 4,         // I32
+        8 => 4,         // F32
+        3 | 5 | 9 => 8, // U64, I64, F64
         _ => 4,
     }
 }

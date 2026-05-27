@@ -386,7 +386,12 @@ pub enum AiOp {
     Quantize {
         scheme: QuantScheme,
     },
-    Dequantize,
+    /// `DequantizeLinear`: dequantize a packed quantized operand. `axis` is the
+    /// per-channel quantization axis (ONNX default 1); ignored when the scale
+    /// is a scalar (per-tensor). Negative indexes from the end.
+    Dequantize {
+        axis: i64,
+    },
     QuantizedMatMul {
         lhs_scheme: QuantScheme,
         rhs_scheme: QuantScheme,
@@ -531,7 +536,7 @@ impl AiOp {
             | AiOp::Sin
             | AiOp::Not
             | AiOp::Identity
-            | AiOp::Dequantize => UnaryElementwise,
+            | AiOp::Dequantize { .. } => UnaryElementwise,
 
             // ── Binary elementwise: broadcast shape, first-input dtype ────
             AiOp::Add

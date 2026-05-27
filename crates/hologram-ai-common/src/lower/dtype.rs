@@ -25,11 +25,12 @@ pub const DTYPE_I4: u8 = 10;
 
 /// Map a hologram-ai `ir::DType` to a canonical `DTypeId`.
 ///
-/// Widening/lowering decisions (preserved from the legacy `FloatDType`
-/// mapping, kept faithful to what hologram's kernels accept):
+/// Widening/lowering decisions (kept faithful to what hologram's kernels
+/// accept):
 /// - `F64` → `F32` (no f64 kernels in the backend),
-/// - `INT4` → `I8` (dequantized form; the I4 tag is reserved for packed
-///   quant weights carrying `QuantAttrs`),
+/// - `INT4` → `I4` (packed 4-bit, two nibbles/byte — the canonical tag for
+///   sub-byte quantized weights; hologram sizes it `div_ceil(n, 2)` and
+///   unpacks each nibble in its dequant kernels),
 /// - `INT16` → `I32` (no i16 tag in the canonical set).
 pub fn ai_dtype_to_dtype_id(dtype: &crate::ir::DType) -> DTypeId {
     use crate::ir::DType;
@@ -39,7 +40,7 @@ pub fn ai_dtype_to_dtype_id(dtype: &crate::ir::DType) -> DTypeId {
         DType::F16 => DTYPE_F16,
         DType::BF16 => DTYPE_BF16,
         DType::INT8 => DTYPE_I8,
-        DType::INT4 => DTYPE_I8,
+        DType::INT4 => DTYPE_I4,
         DType::U8 => DTYPE_U8,
         DType::INT16 => DTYPE_I32,
         DType::INT32 => DTYPE_I32,
@@ -67,7 +68,7 @@ mod tests {
     #[test]
     fn integer_widening_is_faithful() {
         assert_eq!(ai_dtype_to_dtype_id(&DType::INT16), DTypeId(DTYPE_I32));
-        assert_eq!(ai_dtype_to_dtype_id(&DType::INT4), DTypeId(DTYPE_I8));
+        assert_eq!(ai_dtype_to_dtype_id(&DType::INT4), DTypeId(DTYPE_I4));
         assert_eq!(ai_dtype_to_dtype_id(&DType::F64), DTypeId(DTYPE_F32));
     }
 }
