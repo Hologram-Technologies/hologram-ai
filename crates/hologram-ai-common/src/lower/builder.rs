@@ -500,6 +500,7 @@ impl<'a> Ctx<'a> {
             DesugarKind::Attention { causal, scale_bits } => {
                 self.desugar_attention(node, causal, scale_bits)
             }
+            DesugarKind::Concat { axis } => self.desugar_concat(node, axis),
             DesugarKind::Constant => self.desugar_constant(node),
             DesugarKind::Split { axis, sizes } => self.desugar_split(node, axis, &sizes),
             DesugarKind::Gather { axis } => self.desugar_gather(node, axis),
@@ -905,6 +906,81 @@ impl<'a> Ctx<'a> {
         self.graph
             .set_attention_attrs(nid, AttentionAttrs { causal, scale_bits });
         self.bind_out(node, InputSource::Node(nid))
+    }
+
+    /// Emit `Transpose(src)` by `perm` (synthesizing the i64 perm operand the
+    /// compiler reads). `in_dims` is `src`'s shape; the output shape is the
+    /// permuted dims.
+    fn transpose(&mut self, src: InputSource, dtype: DTypeId, in_dims: &[u64], perm: &[u32]) -> InputSource {
+        let out: Vec<u64> = perm.iter().map(|&p| in_dims[p as usize]).collect();
+        let perm_i64: Vec<i64> = perm.iter().map(|&p| p as i64).collect();
+        let perm_op = self.const_i64(&perm_i64);
+        self.op(OpKind::Transpose, &[src, perm_op], dtype, &out)
+    }
+
+    /// Lower `Concat(axis)`. hologram's `Concat` is a flat byte append, which
+    /// realizes an **axis-0** concat directly; for any other axis the join would
+    /// interleave rows, so transpose the join axis to the front, flat-concat
+    /// along axis 0, then transpose back. Also chains N-ary concat into binary
+    /// appends. (A last-axis concat realized as a flat append was the RoPE bug:
+    /// `cat(freqs, freqs, axis=-1)` doubled along seq instead of head_dim.)
+    fn desugar_concat(&mut self, node: &AiNode, axis: i64) -> Result<()> {
+        let dtype = self.dtype_of(node.inputs[0]);
+        let rank = self.out_dims(node)?.len().max(1);
+        let a = Self::norm_axis(axis, rank);
+        // Drop empty (0-element) operands: `concat(∅, X) = X` along any axis.
+        // This is the common empty-past KV concat (`Concat(past[…,0,…], cur)`),
+        // which must collapse to `cur` without transposing a 0-dim tensor.
+        let mut srcs = Vec::new();
+        let mut dims = Vec::new();
+        for i in 0..node.inputs.len() {
+            let d = self.in_dims(node, i)?;
+            if d.iter().product::<u64>() == 0 {
+                continue;
+            }
+            srcs.push(self.src(node.inputs[i])?);
+            dims.push(d);
+        }
+        let n = srcs.len();
+        if n == 0 {
+            // All operands empty → emit an empty passthrough of the first input.
+            let src = self.src(node.inputs[0])?;
+            return self.bind_out(node, src);
+        }
+        if n == 1 {
+            return self.bind_out(node, srcs[0]);
+        }
+
+        // Axis-0: a flat binary-append chain is exactly the concat.
+        if a == 0 {
+            let mut acc = srcs[0];
+            let mut acc_dims = dims[0].clone();
+            for i in 1..n {
+                acc_dims[0] += dims[i][0];
+                acc = self.op(OpKind::Concat, &[acc, srcs[i]], dtype, &acc_dims);
+            }
+            return self.bind_out(node, acc);
+        }
+
+        // Non-axis-0: move axis `a` to the front, flat-concat, transpose back.
+        let fwd: Vec<u32> = std::iter::once(a as u32)
+            .chain((0..rank as u32).filter(|&x| x != a as u32))
+            .collect();
+        let permuted = |d: &[u64]| -> Vec<u64> { fwd.iter().map(|&p| d[p as usize]).collect() };
+        let mut acc = self.transpose(srcs[0], dtype, &dims[0], &fwd);
+        let mut acc_dims = permuted(&dims[0]);
+        for i in 1..n {
+            let t = self.transpose(srcs[i], dtype, &dims[i], &fwd);
+            acc_dims[0] += permuted(&dims[i])[0];
+            acc = self.op(OpKind::Concat, &[acc, t], dtype, &acc_dims);
+        }
+        // Inverse permutation restores the original axis order.
+        let mut back = vec![0u32; rank];
+        for (new_pos, &old_axis) in fwd.iter().enumerate() {
+            back[old_axis as usize] = new_pos as u32;
+        }
+        let res = self.transpose(acc, dtype, &acc_dims, &back);
+        self.bind_out(node, res)
     }
 
     fn desugar_gather_nd(&mut self, node: &AiNode, _batch_dims: i64) -> Result<()> {

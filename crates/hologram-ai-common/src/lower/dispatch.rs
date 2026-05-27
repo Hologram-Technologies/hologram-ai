@@ -58,6 +58,13 @@ pub enum DesugarKind {
         causal: bool,
         scale_bits: u32,
     },
+    /// `Concat(axis)` → flat (axis-0) `Concat` chain. hologram's Concat is a flat
+    /// byte append (axis-0 only), so a non-axis-0 concat is realized by
+    /// transposing the join axis to the front, concatenating, and transposing
+    /// back. Also chains N-ary concat into binary appends.
+    Concat {
+        axis: i64,
+    },
     /// `Split(axis, sizes)` → N `Slice` nodes.
     Split {
         axis: i64,
@@ -292,7 +299,7 @@ pub fn dispatch(op: &AiOp) -> OpPlan {
             P::Direct(OpKind::Reshape)
         }
         A::Transpose { .. } => P::Direct(OpKind::Transpose),
-        A::Concat { .. } => P::Direct(OpKind::Concat),
+        A::Concat { axis } => P::Desugar(DesugarKind::Concat { axis: *axis }),
         A::Slice { .. } => P::Direct(OpKind::Slice),
         A::Expand => P::Direct(OpKind::Expand),
         A::Split { axis, sizes } => P::Desugar(DesugarKind::Split {
