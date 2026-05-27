@@ -385,8 +385,8 @@ fn address_native_scale_forward() {
         20e9 / 2.0 / 1e9,
     );
     eprintln!(
-        "{:>6}  {:>7}  {:>10}  {:>12}  {:>14}  {:>10}",
-        "nom.", "layers", "resident", "forward", "throughput", "verify"
+        "{:>6}  {:>7}  {:>10}  {:>12}  {:>11}  {:<22}",
+        "nom.", "layers", "resident", "forward", "throughput", "verify (vs reference)"
     );
 
     for &target in &targets {
@@ -399,8 +399,11 @@ fn address_native_scale_forward() {
             .expect("compile failed");
         let mut runner = HoloRunner::from_bytes(archive.bytes).expect("load failed");
 
-        // X[j] = (j mod 13). After `layers` right-shifts: out[j] == x[(j-layers) mod d].
-        let x: Vec<f32> = (0..d).map(|j| (j % 13) as f32).collect();
+        // X[j] = j — every element DISTINCT (and exact in f32: j < 8192 ≪ 2²⁴),
+        // so the expected permutation is uniquely identified position-by-position;
+        // a wrong shift, a dropped layer, or a non-permutation weight all surface
+        // as a mismatch. After `layers` right cyclic shifts: out[j] == x[(j-layers) mod d].
+        let x: Vec<f32> = (0..d).map(|j| j as f32).collect();
         let x_bytes: Vec<u8> = x.iter().flat_map(|v| v.to_le_bytes()).collect();
 
         // UOR: the host materializes exactly TWO distinct buffers (X and P),
@@ -422,14 +425,34 @@ fn address_native_scale_forward() {
             .collect();
         assert_eq!(y.len(), d as usize, "output element count");
         let shift = layers as usize % d as usize;
+        // Every position must equal the EXACT expected value (each output element
+        // is one input value selected by the composed permutation — exact in f32).
         let mut max_err = 0.0f32;
+        let mut matched = 0usize;
+        let mut changed = 0usize;
         for j in 0..d as usize {
             let expected = x[(j + d as usize - shift) % d as usize];
-            max_err = max_err.max((y[j] - expected).abs());
+            let err = (y[j] - expected).abs();
+            max_err = max_err.max(err);
+            if err == 0.0 {
+                matched += 1;
+            }
+            if y[j] != x[j] {
+                changed += 1;
+            }
         }
+        // (1) bit-exact at every one of the d positions, and
+        assert_eq!(
+            matched, d as usize,
+            "{params}-param addressed forward WRONG: only {matched}/{d} positions \
+             matched the expected permutation (max |err| = {max_err})"
+        );
+        // (2) the forward did non-trivial work — the output is genuinely the shifted
+        //     sequence, not X passed through (shift≠0 ⇒ d-gcd(shift,d) positions move).
         assert!(
-            max_err <= 1e-4,
-            "{params}-param addressed forward WRONG: max |err| = {max_err}"
+            shift == 0 || changed > 0,
+            "{params}-param forward returned X unchanged (shift={shift}) — \
+             the {layers} matmul layers were not actually applied"
         );
 
         let resident = runner.resident_bytes();
@@ -447,13 +470,13 @@ fn address_native_scale_forward() {
         let gmacs = params as f64 / 1e9;
         let gflops = 2.0 * gmacs / forward.as_secs_f64();
         eprintln!(
-            "{:>5.0}B  {:>7}  {:>8.2} GB  {:>12?}  {:>10.1} GF/s  {:>10}",
+            "{:>5.0}B  {:>7}  {:>8.2} GB  {:>12?}  {:>7.1} GF/s  {:<22}",
             params as f64 / 1e9,
             layers,
             resident as f64 / 1e9,
             forward,
             gflops,
-            format!("±{max_err:.0e}"),
+            format!("{matched}/{d} exact, {changed} moved"),
         );
     }
     eprintln!(
