@@ -2,8 +2,6 @@
 //!
 //! Uses numpy `allclose` semantics: `|actual - expected| <= atol + rtol * |expected|`
 
-use hologram::hologram_core::op::{FloatOp, FloatOpShape};
-
 /// Absolute and relative tolerance for comparing kernel outputs.
 #[derive(Debug, Clone, Copy)]
 pub struct Tolerance {
@@ -24,52 +22,36 @@ impl Tolerance {
     }
 }
 
-/// Get the appropriate tolerance for a FloatOp.
-pub fn tolerance_for(op: &FloatOp) -> Tolerance {
-    match op.category() {
-        FloatOpShape::UnaryElementwise => Tolerance {
-            atol: 1e-6,
-            rtol: 1e-5,
-        },
-        FloatOpShape::BinaryElementwise => Tolerance {
-            atol: 1e-6,
-            rtol: 1e-5,
-        },
-        FloatOpShape::BinaryCompare | FloatOpShape::BinaryByteBool | FloatOpShape::UnaryByteBool => {
-            Tolerance {
-                atol: 0.0,
-                rtol: 0.0,
-            }
-        }
-        FloatOpShape::UnaryToU8 => Tolerance {
+/// Get the appropriate tolerance for a canonical op, keyed by its `OpKind`
+/// name (`hologram_ops::OpKind::name()`). Compute-heavy ops (matmul, conv,
+/// attention) accumulate more float error, so they get looser bounds; exact
+/// integer/boolean ops get zero tolerance.
+pub fn tolerance_for(op_name: &str) -> Tolerance {
+    match op_name {
+        // Exact: comparisons, boolean, integer-index ops.
+        "Equal" | "Less" | "LessOrEqual" | "Greater" | "GreaterOrEqual" | "And" | "Or" | "Xor"
+        | "Bnot" | "Sign" | "IsNaN" => Tolerance {
             atol: 0.0,
             rtol: 0.0,
         },
-        FloatOpShape::Custom => match op {
-            FloatOp::MatMul { .. } | FloatOp::Gemm { .. } => Tolerance {
-                atol: 1e-4,
-                rtol: 1e-3,
-            },
-            FloatOp::Conv2d { .. } | FloatOp::ConvTranspose { .. } => Tolerance {
-                atol: 1e-4,
-                rtol: 1e-3,
-            },
-            FloatOp::Softmax { .. } | FloatOp::LogSoftmax { .. } => Tolerance {
-                atol: 1e-5,
-                rtol: 1e-4,
-            },
-            FloatOp::RmsNorm { .. } | FloatOp::LayerNorm { .. } => Tolerance {
-                atol: 1e-4,
-                rtol: 1e-3,
-            },
-            FloatOp::Attention { .. } => Tolerance {
-                atol: 1e-3,
-                rtol: 1e-2,
-            },
-            _ => Tolerance {
-                atol: 1e-5,
-                rtol: 1e-4,
-            },
+        // Accumulating linear algebra / normalization.
+        "MatMul" | "Gemm" | "Conv2d" | "ConvTranspose2d" | "RmsNorm" | "LayerNorm"
+        | "GroupNorm" | "InstanceNorm" | "AddRmsNorm" | "FusedSwiGlu" => Tolerance {
+            atol: 1e-4,
+            rtol: 1e-3,
+        },
+        "Softmax" | "LogSoftmax" => Tolerance {
+            atol: 1e-5,
+            rtol: 1e-4,
+        },
+        "Attention" => Tolerance {
+            atol: 1e-3,
+            rtol: 1e-2,
+        },
+        // Default: elementwise math.
+        _ => Tolerance {
+            atol: 1e-6,
+            rtol: 1e-5,
         },
     }
 }

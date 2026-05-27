@@ -93,10 +93,9 @@ impl Pass for ConstantEvaluation {
                         .or_else(|| concrete_shape(&param_info.shape))
                         .unwrap_or_else(|| {
                             let elem_sz = param_info.logical_dtype.byte_size().unwrap_or(1);
-                            if elem_sz > 0 {
-                                vec![_data.len() / elem_sz]
-                            } else {
-                                vec![_data.len()]
+                            match _data.len().checked_div(elem_sz) {
+                                Some(n) => vec![n],
+                                None => vec![_data.len()],
                             }
                         })
                 })

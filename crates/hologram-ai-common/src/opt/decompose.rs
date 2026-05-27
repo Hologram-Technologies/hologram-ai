@@ -287,13 +287,13 @@ impl Pass for OpDecomposition {
                 }
                 AiOp::BatchNorm {
                     epsilon, training, ..
-                } if !training => {
+                } if !training
                     // BatchNorm inference: y = (x - mean) / sqrt(var + eps) * scale + bias
                     // Decompose into: w = scale / sqrt(var + eps), b = bias - mean * w
                     // Then: y = x * w_4d + b_4d (channel-wise with NCHW broadcast)
                     //
                     // Inputs: [x, scale, bias, mean, var] — all 1D [C] except x [N,C,H,W]
-                    if node.inputs.len() >= 5 && !node.outputs.is_empty() {
+                    && node.inputs.len() >= 5 && !node.outputs.is_empty() => {
                         let x = node.inputs[0];
                         let scale_tid = node.inputs[1];
                         let bias_tid = node.inputs[2];
@@ -471,10 +471,7 @@ impl Pass for OpDecomposition {
                             vec![out],
                         ));
                         next_nid += 1;
-                    } else {
-                        new_nodes.push(node);
                     }
-                }
                 _ => {
                     new_nodes.push(node);
                 }

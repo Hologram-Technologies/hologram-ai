@@ -18,3 +18,8 @@ pub mod reference;
 pub mod tolerance;
 #[cfg(feature = "conformance")]
 pub mod validate_ort;
+
+// Structural V&V harness (classes ZA/ZM/CE). Self-contained — no hologram
+// dependency — so it is usable the moment the runtime core builds.
+#[cfg(feature = "structural")]
+pub mod alloc;

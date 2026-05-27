@@ -21,6 +21,9 @@ impl Pass for SliceToGather {
         "SliceToGather"
     }
 
+    // `next_tid` mints fresh tensor ids from the graph's max id, not a loop
+    // index — the enumerate/zip rewrite clippy suggests would be incorrect.
+    #[allow(clippy::explicit_counter_loop)]
     fn run(&self, mut graph: AiGraph) -> anyhow::Result<AiGraph> {
         let mut next_tid = graph.tensor_info.keys().copied().max().unwrap_or(0) + 1;
 

@@ -549,7 +549,7 @@ fn conformance_cast() {
 
 // ── Subgraph lowering tests ─────────────────────────────────────────────────
 
-use hologram_ai_common::{lower, KvCacheLayout, LowerPhase, LoweringOptions};
+use hologram_ai_common::{lower, LowerPhase, LoweringOptions};
 
 /// Build an AiGraph with subgraphs for control flow testing.
 fn build_if_graph() -> AiGraph {
@@ -658,9 +658,8 @@ fn build_if_graph() -> AiGraph {
 #[test]
 fn subgraph_if_lowering() {
     let graph = build_if_graph();
-    let kv = KvCacheLayout::none();
     let opts = LoweringOptions::default();
-    let result = lower(&graph, &kv, &opts, &LowerPhase::Forward);
+    let result = lower(&graph, &opts, &LowerPhase::Forward);
 
     // Lowering should succeed — both branches flatten + Where selects.
     assert!(result.is_ok(), "If lowering failed: {:?}", result.err());
@@ -681,9 +680,8 @@ fn subgraph_if_then_only() {
         else_branch: None,
     };
 
-    let kv = KvCacheLayout::none();
     let opts = LoweringOptions::default();
-    let result = lower(&graph, &kv, &opts, &LowerPhase::Forward);
+    let result = lower(&graph, &opts, &LowerPhase::Forward);
     assert!(
         result.is_ok(),
         "If (then-only) lowering failed: {:?}",
@@ -768,9 +766,8 @@ fn subgraph_loop_known_trip_count() {
         topo_cache: Default::default(),
     };
 
-    let kv = KvCacheLayout::none();
     let opts = LoweringOptions::default();
-    let result = lower(&graph, &kv, &opts, &LowerPhase::Forward);
+    let result = lower(&graph, &opts, &LowerPhase::Forward);
     assert!(result.is_ok(), "Loop lowering failed: {:?}", result.err());
 
     let output = result.unwrap();
@@ -854,9 +851,8 @@ fn subgraph_loop_zero_trip() {
         topo_cache: Default::default(),
     };
 
-    let kv = KvCacheLayout::none();
     let opts = LoweringOptions::default();
-    let result = lower(&graph, &kv, &opts, &LowerPhase::Forward);
+    let result = lower(&graph, &opts, &LowerPhase::Forward);
     assert!(
         result.is_ok(),
         "Loop (0-trip) lowering failed: {:?}",

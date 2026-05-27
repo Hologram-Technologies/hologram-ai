@@ -21,7 +21,9 @@
 //! 2. Unified KV cache injection for both ONNX and GGUF models
 //! 3. ~30% fewer graph nodes per transformer layer
 
-use super::graph_utils::{apply_node_mutations, build_consumer_map, build_producer_map, next_node_id};
+use super::graph_utils::{
+    apply_node_mutations, build_consumer_map, build_producer_map, next_node_id,
+};
 use super::pipeline::Pass;
 use crate::ir::{AiGraph, AiNode, AiOp, TensorId};
 use std::collections::{HashMap, HashSet};

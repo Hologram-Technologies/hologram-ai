@@ -54,7 +54,10 @@ pub(crate) fn add_dims(a: &DimExpr, b: &DimExpr) -> DimExpr {
 ///
 /// Uses element count conservation to resolve -1 and unknown entries when
 /// the data input shape provides enough information.
-pub(crate) fn resolve_reshape_shape(vals: &[Option<i64>], data_shape: Option<&Shape>) -> Vec<DimExpr> {
+pub(crate) fn resolve_reshape_shape(
+    vals: &[Option<i64>],
+    data_shape: Option<&Shape>,
+) -> Vec<DimExpr> {
     // First pass: resolve all deterministic entries.
     // Track which indices need inference (None or -1).
     let mut shape: Vec<DimExpr> = Vec::with_capacity(vals.len());

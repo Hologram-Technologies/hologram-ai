@@ -33,6 +33,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "allocator-api2"
+version = "0.2.21"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "683d7910e743518b0e34f1186f92494becacb047c7b6bf616c96772180fef923"
+
+[[package]]
 name = "android_system_properties"
 version = "0.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -340,23 +346,16 @@ dependencies = [
 
 [[package]]
 name = "blake3"
-version = "1.8.3"
+version = "1.5.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2468ef7d57b3fb7e16b576e8377cdbde2320c60e1491e961d11da40fc4f02a2d"
+checksum = "b8ee0c1824c4dea5b5f81736aff91bae041d2c07ee1192bec91054e10e3e601e"
 dependencies = [
  "arrayref",
  "arrayvec",
  "cc",
  "cfg-if",
  "constant_time_eq",
- "cpufeatures",
 ]
-
-[[package]]
-name = "block"
-version = "0.1.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0d8c1fef690941d3e7788d328517591fecc684c084084702d6ff1641e993699a"
 
 [[package]]
 name = "block-buffer"
@@ -715,9 +714,9 @@ dependencies = [
 
 [[package]]
 name = "constant_time_eq"
-version = "0.4.2"
+version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3d52eff69cd5e647efe296129160853a42795992097e8af39800e1060caeea9b"
+checksum = "7c74b8349d32d297c9134b8c88677813a227df8f779daa29bfc29c183fe3dca6"
 
 [[package]]
 name = "convert_case"
@@ -1846,6 +1845,8 @@ version = "0.15.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9229cfe53dfd69f0609a49f65461bd93001ea1ef889cd5529dd176593f5338a1"
 dependencies = [
+ "allocator-api2",
+ "equivalent",
  "foldhash 0.1.5",
 ]
 
@@ -1886,25 +1887,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ec9d92d097f4749b64e8cc33d924d9f40a2d4eb91402b458014b781f5733d60f"
 
 [[package]]
-name = "hologram"
-version = "0.4.1"
-dependencies = [
- "bytemuck",
- "hologram-archive",
- "hologram-backend",
- "hologram-cli",
- "hologram-compiler",
- "hologram-core",
- "hologram-exec",
- "hologram-graph",
- "hologram-ops",
- "rkyv",
- "serde",
- "tokio",
- "toml 0.8.2",
-]
-
-[[package]]
 name = "hologram-ai"
 version = "0.1.0"
 dependencies = [
@@ -1914,12 +1896,19 @@ dependencies = [
  "criterion",
  "dirs 5.0.1",
  "futures",
- "hologram",
  "hologram-ai-common",
  "hologram-ai-conformance",
  "hologram-ai-onnx",
  "hologram-ai-quant",
  "hologram-ai-tokenizer",
+ "hologram-archive",
+ "hologram-backend",
+ "hologram-compiler",
+ "hologram-exec",
+ "hologram-graph",
+ "hologram-host",
+ "hologram-ops",
+ "hologram-types",
  "indicatif",
  "memmap2",
  "parking_lot",
@@ -1935,6 +1924,8 @@ dependencies = [
  "toml 0.8.2",
  "tracing",
  "tracing-subscriber",
+ "uor-addr",
+ "uor-foundation",
  "which",
 ]
 
@@ -1946,8 +1937,12 @@ dependencies = [
  "blake3",
  "bytemuck",
  "half",
- "hologram",
  "hologram-ai-quant",
+ "hologram-archive",
+ "hologram-exec",
+ "hologram-graph",
+ "hologram-ops",
+ "hologram-types",
  "indexmap 2.13.0",
  "rayon",
  "rkyv",
@@ -1965,11 +1960,15 @@ dependencies = [
  "approx",
  "bytemuck",
  "half",
- "hologram",
  "hologram-ai",
  "hologram-ai-common",
  "hologram-ai-onnx",
  "hologram-ai-quant",
+ "hologram-archive",
+ "hologram-exec",
+ "hologram-graph",
+ "hologram-ops",
+ "hologram-types",
  "ndarray 0.16.1",
  "ort",
  "rand 0.8.5",
@@ -2020,7 +2019,6 @@ dependencies = [
  "bytemuck",
  "half",
  "smallvec",
- "thiserror 2.0.18",
 ]
 
 [[package]]
@@ -2028,8 +2026,11 @@ name = "hologram-ai-tokenizer"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "hologram",
- "regex",
+ "hashbrown 0.15.5",
+ "hologram-ai-common",
+ "hologram-archive",
+ "hologram-types",
+ "regex-automata",
  "rkyv",
  "serde",
  "serde_json",
@@ -2037,156 +2038,111 @@ dependencies = [
 
 [[package]]
 name = "hologram-archive"
-version = "0.4.1"
+version = "0.5.0"
 dependencies = [
- "blake3",
  "bytemuck",
- "hologram-compression",
- "hologram-core",
+ "hashbrown 0.15.5",
+ "hologram-backend",
  "hologram-graph",
+ "hologram-host",
  "memmap2",
- "rayon",
- "rkyv",
+ "smallvec",
+ "thiserror 2.0.18",
+ "uor-addr",
+ "uor-foundation",
+ "uor-foundation-sdk",
+ "uor-prism",
 ]
 
 [[package]]
 name = "hologram-backend"
-version = "0.1.0"
+version = "0.5.0"
 dependencies = [
  "bytemuck",
- "hologram-core",
- "hologram-transform",
- "metal",
- "objc",
+ "hologram-host",
+ "hologram-ops",
+ "hologram-types",
+ "libm",
  "smallvec",
  "thiserror 2.0.18",
- "tracing",
-]
-
-[[package]]
-name = "hologram-cascade"
-version = "0.4.1"
-dependencies = [
- "blake3",
- "hologram-archive",
- "hologram-core",
- "hologram-exec",
- "hologram-graph",
- "smallvec",
  "uor-foundation",
-]
-
-[[package]]
-name = "hologram-cli"
-version = "0.4.1"
-dependencies = [
- "clap",
- "hologram-archive",
- "hologram-compiler",
- "hologram-core",
- "hologram-exec",
- "hologram-graph",
- "parking_lot",
- "rkyv",
- "serde_json",
- "tokio",
+ "uor-foundation-sdk",
+ "uor-prism",
+ "uor-prism-tensor",
 ]
 
 [[package]]
 name = "hologram-compiler"
-version = "0.4.1"
+version = "0.5.0"
 dependencies = [
- "blake3",
+ "hashbrown 0.15.5",
  "hologram-archive",
- "hologram-cascade",
- "hologram-core",
+ "hologram-backend",
  "hologram-graph",
- "rayon",
+ "hologram-host",
+ "hologram-ops",
+ "hologram-types",
+ "smallvec",
+ "thiserror 2.0.18",
+ "tracing",
  "uor-foundation",
-]
-
-[[package]]
-name = "hologram-compression"
-version = "0.4.1"
-dependencies = [
- "hologram-core",
-]
-
-[[package]]
-name = "hologram-core"
-version = "0.4.1"
-dependencies = [
- "bytemuck",
- "hologram-ring",
- "libm",
- "rkyv",
- "uor-foundation",
+ "uor-prism",
 ]
 
 [[package]]
 name = "hologram-exec"
-version = "0.4.1"
+version = "0.5.0"
 dependencies = [
- "bytemuck",
+ "hashbrown 0.15.5",
  "hologram-archive",
  "hologram-backend",
- "hologram-core",
  "hologram-graph",
+ "hologram-host",
  "hologram-ops",
- "hologram-ring",
- "hologram-shape",
- "libc",
- "parking_lot",
- "rayon",
- "rkyv",
  "smallvec",
- "tracing",
+ "thiserror 2.0.18",
+ "uor-foundation",
+ "uor-prism",
 ]
 
 [[package]]
 name = "hologram-graph"
-version = "0.4.1"
+version = "0.5.0"
 dependencies = [
- "hologram-core",
  "hologram-ops",
- "rayon",
- "rkyv",
+ "hologram-types",
+ "libm",
  "smallvec",
- "tinyvec",
+]
+
+[[package]]
+name = "hologram-host"
+version = "0.5.0"
+dependencies = [
+ "uor-foundation",
+ "uor-foundation-sdk",
+ "uor-prism",
 ]
 
 [[package]]
 name = "hologram-ops"
-version = "0.4.1"
+version = "0.5.0"
 dependencies = [
+ "hologram-host",
+ "hologram-types",
  "libm",
- "rkyv",
-]
-
-[[package]]
-name = "hologram-ring"
-version = "0.4.1"
-dependencies = [
- "rkyv",
  "uor-foundation",
+ "uor-foundation-sdk",
+ "uor-prism",
 ]
 
 [[package]]
-name = "hologram-shape"
-version = "0.4.1"
+name = "hologram-types"
+version = "0.5.0"
 dependencies = [
- "hologram-core",
- "smallvec",
- "thiserror 2.0.18",
-]
-
-[[package]]
-name = "hologram-transform"
-version = "0.4.1"
-dependencies = [
- "hologram-ops",
- "smallvec",
- "thiserror 2.0.18",
+ "hologram-host",
+ "uor-foundation",
+ "uor-prism",
 ]
 
 [[package]]
@@ -2680,6 +2636,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "keccak"
+version = "0.1.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cb26cec98cce3a3d96cbb7bced3c4b16e3d13f27ec56dbd62cbc8f39cfb9d653"
+dependencies = [
+ "cpufeatures",
+]
+
+[[package]]
 name = "keyboard-types"
 version = "0.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2815,15 +2780,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c41e0c4fef86961ac6d6f8a82609f55f31b05e4fce149ac5710e439df7619ba4"
 
 [[package]]
-name = "malloc_buf"
-version = "0.0.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "62bb907fe88d54d8d9ce32a3cceab4218ed2f6b7d35617cafe9adf84e43919cb"
-dependencies = [
- "libc",
-]
-
-[[package]]
 name = "markup5ever"
 version = "0.14.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2906,21 +2862,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "488016bfae457b036d996092f6cb448677611ce4449e970ceaf42695203f218a"
 dependencies = [
  "autocfg",
-]
-
-[[package]]
-name = "metal"
-version = "0.33.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c7047791b5bc903b8cd963014b355f71dc9864a9a0b727057676c1dcae5cbc15"
-dependencies = [
- "bitflags 2.11.0",
- "block",
- "core-graphics-types",
- "foreign-types 0.5.0",
- "log",
- "objc",
- "paste",
 ]
 
 [[package]]
@@ -3155,15 +3096,6 @@ name = "number_prefix"
 version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "830b246a0e5f20af87141b25c173cd1b609bd7779a4617d6ec582abaf90870f3"
-
-[[package]]
-name = "objc"
-version = "0.2.7"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "915b1b472bc21c53464d6c8461c9d3af805ba1ef837e1cac254428f4a77177b1"
-dependencies = [
- "malloc_buf",
-]
 
 [[package]]
 name = "objc2"
@@ -3456,12 +3388,6 @@ dependencies = [
  "smallvec",
  "windows-link 0.2.1",
 ]
-
-[[package]]
-name = "paste"
-version = "1.0.15"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "57c0d7b74b563b49d38dae00a0c37d4d6de9b432382b2892f0574ddcae73fd0a"
 
 [[package]]
 name = "pathdiff"
@@ -4034,7 +3960,7 @@ dependencies = [
  "once_cell",
  "socket2",
  "tracing",
- "windows-sys 0.59.0",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -4852,6 +4778,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "sha3"
+version = "0.10.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "77fd7028345d415a4034cf8777cd4f8ab1851274233b45f84e3d955502d93874"
+dependencies = [
+ "digest",
+ "keccak",
+]
+
+[[package]]
 name = "sharded-slab"
 version = "0.1.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5471,7 +5407,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "82a72c767771b47409d2345987fda8628641887d5466101319899796367354a0"
 dependencies = [
  "fastrand",
- "getrandom 0.3.4",
+ "getrandom 0.4.2",
  "once_cell",
  "rustix",
  "windows-sys 0.61.2",
@@ -6012,23 +5948,94 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8ecb6da28b8a351d773b68d5825ac39017e680750f980f3a1a85cd8dd28a47c1"
 
 [[package]]
-name = "uor-foundation"
-version = "0.1.5"
+name = "uor-addr"
+version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7288701324f04949c717eb0d3947a396829699b10d896463e646628f0156bf26"
+checksum = "2b6e2d88d6ef066384c4eccbadc6dca625657493096b0776081dc106cd552eb6"
 dependencies = [
- "uor-foundation-macros",
+ "ryu",
+ "uor-foundation",
+ "uor-foundation-sdk",
+ "uor-prism",
+ "uor-prism-tensor",
 ]
 
 [[package]]
-name = "uor-foundation-macros"
-version = "0.1.5"
+name = "uor-foundation"
+version = "0.5.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "46799b53869e7321d93b4b14624ba987823e6a1edfa5783409e65f621a59ade2"
+checksum = "0179d3c29eb68e52ed03f9b48136159d4d4d26bd6b8008da3a9864b43ed0492f"
+dependencies = [
+ "libm",
+]
+
+[[package]]
+name = "uor-foundation-sdk"
+version = "0.5.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2c9ab22f2053e30eb0b748543182e236326a02c576aa46f1956ad4a3e4396490"
 dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.117",
+]
+
+[[package]]
+name = "uor-prism"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6d31f122d1466f5a48780fec22cdbef89dbd345e2b9aab8d8ebe89b5502fbb56"
+dependencies = [
+ "uor-foundation",
+ "uor-foundation-sdk",
+ "uor-prism-crypto",
+ "uor-prism-fhe",
+ "uor-prism-numerics",
+ "uor-prism-tensor",
+]
+
+[[package]]
+name = "uor-prism-crypto"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b363e64319dab5e809cd2524c6f9ff97150cc01b56e6c197feb574482c682542"
+dependencies = [
+ "blake3",
+ "sha2",
+ "sha3",
+ "uor-foundation",
+ "uor-foundation-sdk",
+]
+
+[[package]]
+name = "uor-prism-fhe"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "80bc3e193c5ca7a505d6db4937e30562d276ce6a90e9b0bb181815de64cd8ef2"
+dependencies = [
+ "uor-foundation",
+ "uor-foundation-sdk",
+]
+
+[[package]]
+name = "uor-prism-numerics"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "112180275b7f1b94f202f8894441bb7635fce583be291b91fc1be174435bdfa6"
+dependencies = [
+ "uor-foundation",
+ "uor-foundation-sdk",
+]
+
+[[package]]
+name = "uor-prism-tensor"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b69a4f7b49a8acc21823ca567fb962124d3d6b5b2891e20f5308ac1602211601"
+dependencies = [
+ "uor-foundation",
+ "uor-foundation-sdk",
+ "uor-prism-numerics",
 ]
 
 [[package]]

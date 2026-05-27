@@ -1,6 +1,8 @@
 //! WordPiece encoder (greedy longest-prefix match).
 
 use crate::vocab::VocabTable;
+use alloc::string::ToString;
+use alloc::vec::Vec;
 
 /// WordPiece encoder using greedy longest-prefix matching.
 pub struct WordPieceEncoder<'a> {
@@ -44,7 +46,7 @@ impl<'a> WordPieceEncoder<'a> {
 
             while end > start {
                 let substr = &bytes[start..end];
-                if let Ok(s) = std::str::from_utf8(substr) {
+                if let Ok(s) = core::str::from_utf8(substr) {
                     let candidate = if start > 0 {
                         format!("{}{}", self.continuing_prefix, s)
                     } else {

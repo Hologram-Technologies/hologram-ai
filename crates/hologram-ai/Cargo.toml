@@ -17,9 +17,20 @@ hologram-ai-common.workspace = true
 hologram-ai-quant.workspace  = true
 hologram-ai-onnx.workspace   = true
 hologram-ai-tokenizer.workspace = true
-# hologram with compiler feature — needed for hologram::compile()
-# default features already include compiler; workspace dep points to local path
-hologram.workspace = true
+# hologram 0.5.0 member crates (host-shell build: std + cpu backend + compiler).
+hologram-types.workspace    = true
+hologram-ops.workspace      = true
+hologram-graph.workspace    = true
+hologram-compiler.workspace = true
+hologram-exec.workspace     = true
+hologram-archive.workspace  = true
+hologram-backend.workspace  = true
+hologram-host.workspace     = true
+uor-foundation = "0.5.2"
+# Model-file content addressing (MA): mints a model's uor-addr κ-label used
+# as its dedup / warm-start identity (architecture §8). The format features
+# enable the ONNX / GGUF / JSON canonical realizations.
+uor-addr = { version = "0.2", features = ["onnx", "gguf"] }
 
 bytemuck.workspace     = true
 anyhow.workspace       = true

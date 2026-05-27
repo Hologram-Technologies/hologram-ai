@@ -6,7 +6,11 @@ license.workspace = true
 description = "Conformance testing for hologram float kernels against ONNX Runtime"
 
 [dependencies]
-hologram = { workspace = true }
+hologram-types = { workspace = true }
+hologram-ops = { workspace = true }
+hologram-graph = { workspace = true }
+hologram-exec = { workspace = true }
+hologram-archive = { workspace = true }
 hologram-ai-common = { workspace = true }
 hologram-ai-quant = { workspace = true }
 anyhow = { workspace = true }
@@ -21,7 +25,15 @@ hologram-ai-onnx = { workspace = true, optional = true }
 
 [features]
 conformance = ["ort", "ndarray", "hologram-ai", "hologram-ai-onnx"]
-profile = ["hologram/profile"]
+# Authoritative ONNX operator-spec conformance (classes IM/LW/EE): imports the
+# official ONNX backend node-test corpus and validates compile+run against the
+# spec's expected outputs. No ORT needed — the corpus ships the outputs.
+onnx-spec = ["hologram-ai", "hologram-ai-onnx"]
+# Structural V&V (classes ZA/ZM/CE): counting-allocator harness + zero-movement
+# instrumentation. See CONFORMANCE.md.
+structural = []
+# Performance V&V (class PV): release benches with per-stage budgets.
+perf = []
 
 [dev-dependencies]
 approx = { workspace = true }

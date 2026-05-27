@@ -1,6 +1,8 @@
 //! Vocabulary table and merge rules for BPE tokenization.
 
-use std::collections::HashMap;
+use alloc::string::String;
+use alloc::vec::Vec;
+use hashbrown::HashMap;
 
 /// Bidirectional mapping between token IDs and token byte sequences.
 ///
@@ -87,6 +89,7 @@ impl MergeRules {
 
     /// Parse merges from JSON values — handles both `["a", "b"]` arrays
     /// and `"a b"` strings (both occur in HuggingFace tokenizer.json files).
+    #[cfg(feature = "std")]
     pub fn from_json_merges(merges: &[serde_json::Value]) -> Self {
         let parsed = merges
             .iter()

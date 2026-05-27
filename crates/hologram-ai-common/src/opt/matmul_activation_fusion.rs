@@ -23,7 +23,9 @@
 //! SiLU in LLaMA/Mistral, GeLU in GPT/BERT). Fusing saves ~2x memory
 //! traffic by avoiding the intermediate activation buffer.
 
-use super::graph_utils::{build_consumer_map, build_producer_map, has_single_consumer, remove_nodes};
+use super::graph_utils::{
+    build_consumer_map, build_producer_map, has_single_consumer, remove_nodes,
+};
 use super::pipeline::Pass;
 use crate::ir::{AiGraph, AiNode, AiOp};
 use std::collections::HashSet;

@@ -9,6 +9,48 @@ default:
 # Full CI: format check, clippy, tests
 ci: fmt-check clippy test
 
+# ─────────────────────────────────────────────────────────────────────────────
+# V&V — Verification & Validation (see CONFORMANCE.md / VERIFICATION.md)
+#
+# Reproduces the full invariant catalog. Mirrors hologram's `just vv`.
+# Sub-targets map to the V&V axes; an axis fails loud if its invariant breaks.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Full V&V suite: architecture, conformance, structural, portability, perf.
+vv: vv-arch vv-conformance vv-structural vv-portability vv-perf
+
+# Axis 1 — Architecture (class AR): fmt, clippy, build, test against hologram 0.5.0.
+vv-arch: fmt-check clippy build test
+
+# Axis 2/3/4 — Import + correctness + e2e + addressing (classes IM/LW/CF/QZ/TK/EE/MA).
+vv-conformance: conformance conformance-ort
+
+# Axis 5 — Structural guarantees: zero-alloc (ZA), zero-movement (ZM), elision (CE).
+vv-structural:
+    cargo test -p hologram-ai-conformance --features=structural -- structural
+
+# Axis 6 — Portability (class NS): runtime core builds no_std on wasm + embedded.
+vv-portability: vv-wasm vv-embedded
+
+# NS-1 — the runtime core (dequant + tokenizer encode/decode) builds on
+# wasm32-unknown-unknown (no_std + alloc).
+vv-wasm:
+    cargo build --target wasm32-unknown-unknown -p hologram-ai-quant
+    cargo build --target wasm32-unknown-unknown -p hologram-ai-tokenizer --no-default-features
+
+# NS-2 — the runtime core builds on thumbv7em-none-eabi (no_std, bare metal).
+vv-embedded:
+    cargo build --target thumbv7em-none-eabi -p hologram-ai-quant
+    cargo build --target thumbv7em-none-eabi -p hologram-ai-tokenizer --no-default-features
+
+# Axis 7 — Performance (class PV): release benches with per-stage budgets.
+vv-perf:
+    cargo bench -p hologram-ai-conformance --features=perf
+
+# Install the cross-compilation targets the portability axis needs.
+vv-setup:
+    rustup target add wasm32-unknown-unknown thumbv7em-none-eabi
+
 # Run all tests
 test:
     cargo nextest run --workspace

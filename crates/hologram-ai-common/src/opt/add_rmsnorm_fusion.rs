@@ -41,7 +41,10 @@ impl Pass for AddRmsNormFusion {
     }
 
     fn should_run(&self, graph: &AiGraph) -> bool {
-        graph.nodes.iter().any(|n| matches!(n.op, AiOp::RmsNorm { .. }))
+        graph
+            .nodes
+            .iter()
+            .any(|n| matches!(n.op, AiOp::RmsNorm { .. }))
     }
 
     fn run(&self, mut graph: AiGraph) -> anyhow::Result<AiGraph> {

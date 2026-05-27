@@ -1,7 +1,9 @@
 //! Tokenizer configuration types.
 
 use crate::vocab::{MergeRules, VocabTable};
-use std::collections::HashMap;
+use alloc::string::String;
+use alloc::vec::Vec;
+use hashbrown::HashMap;
 
 /// Top-level tokenizer configuration.
 pub struct TokenizerConfig {
@@ -59,9 +61,7 @@ pub enum PreTokenizerConfig {
     /// Byte-level pre-tokenizer (GPT-2 / Qwen style).
     /// Maps each input byte to a Unicode character via the GPT-2
     /// byte-to-unicode table, then splits with an optional regex.
-    ByteLevel {
-        regex: Option<String>,
-    },
+    ByteLevel { regex: Option<String> },
 }
 
 /// Pre-tokenization text normalization.

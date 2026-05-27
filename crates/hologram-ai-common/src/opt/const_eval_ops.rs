@@ -368,7 +368,10 @@ pub(crate) fn eval_where(
     Some((result, x_dtype, out_shape))
 }
 
-pub(crate) fn eval_cast(inputs: &[(&[u8], &TensorInfo)], to: DType) -> Option<(Vec<u8>, DType, Vec<usize>)> {
+pub(crate) fn eval_cast(
+    inputs: &[(&[u8], &TensorInfo)],
+    to: DType,
+) -> Option<(Vec<u8>, DType, Vec<usize>)> {
     if inputs.is_empty() {
         return None;
     }

@@ -1,5 +1,4 @@
 pub mod add_rmsnorm_fusion;
-pub mod graph_utils;
 pub mod attention_fusion;
 pub mod const_dedup;
 pub mod const_eval;
@@ -9,6 +8,7 @@ pub mod data_eval_ops;
 pub mod data_prop;
 pub mod dead_node;
 pub mod decompose;
+pub mod graph_utils;
 pub mod kv_slot_injection;
 pub mod layernorm_fusion;
 pub mod matmul_activation_fusion;

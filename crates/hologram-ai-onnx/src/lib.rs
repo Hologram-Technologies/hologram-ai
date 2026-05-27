@@ -20,6 +20,34 @@ mod op_map;
 mod resolve_op_params;
 mod tensor_map;
 
+/// Decode a standalone ONNX `TensorProto` (e.g. an `input_0.pb` / `output_0.pb`
+/// from the official ONNX backend node-test corpus) into its little-endian
+/// byte image, dims, and ONNX data-type tag. Used by the V&V harness to feed
+/// and validate against the ONNX operator spec's authoritative test artifacts.
+pub fn decode_tensor_proto_bytes(bytes: &[u8]) -> anyhow::Result<(Vec<u8>, Vec<i64>, i32)> {
+    let t = onnx_pb::TensorProto::decode(bytes)?;
+    let raw = if !t.raw_data.is_empty() {
+        t.raw_data.clone()
+    } else {
+        t.float_data.iter().flat_map(|f| f.to_le_bytes()).collect()
+    };
+    Ok((raw, t.dims.clone(), t.data_type))
+}
+
+/// Decode a standalone `TensorProto` into its `f32` values (from `raw_data` or
+/// `float_data`) — the authoritative expected output for numeric comparison.
+pub fn decode_tensor_proto_f32(bytes: &[u8]) -> anyhow::Result<Vec<f32>> {
+    let t = onnx_pb::TensorProto::decode(bytes)?;
+    if !t.raw_data.is_empty() {
+        Ok(t.raw_data
+            .chunks_exact(4)
+            .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+            .collect())
+    } else {
+        Ok(t.float_data.clone())
+    }
+}
+
 /// Options controlling ONNX import behaviour.
 #[derive(Debug, Clone, Default)]
 pub struct OnnxImportOptions {

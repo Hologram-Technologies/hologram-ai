@@ -12,8 +12,18 @@ license     = "MIT OR Apache-2.0"
 repository  = "https://github.com/uor-framework/hologram-ai"
 
 [workspace.dependencies]
-# hologram root crate (path dep — local sibling directory)
-hologram = { path = "../hologram", features = ["cli", "accelerate", "parallel"] }
+# hologram 0.5.0 is UOR-native: there is no umbrella `hologram` crate anymore.
+# Consumers depend on the individual member crates (path deps — local sibling).
+# Runtime-core crates (types/ops/graph) are no_std-capable (default = []); the
+# host-shell stack (compiler/exec/archive/backend) is built with `std`.
+hologram-types    = { path = "../hologram/crates/hologram-types" }
+hologram-ops      = { path = "../hologram/crates/hologram-ops" }
+hologram-graph    = { path = "../hologram/crates/hologram-graph" }
+hologram-compiler = { path = "../hologram/crates/hologram-compiler" }
+hologram-exec     = { path = "../hologram/crates/hologram-exec", features = ["parallel"] }
+hologram-archive  = { path = "../hologram/crates/hologram-archive", features = ["model-formats"] }
+hologram-backend  = { path = "../hologram/crates/hologram-backend", features = ["parallel"] }
+hologram-host     = { path = "../hologram/crates/hologram-host" }
 
 # workspace-internal
 hologram-ai-quant  = { path = "crates/hologram-ai-quant" }
