@@ -1,0 +1,24 @@
+[package]
+name    = "hologram-ai-wasm"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Browser (WebAssembly) entry point for hologram-ai — the real compile/run/generate pipeline, parallel-free. See ADR-0017."
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+# NOTE: no `parallel` feature — rayon cannot spawn threads on wasm32. These deps
+# inherit the workspace declarations, which (post ADR-0017) no longer pin
+# parallel, so building this crate alone for wasm32 is single-threaded.
+[dependencies]
+hologram-exec.workspace    = true
+hologram-backend.workspace = true
+
+wasm-bindgen = "0.2"
+serde = { workspace = true, features = ["derive"] }
+serde-wasm-bindgen = "0.6"
+console_error_panic_hook = "0.1"
+
+[dev-dependencies]
+wasm-bindgen-test = "0.3"

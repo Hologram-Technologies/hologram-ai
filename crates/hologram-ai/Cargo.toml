@@ -9,6 +9,15 @@ name = "hologram-ai"
 path = "src/cli.rs"
 
 [features]
+default = ["parallel"]
+# Multi-core execution (rayon), defaulted on for the native lib/CLI/benches so
+# performance (class PV) is unchanged. The wasm build (`hologram-ai-wasm`) omits
+# it — rayon cannot spawn threads on wasm32. See ADR-0017.
+parallel = [
+    "hologram-exec/parallel",
+    "hologram-backend/parallel",
+    "hologram-ai-common/parallel",
+]
 # Feature-gate large model E2E tests that require local model files (not run in CI).
 e2e = []
 
