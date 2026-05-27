@@ -90,10 +90,16 @@ impl NativeTokenizer {
 impl NativeTokenizer {
     /// Construct from a HuggingFace `tokenizer.json` file.
     pub fn from_tokenizer_json(path: &Path) -> Result<Self> {
-        let data = std::fs::read_to_string(path)
+        let data = std::fs::read(path)
             .with_context(|| format!("reading tokenizer file: {}", path.display()))?;
+        Self::from_tokenizer_json_bytes(&data)
+    }
+
+    /// Construct from in-memory HuggingFace `tokenizer.json` bytes — used to load
+    /// the tokenizer baked into a `.holo` archive extension (no file needed).
+    pub fn from_tokenizer_json_bytes(bytes: &[u8]) -> Result<Self> {
         let json: serde_json::Value =
-            serde_json::from_str(&data).context("parsing tokenizer JSON")?;
+            serde_json::from_slice(bytes).context("parsing tokenizer JSON")?;
 
         let model = &json["model"];
         let model_type = model["type"].as_str().context("missing model.type")?;

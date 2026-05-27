@@ -1,3 +1,10 @@
+> **✅ RESOLVED (hologram main `8d0398f`).** Hologram landed first-class
+> `OpKind::Gather` (runtime int indices) and `OpKind::Cast` (numeric int↔float),
+> plus named/shaped ports and open extension sections. hologram-ai adopted them:
+> embedding now lowers to one `Gather` (int64 ids, no int→float cast) and `Cast`
+> is a real numeric conversion — the dequant-widening below is moot. Kept for the
+> record. See `specs/notes/generation-cli.md`.
+
 # Upstream request to hologram: dequantize over i32/i64 (unblock LM token embedding)
 
 **Against hologram main `c065c5e`** ("uint8 dequantization"). One small,

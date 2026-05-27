@@ -37,12 +37,13 @@ pub struct RunArgs {
 
     // ── Text generation (causal LM) ──────────────────────────────────────────
     // When `--prompt` is given, `run` performs autoregressive generation instead
-    // of a single raw forward pass. The `.holo` carries no tokenizer (closed
-    // section set), so `--tokenizer` supplies the HuggingFace `tokenizer.json`.
+    // of a single raw forward pass. The tokenizer is read from the archive's
+    // baked-in extension; `--tokenizer` overrides it with an external file.
     /// Prompt text — switches `run` into text-generation mode.
     #[arg(long)]
     pub prompt: Option<String>,
-    /// Path to the model's HuggingFace `tokenizer.json` (required with `--prompt`).
+    /// HuggingFace `tokenizer.json` override; defaults to the one baked into the
+    /// archive (a compiled model is self-describing).
     #[arg(long, value_name = "FILE")]
     pub tokenizer: Option<PathBuf>,
     /// Prompt template with a `{prompt}` placeholder (e.g. a chat template).
@@ -263,14 +264,17 @@ fn fmt_vals(bytes: &[u8], width: usize, max: usize, decode: impl Fn(&[u8]) -> f6
 /// `run --prompt …` — autoregressive text generation over a causal LM.
 fn generate_cmd(args: RunArgs) -> Result<()> {
     let prompt = args.prompt.as_deref().expect("generate_cmd requires --prompt");
-    let tok_path = args.tokenizer.as_ref().context(
-        "text generation needs the model tokenizer: pass --tokenizer path/to/tokenizer.json",
-    )?;
-
-    let tokenizer = NativeTokenizer::from_tokenizer_json(tok_path)
-        .with_context(|| format!("loading tokenizer {tok_path:?}"))?;
     let mut runner = HoloRunner::from_path(&args.file, None)
         .with_context(|| format!("loading model {:?}", args.file))?;
+
+    // Tokenizer source: an explicit `--tokenizer` file overrides; otherwise the
+    // one baked into the archive (canonicalized, content-addressed). The `.holo`
+    // is self-describing, so no external file is needed for a compiled model.
+    let tokenizer = match args.tokenizer.as_ref() {
+        Some(path) => NativeTokenizer::from_tokenizer_json(path)
+            .with_context(|| format!("loading tokenizer {path:?}"))?,
+        None => load_archived_tokenizer(&runner)?,
+    };
 
     let cfg = GenConfig {
         max_tokens: args.max_tokens,
@@ -291,6 +295,31 @@ fn generate_cmd(args: RunArgs) -> Result<()> {
     generate::generate_stream(&mut runner, &tokenizer, &templated, &cfg, &mut stdout)?;
     println!();
     Ok(())
+}
+
+/// Load the tokenizer baked into the archive (canonical `tokenizer.json`
+/// extension), verifying its content address against the stored κ-label so a
+/// corrupted tokenizer is caught rather than silently producing wrong tokens.
+fn load_archived_tokenizer(runner: &HoloRunner) -> Result<NativeTokenizer> {
+    let canonical = runner.extension(crate::compiler::TOKENIZER_EXT).context(
+        "no tokenizer: the model has none embedded — recompile from a model directory \
+         containing tokenizer.json, or pass --tokenizer path/to/tokenizer.json",
+    )?;
+    if let Some(expected) = runner.extension(crate::compiler::TOKENIZER_KAPPA_EXT) {
+        let actual = uor_addr::json::address(canonical)
+            .map_err(|e| anyhow::anyhow!("re-addressing embedded tokenizer: {e:?}"))?
+            .address
+            .as_str()
+            .to_string();
+        if actual.as_bytes() != expected {
+            anyhow::bail!(
+                "embedded tokenizer failed its content-address check (expected {}, got {actual}) \
+                 — the archive's tokenizer is corrupt",
+                String::from_utf8_lossy(expected)
+            );
+        }
+    }
+    NativeTokenizer::from_tokenizer_json_bytes(canonical).context("parsing embedded tokenizer")
 }
 
 // ── input parsing ─────────────────────────────────────────────────────────────

@@ -42,23 +42,19 @@ pub async fn generate(
     let bin = paths::hologram_ai_bin().map_err(|e| e.to_string())?;
     let cwd = paths::workspace_root();
 
-    // The tokenizer is supplied at run time (the archive carries none). Default
-    // to `tokenizer.json` beside the archive when the request doesn't name one.
-    let tokenizer = req.tokenizer.clone().unwrap_or_else(|| {
-        req.archive
-            .parent()
-            .map(|d| d.join("tokenizer.json"))
-            .unwrap_or_else(|| PathBuf::from("tokenizer.json"))
-    });
-
+    // The tokenizer is baked into the compiled archive (self-describing), so
+    // `run --prompt` needs no tokenizer file; only pass `--tokenizer` when the
+    // request explicitly overrides it.
     let mut args = vec![
         "run".to_string(),
         req.archive.to_string_lossy().into_owned(),
         "--prompt".into(),
         req.prompt,
-        "--tokenizer".into(),
-        tokenizer.to_string_lossy().into_owned(),
     ];
+    if let Some(tok) = &req.tokenizer {
+        args.push("--tokenizer".into());
+        args.push(tok.to_string_lossy().into_owned());
+    }
     if let Some(t) = &req.prompt_template {
         args.push("--prompt-template".into());
         args.push(t.clone());

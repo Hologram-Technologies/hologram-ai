@@ -73,14 +73,19 @@ pub struct HoloArchive {
     pub stats: CompileStats,
 }
 
-/// Sections to embed in the archive during the single build pass.
-///
-/// Collected by the CLI before compilation so that the compiler can
-/// include them in `build_final_archive_to_file` — no post-processing
-/// `rebuild_archive_with_section` round-trips needed.
+/// Archive extension key for the canonicalized tokenizer JSON (uor-addr JCS).
+pub const TOKENIZER_EXT: &str = "tokenizer.json";
+/// Archive extension key for the tokenizer's uor-addr κ-label (integrity check).
+pub const TOKENIZER_KAPPA_EXT: &str = "tokenizer.kappa";
+
+/// Open **extension sections** (key → bytes) to embed in the `.holo` during the
+/// single build pass — the runtime carries them opaquely and exposes them via
+/// `session.extension(key)`. hologram-ai uses this to bake the model's tokenizer
+/// (canonicalized via uor-addr) into the archive so it is self-describing; the
+/// platform also uses it for generation config, labels, provenance, etc.
 #[derive(Default)]
 pub struct ArchiveSections {
-    sections: Vec<(u32, Vec<u8>)>,
+    extensions: Vec<(String, Vec<u8>)>,
 }
 
 impl ArchiveSections {
@@ -88,25 +93,25 @@ impl ArchiveSections {
         Self::default()
     }
 
-    /// Add a section from a [`Section`](hologram_ai_common::Section) implementor.
-    pub fn add(&mut self, section: &dyn hologram_ai_common::Section) {
-        self.sections
-            .push((section.section_kind(), section.to_bytes()));
+    /// Attach an extension section under `key`. A later add with the same key
+    /// shadows the earlier one (last-wins).
+    pub fn add_extension(&mut self, key: impl Into<String>, bytes: Vec<u8>) {
+        self.extensions.push((key.into(), bytes));
     }
 
-    /// Add a raw section (kind + pre-serialized bytes).
-    pub fn add_raw(&mut self, kind: u32, bytes: Vec<u8>) {
-        self.sections.push((kind, bytes));
+    /// Whether the given extension key is already present.
+    pub fn contains(&self, key: &str) -> bool {
+        self.extensions.iter().any(|(k, _)| k == key)
     }
 
-    /// Whether any sections have been added.
+    /// Whether any extension has been added.
     pub fn is_empty(&self) -> bool {
-        self.sections.is_empty()
+        self.extensions.is_empty()
     }
 
-    /// Consume and return the collected sections.
-    pub fn into_inner(self) -> Vec<(u32, Vec<u8>)> {
-        self.sections
+    /// Consume and return the collected extensions.
+    pub fn into_inner(self) -> Vec<(String, Vec<u8>)> {
+        self.extensions
     }
 }
 
@@ -231,7 +236,7 @@ impl ModelCompiler {
     pub fn compile_with_sections(
         &self,
         source: ModelSource,
-        _sections: ArchiveSections,
+        mut sections: ArchiveSections,
     ) -> anyhow::Result<HoloArchive> {
         use hologram_compiler::{compile, BackendKind};
 
@@ -269,8 +274,34 @@ impl ModelCompiler {
         let node_count = ai_graph.nodes.len();
 
         // Step 4 — lower to a canonical hologram graph.
-        let lowered = lower(&ai_graph, &self.lowering_options(), &LowerPhase::Forward)
+        let mut lowered = lower(&ai_graph, &self.lowering_options(), &LowerPhase::Forward)
             .context("lowering to canonical graph failed")?;
+
+        // Step 4b — bake the model's tokenizer into the archive as an open
+        // extension, canonicalized via uor-addr (JCS-RFC8785 + NFC) so it is a
+        // deterministic, content-addressed artifact — the `.holo` is then
+        // self-describing and `run --prompt` needs no external tokenizer file.
+        if let Some(dir) = &model_dir {
+            let tok = dir.join("tokenizer.json");
+            if tok.exists() && !sections.contains(TOKENIZER_EXT) {
+                let raw = std::fs::read(&tok)
+                    .with_context(|| format!("reading tokenizer {tok:?}"))?;
+                let canonical = uor_addr::json::canonicalize(&raw)
+                    .map_err(|e| anyhow::anyhow!("tokenizer.json is not valid JSON: {e:?}"))?;
+                // Content address (κ-label) of the canonical form, for integrity
+                // verification + dedup at load (class MA), stored alongside it.
+                let kappa = uor_addr::json::address(&canonical)
+                    .map_err(|e| anyhow::anyhow!("addressing tokenizer.json: {e:?}"))?
+                    .address
+                    .as_str()
+                    .to_string();
+                sections.add_extension(TOKENIZER_EXT, canonical);
+                sections.add_extension(TOKENIZER_KAPPA_EXT, kappa.into_bytes());
+            }
+        }
+        for (key, bytes) in sections.into_inner() {
+            lowered.graph.add_extension(key, bytes);
+        }
 
         // Step 5 — compile to a `.holo` archive.
         let out = compile(lowered.graph, BackendKind::Cpu, hologram_witt_level())
