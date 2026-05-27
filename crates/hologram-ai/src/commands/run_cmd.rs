@@ -8,9 +8,12 @@
 
 use anyhow::{Context as _, Result};
 use clap::Args;
+use std::io::Write;
 use std::path::PathBuf;
 
+use crate::commands::generate::{self, GenConfig};
 use crate::runner::HoloRunner;
+use hologram_ai_tokenizer::NativeTokenizer;
 
 /// Arguments for the `run` subcommand.
 #[derive(Args, Debug)]
@@ -26,10 +29,46 @@ pub struct RunArgs {
     /// Print output bytes as hex (otherwise only shapes/sizes are printed).
     #[arg(long)]
     pub verbose: bool,
+
+    // ── Text generation (causal LM) ──────────────────────────────────────────
+    // When `--prompt` is given, `run` performs autoregressive generation instead
+    // of a single raw forward pass. The `.holo` carries no tokenizer (closed
+    // section set), so `--tokenizer` supplies the HuggingFace `tokenizer.json`.
+    /// Prompt text — switches `run` into text-generation mode.
+    #[arg(long)]
+    pub prompt: Option<String>,
+    /// Path to the model's HuggingFace `tokenizer.json` (required with `--prompt`).
+    #[arg(long, value_name = "FILE")]
+    pub tokenizer: Option<PathBuf>,
+    /// Prompt template with a `{prompt}` placeholder (e.g. a chat template).
+    #[arg(long, value_name = "TEMPLATE")]
+    pub prompt_template: Option<String>,
+    /// Maximum number of new tokens to generate.
+    #[arg(long, default_value_t = 64)]
+    pub max_tokens: usize,
+    /// Sampling temperature; `0.0` is greedy/deterministic argmax.
+    #[arg(long, default_value_t = 0.0)]
+    pub temperature: f32,
+    /// Restrict sampling to the `k` most-likely tokens.
+    #[arg(long, value_name = "K")]
+    pub top_k: Option<usize>,
+    /// Stop string(s); generation halts when the decoded suffix contains one.
+    #[arg(long)]
+    pub stop: Vec<String>,
+    /// Override the end-of-sequence token id (default: tokenizer's eos).
+    #[arg(long, value_name = "ID")]
+    pub eos: Option<u32>,
+    /// RNG seed for temperature sampling (reproducibility).
+    #[arg(long, default_value_t = 0x9E3779B97F4A7C15)]
+    pub seed: u64,
 }
 
 /// Execute the `run` subcommand.
 pub fn execute(args: RunArgs) -> Result<()> {
+    if args.prompt.is_some() {
+        return generate_cmd(args);
+    }
+
     let mut runner = HoloRunner::from_path(&args.file, None)
         .with_context(|| format!("loading model {:?}", args.file))?;
 
@@ -80,6 +119,39 @@ pub fn execute(args: RunArgs) -> Result<()> {
             println!("output[{i}]: {} bytes", out.bytes.len());
         }
     }
+    Ok(())
+}
+
+/// `run --prompt …` — autoregressive text generation over a causal LM.
+fn generate_cmd(args: RunArgs) -> Result<()> {
+    let prompt = args.prompt.as_deref().expect("generate_cmd requires --prompt");
+    let tok_path = args.tokenizer.as_ref().context(
+        "text generation needs the model tokenizer: pass --tokenizer path/to/tokenizer.json",
+    )?;
+
+    let tokenizer = NativeTokenizer::from_tokenizer_json(tok_path)
+        .with_context(|| format!("loading tokenizer {tok_path:?}"))?;
+    let mut runner = HoloRunner::from_path(&args.file, None)
+        .with_context(|| format!("loading model {:?}", args.file))?;
+
+    let cfg = GenConfig {
+        max_tokens: args.max_tokens,
+        temperature: args.temperature,
+        top_k: args.top_k,
+        stop: args.stop.clone(),
+        eos: args.eos,
+        seed: args.seed,
+    };
+
+    let templated = generate::apply_template(args.prompt_template.as_deref(), prompt);
+
+    let mut stdout = std::io::stdout();
+    // Echo the prompt so a streamed transcript reads coherently, then stream
+    // the generated continuation token-by-token from inside generate_stream.
+    print!("{prompt}");
+    stdout.flush().ok();
+    generate::generate_stream(&mut runner, &tokenizer, &templated, &cfg, &mut stdout)?;
+    println!();
     Ok(())
 }
 

@@ -1,15 +1,36 @@
-# Qwen2 0.5B — Q8 quantized compilation (auto-downgraded from Q4 for small models)
+# Qwen2 0.5B Instruct — Q8-quantized compile + generate.
 #
-# Compile: cargo run --release -- compile --config examples/qwen2.toml
-# Run:     cargo run --release -- run models/Qwen2-0.5B/model.holo --prompt "The capital of France is" --max-tokens 30
+# hologram-ai uses explicit CLI flags (there is no `--config` mode). The fields
+# below are reference values; the exact commands are:
+#
+# Download (lays out model.onnx + tokenizer.json under models/…):
+#   cargo run --release -- download Qwen/Qwen2-0.5B-Instruct
+#
+# Compile (q8_0 ≈ 1 byte/param; small models keep more precision than q4):
+#   cargo run --release -- compile \
+#     --model models/Qwen2-0.5B-Instruct/model.onnx \
+#     --output models/Qwen2-0.5B-Instruct \
+#     --quantize q8_0
+#
+# Generate (ChatML template; stop at the assistant turn end):
+#   cargo run --release -- run models/Qwen2-0.5B-Instruct/model.holo \
+#     --prompt "What is the capital of France?" \
+#     --tokenizer models/Qwen2-0.5B-Instruct/tokenizer.json \
+#     --prompt-template "<|im_start|>user\n{prompt}<|im_end|>\n<|im_start|>assistant\n" \
+#     --max-tokens 60 --temperature 0.0 --stop "<|im_end|>"
+#
+# NOTE: real LMs use int64 `input_ids`; end-to-end generation against them needs
+# the upstream hologram embedding widening (Dequantize over i32/i64 indices) —
+# see specs/notes/generation-cli.md. The generation loop itself is verified on a
+# synthetic i8-vocab LM (tests/generation_synthetic.rs).
 
 [model]
-path = "../models/Qwen2-0.5B/model.onnx"
-output = "../models/Qwen2-0.5B"
-quantize = "q4_0"
+hf_id = "Qwen/Qwen2-0.5B-Instruct"
+quantize = "q8_0"
 
 [run]
-prompt = "<|im_start|>system\nYou are a helpful assistant<|im_end|>\n<|im_start|>user\nWhat is the capital of France?<|im_end|>\n<|im_start|>assistant\n"
+prompt = "What is the capital of France?"
+prompt_template = "<|im_start|>user\n{prompt}<|im_end|>\n<|im_start|>assistant\n"
 max_tokens = 60
 temperature = 0.0
 stop = ["<|im_end|>"]

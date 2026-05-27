@@ -1,13 +1,37 @@
-# TinyLlama 1.1B Chat — Q4 quantized compilation
+# TinyLlama 1.1B Chat — Q4-quantized compile + generate.
 #
-# Compile: cargo run --release -- compile --config examples/tinyllama.toml
-# Run:     cargo run --release -- run models/TinyLlama-1.1B-Chat-v1.0/model.holo --prompt "The capital of France is" --max-tokens 30
+# hologram-ai uses explicit CLI flags (there is no `--config` mode). The fields
+# below are reference values; the exact commands are:
+#
+# Download (lays out model.onnx + tokenizer.json under models/…):
+#   cargo run --release -- download TinyLlama/TinyLlama-1.1B-Chat-v1.0
+#
+# Compile (model.onnx → model.holo; q4_0 keeps weights packed at ~½ byte/param):
+#   cargo run --release -- compile \
+#     --model models/TinyLlama-1.1B-Chat-v1.0/model.onnx \
+#     --output models/TinyLlama-1.1B-Chat-v1.0 \
+#     --quantize q4_0
+#
+# Generate (the tokenizer is supplied at run time — the .holo carries no
+# tokenizer section; greedy decoding at temperature 0):
+#   cargo run --release -- run models/TinyLlama-1.1B-Chat-v1.0/model.holo \
+#     --prompt "The capital of France is" \
+#     --tokenizer models/TinyLlama-1.1B-Chat-v1.0/tokenizer.json \
+#     --prompt-template "<|user|>\n{prompt}</s>\n<|assistant|>\n" \
+#     --max-tokens 60 --stop "</s>"
+#
+# NOTE: real LMs use int64 `input_ids`; end-to-end generation against them needs
+# the upstream hologram embedding widening (Dequantize over i32/i64 indices) —
+# see specs/notes/generation-cli.md. The generation loop itself is verified on a
+# synthetic i8-vocab LM (tests/generation_synthetic.rs).
 
 [model]
-path = "../models/TinyLlama-1.1B-Chat-v1.0/model.onnx"
-output = "../models/TinyLlama-1.1B-Chat-v1.0"
+hf_id = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
 quantize = "q4_0"
 
 [run]
 prompt = "The capital of France is"
+prompt_template = "<|user|>\n{prompt}</s>\n<|assistant|>\n"
 max_tokens = 60
+temperature = 0.0
+stop = ["</s>"]

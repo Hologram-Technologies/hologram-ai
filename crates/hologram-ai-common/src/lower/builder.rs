@@ -775,22 +775,48 @@ impl<'a> Ctx<'a> {
 
     // ── selection: one-hot × matmul (no Gather in the canonical catalog) ─────
 
-    /// Build a one-hot `[rows, depth]` f32 matrix from i64 `indices` `[rows]`.
-    fn one_hot(&mut self, indices: InputSource, rows: u64, depth: u64) -> InputSource {
-        // iota row [1, depth]; indices as [rows, 1]; Equal broadcasts to
-        // [rows, depth]; cast to f32 by multiplying with 1.0 (Equal yields a
-        // numeric 0/1 mask in the canonical kernels).
-        let iota: Vec<i64> = (0..depth as i64).collect();
-        let iota_c = self.const_i64(&iota);
-        // Reshape indices to [rows, 1] and iota to [1, depth] via Reshape ops.
-        let idx_2d = self.reshape_to(indices, DTypeId(DTYPE_I64), &[rows, 1]);
-        let iota_2d = self.reshape_to(iota_c, DTypeId(DTYPE_I64), &[1, depth]);
-        self.op(
-            OpKind::Equal,
-            &[idx_2d, iota_2d],
+    /// Numeric int→f32 conversion via `Dequantize(scale 1, zp 0)` — the
+    /// canonical `toᶠ³²` used by the dequant primitive. The backend's dequant
+    /// kernel is the integer→float converter (`(q − z)·s`); it supports the
+    /// quantum widths (i8/i4/u8). `dims` is `src`'s shape, `src_dtype` its tag.
+    fn cast_f32(&mut self, src: InputSource, dims: &[u64], src_dtype: u8) -> InputSource {
+        let shape = self.intern(dims);
+        let nid = self.add(
+            GraphOp::Op(OpKind::Dequantize),
+            SmallVec::from_iter([src]),
             DTypeId(DTYPE_F32),
-            &[rows, depth],
-        )
+            shape,
+        );
+        self.graph.set_quant_attrs(
+            nid,
+            QuantAttrs { quant_dtype: src_dtype, scale_bits: 1.0f32.to_bits(), zero_point: 0, axis: -1 },
+        );
+        InputSource::Node(nid)
+    }
+
+    /// Build a one-hot `[rows, depth]` f32 matrix from integer `indices`
+    /// `[rows]` (the embedding/Gather selection matrix).
+    ///
+    /// The comparison runs in the **float domain**: indices and the `iota`
+    /// `[0..depth)` are converted to f32 (exact for ids < 2²⁴) and both operands
+    /// are explicitly `Expand`ed to `[rows, depth]` before `Equal`. The backend
+    /// binary kernels are not broadcasting and the byte-domain `Equal` can't
+    /// compare multi-byte integers, so neither implicit broadcast nor an i64
+    /// compare is valid — the operands must be materialized at full shape in a
+    /// dtype the kernel supports. `Equal` then yields the 0/1 f32 mask directly.
+    fn one_hot(&mut self, indices: InputSource, rows: u64, depth: u64, idx_dtype: u8) -> InputSource {
+        let f32t = DTypeId(DTYPE_F32);
+        // iota as an f32 `[1, depth]` constant; indices cast to f32 `[rows]` then
+        // reshaped to `[rows, 1]`. Both operands are then `Expand`ed to the full
+        // `[rows, depth]` shape (matching rank, so `expand_plan` accepts them)
+        // before the strict-elementwise `Equal`.
+        let iota: Vec<f32> = (0..depth).map(|i| i as f32).collect();
+        let iota_2d = self.const_f32(&iota, &[1, depth]);
+        let idx_f = self.cast_f32(indices, &[rows], idx_dtype);
+        let idx_2d = self.reshape_to(idx_f, f32t, &[rows, 1]);
+        let idx_b = self.broadcast_to(idx_2d, f32t, &[rows, 1], &[rows, depth]);
+        let iota_b = self.broadcast_to(iota_2d, f32t, &[1, depth], &[rows, depth]);
+        self.op(OpKind::Equal, &[idx_b, iota_b], f32t, &[rows, depth])
     }
 
     /// An i64 shape constant operand for Reshape.
@@ -809,7 +835,8 @@ impl<'a> Ctx<'a> {
         let (vocab, dim) = (w_dims[0], w_dims[1]);
         let id_dims = self.tensor_dims(ids_tid)?;
         let rows: u64 = id_dims.iter().product();
-        let onehot = self.one_hot(ids, rows, vocab);
+        let id_dtype = self.dtype_of(ids_tid).0;
+        let onehot = self.one_hot(ids, rows, vocab, id_dtype);
         let (dtype, _) = self.out_dtype_shape(node)?;
         let mm = self.op(OpKind::MatMul, &[onehot, w], dtype, &[rows, dim]);
         // Reshape to the declared output shape (ids.shape ++ [dim]).
@@ -846,7 +873,8 @@ impl<'a> Ctx<'a> {
 
         let data = self.src(data_tid)?;
         let idx = self.src(idx_tid)?;
-        let onehot = self.one_hot(idx, rows, depth); // [rows, depth]
+        let idx_dtype = self.dtype_of(idx_tid).0;
+        let onehot = self.one_hot(idx, rows, depth, idx_dtype); // [rows, depth]
 
         // Bring axis to front: [depth, rest]; matmul one-hot; restore.
         let rest: u64 = data_dims
@@ -890,9 +918,10 @@ impl<'a> Ctx<'a> {
         let idx = self.src(idx_tid)?;
         let idx_dims = self.tensor_dims(idx_tid)?;
         let rows: u64 = idx_dims.iter().product();
+        let idx_dtype = self.dtype_of(idx_tid).0;
         let out_dims = self.out_dims(node)?;
         let depth = out_dims[Self::norm_axis(axis, out_dims.len())];
-        let oh = self.one_hot(idx, rows, depth);
+        let oh = self.one_hot(idx, rows, depth, idx_dtype);
         let (dtype, _) = self.out_dtype_shape(node)?;
         let out = self.reshape_to(oh, dtype, &out_dims);
         self.bind_out(node, out)

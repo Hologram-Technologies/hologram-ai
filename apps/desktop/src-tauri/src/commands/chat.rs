@@ -23,6 +23,14 @@ pub struct GenerateRequest {
     pub temperature: Option<f32>,
     pub top_k: Option<usize>,
     pub stop: Vec<String>,
+    /// HuggingFace `tokenizer.json`. The `.holo` carries no tokenizer (closed
+    /// section set), so generation needs it at run time. Defaults to
+    /// `tokenizer.json` beside the archive when omitted.
+    #[serde(default)]
+    pub tokenizer: Option<PathBuf>,
+    /// Prompt template with a `{prompt}` placeholder (chat template).
+    #[serde(default)]
+    pub prompt_template: Option<String>,
 }
 
 #[tauri::command]
@@ -34,12 +42,27 @@ pub async fn generate(
     let bin = paths::hologram_ai_bin().map_err(|e| e.to_string())?;
     let cwd = paths::workspace_root();
 
+    // The tokenizer is supplied at run time (the archive carries none). Default
+    // to `tokenizer.json` beside the archive when the request doesn't name one.
+    let tokenizer = req.tokenizer.clone().unwrap_or_else(|| {
+        req.archive
+            .parent()
+            .map(|d| d.join("tokenizer.json"))
+            .unwrap_or_else(|| PathBuf::from("tokenizer.json"))
+    });
+
     let mut args = vec![
         "run".to_string(),
         req.archive.to_string_lossy().into_owned(),
         "--prompt".into(),
         req.prompt,
+        "--tokenizer".into(),
+        tokenizer.to_string_lossy().into_owned(),
     ];
+    if let Some(t) = &req.prompt_template {
+        args.push("--prompt-template".into());
+        args.push(t.clone());
+    }
     if let Some(n) = req.max_tokens {
         args.push("--max-tokens".into());
         args.push(n.to_string());

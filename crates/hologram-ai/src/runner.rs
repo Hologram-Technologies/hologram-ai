@@ -14,6 +14,16 @@ use hologram_backend::CpuBackend;
 use hologram_exec::{BufferArena, InferenceSession, InputBuffer, OutputBuffer};
 use std::path::Path;
 
+/// Shape/dtype facts about one graph port: the backend dtype tag
+/// (`hologram_backend::cpu::dtype` encoding) and the logical element count.
+#[derive(Debug, Clone, Copy)]
+pub struct PortInfo {
+    /// Backend dtype tag (e.g. `5` = I64, `8` = F32; see [`port_byte_size`]).
+    pub dtype: u8,
+    /// Logical element count (product of the port's concrete dims).
+    pub element_count: usize,
+}
+
 /// A loaded model ready for inference.
 pub struct HoloRunner {
     /// The archive bytes (kept so callers can re-address / inspect the model).
@@ -64,6 +74,30 @@ impl HoloRunner {
             .input_ports()
             .iter()
             .map(|p| port_byte_size(p.element_count as usize, p.dtype))
+            .collect()
+    }
+
+    /// `(dtype tag, element count)` for each graph input, in graph-input order.
+    /// The compiled archive carries no tensor *names* (a port is identified by
+    /// position), so a caller infers roles by convention — e.g. a causal LM's
+    /// single integer input is `input_ids` of shape `[1, seq_len]`, so its
+    /// element count is the fixed sequence length.
+    pub fn input_port_info(&self) -> Vec<PortInfo> {
+        self.session
+            .input_ports()
+            .iter()
+            .map(|p| PortInfo { dtype: p.dtype, element_count: p.element_count as usize })
+            .collect()
+    }
+
+    /// `(dtype tag, element count)` for each graph output, in graph-output order.
+    /// For a causal LM the single output is `logits` of shape `[1, seq_len,
+    /// vocab_size]`, so `element_count / seq_len` recovers the vocabulary size.
+    pub fn output_port_info(&self) -> Vec<PortInfo> {
+        self.session
+            .output_ports()
+            .iter()
+            .map(|p| PortInfo { dtype: p.dtype, element_count: p.element_count as usize })
             .collect()
     }
 
