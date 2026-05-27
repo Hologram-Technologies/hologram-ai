@@ -206,6 +206,61 @@ fn content_addressed_reuse_beats_recompute() {
 }
 
 #[test]
+fn runtime_weight_footprint_is_the_deduplicated_set() {
+    // Under canonicalization, weights live in the content-addressed pool keyed
+    // by κ-label: identical content occupies ONE buffer no matter how many
+    // nodes reference it. So the runtime weight footprint is the size of the
+    // *distinct* weight set, not the nominal total.
+    let d = 1024u64; // weight body = 1024·1024·4 = 4 MiB
+    let layers = 16u64;
+    let body = (d * d * 4) as usize;
+
+    let compile_stack = || {
+        let archive = ModelCompiler::default()
+            .compile(ModelSource::AiGraph(matmul_stack(d, layers)))
+            .expect("compile");
+        HoloRunner::from_bytes(archive.bytes).expect("load")
+    };
+
+    // Distinct weights: every layer's weight has unique content.
+    let mut distinct = compile_stack();
+    let sizes = distinct.input_byte_sizes(); // [X, W_0 .. W_{layers-1}]
+    distinct.intern_input(&vec![0u8; sizes[0]]); // X
+    for (i, &sz) in sizes.iter().enumerate().skip(1) {
+        let mut w = vec![0u8; sz];
+        w[0] = i as u8; // perturb → distinct content address
+        distinct.intern_input(&w);
+    }
+    let distinct_bytes = distinct.resident_bytes();
+    let distinct_count = distinct.resident_count();
+
+    // Identical weights: every layer shares one weight body.
+    let mut shared = compile_stack();
+    let sizes = shared.input_byte_sizes();
+    shared.intern_input(&vec![0u8; sizes[0]]); // X
+    let one_weight = vec![7u8; sizes[1]];
+    for _ in 1..sizes.len() {
+        shared.intern_input(&one_weight);
+    }
+    let shared_bytes = shared.resident_bytes();
+    let shared_count = shared.resident_count();
+
+    println!(
+        "{layers}×[{d},{d}] weights: distinct {} bytes ({} resident) vs shared {} bytes ({} resident)",
+        distinct_bytes, distinct_count, shared_bytes, shared_count
+    );
+
+    // Distinct: ~layers weight bodies resident.
+    assert!(distinct_bytes >= layers as usize * body, "distinct must hold every body");
+    assert_eq!(distinct_count, layers as usize + 1, "X + {layers} distinct weights");
+    // Shared: a single weight body (plus the tiny X), regardless of layer count.
+    assert!(shared_bytes <= body + 65536, "shared must collapse to one body");
+    assert_eq!(shared_count, 2, "X + 1 shared weight");
+    // The dedup is dramatic: ~layers× less memory for the same nominal model.
+    assert!(shared_bytes * (layers as usize / 2) < distinct_bytes);
+}
+
+#[test]
 fn matmul_sweep_runs_at_every_size() {
     // hologram's 64/128/256/512 sweep — every size compiles AND runs through
     // hologram-ai end to end (no size is special-cased or capped).

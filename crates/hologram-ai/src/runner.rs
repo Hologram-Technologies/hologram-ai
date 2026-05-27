@@ -116,6 +116,21 @@ impl HoloRunner {
     pub fn resolve(&self, label: &ContentLabel) -> Option<&[u8]> {
         self.session.resolve(label)
     }
+
+    /// Resident bytes in the content-addressed pool, **deduplicated by κ-label**
+    /// — the runtime memory footprint of all interned values (weights supplied
+    /// as inputs, intermediate results). Values that share a content address
+    /// occupy one buffer, so this is the size of the *distinct* set. Lets a
+    /// caller measure how much space weights actually require at runtime under
+    /// canonicalization.
+    pub fn resident_bytes(&self) -> usize {
+        self.session.resident_bytes()
+    }
+
+    /// Number of distinct resident values in the pool (deduped by κ-label).
+    pub fn resident_count(&self) -> usize {
+        self.session.resident_count()
+    }
 }
 
 /// Byte width of a canonical dtype tag (`hologram_backend::cpu::dtype` encoding).
