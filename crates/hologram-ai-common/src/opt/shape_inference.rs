@@ -334,20 +334,27 @@ fn infer_custom_output_shapes(
             }
         }
 
-        // Expand: use known_i64_values from the shape input if available.
+        // Expand (ONNX): the output is the *broadcast* of the input shape and
+        // the given target shape — NOT the target shape verbatim. A target dim
+        // of 1 broadcasts to the input's dim (e.g. `Expand([1,32,1], [1,1,1])`
+        // → `[1,32,1]`, not `[1,1,1]`). This is the idiom HF dynamic exports use
+        // for `.expand(batch, -1, 1)`: the `-1` is materialized as `1` via a
+        // `Where`, and Expand's broadcast restores the kept dimension. Taking
+        // the target verbatim silently dropped those dims (e.g. RoPE inv_freq's
+        // head_dim/2), so it must broadcast against the input.
         AiOp::Expand => {
             if let Some(vals) = shape_known_values {
-                let shape: Vec<DimExpr> = vals
+                let target: Shape = vals
                     .iter()
                     .map(|v| match v {
                         Some(n) if *n >= 0 => DimExpr::Concrete(*n as u64),
                         _ => DimExpr::Dynamic,
                     })
                     .collect();
-                if shape.is_empty() {
-                    inputs.first().cloned().into_iter().collect()
-                } else {
-                    vec![Shape::from(shape)]
+                match (target.is_empty(), inputs.first()) {
+                    (true, _) => inputs.first().cloned().into_iter().collect(),
+                    (false, Some(input)) => vec![broadcast_shape(input, &target)],
+                    (false, None) => vec![target],
                 }
             } else {
                 inputs.first().cloned().into_iter().collect()
