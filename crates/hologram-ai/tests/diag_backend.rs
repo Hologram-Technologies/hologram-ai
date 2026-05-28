@@ -52,16 +52,24 @@ impl<W: Workspace> Backend for DiagBackend<W> {
     type WS = W;
 
     fn dispatch(&mut self, call: &KernelCall, ws: &mut W) -> Result<(), BackendError> {
-        *self.n.lock().unwrap() += 1;
+        let n = {
+            let mut g = self.n.lock().unwrap();
+            *g += 1;
+            *g
+        };
+        // Trace every dispatch under HOLOGRAM_AI_DIAG_TRACE=1 — useful
+        // for seeing the call sequence leading up to a failure
+        // (slot allocations, kernel order, op kinds).
+        if std::env::var("HOLOGRAM_AI_DIAG_TRACE").is_ok() {
+            let summary: String = format!("{call:?}").chars().take(220).collect();
+            eprintln!("DIAG #{n} {summary}");
+        }
         match self.inner.dispatch(call, ws) {
             Ok(()) => Ok(()),
             Err(e) => {
                 let mut slot = self.failures.lock().unwrap();
                 if slot.len() < self.max_failures {
-                    let msg = format!(
-                        "call #{}: {call:?}\n  -> BackendError: {e}",
-                        self.n.lock().unwrap()
-                    );
+                    let msg = format!("call #{n}: {call:?}\n  -> BackendError: {e}");
                     eprintln!("DIAG BACKEND FAIL {msg}");
                     slot.push(msg);
                 }
