@@ -183,15 +183,30 @@ impl Pass for AttentionFusion {
 
                 replacements.insert(chain.output_matmul_idx, fused);
 
-                // Ensure the output tensor's shape matches Q's shape:
-                // [batch, num_heads, seq, head_dim]. Must preserve this so
-                // downstream Transpose/Reshape nodes operate correctly.
+                // Ensure the output tensor's shape AND dtype match Q's. The
+                // SDPA chain's terminal `MatMul(weights, V)` output tensor was
+                // originally registered in `tensor_info` from the ONNX
+                // ValueInfoProto. Some exporters (e.g. the onnx-community
+                // Qwen2 export) declare this tensor with a dtype that
+                // disagrees with the actual SDPA semantics (BOOL was observed
+                // — possibly an export-time artifact of an IsNaN-guarded
+                // branch annotation). Attention output is **always** Q's
+                // dtype semantically — propagate it here so downstream
+                // shape/dtype propagation sees the correct type. The diag
+                // harness `tests/diag_qwen2_gqa_shapes.rs` is the V&V witness;
+                // before this fix, the AttentionCall's `dtype` field (= the
+                // GQA node output's dtype after lowering) was set to BOOL,
+                // and hologram's CPU kernel computed `kv_total*es` with
+                // `es = 1` (BOOL) ⇒ a buffer-size mismatch with the f32-
+                // sized BufferRef ⇒ `SlotOutOfRange(K)`.
                 {
-                    let q_shape = graph.tensor_info.get(&q_tid).cloned();
-                    if let (Some(qs), Some(out_info)) =
-                        (q_shape, graph.tensor_info.get_mut(&chain.output_tid))
+                    let q_info = graph.tensor_info.get(&q_tid).cloned();
+                    if let (Some(qi), Some(out_info)) =
+                        (q_info, graph.tensor_info.get_mut(&chain.output_tid))
                     {
-                        out_info.shape = qs.shape;
+                        out_info.shape = qi.shape;
+                        out_info.logical_dtype = qi.logical_dtype;
+                        out_info.storage_dtype = qi.storage_dtype;
                     }
                 }
 
