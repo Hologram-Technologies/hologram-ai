@@ -13,7 +13,6 @@ pub mod norm_projection_fusion;
 pub mod oracle;
 pub mod patch_prune;
 pub mod pipeline;
-pub mod position_ids_injection;
 pub mod resolve_slice_params;
 pub mod semantic_prop;
 pub mod shape_consistency;

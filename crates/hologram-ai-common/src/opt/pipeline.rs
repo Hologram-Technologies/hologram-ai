@@ -31,15 +31,15 @@ impl OptPipeline {
             const_eval::ConstantEvaluation, constant_fold::ConstantFolding,
             data_prop::DataPropagation, dead_node::DeadNodeElimination, decompose::OpDecomposition,
             kv_slot_injection::KvSlotInjection, norm_projection_fusion::NormProjectionFusion,
-            position_ids_injection::PositionIdsInjection, resolve_slice_params::ResolveSliceParams,
-            semantic_prop::SemanticPropagation, shape_prop::ShapePropagation,
+            resolve_slice_params::ResolveSliceParams, semantic_prop::SemanticPropagation,
+            shape_prop::ShapePropagation,
             shared_input_projection_fusion::SharedInputProjectionFusion,
         };
         use crate::rules::{
             pattern_rules::{
-                add_rmsnorm_rules, layernorm_rules, matmul_activation_rules, rmsnorm_rules,
-                scalar_absorption_rules, slice_to_gather_rules, swiglu_projection_rules,
-                swiglu_rules, transpose_matmul_rules,
+                add_rmsnorm_rules, layernorm_rules, matmul_activation_rules, position_ids_rules,
+                rmsnorm_rules, scalar_absorption_rules, slice_to_gather_rules,
+                swiglu_projection_rules, swiglu_rules, transpose_matmul_rules,
             },
             RulePass,
         };
@@ -128,9 +128,13 @@ impl OptPipeline {
             // Gate+Up: 2 MatMuls → 1 MatMul + 2 Slices (saves 22 BLAS calls)
             Box::new(SharedInputProjectionFusion),
             // Replace Range(0, seq, 1) position generators with a position_ids
-            // input. Enables KV cache decode at seq=1 by passing the correct
-            // absolute position from the generation loop.
-            Box::new(PositionIdsInjection),
+            // input. ADR-0018 declarative rule via `Replacement::custom`:
+            // the rewrite verifies start==0 + step==1, allocates (or reuses)
+            // a `position_ids` graph input, and replaces the matched Range
+            // with `Identity(position_ids)`. Enables KV cache decode at
+            // seq=1 by passing the correct absolute position from the
+            // generation loop.
+            Box::new(RulePass::new("PositionIdsInjection", position_ids_rules())),
             Box::new(AttentionFusion { force_causal: None }),
             Box::new(KvSlotInjection),
             // Rewrite non-axis-0 slices (RoPE rotate_half, QKV/gate-up splits)

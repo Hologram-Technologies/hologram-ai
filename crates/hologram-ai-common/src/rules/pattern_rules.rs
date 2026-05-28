@@ -9,7 +9,7 @@
 //! output.
 
 use super::{OpMatcher, Pattern, Replacement, Rule, RuleSet, VarId};
-use crate::ir::AiOp;
+use crate::ir::{AiOp, AiParam};
 
 /// SwiGLU fusion (direct-Silu variant).
 ///
@@ -682,4 +682,136 @@ pub fn slice_to_gather_rule() -> Rule {
 
 pub fn slice_to_gather_rules() -> RuleSet {
     RuleSet::new().with_rule(slice_to_gather_rule())
+}
+
+// ── PositionIdsInjection: Range(0, seq, 1) → Identity(position_ids_input)
+
+/// Read a tensor's known scalar i64 value, either from `info.known_i64_values`
+/// or from an inline f32/i64 const param. Mirrors the imperative pass's
+/// `get_i64_param` — the same canonical scalar-extraction logic, just lifted
+/// out of the pass code.
+fn read_scalar_i64(tid: crate::ir::TensorId, graph: &crate::ir::AiGraph) -> Option<i64> {
+    if let Some(info) = graph.tensor_info.get(&tid) {
+        if let Some(vals) = &info.known_i64_values {
+            if vals.len() == 1 {
+                return vals[0];
+            }
+        }
+    }
+    match graph.params.get(&tid)? {
+        AiParam::Inline { data, info } => {
+            if info.logical_dtype == crate::ir::DType::INT64 && data.len() == 8 {
+                Some(i64::from_le_bytes(data[..8].try_into().ok()?))
+            } else if info.logical_dtype == crate::ir::DType::F32 && data.len() == 4 {
+                Some(f32::from_le_bytes(data[..4].try_into().ok()?) as i64)
+            } else {
+                None
+            }
+        }
+        AiParam::Mmap { .. } => None,
+    }
+}
+
+/// `Range(start=0, *, step=1)` → `Identity(position_ids_input)`.
+///
+/// The first occurrence of a position-generating Range adds the
+/// `position_ids` graph input. Subsequent Range nodes (one per
+/// transformer layer) reuse the same `position_ids` tensor — the
+/// rewrite checks `graph.inputs` to find an existing `position_ids`
+/// before allocating.
+fn position_ids_inject(
+    graph: &mut crate::ir::AiGraph,
+    _binds: &std::collections::HashMap<super::VarId, crate::ir::TensorId>,
+    root_idx: usize,
+) -> Option<crate::ir::AiNode> {
+    use crate::ir::{shape, AiParam, DType, SemanticHint, TensorInfo};
+    use hologram_ai_quant::QuantDescriptor;
+
+    // Verify start == 0 and step == 1 at the matched Range's inputs.
+    let (range_output, range_shape, start_tid, step_tid) = {
+        let node = graph.nodes.get(root_idx)?;
+        if !matches!(node.op, AiOp::Range) || node.inputs.len() < 3 {
+            return None;
+        }
+        let range_output = *node.outputs.first()?;
+        let range_shape = graph
+            .tensor_info
+            .get(&range_output)
+            .map(|info| info.shape.clone())
+            .unwrap_or(shape::Shape::new());
+        (range_output, range_shape, node.inputs[0], node.inputs[2])
+    };
+    if read_scalar_i64(start_tid, graph)? != 0 {
+        return None;
+    }
+    if read_scalar_i64(step_tid, graph)? != 1 {
+        return None;
+    }
+    let _ = range_output; // (output is reused by the Identity below)
+
+    // Reuse an existing `position_ids` input if present; otherwise
+    // allocate a fresh TensorId and register it as a graph input.
+    let pos_tid = if let Some((i, _)) = graph
+        .input_names
+        .iter()
+        .enumerate()
+        .find(|(_, n)| *n == "position_ids")
+    {
+        // graph.inputs[i] is the matching tid.
+        *graph.inputs.get(i)?
+    } else {
+        let next_tid = graph.tensor_info.keys().copied().max().unwrap_or(0) + 1;
+        graph.tensor_names.insert(next_tid, "position_ids".into());
+        graph.inputs.push(next_tid);
+        graph.input_names.push("position_ids".into());
+        graph.tensor_info.insert(
+            next_tid,
+            TensorInfo {
+                logical_dtype: DType::INT64,
+                storage_dtype: DType::INT64,
+                shape: range_shape.clone(),
+                quant: QuantDescriptor::none(),
+                known_i64_values: None,
+                semantic: SemanticHint::Position,
+            },
+        );
+        // Suppress unused-import warning for AiParam — declared via the
+        // `use` in this function's body for the scalar-read helper above.
+        let _ = std::marker::PhantomData::<AiParam>;
+        next_tid
+    };
+
+    // Return Identity(position_ids) at root_idx; keep the original
+    // output tensor so downstream consumers' wiring is unchanged.
+    let nid = graph.nodes[root_idx].id;
+    let out_tid = graph.nodes[root_idx].outputs.first().copied()?;
+    Some(crate::ir::AiNode::new(
+        nid,
+        AiOp::Identity,
+        vec![pos_tid],
+        vec![out_tid],
+    ))
+}
+
+pub fn position_ids_rule() -> Rule {
+    let start = VarId(1);
+    let limit = VarId(2);
+    let step = VarId(3);
+    Rule {
+        name: "position_ids_injection",
+        witness: "real_model_generation::smollm2 (EE-3 ORT logit parity, ADR-0018)",
+        pattern: Pattern::op(
+            OpMatcher::Exact(crate::rules::AiOpDiscriminant::Range),
+            vec![
+                Pattern::Const(start),
+                Pattern::Var(limit),
+                Pattern::Const(step),
+            ],
+        ),
+        replacement: Replacement::custom(position_ids_inject),
+    }
+}
+
+pub fn position_ids_rules() -> RuleSet {
+    RuleSet::new().with_rule(position_ids_rule())
 }
