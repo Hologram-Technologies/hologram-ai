@@ -341,6 +341,42 @@ impl<'a> MatchView<'a> {
         Some(s[0])
     }
 
+    /// The bound var's declared shape, if it's a tensor with known
+    /// `TensorInfo` (a graph input, param, or a node output the
+    /// shape-propagation passes have inferred). Used by rules that
+    /// derive replacement attributes from tensor dimensions —
+    /// `AttentionFusion`'s `num_heads`/`num_kv_heads`/`head_dim` come
+    /// from Q and K's shapes.
+    pub fn shape(&self, var: VarId) -> Option<&crate::ir::Shape> {
+        let tid = self.tensor(var)?;
+        self.graph.tensor_info.get(&tid).map(|info| &info.shape)
+    }
+
+    /// Concrete dim value of the bound var at `axis`, or `None` if the
+    /// shape isn't known concretely at that axis. Negative axes index
+    /// from the end of the shape (`-1` = last axis).
+    pub fn dim(&self, var: VarId, axis: i64) -> Option<u64> {
+        let s = self.shape(var)?;
+        let r = s.len();
+        let idx = if axis < 0 {
+            ((r as i64) + axis).max(0) as usize
+        } else {
+            axis as usize
+        };
+        s.get(idx)?.as_concrete()
+    }
+
+    /// True if the bound var is a graph input port (a runtime-bound
+    /// tensor, not a constant). Used by rules whose `VarId` should
+    /// match only a graph input (e.g. a model weight passed at
+    /// runtime).
+    pub fn is_graph_input(&self, var: VarId) -> bool {
+        let Some(tid) = self.tensor(var) else {
+            return false;
+        };
+        self.graph.inputs.contains(&tid)
+    }
+
     /// Read the bound var as an i64 array (e.g. a `Transpose.perm`).
     pub fn i64_vec(&self, var: VarId) -> Option<Vec<i64>> {
         let param = self.param(var)?;
