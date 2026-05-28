@@ -203,3 +203,38 @@ pub fn add_rmsnorm_rule() -> Rule {
 pub fn add_rmsnorm_rules() -> RuleSet {
     RuleSet::new().with_rule(add_rmsnorm_rule())
 }
+
+// ── FusedSwiGLU + MatMul → FusedSwiGluProjection ────────────────────────
+
+/// Fuse `MatMul(FusedSwiGLU(gate, up), W_down)` into the canonical
+/// `FusedSwiGluProjection(gate, up, W_down)` — the down-projection of
+/// the FFN block runs the activated values straight through the matmul
+/// in-register, eliminating the intermediate FusedSwiGLU output buffer.
+///
+/// Witness — `hologram-ai-conformance::real_model_generation::smollm2`
+/// (EE-3 ORT logit parity). Every transformer FFN's down projection
+/// runs through this pattern.
+pub fn swiglu_projection_rule() -> Rule {
+    let gate = VarId(1);
+    let up = VarId(2);
+    let w_down = VarId(3);
+    Rule {
+        name: "swiglu_projection",
+        witness: "real_model_generation::smollm2 (EE-3 ORT logit parity, ADR-0018)",
+        pattern: Pattern::op(
+            OpMatcher::exact_matmul(),
+            vec![
+                Pattern::op(
+                    OpMatcher::exact_fused_swiglu(),
+                    vec![Pattern::Var(gate), Pattern::Var(up)],
+                ),
+                Pattern::Var(w_down),
+            ],
+        ),
+        replacement: Replacement::new(AiOp::FusedSwiGluProjection, vec![gate, up, w_down]),
+    }
+}
+
+pub fn swiglu_projection_rules() -> RuleSet {
+    RuleSet::new().with_rule(swiglu_projection_rule())
+}

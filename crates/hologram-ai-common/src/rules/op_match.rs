@@ -59,6 +59,9 @@ impl OpMatcher {
     pub fn exact_reshape() -> Self {
         OpMatcher::Exact(AiOpDiscriminant::Reshape)
     }
+    pub fn exact_fused_swiglu() -> Self {
+        OpMatcher::Exact(AiOpDiscriminant::FusedSwiGLU)
+    }
 }
 
 /// Discriminant identity of an `AiOp` value — strips per-variant
@@ -90,6 +93,7 @@ pub enum AiOpDiscriminant {
     Gather,
     Cast,
     Dequantize,
+    FusedSwiGLU,
     Other,
 }
 
@@ -118,6 +122,7 @@ impl AiOpDiscriminant {
             Gather { .. } => Self::Gather,
             Cast { .. } => Self::Cast,
             Dequantize { .. } => Self::Dequantize,
+            FusedSwiGLU => Self::FusedSwiGLU,
             _ => Self::Other,
         }
     }

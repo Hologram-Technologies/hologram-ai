@@ -310,17 +310,19 @@ fn ffn_block_swiglu_projection_fusion() {
     // `pattern_rules::swiglu_rules()`); the others are still imperative
     // passes pending their own rule-set port.
     use hologram_ai_common::opt::{
-        norm_projection_fusion::NormProjectionFusion, pipeline::Pass,
-        rmsnorm_fusion::RmsNormFusion, swiglu_projection_fusion::SwiGluProjectionFusion,
+        norm_projection_fusion::NormProjectionFusion, pipeline::Pass, rmsnorm_fusion::RmsNormFusion,
     };
-    use hologram_ai_common::rules::{pattern_rules::swiglu_rules, RulePass};
+    use hologram_ai_common::rules::{
+        pattern_rules::{swiglu_projection_rules, swiglu_rules},
+        RulePass,
+    };
 
     let g = RmsNormFusion.run(g).expect("RmsNormFusion");
     let g = RulePass::new("SwiGluFusion", swiglu_rules())
         .run(g)
         .expect("SwiGluFusion");
     let g = NormProjectionFusion.run(g).expect("NormProjectionFusion");
-    let g = SwiGluProjectionFusion
+    let g = RulePass::new("SwiGluProjectionFusion", swiglu_projection_rules())
         .run(g)
         .expect("SwiGluProjectionFusion");
 
@@ -468,17 +470,19 @@ fn multi_layer_ffn_fusion_scaling() {
     let before_nodes = g.nodes.len();
 
     use hologram_ai_common::opt::{
-        norm_projection_fusion::NormProjectionFusion, pipeline::Pass,
-        rmsnorm_fusion::RmsNormFusion, swiglu_projection_fusion::SwiGluProjectionFusion,
+        norm_projection_fusion::NormProjectionFusion, pipeline::Pass, rmsnorm_fusion::RmsNormFusion,
     };
-    use hologram_ai_common::rules::{pattern_rules::swiglu_rules, RulePass};
+    use hologram_ai_common::rules::{
+        pattern_rules::{swiglu_projection_rules, swiglu_rules},
+        RulePass,
+    };
 
     let g = RmsNormFusion.run(g).expect("RmsNormFusion");
     let g = RulePass::new("SwiGluFusion", swiglu_rules())
         .run(g)
         .expect("SwiGluFusion");
     let g = NormProjectionFusion.run(g).expect("NormProjectionFusion");
-    let g = SwiGluProjectionFusion
+    let g = RulePass::new("SwiGluProjectionFusion", swiglu_projection_rules())
         .run(g)
         .expect("SwiGluProjectionFusion");
 

@@ -36,11 +36,12 @@ impl OptPipeline {
             rmsnorm_fusion::RmsNormFusion, scalar_absorption::ScalarAbsorption,
             semantic_prop::SemanticPropagation, shape_prop::ShapePropagation,
             shared_input_projection_fusion::SharedInputProjectionFusion,
-            slice_to_gather::SliceToGather, swiglu_projection_fusion::SwiGluProjectionFusion,
-            transpose_matmul_fusion::TransposeMatMulFusion,
+            slice_to_gather::SliceToGather, transpose_matmul_fusion::TransposeMatMulFusion,
         };
         use crate::rules::{
-            pattern_rules::{add_rmsnorm_rules, matmul_activation_rules, swiglu_rules},
+            pattern_rules::{
+                add_rmsnorm_rules, matmul_activation_rules, swiglu_projection_rules, swiglu_rules,
+            },
             RulePass,
         };
         Self::new(vec![
@@ -102,8 +103,12 @@ impl OptPipeline {
             // Lowered as MultiOutput: 1 norm node + N MatMul nodes sharing
             // the norm output. No weight concatenation — original params reused.
             Box::new(NormProjectionFusion),
-            // Fuse FusedSwiGLU → MatMul (down projection).
-            Box::new(SwiGluProjectionFusion),
+            // Fuse FusedSwiGLU → MatMul (down projection) → FusedSwiGluProjection.
+            // ADR-0018 declarative rule.
+            Box::new(RulePass::new(
+                "SwiGluProjectionFusion",
+                swiglu_projection_rules(),
+            )),
             // Fuse shared-input MatMul projections:
             // QKV: 3 MatMuls → 1 MatMul + 3 Slices (saves 44 BLAS calls)
             // Gate+Up: 2 MatMuls → 1 MatMul + 2 Slices (saves 22 BLAS calls)
