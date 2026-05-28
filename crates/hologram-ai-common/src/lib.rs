@@ -9,6 +9,7 @@ pub mod ir;
 pub mod lower;
 pub mod mem;
 pub mod opt;
+pub mod rules;
 pub mod sections;
 
 // Flat re-exports for convenience.
