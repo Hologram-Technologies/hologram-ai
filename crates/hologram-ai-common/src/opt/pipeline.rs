@@ -36,11 +36,12 @@ impl OptPipeline {
             rmsnorm_fusion::RmsNormFusion, scalar_absorption::ScalarAbsorption,
             semantic_prop::SemanticPropagation, shape_prop::ShapePropagation,
             shared_input_projection_fusion::SharedInputProjectionFusion,
-            slice_to_gather::SliceToGather, transpose_matmul_fusion::TransposeMatMulFusion,
+            slice_to_gather::SliceToGather,
         };
         use crate::rules::{
             pattern_rules::{
                 add_rmsnorm_rules, matmul_activation_rules, swiglu_projection_rules, swiglu_rules,
+                transpose_matmul_rules,
             },
             RulePass,
         };
@@ -76,9 +77,14 @@ impl OptPipeline {
             // with SDPA pattern matching.
             Box::new(RulePass::new("SwiGluFusion", swiglu_rules())),
             // Absorb Transpose(swap-last-2) → MatMul into Gemm { trans_a/trans_b }.
-            // Eliminates intermediate transposed buffer. Must run before
-            // MatMulActivationFusion (which matches on MatMul nodes).
-            Box::new(TransposeMatMulFusion),
+            // ADR-0018 declarative rules with a `Pattern` predicate that
+            // checks the Transpose's `perm` swaps exactly the last two
+            // axes. Eliminates intermediate transposed buffer. Must run
+            // before MatMulActivationFusion (which matches on MatMul).
+            Box::new(RulePass::new(
+                "TransposeMatMulFusion",
+                transpose_matmul_rules(),
+            )),
             // Absorb MatMul → Mul(scalar) into Gemm { alpha }.
             // Eliminates full-tensor scalar multiply. Must run before other
             // matmul fusions to simplify the graph.

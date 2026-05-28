@@ -26,7 +26,6 @@ pub mod shape_inference;
 pub mod shape_prop;
 pub mod shared_input_projection_fusion;
 pub mod slice_to_gather;
-pub mod transpose_matmul_fusion;
 
 pub use attention_fusion::AttentionFusion;
 pub use const_dedup::ConstantDeduplication;

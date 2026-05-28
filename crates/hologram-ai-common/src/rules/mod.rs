@@ -49,7 +49,7 @@
 //!   may be added later for ergonomics but are not part of the
 //!   architecture.
 
-use crate::ir::{AiGraph, AiNode, AiOp, NodeId, TensorId};
+use crate::ir::{AiGraph, AiNode, AiOp, AiParam, NodeId, TensorId};
 use std::collections::HashMap;
 
 mod op_match;
@@ -97,7 +97,7 @@ impl crate::opt::Pass for RulePass {
 pub struct VarId(pub u32);
 
 /// Pattern over the canonical `AiGraph` IR.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub enum Pattern {
     /// Match any tensor; bind it under `var`.
     Var(VarId),
@@ -113,10 +113,40 @@ pub enum Pattern {
         /// matching the inputs (binary commutative ops only — must have
         /// `inputs.len() == 2`).
         commutative: bool,
+        /// Optional predicate on the matched node's `AiOp` — used for
+        /// attribute-level constraints (e.g. a `Transpose` whose
+        /// `perm` swaps the last two axes, a `Concat` on a specific
+        /// `axis`). A `fn` pointer keeps the predicate purely data
+        /// (no captured state); the engine refuses to match if the
+        /// predicate returns false.
+        predicate: Option<fn(&AiOp) -> bool>,
     },
     /// Match either the inner pattern or its `bind`'s underlying tensor
     /// directly.
     Maybe(Box<Pattern>),
+}
+
+impl std::fmt::Debug for Pattern {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Pattern::Var(v) => f.debug_tuple("Var").field(v).finish(),
+            Pattern::Op {
+                op,
+                inputs,
+                bind,
+                commutative,
+                predicate,
+            } => f
+                .debug_struct("Op")
+                .field("op", op)
+                .field("inputs", inputs)
+                .field("bind", bind)
+                .field("commutative", commutative)
+                .field("predicate", &predicate.map(|_| "<fn>"))
+                .finish(),
+            Pattern::Maybe(inner) => f.debug_tuple("Maybe").field(inner).finish(),
+        }
+    }
 }
 
 impl Pattern {
@@ -126,6 +156,7 @@ impl Pattern {
             inputs,
             bind: None,
             commutative: false,
+            predicate: None,
         }
     }
 
@@ -135,6 +166,7 @@ impl Pattern {
             inputs,
             bind: Some(bind),
             commutative: false,
+            predicate: None,
         }
     }
 
@@ -147,6 +179,28 @@ impl Pattern {
             inputs: vec![a, b],
             bind: None,
             commutative: true,
+            predicate: None,
+        }
+    }
+
+    /// Attach a predicate to this `Pattern::Op` — the matched node's
+    /// `AiOp` must satisfy the predicate. No-op on `Var` and `Maybe`.
+    pub fn with_predicate(self, pred: fn(&AiOp) -> bool) -> Self {
+        match self {
+            Pattern::Op {
+                op,
+                inputs,
+                bind,
+                commutative,
+                predicate: _,
+            } => Pattern::Op {
+                op,
+                inputs,
+                bind,
+                commutative,
+                predicate: Some(pred),
+            },
+            other => other,
         }
     }
 }
@@ -175,22 +229,29 @@ enum ReplacementOp {
     Static(Box<AiOp>),
     /// Computed from the matched root's `AiOp` (e.g. carry epsilon).
     FromRoot(fn(&AiOp) -> Option<AiOp>),
+    /// Computed from the matched root op + a typed view of the bound
+    /// variables (their params, shapes, and scalar values). Used by
+    /// fusions whose canonical replacement carries an attribute
+    /// extracted from a bound constant or from a tensor's shape —
+    /// e.g. an `epsilon` scalar param on `RmsNormFusion`, a `perm`
+    /// i64 array on `TransposeMatMulFusion`, or `num_heads` /
+    /// `head_dim` derived from the K tensor's shape on
+    /// `AttentionFusion`. Returning `None` aborts the rewrite — the
+    /// engine refuses to approximate.
+    FromMatch(fn(&AiOp, &MatchView) -> Option<AiOp>),
 }
 
 impl std::fmt::Debug for Replacement {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match &self.op {
-            ReplacementOp::Static(op) => f
-                .debug_struct("Replacement::Static")
-                .field("op", op)
-                .field("inputs", &self.inputs)
-                .finish(),
-            ReplacementOp::FromRoot(_) => f
-                .debug_struct("Replacement::FromRoot")
-                .field("builder", &"<fn>")
-                .field("inputs", &self.inputs)
-                .finish(),
-        }
+        let kind = match &self.op {
+            ReplacementOp::Static(_) => "Static",
+            ReplacementOp::FromRoot(_) => "FromRoot",
+            ReplacementOp::FromMatch(_) => "FromMatch",
+        };
+        f.debug_struct("Replacement")
+            .field("kind", &kind)
+            .field("inputs", &self.inputs)
+            .finish()
     }
 }
 
@@ -214,15 +275,86 @@ impl Replacement {
         }
     }
 
+    /// Dynamic replacement with access to the bound variables. The
+    /// builder receives the matched root's `AiOp` plus a typed view of
+    /// the bound vars (their `AiParam`s if they are constants, their
+    /// declared tensor shapes, and helpers for the common scalar /
+    /// 1-D vector extractions). Returning `None` aborts the rewrite —
+    /// the engine refuses to approximate.
+    pub fn from_match(builder: fn(&AiOp, &MatchView) -> Option<AiOp>, inputs: Vec<VarId>) -> Self {
+        Self {
+            op: ReplacementOp::FromMatch(builder),
+            inputs,
+        }
+    }
+
     pub fn inputs(&self) -> &[VarId] {
         &self.inputs
     }
 
-    fn build(&self, root_op: &AiOp) -> Option<AiOp> {
+    fn build(&self, root_op: &AiOp, view: &MatchView) -> Option<AiOp> {
         match &self.op {
             ReplacementOp::Static(op) => Some((**op).clone()),
             ReplacementOp::FromRoot(builder) => builder(root_op),
+            ReplacementOp::FromMatch(builder) => builder(root_op, view),
         }
+    }
+}
+
+/// A typed view of a successful match: the bound variables and the
+/// graph context they live in. Available to `Replacement::from_match`
+/// builders.
+pub struct MatchView<'a> {
+    binds: &'a HashMap<VarId, TensorId>,
+    graph: &'a AiGraph,
+}
+
+impl<'a> MatchView<'a> {
+    pub fn tensor(&self, var: VarId) -> Option<TensorId> {
+        self.binds.get(&var).copied()
+    }
+
+    /// The bound var's `AiParam`, if the tensor is a constant. Useful
+    /// for extracting scalar epsilons, integer arrays, etc.
+    pub fn param(&self, var: VarId) -> Option<&AiParam> {
+        let tid = self.tensor(var)?;
+        self.graph.params.get(&tid)
+    }
+
+    /// Read the bound var as a scalar f32 (e.g. epsilon, scale).
+    /// Returns `None` if the param is missing, not a constant, or not
+    /// a singleton f32 value.
+    pub fn scalar_f32(&self, var: VarId) -> Option<f32> {
+        let param = self.param(var)?;
+        if param.info().logical_dtype != crate::ir::DType::F32 {
+            return None;
+        }
+        let s = param.as_f32_slice()?;
+        if s.len() != 1 {
+            return None;
+        }
+        Some(s[0])
+    }
+
+    /// Read the bound var as an i64 array (e.g. a `Transpose.perm`).
+    pub fn i64_vec(&self, var: VarId) -> Option<Vec<i64>> {
+        let param = self.param(var)?;
+        if param.info().logical_dtype != crate::ir::DType::INT64 {
+            return None;
+        }
+        let bytes: &[u8] = match param {
+            AiParam::Inline { data, .. } => data.as_ref(),
+            AiParam::Mmap { .. } => return None,
+        };
+        if !bytes.len().is_multiple_of(8) {
+            return None;
+        }
+        Some(
+            bytes
+                .chunks_exact(8)
+                .map(|c| i64::from_le_bytes(c.try_into().expect("chunk_exact")))
+                .collect(),
+        )
     }
 }
 
@@ -314,13 +446,22 @@ impl RuleSet {
                     continue;
                 }
 
-                let root_node = &graph.nodes[root_idx];
-                let Some(root_out) = root_node.outputs.first().copied() else {
+                let root_op = graph.nodes[root_idx].op.clone();
+                let Some(root_out) = graph.nodes[root_idx].outputs.first().copied() else {
                     continue;
                 };
-                let Some(new_node) =
-                    materialize(&rule.replacement, &m, &root_node.op, root_out, &mut next_id)
-                else {
+                let view = MatchView {
+                    binds: &m.binds,
+                    graph,
+                };
+                let Some(new_node) = materialize(
+                    &rule.replacement,
+                    &m,
+                    &root_op,
+                    &view,
+                    root_out,
+                    &mut next_id,
+                ) else {
                     continue;
                 };
                 rewritten.insert(root_idx, new_node);
@@ -418,12 +559,18 @@ impl Matcher {
                 inputs,
                 bind,
                 commutative,
+                predicate,
             } => {
                 if !op.matches(&node.op) {
                     return false;
                 }
                 if inputs.len() != node.inputs.len() {
                     return false;
+                }
+                if let Some(pred) = predicate {
+                    if !pred(&node.op) {
+                        return false;
+                    }
                 }
                 if let Some(b) = bind {
                     let Some(&tid) = node.outputs.first() else {
@@ -543,6 +690,7 @@ fn materialize(
     repl: &Replacement,
     m: &Match,
     root_op: &AiOp,
+    view: &MatchView,
     root_out: TensorId,
     next_id: &mut NodeId,
 ) -> Option<AiNode> {
@@ -550,7 +698,7 @@ fn materialize(
     for v in &repl.inputs {
         input_tids.push(m.lookup(*v)?);
     }
-    let op = repl.build(root_op)?;
+    let op = repl.build(root_op, view)?;
     let new = AiNode::new(*next_id, op, input_tids, vec![root_out]);
     *next_id += 1;
     Some(new)

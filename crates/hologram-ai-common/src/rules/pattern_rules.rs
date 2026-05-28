@@ -238,3 +238,85 @@ pub fn swiglu_projection_rule() -> Rule {
 pub fn swiglu_projection_rules() -> RuleSet {
     RuleSet::new().with_rule(swiglu_projection_rule())
 }
+
+// ── Transpose(swap-last-2) + MatMul → Gemm{trans_*} ─────────────────────
+
+/// Predicate: a `Transpose` whose `perm` swaps exactly the last two
+/// dims (the canonical Gemm transpose, ignoring higher batch dims).
+/// `perm` is `Vec<u32>` of arbitrary rank; the swap-last-two pattern is
+/// `[0, 1, ..., r-3, r-1, r-2]`. For rank 2 this is `[1, 0]`.
+fn perm_is_swap_last_two(op: &AiOp) -> bool {
+    let AiOp::Transpose { perm } = op else {
+        return false;
+    };
+    let r = perm.len();
+    if r < 2 {
+        return false;
+    }
+    for (i, &p) in perm.iter().enumerate().take(r - 2) {
+        if p as usize != i {
+            return false;
+        }
+    }
+    perm[r - 2] as usize == r - 1 && perm[r - 1] as usize == r - 2
+}
+
+/// Trans-A rule: `MatMul(Transpose(A), B) → Gemm{trans_a=true}`.
+pub fn transpose_matmul_trans_a_rule() -> Rule {
+    let a = VarId(1);
+    let b = VarId(2);
+    Rule {
+        name: "transpose_matmul_trans_a",
+        witness: "real_model_generation::smollm2 (EE-3 ORT logit parity, ADR-0018)",
+        pattern: Pattern::op(
+            OpMatcher::exact_matmul(),
+            vec![
+                Pattern::op(OpMatcher::exact_transpose(), vec![Pattern::Var(a)])
+                    .with_predicate(perm_is_swap_last_two),
+                Pattern::Var(b),
+            ],
+        ),
+        replacement: Replacement::new(
+            AiOp::Gemm {
+                alpha: 1.0,
+                beta: 0.0,
+                trans_a: true,
+                trans_b: false,
+            },
+            vec![a, b],
+        ),
+    }
+}
+
+/// Trans-B rule: `MatMul(A, Transpose(B)) → Gemm{trans_b=true}`.
+pub fn transpose_matmul_trans_b_rule() -> Rule {
+    let a = VarId(1);
+    let b = VarId(2);
+    Rule {
+        name: "transpose_matmul_trans_b",
+        witness: "real_model_generation::smollm2 (EE-3 ORT logit parity, ADR-0018)",
+        pattern: Pattern::op(
+            OpMatcher::exact_matmul(),
+            vec![
+                Pattern::Var(a),
+                Pattern::op(OpMatcher::exact_transpose(), vec![Pattern::Var(b)])
+                    .with_predicate(perm_is_swap_last_two),
+            ],
+        ),
+        replacement: Replacement::new(
+            AiOp::Gemm {
+                alpha: 1.0,
+                beta: 0.0,
+                trans_a: false,
+                trans_b: true,
+            },
+            vec![a, b],
+        ),
+    }
+}
+
+pub fn transpose_matmul_rules() -> RuleSet {
+    RuleSet::new()
+        .with_rule(transpose_matmul_trans_a_rule())
+        .with_rule(transpose_matmul_trans_b_rule())
+}
