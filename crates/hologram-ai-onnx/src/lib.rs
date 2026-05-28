@@ -237,36 +237,85 @@ fn inject_lm_head_if_needed(mut graph: AiGraph) -> AiGraph {
         _ => return graph,
     };
 
-    // Allocate a fresh TensorId beyond all existing ones.
-    let new_tid = graph
+    // hologram_compiler's Gemm lowering reads `m=A.dim(0), k=A.dim(1),
+    // n=B.dim(1)` (see hologram-compiler/src/lower.rs:99-101) and *does
+    // not honour* `trans_a`/`trans_b` — those flags are silently dropped
+    // at the kernel boundary (GemmCall has no trans fields). A Gemm
+    // with `trans_b=true` against a rank-3 A and a [vocab, hidden]
+    // B would therefore corrupt m/k/n. We emit the transpose
+    // explicitly and use `AiOp::MatMul`, whose `desugar_matmul`
+    // correctly flattens the leading batch dims (rank-3 A with rank-2
+    // B) and produces canonical [m,k]·[k,n] operands for the
+    // compiler. The resulting kernel call has m=batch*seq, k=hidden,
+    // n=vocab — i.e. the LM-head shape we want.
+    let embed_shape = match graph.tensor_info.get(&embed_tid) {
+        Some(info) if info.shape.len() == 2 => info.shape.clone(),
+        _ => return graph,
+    };
+    let hidden_dim = match embed_shape[1].as_concrete() {
+        Some(v) if v > 0 => v,
+        _ => return graph,
+    };
+
+    let mut alloc_tid = graph
         .tensor_info
         .keys()
         .chain(graph.params.keys())
         .max()
         .copied()
-        .unwrap_or(0)
-        + 1;
-    let new_nid = graph.nodes.iter().map(|n| n.id).max().unwrap_or(0) + 1;
+        .unwrap_or(0);
+    let mut alloc_nid = graph.nodes.iter().map(|n| n.id).max().unwrap_or(0);
+    let mut next_tid = || {
+        alloc_tid += 1;
+        alloc_tid
+    };
+    let mut next_nid = || {
+        alloc_nid += 1;
+        alloc_nid
+    };
 
+    // embed_tokens.weight is [vocab, hidden]; the LM-head needs
+    // it as [hidden, vocab]. Use a swap-last-two Transpose so
+    // TransposeMatMulFusion does not re-absorb it into a
+    // Gemm{trans_b} (this rewrite is the inverse of that fusion).
+    let weight_t_tid = next_tid();
+    let mut weight_t_shape = hologram_ai_common::Shape::new();
+    weight_t_shape.push(embed_shape[1].clone());
+    weight_t_shape.push(embed_shape[0].clone());
+    graph.tensor_info.insert(
+        weight_t_tid,
+        TensorInfo::new(DType::F32, weight_t_shape.clone()),
+    );
     graph
-        .tensor_info
-        .insert(new_tid, TensorInfo::new(DType::F32, logits_shape));
-    graph.tensor_names.insert(new_tid, "logits".to_string());
-
-    // logits = last_hidden_state @ embed_tokens.weight^T
+        .tensor_names
+        .insert(weight_t_tid, "lm_head.weight.T".to_string());
     graph.nodes.push(AiNode::new(
-        new_nid,
-        AiOp::Gemm {
-            alpha: 1.0,
-            beta: 0.0,
-            trans_a: false,
-            trans_b: true,
-        },
-        vec![lhs_tid, embed_tid],
-        vec![new_tid],
+        next_nid(),
+        AiOp::Transpose { perm: vec![1, 0] },
+        vec![embed_tid],
+        vec![weight_t_tid],
     ));
 
-    graph.outputs[lhs_idx] = new_tid;
+    // logits = last_hidden_state @ weight^T  →  MatMul handles
+    // rank-3 A by flattening batch+seq into the matmul rows
+    // (desugar_matmul, builder.rs:1060), producing the canonical
+    // [batch*seq, hidden] · [hidden, vocab] kernel call.
+    let _ = hidden_dim; // kept for the asserting comment above
+    let logits_tid = next_tid();
+    graph
+        .tensor_info
+        .insert(logits_tid, TensorInfo::new(DType::F32, logits_shape));
+    graph
+        .tensor_names
+        .insert(logits_tid, "logits".to_string());
+    graph.nodes.push(AiNode::new(
+        next_nid(),
+        AiOp::MatMul,
+        vec![lhs_tid, weight_t_tid],
+        vec![logits_tid],
+    ));
+
+    graph.outputs[lhs_idx] = logits_tid;
     graph.output_names[lhs_idx] = "logits".to_string();
 
     tracing::info!(

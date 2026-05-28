@@ -39,7 +39,7 @@ impl OptPipeline {
                 add_rmsnorm_rules, kv_slot_injection_rules, layernorm_rules,
                 matmul_activation_rules, position_ids_rules, rmsnorm_rules,
                 scalar_absorption_rules, slice_to_gather_rules, swiglu_projection_rules,
-                swiglu_rules, transpose_matmul_rules,
+                swiglu_rules,
             },
             RulePass,
         };
@@ -82,15 +82,20 @@ impl OptPipeline {
             // collapsed; before AttentionFusion to avoid interfering
             // with SDPA pattern matching.
             Box::new(RulePass::new("SwiGluFusion", swiglu_rules())),
-            // Absorb Transpose(swap-last-2) → MatMul into Gemm { trans_a/trans_b }.
-            // ADR-0018 declarative rules with a `Pattern` predicate that
-            // checks the Transpose's `perm` swaps exactly the last two
-            // axes. Eliminates intermediate transposed buffer. Must run
-            // before MatMulActivationFusion (which matches on MatMul).
-            Box::new(RulePass::new(
-                "TransposeMatMulFusion",
-                transpose_matmul_rules(),
-            )),
+            // TransposeMatMulFusion is DISABLED because the
+            // hologram-compiler Gemm lowering does not honour
+            // `trans_a`/`trans_b` (GemmCall has no transpose fields,
+            // and lower.rs reads `m=A.dim(0), k=A.dim(1),
+            // n=B.dim(1)` directly — see hologram-compiler/src/
+            // lower.rs:99-101). Absorbing Transpose into Gemm with
+            // trans flags is therefore silent corruption: the kernel
+            // computes with the *un-transposed* B, which only
+            // accidentally coincides with the correct result when B
+            // is square (a constraint the rule did not enforce). The
+            // explicit Transpose stays in the IR; if a future
+            // dedicated fusion preserves correctness (e.g. by
+            // packing B in transposed layout via b_packed), it can
+            // re-enable absorption then.
             // Absorb MatMul → Mul(scalar) into Gemm { alpha }.
             // ADR-0018 declarative rule using `Pattern::Const` to require
             // the scalar to be a constant param + `Replacement::from_match`

@@ -1613,6 +1613,15 @@ impl<'a> Ctx<'a> {
             let n = self.op(OpKind::RmsNorm, &[x, w], dtype, &x_dims);
             (n, 2)
         };
+        // hologram_compiler infers `m=A.dim(0), k=A.dim(1), n=B.dim(1)`
+        // from operand shapes (lower.rs:99-101) — it does not interpret
+        // rank-3 A as a batched matmul. desugar_swiglu_projection already
+        // folds batch dims into matmul rows; the norm-projection path must
+        // do the same or the kernel collapses A=[batch, seq, hidden] to
+        // m=batch, k=seq, n=B[-1] (silent corruption).
+        let hidden = x_dims.last().copied().unwrap_or(1).max(1);
+        let rows: u64 = x_dims.iter().product::<u64>() / hidden;
+        let norm2d = self.reshape_to(norm, dtype, &[rows, hidden]);
         for (i, _sz) in split_sizes.iter().enumerate() {
             let w = self.src(node.inputs[wstart + i])?;
             let out_dims = self
@@ -1621,7 +1630,10 @@ impl<'a> Ctx<'a> {
                 .get(&node.outputs[i])
                 .and_then(dims_of)
                 .context("norm-projection output shape")?;
-            let proj = self.op(OpKind::MatMul, &[norm, w], dtype, &out_dims);
+            let w_dims = self.in_dims(node, wstart + i)?;
+            let n = w_dims.last().copied().unwrap_or(1).max(1);
+            let proj2d = self.op(OpKind::MatMul, &[norm2d, w], dtype, &[rows, n]);
+            let proj = self.reshape_to(proj2d, dtype, &out_dims);
             self.bind(node.outputs[i], proj);
         }
         Ok(())
