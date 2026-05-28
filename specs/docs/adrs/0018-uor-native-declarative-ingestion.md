@@ -162,7 +162,67 @@ the rule-driven path).
   runtime (ADR-055/056). This ADR is about hologram-ai's lowering
   layer.
 
-## References
+## Implementation status
+
+The architecture is implemented and exercised end-to-end.
+
+**Engine** (`crates/hologram-ai-common/src/rules/`):
+* `Pattern` — `Var(VarId)` / `Const(VarId)` (matches a constant graph
+  param) / `Op { matcher, inputs, bind, commutative, predicate }` /
+  `Maybe(inner)`.
+* `Replacement` — `new(op, inputs)` (static) /
+  `from_root(fn(&AiOp) -> Option<AiOp>, inputs)` /
+  `from_match(fn(&AiOp, &MatchView) -> Option<AiOp>, inputs)` /
+  `custom(fn(&mut AiGraph, &Bindings, root_idx) -> Option<AiNode>)`
+  for graph-mutating rewrites that emit new params + appended nodes.
+* `MatchView` — typed accessors over bound vars: `param`, `scalar_f32`,
+  `i64_vec`, `shape`, `dim`, `is_graph_input`.
+* `RulePass` — `Pass` adapter that runs a `RuleSet` to fixed-point;
+  non-convergent rule sets are detected and panicked (the engine
+  refuses, never approximates).
+* `OpMatcher::Exact(AiOpDiscriminant)` over a closed discriminant
+  catalog the rule author extends as new ops are matched.
+
+**Imperative passes ported to declarative rules** (11 of 14 fusion /
+injection passes; ~2200 LOC of pass code → ~850 LOC of declarative
+rules):
+* `SwiGluFusion` (direct + decomposed variants), `MatMulActivationFusion`,
+  `AddRmsNormFusion` (with `from_root` epsilon carry),
+  `SwiGluProjectionFusion`, `TransposeMatMulFusion`
+  (with `Predicate` on `perm`), `ScalarAbsorption` (with `Const` +
+  `from_match::scalar_f32`), `RmsNormFusion` (Mul + Div variants),
+  `LayerNormFusion` (centered-variance shape with same-`Var` binding
+  on the centered tensor), `SliceToGather` (Custom rewrite emitting
+  a new i64 indices param + Gather), `PositionIdsInjection` (Custom
+  rewrite allocating / reusing the `position_ids` graph input),
+  `KvSlotInjection` (Custom rewrite appending KvSlotWrite nodes per
+  GroupedQueryAttention).
+
+**Witness throughout.** `hologram-ai-conformance::real_model_generation::smollm2`
+(EE-3 ORT logit parity) stays green at every port. Specifically:
+"The capital of France is" → " Paris. Paris is the largest city in
+France and"; "The sun rises in the" → " east, casting a warm orange
+glow over the landscape" — both match ORT exactly.
+
+**Imperative passes remaining** (3 passes, each follows the
+established `Replacement::custom` pattern; the engine has the full
+architectural surface — these are per-pass ports):
+* `AttentionFusion` (~900 LOC, including ~600 LOC of helpers:
+  `match_sdpa_chain`, `find_pre_transpose_with_scale`,
+  `trace_past_expand`, `infer_all_head_params`, `extract_heads_dim`).
+  Ports as a Custom rewrite whose pattern matches the chain's final
+  `MatMul(softmax_out, V)` and whose body invokes the SDPA-chain
+  helpers + the `MatchView::shape`/`dim` API (already in the engine).
+  Helpers should be hoisted into a `pub(crate)` `graph_utils` module
+  so both opt/* and rules/* can use them without duplication.
+* `NormProjectionFusion` (~440 LOC) and
+  `SharedInputProjectionFusion` (~490 LOC) are multi-output fusions:
+  one matched chain → 1 fused norm/proj node + N slice nodes splitting
+  the concatenated output. The engine's `Replacement::custom` already
+  supports appending new nodes during the rewrite (used by
+  KvSlotInjection); these ports follow the same pattern.
+
+
 
 - uor-addr 0.2.0 — `uor_addr::onnx::canonicalize` + the ψ-tower
   realization for protobuf/JSON/CBOR/CCMAS/GGUF/ONNX.
