@@ -38,10 +38,10 @@ impl OptPipeline {
             rmsnorm_fusion::RmsNormFusion, scalar_absorption::ScalarAbsorption,
             semantic_prop::SemanticPropagation, shape_prop::ShapePropagation,
             shared_input_projection_fusion::SharedInputProjectionFusion,
-            slice_to_gather::SliceToGather, swiglu_fusion::SwiGluFusion,
-            swiglu_projection_fusion::SwiGluProjectionFusion,
+            slice_to_gather::SliceToGather, swiglu_projection_fusion::SwiGluProjectionFusion,
             transpose_matmul_fusion::TransposeMatMulFusion,
         };
+        use crate::rules::{pattern_rules::swiglu_rules, RulePass};
         Self::new(vec![
             // Resolve ONNX opset 10+ Slice params from constant inputs
             // before shape propagation needs the concrete slice bounds.
@@ -66,10 +66,13 @@ impl OptPipeline {
             // consume the inner Pow→ReduceMean→Sqrt→Div subchain.
             Box::new(LayerNormFusion),
             Box::new(RmsNormFusion),
-            // Fuse SiLU(gate) * up → FusedSwiGLU. Runs after RmsNormFusion
-            // so norm chains are already collapsed. Must run before
-            // AttentionFusion to avoid interfering with SDPA pattern matching.
-            Box::new(SwiGluFusion),
+            // Fuse SiLU(gate) * up → FusedSwiGLU. ADR-0018 declarative
+            // rule set: matches both the direct (`Silu`) and decomposed
+            // (`Mul(x, Sigmoid(x))`) exporter variants commutatively.
+            // Runs after RmsNormFusion so norm chains are already
+            // collapsed; before AttentionFusion to avoid interfering
+            // with SDPA pattern matching.
+            Box::new(RulePass::new("SwiGluFusion", swiglu_rules())),
             // Absorb Transpose(swap-last-2) → MatMul into Gemm { trans_a/trans_b }.
             // Eliminates intermediate transposed buffer. Must run before
             // MatMulActivationFusion (which matches on MatMul nodes).

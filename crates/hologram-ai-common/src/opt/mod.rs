@@ -28,7 +28,6 @@ pub mod shape_inference;
 pub mod shape_prop;
 pub mod shared_input_projection_fusion;
 pub mod slice_to_gather;
-pub mod swiglu_fusion;
 pub mod swiglu_projection_fusion;
 pub mod transpose_matmul_fusion;
 
@@ -47,4 +46,3 @@ pub use shape_heal::ShapeHealing;
 pub use shape_prop::AggressiveShapePropagation;
 pub use shared_input_projection_fusion::SharedInputProjectionFusion;
 pub use slice_to_gather::SliceToGather;
-pub use swiglu_fusion::SwiGluFusion;

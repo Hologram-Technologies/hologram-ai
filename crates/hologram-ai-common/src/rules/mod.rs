@@ -6,37 +6,38 @@
 //! ## Canonical pieces
 //!
 //! - [`Pattern`] declares the input sub-graph a rule recognizes — a tree
-//!   of [`PatternOp`]s with leaves that bind to graph tensors as
-//!   [`VarId`]s. Variants like `Maybe` express architecture-specific
-//!   differences (e.g. biased vs unbiased projections) as **declared
-//!   alternates** in the schema, not as separate code.
+//!   of `Op`s with leaves that bind to graph tensors as [`VarId`]s.
+//!   `Maybe` expresses architecture-specific differences (e.g. biased
+//!   vs unbiased projections) as **declared alternates**, not as
+//!   separate code.
 //!
-//! - [`Replacement`] declares the canonical replacement — a tree of
-//!   `AiOp`s with leaves that re-use the bound `VarId`s from the pattern.
+//! - [`Replacement`] declares the canonical replacement — a single
+//!   `AiOp` node whose inputs are bound `VarId`s from the pattern. The
+//!   replacement reuses the matched root node's first output tensor
+//!   id, so downstream consumers see the same tensor id and require no
+//!   rewiring.
 //!
 //! - [`Rule`] = `Pattern` + `Replacement` + the citation to the external
-//!   authoritative source that verifies the rule (the ONNX spec link or
-//!   the ORT-parity test name). No rule lands without a witness.
+//!   authoritative source (ONNX spec, ORT logit parity, ONNX backend
+//!   node-test corpus). No rule lands without a witness.
 //!
 //! - [`RuleSet`] applies rules to fixed-point. Each rule either matches
 //!   and rewrites or doesn't; the result is independent of rule order
 //!   (rules are confluent on the canonical form). A non-confluent rule
-//!   pair is rejected at load time.
+//!   pair is caught at apply time by non-convergence.
 //!
 //! ## Match semantics
 //!
 //! A match binds each pattern [`VarId`] to a graph [`TensorId`]. The
 //! root pattern matches against an `AiNode`'s op + input tensors;
 //! sub-patterns recurse by following each input tensor back to its
-//! producer node (if any). If a sub-pattern is a `VarId` and the same
-//! `VarId` appears elsewhere in the pattern, the bindings must agree
-//! (linear vs sharing is explicit, not implied).
+//! producer node. When a `VarId` appears more than once in the pattern,
+//! the bindings must agree (sharing is explicit, not implied).
 //!
-//! Once a pattern matches, the replacement is constructed: a new node
-//! whose inputs are the bound `VarId`s' tensor IDs and whose outputs
-//! inherit the matched root node's outputs (so consumers downstream
-//! continue to see the same tensor IDs — no rewiring outside the
-//! match).
+//! Op patterns at *interior* positions (non-root) require their matched
+//! node to have **exactly one consumer**. Removing a multi-consumer
+//! interior node would break downstream paths, so the matcher refuses
+//! to match it in the first place.
 //!
 //! ## What this is not
 //!
@@ -52,23 +53,50 @@ use crate::ir::{AiGraph, AiNode, AiOp, NodeId, TensorId};
 use std::collections::HashMap;
 
 mod op_match;
-pub use op_match::OpMatcher;
+pub mod pattern_rules;
+pub use op_match::{AiOpDiscriminant, OpMatcher};
+
+/// Adapter that wraps a [`RuleSet`] as an `opt::Pass`, so the rule
+/// engine plugs into the existing `OptPipeline` while the imperative
+/// passes are being replaced.
+///
+/// `should_run` always returns `true` — the matcher itself is the
+/// cheap predicate; a rule that doesn't match does no graph mutation.
+pub struct RulePass {
+    pub name: &'static str,
+    pub set: RuleSet,
+}
+
+impl RulePass {
+    pub fn new(name: &'static str, set: RuleSet) -> Self {
+        Self { name, set }
+    }
+}
+
+impl crate::opt::Pass for RulePass {
+    fn name(&self) -> &str {
+        self.name
+    }
+
+    fn run(&self, mut graph: AiGraph) -> anyhow::Result<AiGraph> {
+        let rewrites = self.set.apply(&mut graph);
+        if rewrites > 0 {
+            tracing::info!(
+                pass = self.name,
+                rewrites,
+                "RulePass: applied {} declarative rewrite(s)",
+                rewrites
+            );
+        }
+        Ok(graph)
+    }
+}
 
 /// A name bound by a [`Pattern`] to a tensor in the matched sub-graph.
-///
-/// `VarId(0)` is conventionally the **root output** of the pattern (the
-/// tensor the replacement's root will write to). Other ids name
-/// intermediate tensors used by the replacement.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct VarId(pub u32);
 
 /// Pattern over the canonical `AiGraph` IR.
-///
-/// `Op` matches a producer node whose op satisfies [`OpMatcher`] and
-/// whose input tensors recursively match each child pattern. `Var`
-/// matches *any* tensor and binds it. `Maybe` matches either the inner
-/// pattern *or* the bare `Var` (used to declare optional operations
-/// like a bias-Add between a MatMul and its consumer).
 #[derive(Debug, Clone)]
 pub enum Pattern {
     /// Match any tensor; bind it under `var`.
@@ -79,68 +107,83 @@ pub enum Pattern {
         op: OpMatcher,
         inputs: Vec<Pattern>,
         /// Optional bind of the root tensor of this sub-pattern (its
-        /// producer's first output). Useful in `Replacement::Var`
-        /// references and in `Maybe` to inject the inner result back.
+        /// producer's first output).
         bind: Option<VarId>,
+        /// If true, try both `[A, B]` and `[B, A]` orderings when
+        /// matching the inputs (binary commutative ops only — must have
+        /// `inputs.len() == 2`).
+        commutative: bool,
     },
     /// Match either the inner pattern or its `bind`'s underlying tensor
-    /// directly. The inner pattern's `bind` (if any) is propagated.
+    /// directly.
     Maybe(Box<Pattern>),
 }
 
 impl Pattern {
-    /// Convenience: an `Op` pattern with no binding on its own output.
     pub fn op(matcher: OpMatcher, inputs: Vec<Pattern>) -> Self {
         Pattern::Op {
             op: matcher,
             inputs,
             bind: None,
+            commutative: false,
         }
     }
 
-    /// Convenience: an `Op` pattern that also binds its output tensor.
     pub fn op_bind(matcher: OpMatcher, inputs: Vec<Pattern>, bind: VarId) -> Self {
         Pattern::Op {
             op: matcher,
             inputs,
             bind: Some(bind),
+            commutative: false,
+        }
+    }
+
+    /// Commutative binary Op pattern. The matcher tries both input
+    /// orderings (`[A, B]` and `[B, A]`); the first one whose sub-
+    /// patterns all match wins.
+    pub fn op_comm(matcher: OpMatcher, a: Pattern, b: Pattern) -> Self {
+        Pattern::Op {
+            op: matcher,
+            inputs: vec![a, b],
+            bind: None,
+            commutative: true,
         }
     }
 }
 
-/// Replacement tree. Leaves are `Var` references to bindings made by
-/// the pattern; internal nodes are canonical `AiOp` constructions whose
-/// inputs are themselves `Replacement`s.
+/// Replacement: a single canonical `AiOp` node whose inputs are bound
+/// `VarId`s from the pattern.
 ///
 /// `AiOp` is boxed because clippy flags the unboxed enum as large
 /// (≈48 bytes for the heaviest variants) — boxing keeps the
-/// `Replacement` discriminant compact while still allowing the rule
-/// author to write rich canonical replacements.
+/// `Replacement` discriminant compact.
 #[derive(Debug, Clone)]
-pub enum Replacement {
-    /// Re-use a tensor bound by the pattern. The tensor's existing
-    /// producer (if any) stays in the graph; the replacement just
-    /// references it.
-    Var(VarId),
-    /// Construct a new node with the given op and recursively-built
-    /// inputs.
-    Op {
-        op: Box<AiOp>,
-        inputs: Vec<Replacement>,
-    },
+pub struct Replacement {
+    /// Canonical op of the replacement node.
+    pub op: Box<AiOp>,
+    /// Bound variable references — each becomes an input tensor on the
+    /// emitted node, in this order.
+    pub inputs: Vec<VarId>,
+}
+
+impl Replacement {
+    pub fn new(op: AiOp, inputs: Vec<VarId>) -> Self {
+        Self {
+            op: Box::new(op),
+            inputs,
+        }
+    }
 }
 
 /// A single declarative rewrite rule.
 ///
-/// `witness` is the name of the V&V test (in `hologram-ai-conformance`,
-/// `hologram-ai`, or upstream) that establishes the rule's correctness
-/// against an external authoritative source — the ONNX operator spec,
-/// the ONNX backend node-test corpus, or an ORT logit-parity check.
-/// A rule without a witness MUST NOT be added to a [`RuleSet`].
+/// `witness` is the V&V test name (in `hologram-ai-conformance`,
+/// `hologram-ai`, or upstream) that verifies the rule's correctness
+/// against an external authoritative source. A rule without a witness
+/// MUST NOT be added to a [`RuleSet`].
 #[derive(Debug, Clone)]
 pub struct Rule {
     pub name: &'static str,
-    /// External authoritative-source citation (URL or test name).
     pub witness: &'static str,
     pub pattern: Pattern,
     pub replacement: Replacement,
@@ -166,11 +209,10 @@ impl RuleSet {
         &self.rules
     }
 
-    /// Apply every rule to fixed-point. Returns the total number of
-    /// rewrites performed. A rule pair that produces different results
-    /// on the same input fragment (a confluence violation) is rejected
-    /// here by detecting an unbounded rewrite loop and panicking; the
-    /// rule set must be fixed before re-running.
+    /// Apply every rule to fixed-point. Returns the number of rewrites.
+    /// A non-confluent rule set is detected by non-convergence (an
+    /// unbounded loop) and panics — the engine refuses rather than
+    /// approximates.
     pub fn apply(&self, graph: &mut AiGraph) -> usize {
         let mut total = 0usize;
         loop {
@@ -189,56 +231,86 @@ impl RuleSet {
         total
     }
 
-    /// One sweep over the graph applying every rule once at every
-    /// candidate root. Returns the number of rewrites made this sweep.
+    /// One sweep: at each candidate root, try each rule. A successful
+    /// match (a) replaces the root node's op + inputs with the rule's
+    /// replacement, and (b) marks every *interior* matched node for
+    /// removal. After the sweep, removed nodes are spliced out and any
+    /// stale producer-map entries are rebuilt on the next pass.
     fn apply_pass(&self, graph: &mut AiGraph) -> usize {
         let mut rewrites = 0usize;
         let n = graph.nodes.len();
         let mut next_id = next_node_id(graph);
-        let mut producer = build_producer_map(graph);
-
-        let mut new_nodes: HashMap<usize, AiNode> = HashMap::new();
+        let producer = build_producer_map(graph);
+        let consumer_counts = build_consumer_counts(graph);
+        let mut rewritten: HashMap<usize, AiNode> = HashMap::new();
+        let mut to_remove: Vec<bool> = vec![false; n];
 
         'outer: for root_idx in 0..n {
-            if new_nodes.contains_key(&root_idx) {
-                continue; // Already rewritten this sweep.
+            if rewritten.contains_key(&root_idx) || to_remove[root_idx] {
+                continue;
             }
             for rule in &self.rules {
-                let mut env = Env::default();
-                if Matcher::match_at(graph, &producer, &rule.pattern, root_idx, &mut env) {
-                    let root_node = &graph.nodes[root_idx];
-                    let root_out = root_node.outputs.first().copied();
-                    let Some(root_out) = root_out else {
-                        continue;
-                    };
-                    let Some(new_node) =
-                        materialize(&rule.replacement, &env, root_out, &mut next_id)
-                    else {
-                        continue;
-                    };
-                    producer.insert(root_out, root_idx);
-                    new_nodes.insert(root_idx, new_node);
-                    rewrites += 1;
-                    continue 'outer;
+                let mut m = Match::default();
+                if !Matcher::match_at(
+                    graph,
+                    &producer,
+                    &consumer_counts,
+                    &rule.pattern,
+                    root_idx,
+                    true, // root position
+                    &mut m,
+                ) {
+                    continue;
                 }
+
+                let Some(root_out) = graph.nodes[root_idx].outputs.first().copied() else {
+                    continue;
+                };
+                let Some(new_node) = materialize(&rule.replacement, &m, root_out, &mut next_id)
+                else {
+                    continue;
+                };
+                rewritten.insert(root_idx, new_node);
+                for &idx in &m.consumed {
+                    if idx != root_idx {
+                        to_remove[idx] = true;
+                    }
+                }
+                rewrites += 1;
+                continue 'outer;
             }
         }
 
-        for (idx, node) in new_nodes {
-            graph.nodes[idx] = node;
+        if rewrites == 0 {
+            return 0;
         }
+
+        // Apply rewrites + removals in one pass over `nodes`.
+        let mut new_nodes = Vec::with_capacity(graph.nodes.len());
+        for (idx, node) in graph.nodes.iter().enumerate() {
+            if to_remove[idx] {
+                continue;
+            }
+            if let Some(replacement) = rewritten.remove(&idx) {
+                new_nodes.push(replacement);
+            } else {
+                new_nodes.push(node.clone());
+            }
+        }
+        graph.nodes = new_nodes;
 
         rewrites
     }
 }
 
-/// Bindings established by a successful pattern match.
+/// Bindings + matched-node indices established by a successful match.
 #[derive(Debug, Default)]
-struct Env {
+struct Match {
     binds: HashMap<VarId, TensorId>,
+    consumed: Vec<usize>,
 }
 
-impl Env {
+impl Match {
     fn bind(&mut self, var: VarId, tid: TensorId) -> bool {
         match self.binds.get(&var) {
             Some(&existing) => existing == tid,
@@ -260,21 +332,40 @@ impl Matcher {
     fn match_at(
         graph: &AiGraph,
         producer: &HashMap<TensorId, usize>,
+        consumer_counts: &HashMap<TensorId, usize>,
         pattern: &Pattern,
         node_idx: usize,
-        env: &mut Env,
+        is_root: bool,
+        m: &mut Match,
     ) -> bool {
         let node = &graph.nodes[node_idx];
+
+        // Interior matched Op nodes must have single-consumer outputs;
+        // otherwise removing them would break a downstream path.
+        if !is_root {
+            if let Pattern::Op { .. } = pattern {
+                let Some(&out) = node.outputs.first() else {
+                    return false;
+                };
+                if consumer_counts.get(&out).copied().unwrap_or(0) != 1 {
+                    return false;
+                }
+            }
+        }
+
         match pattern {
             Pattern::Var(var) => {
-                // A bare Var at a root position matches the node's first
-                // output tensor.
                 let Some(&tid) = node.outputs.first() else {
                     return false;
                 };
-                env.bind(*var, tid)
+                m.bind(*var, tid)
             }
-            Pattern::Op { op, inputs, bind } => {
+            Pattern::Op {
+                op,
+                inputs,
+                bind,
+                commutative,
+            } => {
                 if !op.matches(&node.op) {
                     return false;
                 }
@@ -285,37 +376,83 @@ impl Matcher {
                     let Some(&tid) = node.outputs.first() else {
                         return false;
                     };
-                    if !env.bind(*b, tid) {
+                    if !m.bind(*b, tid) {
                         return false;
                     }
                 }
-                for (i, child_pat) in inputs.iter().enumerate() {
-                    let in_tid = node.inputs[i];
-                    if !Self::match_tensor(graph, producer, child_pat, in_tid, env) {
-                        return false;
+
+                // Try the natural input order; if commutative and that
+                // order fails, try the swapped order.
+                let orderings: &[[usize; 2]] = if *commutative && inputs.len() == 2 {
+                    &[[0, 1], [1, 0]]
+                } else {
+                    &[[0, 1]] // ignored when inputs.len() != 2
+                };
+
+                let try_order = |order: &[usize], saved: &mut Match| -> bool {
+                    for (pos, &perm_idx) in order.iter().enumerate() {
+                        let child_pat = &inputs[perm_idx];
+                        let in_tid = node.inputs[pos];
+                        if !Matcher::match_tensor(
+                            graph,
+                            producer,
+                            consumer_counts,
+                            child_pat,
+                            in_tid,
+                            saved,
+                        ) {
+                            return false;
+                        }
+                    }
+                    true
+                };
+
+                if *commutative && inputs.len() == 2 {
+                    let snapshot_binds = m.binds.clone();
+                    let snapshot_consumed = m.consumed.clone();
+                    for order in orderings {
+                        if try_order(order, m) {
+                            m.consumed.push(node_idx);
+                            return true;
+                        }
+                        m.binds = snapshot_binds.clone();
+                        m.consumed = snapshot_consumed.clone();
+                    }
+                    false
+                } else {
+                    let natural: Vec<usize> = (0..inputs.len()).collect();
+                    if try_order(&natural, m) {
+                        m.consumed.push(node_idx);
+                        true
+                    } else {
+                        false
                     }
                 }
-                true
             }
             Pattern::Maybe(inner) => {
-                // Try the inner pattern first; if it doesn't match, the
-                // node itself is the "absent" branch — bind the inner's
-                // root var (if any) to the node's first output.
-                let mut tentative = Env {
-                    binds: env.binds.clone(),
+                let snapshot = (m.binds.clone(), m.consumed.clone());
+                if Self::match_at(
+                    graph,
+                    producer,
+                    consumer_counts,
+                    inner,
+                    node_idx,
+                    is_root,
+                    m,
+                ) {
+                    return true;
+                }
+                m.binds = snapshot.0;
+                m.consumed = snapshot.1;
+                // Absent branch: bind the inner's root var (if any) to
+                // this node's first output.
+                let Some(&tid) = node.outputs.first() else {
+                    return false;
                 };
-                if Self::match_at(graph, producer, inner, node_idx, &mut tentative) {
-                    env.binds = tentative.binds;
-                    true
+                if let Pattern::Op { bind: Some(b), .. } = inner.as_ref() {
+                    m.bind(*b, tid)
                 } else {
-                    let Some(&tid) = node.outputs.first() else {
-                        return false;
-                    };
-                    if let Pattern::Op { bind: Some(b), .. } = inner.as_ref() {
-                        env.bind(*b, tid)
-                    } else {
-                        true
-                    }
+                    true
                 }
             }
         }
@@ -324,17 +461,26 @@ impl Matcher {
     fn match_tensor(
         graph: &AiGraph,
         producer: &HashMap<TensorId, usize>,
+        consumer_counts: &HashMap<TensorId, usize>,
         pattern: &Pattern,
         tid: TensorId,
-        env: &mut Env,
+        m: &mut Match,
     ) -> bool {
         match pattern {
-            Pattern::Var(var) => env.bind(*var, tid),
+            Pattern::Var(var) => m.bind(*var, tid),
             Pattern::Op { .. } | Pattern::Maybe(_) => {
                 let Some(&prod_idx) = producer.get(&tid) else {
                     return false;
                 };
-                Self::match_at(graph, producer, pattern, prod_idx, env)
+                Self::match_at(
+                    graph,
+                    producer,
+                    consumer_counts,
+                    pattern,
+                    prod_idx,
+                    false,
+                    m,
+                )
             }
         }
     }
@@ -342,35 +488,18 @@ impl Matcher {
 
 fn materialize(
     repl: &Replacement,
-    env: &Env,
+    m: &Match,
     root_out: TensorId,
     next_id: &mut NodeId,
 ) -> Option<AiNode> {
-    let Replacement::Op { op, inputs } = repl else {
-        return None; // Root replacement must be an Op (Var alone has no node).
-    };
-    let mut input_tids = Vec::with_capacity(inputs.len());
-    for inp in inputs {
-        match inp {
-            Replacement::Var(v) => input_tids.push(env.lookup(*v)?),
-            Replacement::Op { .. } => {
-                // Nested op replacements not yet supported; surface as
-                // a hard miss so the caller knows. The architecture
-                // permits this; the current matcher only constructs the
-                // root replacement node, leaving multi-node fan-out
-                // (e.g. a fused norm + N projections) for the engine's
-                // multi-output extension.
-                return None;
-            }
-        }
+    let mut input_tids = Vec::with_capacity(repl.inputs.len());
+    for v in &repl.inputs {
+        input_tids.push(m.lookup(*v)?);
     }
-    let new = AiNode::new(*next_id, (**op).clone(), input_tids, vec![root_out]);
+    let new = AiNode::new(*next_id, (*repl.op).clone(), input_tids, vec![root_out]);
     *next_id += 1;
     Some(new)
 }
-
-// ── helpers (duplicated from opt::graph_utils to keep the modules
-// independent until the imperative passes are deleted) ──────────────
 
 fn next_node_id(graph: &AiGraph) -> NodeId {
     graph.nodes.iter().map(|n| n.id).max().unwrap_or(0) + 1
@@ -382,6 +511,20 @@ fn build_producer_map(graph: &AiGraph) -> HashMap<TensorId, usize> {
         for &out in &node.outputs {
             m.insert(out, idx);
         }
+    }
+    m
+}
+
+fn build_consumer_counts(graph: &AiGraph) -> HashMap<TensorId, usize> {
+    let mut m: HashMap<TensorId, usize> = HashMap::new();
+    for node in &graph.nodes {
+        for &in_tid in &node.inputs {
+            *m.entry(in_tid).or_insert(0) += 1;
+        }
+    }
+    // A tensor that's a graph output is also "consumed" (by the world).
+    for &out_tid in &graph.outputs {
+        *m.entry(out_tid).or_insert(0) += 1;
     }
     m
 }
@@ -412,64 +555,67 @@ mod tests {
         }
     }
 
+    fn add_node(g: &mut AiGraph, id: NodeId, op: AiOp, inputs: Vec<TensorId>, output: TensorId) {
+        let shape = shape_from_concrete(&[4]);
+        g.tensor_info
+            .insert(output, TensorInfo::new(DType::F32, shape));
+        g.nodes.push(AiNode::new(id, op, inputs, vec![output]));
+    }
+
     #[test]
     fn double_relu_folds_to_single_relu() {
-        // ReluRelu fusion: Relu(Relu(x)) → Relu(x). Trivial canonical
-        // identity that proves the rule engine end-to-end.
+        // Relu(Relu(x)) → Relu(x). Two matched nodes: the outer Relu
+        // becomes the rewrite; the inner Relu is interior, single-
+        // consumer, removed.
         let mut g = unit_graph();
         let shape = shape_from_concrete(&[4]);
-        for tid in 0..3u32 {
-            g.tensor_info
-                .insert(tid, TensorInfo::new(DType::F32, shape.clone()));
-        }
+        g.tensor_info.insert(0, TensorInfo::new(DType::F32, shape));
         g.inputs = vec![0];
         g.outputs = vec![2];
-        g.nodes.push(AiNode::new(0, AiOp::Relu, vec![0], vec![1]));
-        g.nodes.push(AiNode::new(1, AiOp::Relu, vec![1], vec![2]));
+        add_node(&mut g, 0, AiOp::Relu, vec![0], 1);
+        add_node(&mut g, 1, AiOp::Relu, vec![1], 2);
 
         let x = VarId(1);
         let rule = Rule {
             name: "double_relu_collapse",
-            witness: "Relu(Relu(x)) == Relu(x) (idempotence of ReLU; trivial spec invariant)",
+            witness: "Relu(Relu(x)) == Relu(x) (idempotence; spec invariant)",
             pattern: Pattern::op(
                 OpMatcher::exact_relu(),
                 vec![Pattern::op(OpMatcher::exact_relu(), vec![Pattern::Var(x)])],
             ),
-            replacement: Replacement::Op {
-                op: Box::new(AiOp::Relu),
-                inputs: vec![Replacement::Var(x)],
-            },
+            replacement: Replacement::new(AiOp::Relu, vec![x]),
         };
         let set = RuleSet::new().with_rule(rule);
 
         let rewrites = set.apply(&mut g);
         assert!(rewrites >= 1, "expected at least one rewrite");
-        // The outer node (id=1, idx=1) was rewritten to Relu(x) directly,
-        // skipping the inner Relu.
-        let rewritten = &g.nodes[1];
-        assert!(matches!(rewritten.op, AiOp::Relu));
-        assert_eq!(rewritten.inputs, vec![0], "outer Relu now reads from x");
+        // After the rewrite, only one Relu node remains.
+        assert_eq!(g.nodes.len(), 1);
+        assert!(matches!(g.nodes[0].op, AiOp::Relu));
+        assert_eq!(g.nodes[0].inputs, vec![0], "outer Relu now reads from x");
         assert_eq!(
-            rewritten.outputs,
+            g.nodes[0].outputs,
             vec![2],
-            "outer Relu's output unchanged so downstream wiring is preserved"
+            "outer Relu retains the root output tensor id"
         );
     }
 
     #[test]
-    fn non_matching_graph_is_not_rewritten() {
-        // A graph that doesn't match the rule must stay unchanged — the
-        // engine never approximates or partially matches.
+    fn multi_consumer_interior_is_not_rewritten() {
+        // If the interior Relu has more than one consumer, removing it
+        // would break the second consumer's input — the matcher must
+        // refuse to match.
         let mut g = unit_graph();
         let shape = shape_from_concrete(&[4]);
-        for tid in 0..2u32 {
+        for tid in 0..4u32 {
             g.tensor_info
                 .insert(tid, TensorInfo::new(DType::F32, shape.clone()));
         }
         g.inputs = vec![0];
-        g.outputs = vec![1];
-        g.nodes
-            .push(AiNode::new(0, AiOp::Sigmoid, vec![0], vec![1]));
+        g.outputs = vec![2, 3];
+        add_node(&mut g, 0, AiOp::Relu, vec![0], 1);
+        add_node(&mut g, 1, AiOp::Relu, vec![1], 2);
+        add_node(&mut g, 2, AiOp::Sigmoid, vec![1], 3); // second consumer of inner Relu
 
         let x = VarId(1);
         let rule = Rule {
@@ -479,15 +625,58 @@ mod tests {
                 OpMatcher::exact_relu(),
                 vec![Pattern::op(OpMatcher::exact_relu(), vec![Pattern::Var(x)])],
             ),
-            replacement: Replacement::Op {
-                op: Box::new(AiOp::Relu),
-                inputs: vec![Replacement::Var(x)],
-            },
+            replacement: Replacement::new(AiOp::Relu, vec![x]),
         };
         let set = RuleSet::new().with_rule(rule);
 
         let rewrites = set.apply(&mut g);
-        assert_eq!(rewrites, 0, "no rewrite on a non-matching graph");
-        assert!(matches!(g.nodes[0].op, AiOp::Sigmoid));
+        assert_eq!(
+            rewrites, 0,
+            "multi-consumer interior must not be rewritten (no approximation)"
+        );
+        assert_eq!(g.nodes.len(), 3);
+    }
+
+    #[test]
+    fn commutative_match_tries_both_orderings() {
+        // SwiGLU pattern: Mul(Silu(gate), up) → FusedSwiGLU(gate, up).
+        // Test both Mul orderings: Mul(Silu(g), u) and Mul(u, Silu(g)).
+        for swap in [false, true] {
+            let mut g = unit_graph();
+            let shape = shape_from_concrete(&[4]);
+            for tid in 0..4u32 {
+                g.tensor_info
+                    .insert(tid, TensorInfo::new(DType::F32, shape.clone()));
+            }
+            g.inputs = vec![0, 1];
+            g.outputs = vec![3];
+            add_node(&mut g, 0, AiOp::Silu, vec![0], 2);
+            let mul_inputs = if swap { vec![1, 2] } else { vec![2, 1] };
+            add_node(&mut g, 1, AiOp::Mul, mul_inputs, 3);
+
+            let gate = VarId(1);
+            let up = VarId(2);
+            let rule = Rule {
+                name: "swiglu_fusion_direct",
+                witness: "real_model_generation::smollm2_paris (EE-3 ORT parity)",
+                pattern: Pattern::op_comm(
+                    OpMatcher::exact_mul(),
+                    Pattern::op(OpMatcher::exact_silu(), vec![Pattern::Var(gate)]),
+                    Pattern::Var(up),
+                ),
+                replacement: Replacement::new(AiOp::FusedSwiGLU, vec![gate, up]),
+            };
+            let set = RuleSet::new().with_rule(rule);
+
+            let rewrites = set.apply(&mut g);
+            assert!(rewrites >= 1, "swap={swap}: expected a rewrite");
+            assert_eq!(g.nodes.len(), 1, "swap={swap}: Silu removed");
+            assert!(matches!(g.nodes[0].op, AiOp::FusedSwiGLU));
+            assert_eq!(
+                g.nodes[0].inputs,
+                vec![0, 1],
+                "swap={swap}: gate=tid 0, up=tid 1"
+            );
+        }
     }
 }
