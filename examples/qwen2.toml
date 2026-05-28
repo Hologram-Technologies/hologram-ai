@@ -24,22 +24,39 @@
 #     --prompt-template "<|im_start|>user\n{prompt}<|im_end|>\n<|im_start|>assistant\n" \
 #     --max-tokens 60 --stop "<|im_end|>"
 #
-# STATUS: compile + a full forward pass are verified end-to-end on real
-# Llama-family ONNX (the authoritative onnx-community SmolLM2-135M runs through
-# the canonical OpKind pipeline — embedding Gather, causal grouped-query
-# attention, RoPE, RMSNorm, SwiGLU, LM head). int64 `input_ids` work via the
-# first-class `Gather` (no i8≤127 limit).
+# STATUS — Qwen2 family compiles but does NOT yet run end-to-end.
 #
-# The greedy/sampled generation loop is verified end-to-end — see the runnable
-# `cargo run -p hologram-ai --example text_generation` (deterministic, checked
-# against a closed-form expectation) and `tests/generation_synthetic.rs`.
+# Compile succeeds (q8_0, ~2 GB archive) on a 15 GB box with rust-analyzer
+# killed (peak 8 GB resident). Forward execution then fails at the GQA
+# attention call with:
+#   Backend error: buffer slot out of range  (K = slot 60, length 8192)
+# The K input buffer hologram allocates is smaller than the AttentionCall
+# requests. The diag harness
+#   HOLOGRAM_AI_LIVE=1 \
+#   HOLOGRAM_AI_DIAG_ONNX=models/Qwen2-0.5B-Instruct/model.onnx \
+#   cargo test --release -p hologram-ai --test diag_backend -- --ignored
+# surfaces the failing kernel.
 #
-# Real generation works on the standard *with-past* HF/onnx-community exports:
+# Root cause: hologram-compiler-level slot allocation under Qwen2's specific
+# graph shape — Qwen2 has biased Q/K/V projections (Llama-family models don't)
+# and GQA ratio 7 (vs SmolLM2's ratio 3). The K tensor's lifetime/shape
+# resolution interacts with these differences to produce a buffer smaller than
+# the AttentionCall's BufferRef.length. This is a compiler-level fix, separate
+# from the pipeline rule engine (ADR-0018) — the rule path is unchanged from
+# SmolLM2, which works.
+#
+# Llama-family path is verified end-to-end on the authoritative onnx-community
+# SmolLM2-135M — see `examples/smollm2.toml` for the same canonical pipeline
+# (RoPE + causal grouped-query attention + RMSNorm + SwiGLU + LM head).
+# Generation loop verified by `cargo run -p hologram-ai --example
+# text_generation` (deterministic closed-form check) and
+# `tests/generation_synthetic.rs`.
+#
 # hologram-ai replaces the mutable KV-cache with content-addressed κ-label
-# elision, so it runs the with-past decoder as a full-recompute prefill with an
-# empty past (`Concat(past[…,0,…], cur) = cur`) and `run --prompt` recomputes the
-# growing token window, eliding the unchanged prefix by content address. Verified
-# end-to-end on SmolLM2-135M — see `examples/smollm2.toml`.
+# elision: it runs HuggingFace's with-past decoder exports as a full-recompute
+# prefill with an empty past (`Concat(past[…,0,…], cur) = cur`) and `run
+# --prompt` recomputes the growing token window, eliding the unchanged prefix
+# by content address.
 
 [model]
 hf_id = "Qwen/Qwen2-0.5B-Instruct"
