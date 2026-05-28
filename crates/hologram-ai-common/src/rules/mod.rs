@@ -154,23 +154,74 @@ impl Pattern {
 /// Replacement: a single canonical `AiOp` node whose inputs are bound
 /// `VarId`s from the pattern.
 ///
-/// `AiOp` is boxed because clippy flags the unboxed enum as large
-/// (≈48 bytes for the heaviest variants) — boxing keeps the
-/// `Replacement` discriminant compact.
-#[derive(Debug, Clone)]
+/// Two construction modes:
+/// * `Replacement::new(op, inputs)` — static op (e.g. `FusedSwiGLU`).
+/// * `Replacement::from_root(builder, inputs)` — the replacement op is
+///   computed from the matched root's `AiOp` value via a pure `fn`
+///   pointer. This handles patterns whose canonical replacement carries
+///   an attribute from the matched root (e.g. `Add(x, r) → RmsNorm` →
+///   `FusedLayerNormResidual { epsilon }` carries the `RmsNorm`'s
+///   epsilon). The builder is a plain `fn` (not a closure capturing
+///   state), so its identity is its address — content-addressable.
+#[derive(Clone)]
 pub struct Replacement {
-    /// Canonical op of the replacement node.
-    pub op: Box<AiOp>,
-    /// Bound variable references — each becomes an input tensor on the
-    /// emitted node, in this order.
-    pub inputs: Vec<VarId>,
+    op: ReplacementOp,
+    inputs: Vec<VarId>,
+}
+
+#[derive(Clone)]
+enum ReplacementOp {
+    /// Static op — the same value for every successful match.
+    Static(Box<AiOp>),
+    /// Computed from the matched root's `AiOp` (e.g. carry epsilon).
+    FromRoot(fn(&AiOp) -> Option<AiOp>),
+}
+
+impl std::fmt::Debug for Replacement {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match &self.op {
+            ReplacementOp::Static(op) => f
+                .debug_struct("Replacement::Static")
+                .field("op", op)
+                .field("inputs", &self.inputs)
+                .finish(),
+            ReplacementOp::FromRoot(_) => f
+                .debug_struct("Replacement::FromRoot")
+                .field("builder", &"<fn>")
+                .field("inputs", &self.inputs)
+                .finish(),
+        }
+    }
 }
 
 impl Replacement {
+    /// Static replacement — the canonical op is the same for every match.
     pub fn new(op: AiOp, inputs: Vec<VarId>) -> Self {
         Self {
-            op: Box::new(op),
+            op: ReplacementOp::Static(Box::new(op)),
             inputs,
+        }
+    }
+
+    /// Dynamic replacement — the canonical op is computed from the
+    /// matched root's `AiOp` value. Returns `None` to abort the rewrite
+    /// (e.g. an attribute that should have been resolved at the matched
+    /// root is unexpectedly missing — the engine refuses to approximate).
+    pub fn from_root(builder: fn(&AiOp) -> Option<AiOp>, inputs: Vec<VarId>) -> Self {
+        Self {
+            op: ReplacementOp::FromRoot(builder),
+            inputs,
+        }
+    }
+
+    pub fn inputs(&self) -> &[VarId] {
+        &self.inputs
+    }
+
+    fn build(&self, root_op: &AiOp) -> Option<AiOp> {
+        match &self.op {
+            ReplacementOp::Static(op) => Some((**op).clone()),
+            ReplacementOp::FromRoot(builder) => builder(root_op),
         }
     }
 }
@@ -263,10 +314,12 @@ impl RuleSet {
                     continue;
                 }
 
-                let Some(root_out) = graph.nodes[root_idx].outputs.first().copied() else {
+                let root_node = &graph.nodes[root_idx];
+                let Some(root_out) = root_node.outputs.first().copied() else {
                     continue;
                 };
-                let Some(new_node) = materialize(&rule.replacement, &m, root_out, &mut next_id)
+                let Some(new_node) =
+                    materialize(&rule.replacement, &m, &root_node.op, root_out, &mut next_id)
                 else {
                     continue;
                 };
@@ -489,6 +542,7 @@ impl Matcher {
 fn materialize(
     repl: &Replacement,
     m: &Match,
+    root_op: &AiOp,
     root_out: TensorId,
     next_id: &mut NodeId,
 ) -> Option<AiNode> {
@@ -496,7 +550,8 @@ fn materialize(
     for v in &repl.inputs {
         input_tids.push(m.lookup(*v)?);
     }
-    let new = AiNode::new(*next_id, (*repl.op).clone(), input_tids, vec![root_out]);
+    let op = repl.build(root_op)?;
+    let new = AiNode::new(*next_id, op, input_tids, vec![root_out]);
     *next_id += 1;
     Some(new)
 }

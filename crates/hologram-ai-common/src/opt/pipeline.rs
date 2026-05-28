@@ -27,10 +27,9 @@ impl OptPipeline {
     /// Standard optimization pipeline.
     pub fn mvp() -> Self {
         use super::{
-            add_rmsnorm_fusion::AddRmsNormFusion, attention_fusion::AttentionFusion,
-            const_dedup::ConstantDeduplication, const_eval::ConstantEvaluation,
-            constant_fold::ConstantFolding, data_prop::DataPropagation,
-            dead_node::DeadNodeElimination, decompose::OpDecomposition,
+            attention_fusion::AttentionFusion, const_dedup::ConstantDeduplication,
+            const_eval::ConstantEvaluation, constant_fold::ConstantFolding,
+            data_prop::DataPropagation, dead_node::DeadNodeElimination, decompose::OpDecomposition,
             kv_slot_injection::KvSlotInjection, layernorm_fusion::LayerNormFusion,
             norm_projection_fusion::NormProjectionFusion,
             position_ids_injection::PositionIdsInjection, resolve_slice_params::ResolveSliceParams,
@@ -41,7 +40,7 @@ impl OptPipeline {
             transpose_matmul_fusion::TransposeMatMulFusion,
         };
         use crate::rules::{
-            pattern_rules::{matmul_activation_rules, swiglu_rules},
+            pattern_rules::{add_rmsnorm_rules, matmul_activation_rules, swiglu_rules},
             RulePass,
         };
         Self::new(vec![
@@ -93,9 +92,11 @@ impl OptPipeline {
                 matmul_activation_rules(),
             )),
             // Fuse Add(x, residual) → RmsNorm(sum, weight, eps) into
-            // FusedLayerNormResidual. Runs after RmsNormFusion (needs fused
-            // RmsNorm nodes) and before AttentionFusion.
-            Box::new(AddRmsNormFusion),
+            // FusedLayerNormResidual. ADR-0018 declarative rule with
+            // `Replacement::from_root` carrying epsilon from the matched
+            // RmsNorm. Runs after RmsNormFusion (needs fused RmsNorm
+            // nodes) and before AttentionFusion.
+            Box::new(RulePass::new("AddRmsNormFusion", add_rmsnorm_rules())),
             // Deep decode fusions (Plan 054):
             // Fuse [Add+]RmsNorm → multi-way MatMul projection.
             // Lowered as MultiOutput: 1 norm node + N MatMul nodes sharing

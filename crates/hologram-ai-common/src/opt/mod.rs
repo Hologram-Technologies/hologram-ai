@@ -1,4 +1,3 @@
-pub mod add_rmsnorm_fusion;
 pub mod attention_fusion;
 pub mod const_dedup;
 pub mod const_eval;
@@ -30,7 +29,6 @@ pub mod slice_to_gather;
 pub mod swiglu_projection_fusion;
 pub mod transpose_matmul_fusion;
 
-pub use add_rmsnorm_fusion::AddRmsNormFusion;
 pub use attention_fusion::AttentionFusion;
 pub use const_dedup::ConstantDeduplication;
 pub use decompose::OpDecomposition;

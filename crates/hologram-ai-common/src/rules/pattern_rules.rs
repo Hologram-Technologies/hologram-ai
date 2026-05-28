@@ -99,11 +99,7 @@ pub fn swiglu_rules() -> RuleSet {
 /// asserts ORT logit parity; every transformer layer's FFN runs the
 /// fused matmul + activation path through this fusion (the activation
 /// path on the up/gate projection, prior to SwiGLU).
-fn matmul_activation_rule(
-    name: &'static str,
-    act: OpMatcher,
-    fused: AiOp,
-) -> Rule {
+fn matmul_activation_rule(name: &'static str, act: OpMatcher, fused: AiOp) -> Rule {
     let a = VarId(1);
     let w = VarId(2);
     Rule {
@@ -121,11 +117,7 @@ fn matmul_activation_rule(
 }
 
 pub fn matmul_silu_rule() -> Rule {
-    matmul_activation_rule(
-        "matmul_silu",
-        OpMatcher::exact_silu(),
-        AiOp::MatMulSilu,
-    )
+    matmul_activation_rule("matmul_silu", OpMatcher::exact_silu(), AiOp::MatMulSilu)
 }
 
 pub fn matmul_gelu_rule() -> Rule {
@@ -137,11 +129,7 @@ pub fn matmul_gelu_rule() -> Rule {
 }
 
 pub fn matmul_relu_rule() -> Rule {
-    matmul_activation_rule(
-        "matmul_relu",
-        OpMatcher::exact_relu(),
-        AiOp::MatMulRelu,
-    )
+    matmul_activation_rule("matmul_relu", OpMatcher::exact_relu(), AiOp::MatMulRelu)
 }
 
 /// The full MatMul + Activation rule set — one rule per supported
@@ -153,4 +141,65 @@ pub fn matmul_activation_rules() -> RuleSet {
         .with_rule(matmul_silu_rule())
         .with_rule(matmul_gelu_rule())
         .with_rule(matmul_relu_rule())
+}
+
+// ── Add → RmsNorm → FusedLayerNormResidual fusion ───────────────────────
+
+/// Fuse a transformer block's residual-add + RmsNorm tail into the
+/// canonical `FusedLayerNormResidual { epsilon }` op: the kernel
+/// computes `rms_norm(x + residual, weight)` in one pass, eliminating
+/// the intermediate `sum` buffer.
+///
+/// Pattern:
+/// ```text
+/// out = RmsNorm(Add(x, residual), weight)
+/// ```
+///
+/// The outer `RmsNorm` is non-commutative (input 0 is the value,
+/// input 1 is the weight); the inner `Add` IS commutative — exporters
+/// emit either `Add(x, residual)` or `Add(residual, x)` depending on
+/// the source's expression order — so the inner pattern is matched
+/// commutatively.
+///
+/// The replacement's epsilon is carried from the matched `RmsNorm`'s
+/// attribute via `Replacement::from_root` — the engine's
+/// attribute-propagation hook. If the matched op isn't an `RmsNorm`
+/// (a programming error in the pattern), the builder returns `None`
+/// and the rewrite aborts — no approximation.
+///
+/// Witness — `hologram-ai-conformance::real_model_generation::smollm2`
+/// (EE-3 ORT parity). Every SmolLM2 transformer layer has two of
+/// these blocks (post-attention and post-MLP). A regression in this
+/// fusion makes the residual stream's RmsNorm produce different
+/// numerics than ORT.
+pub fn add_rmsnorm_rule() -> Rule {
+    let x = VarId(1);
+    let residual = VarId(2);
+    let weight = VarId(3);
+    fn carry_epsilon(root: &AiOp) -> Option<AiOp> {
+        match root {
+            AiOp::RmsNorm { epsilon } => Some(AiOp::FusedLayerNormResidual { epsilon: *epsilon }),
+            _ => None,
+        }
+    }
+    Rule {
+        name: "add_rmsnorm_fusion",
+        witness: "real_model_generation::smollm2 (EE-3 ORT logit parity, ADR-0018)",
+        pattern: Pattern::op(
+            OpMatcher::Exact(crate::rules::AiOpDiscriminant::RmsNorm),
+            vec![
+                Pattern::op_comm(
+                    OpMatcher::exact_add(),
+                    Pattern::Var(x),
+                    Pattern::Var(residual),
+                ),
+                Pattern::Var(weight),
+            ],
+        ),
+        replacement: Replacement::from_root(carry_epsilon, vec![x, residual, weight]),
+    }
+}
+
+pub fn add_rmsnorm_rules() -> RuleSet {
+    RuleSet::new().with_rule(add_rmsnorm_rule())
 }
