@@ -320,3 +320,43 @@ pub fn transpose_matmul_rules() -> RuleSet {
         .with_rule(transpose_matmul_trans_a_rule())
         .with_rule(transpose_matmul_trans_b_rule())
 }
+
+// ── Mul(scalar) absorption: MatMul + Mul(scalar) → Gemm{alpha} ──────────
+
+/// `Mul(MatMul(A, B), scalar) → Gemm{alpha=scalar}(A, B)`. Both
+/// operand orderings of the outer `Mul` are valid; the matcher's
+/// commutativity tries both. The scalar must be a constant — the
+/// `Pattern::Const` binding refuses non-constant operands at match time.
+/// The `Gemm{alpha}` value is read from the bound `Const` var via
+/// `Replacement::from_match`.
+pub fn scalar_absorption_rule() -> Rule {
+    let a = VarId(1);
+    let b = VarId(2);
+    let scalar = VarId(3);
+    fn build(_root: &AiOp, view: &super::MatchView) -> Option<AiOp> {
+        let s = view.scalar_f32(VarId(3))?;
+        Some(AiOp::Gemm {
+            alpha: s,
+            beta: 0.0,
+            trans_a: false,
+            trans_b: false,
+        })
+    }
+    Rule {
+        name: "scalar_absorption_matmul",
+        witness: "real_model_generation::smollm2 (EE-3 ORT logit parity, ADR-0018)",
+        pattern: Pattern::op_comm(
+            OpMatcher::exact_mul(),
+            Pattern::op(
+                OpMatcher::exact_matmul(),
+                vec![Pattern::Var(a), Pattern::Var(b)],
+            ),
+            Pattern::Const(scalar),
+        ),
+        replacement: Replacement::from_match(build, vec![a, b]),
+    }
+}
+
+pub fn scalar_absorption_rules() -> RuleSet {
+    RuleSet::new().with_rule(scalar_absorption_rule())
+}

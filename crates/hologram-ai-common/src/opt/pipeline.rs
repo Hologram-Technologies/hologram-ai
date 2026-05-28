@@ -33,15 +33,15 @@ impl OptPipeline {
             kv_slot_injection::KvSlotInjection, layernorm_fusion::LayerNormFusion,
             norm_projection_fusion::NormProjectionFusion,
             position_ids_injection::PositionIdsInjection, resolve_slice_params::ResolveSliceParams,
-            rmsnorm_fusion::RmsNormFusion, scalar_absorption::ScalarAbsorption,
-            semantic_prop::SemanticPropagation, shape_prop::ShapePropagation,
+            rmsnorm_fusion::RmsNormFusion, semantic_prop::SemanticPropagation,
+            shape_prop::ShapePropagation,
             shared_input_projection_fusion::SharedInputProjectionFusion,
             slice_to_gather::SliceToGather,
         };
         use crate::rules::{
             pattern_rules::{
-                add_rmsnorm_rules, matmul_activation_rules, swiglu_projection_rules, swiglu_rules,
-                transpose_matmul_rules,
+                add_rmsnorm_rules, matmul_activation_rules, scalar_absorption_rules,
+                swiglu_projection_rules, swiglu_rules, transpose_matmul_rules,
             },
             RulePass,
         };
@@ -86,9 +86,11 @@ impl OptPipeline {
                 transpose_matmul_rules(),
             )),
             // Absorb MatMul → Mul(scalar) into Gemm { alpha }.
-            // Eliminates full-tensor scalar multiply. Must run before other
-            // matmul fusions to simplify the graph.
-            Box::new(ScalarAbsorption),
+            // ADR-0018 declarative rule using `Pattern::Const` to require
+            // the scalar to be a constant param + `Replacement::from_match`
+            // to read its f32 value into Gemm's `alpha`. Eliminates the
+            // full-tensor scalar multiply.
+            Box::new(RulePass::new("ScalarAbsorption", scalar_absorption_rules())),
             // Fuse MatMul → SiLU/GeLU/ReLU into MatMulSilu/Gelu/Relu.
             // ADR-0018 declarative rule set — one rule per supported
             // activation. Eliminates the intermediate activation buffer;

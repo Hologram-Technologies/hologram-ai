@@ -101,6 +101,10 @@ pub struct VarId(pub u32);
 pub enum Pattern {
     /// Match any tensor; bind it under `var`.
     Var(VarId),
+    /// Match a constant tensor (an `AiParam` in `graph.params`); bind
+    /// it under `var`. Use [`MatchView::scalar_f32`] / [`MatchView::i64_vec`]
+    /// to read the value in a `Replacement::from_match` builder.
+    Const(VarId),
     /// Match the producer node of a tensor against `op`, with each input
     /// recursively matching the corresponding `inputs[i]`.
     Op {
@@ -130,6 +134,7 @@ impl std::fmt::Debug for Pattern {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Pattern::Var(v) => f.debug_tuple("Var").field(v).finish(),
+            Pattern::Const(v) => f.debug_tuple("Const").field(v).finish(),
             Pattern::Op {
                 op,
                 inputs,
@@ -554,6 +559,12 @@ impl Matcher {
                 };
                 m.bind(*var, tid)
             }
+            Pattern::Const(_) => {
+                // Const can only match a leaf tensor (a graph constant),
+                // not the output of an arbitrary node. At a node root
+                // position this is a structural error in the pattern.
+                false
+            }
             Pattern::Op {
                 op,
                 inputs,
@@ -668,6 +679,12 @@ impl Matcher {
     ) -> bool {
         match pattern {
             Pattern::Var(var) => m.bind(*var, tid),
+            Pattern::Const(var) => {
+                if !graph.params.contains_key(&tid) {
+                    return false;
+                }
+                m.bind(*var, tid)
+            }
             Pattern::Op { .. } | Pattern::Maybe(_) => {
                 let Some(&prod_idx) = producer.get(&tid) else {
                     return false;
