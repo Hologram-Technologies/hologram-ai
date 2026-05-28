@@ -13,21 +13,23 @@ repository  = "https://github.com/uor-framework/hologram-ai"
 
 [workspace.dependencies]
 # hologram 0.5.0 is UOR-native: there is no umbrella `hologram` crate anymore.
-# Consumers depend on the individual member crates (path deps — local sibling).
+# Consumers depend on the individual member crates, sourced from hologram's
+# canonical upstream (origin/main of Hologram-Technologies/hologram). Cargo.lock
+# pins the exact commit; `cargo update -p <crate>` advances them together.
 # Runtime-core crates (types/ops/graph) are no_std-capable (default = []); the
 # host-shell stack (compiler/exec/archive/backend) is built with `std`.
-hologram-types    = { path = "../hologram/crates/hologram-types" }
-hologram-ops      = { path = "../hologram/crates/hologram-ops" }
-hologram-graph    = { path = "../hologram/crates/hologram-graph" }
-hologram-compiler = { path = "../hologram/crates/hologram-compiler" }
+hologram-types    = { git = "https://github.com/Hologram-Technologies/hologram.git", branch = "main" }
+hologram-ops      = { git = "https://github.com/Hologram-Technologies/hologram.git", branch = "main" }
+hologram-graph    = { git = "https://github.com/Hologram-Technologies/hologram.git", branch = "main" }
+hologram-compiler = { git = "https://github.com/Hologram-Technologies/hologram.git", branch = "main" }
 # `parallel` (rayon) is NOT pinned here — it cannot run on wasm32 (no threads).
 # It is an opt-in feature, enabled by default for native consumers (the
 # `hologram-ai` lib/CLI) via their own `parallel` feature, and left off for the
 # `hologram-ai-wasm` browser build. See ADR-0017.
-hologram-exec     = { path = "../hologram/crates/hologram-exec" }
-hologram-archive  = { path = "../hologram/crates/hologram-archive", features = ["model-formats"] }
-hologram-backend  = { path = "../hologram/crates/hologram-backend" }
-hologram-host     = { path = "../hologram/crates/hologram-host" }
+hologram-exec     = { git = "https://github.com/Hologram-Technologies/hologram.git", branch = "main" }
+hologram-archive  = { git = "https://github.com/Hologram-Technologies/hologram.git", branch = "main", features = ["model-formats"] }
+hologram-backend  = { git = "https://github.com/Hologram-Technologies/hologram.git", branch = "main" }
+hologram-host     = { git = "https://github.com/Hologram-Technologies/hologram.git", branch = "main" }
 
 # workspace-internal
 hologram-ai-quant  = { path = "crates/hologram-ai-quant" }
