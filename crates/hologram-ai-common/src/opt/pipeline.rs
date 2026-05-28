@@ -32,7 +32,6 @@ impl OptPipeline {
             constant_fold::ConstantFolding, data_prop::DataPropagation,
             dead_node::DeadNodeElimination, decompose::OpDecomposition,
             kv_slot_injection::KvSlotInjection, layernorm_fusion::LayerNormFusion,
-            matmul_activation_fusion::MatMulActivationFusion,
             norm_projection_fusion::NormProjectionFusion,
             position_ids_injection::PositionIdsInjection, resolve_slice_params::ResolveSliceParams,
             rmsnorm_fusion::RmsNormFusion, scalar_absorption::ScalarAbsorption,
@@ -41,7 +40,10 @@ impl OptPipeline {
             slice_to_gather::SliceToGather, swiglu_projection_fusion::SwiGluProjectionFusion,
             transpose_matmul_fusion::TransposeMatMulFusion,
         };
-        use crate::rules::{pattern_rules::swiglu_rules, RulePass};
+        use crate::rules::{
+            pattern_rules::{matmul_activation_rules, swiglu_rules},
+            RulePass,
+        };
         Self::new(vec![
             // Resolve ONNX opset 10+ Slice params from constant inputs
             // before shape propagation needs the concrete slice bounds.
@@ -82,9 +84,14 @@ impl OptPipeline {
             // matmul fusions to simplify the graph.
             Box::new(ScalarAbsorption),
             // Fuse MatMul → SiLU/GeLU/ReLU into MatMulSilu/Gelu/Relu.
-            // Eliminates intermediate activation buffer; the tape kernel
-            // applies activation in-register during matmul writeback.
-            Box::new(MatMulActivationFusion),
+            // ADR-0018 declarative rule set — one rule per supported
+            // activation. Eliminates the intermediate activation buffer;
+            // the matmul kernel applies the activation in-register on
+            // writeback.
+            Box::new(RulePass::new(
+                "MatMulActivationFusion",
+                matmul_activation_rules(),
+            )),
             // Fuse Add(x, residual) → RmsNorm(sum, weight, eps) into
             // FusedLayerNormResidual. Runs after RmsNormFusion (needs fused
             // RmsNorm nodes) and before AttentionFusion.

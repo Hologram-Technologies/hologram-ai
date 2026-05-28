@@ -82,3 +82,75 @@ pub fn swiglu_rules() -> RuleSet {
         .with_rule(swiglu_direct_rule())
         .with_rule(swiglu_decomposed_rule())
 }
+
+// ── MatMul + Activation fusion ──────────────────────────────────────────
+
+/// Fuse `Activation(MatMul(A, W))` into the canonical
+/// `MatMulActivation` op the matmul kernel can apply in-register on
+/// writeback, eliminating the intermediate matmul-output buffer.
+///
+/// Three activations have a fused matmul op today (`Silu`, `Gelu`,
+/// `Relu`); each is its own declarative rule with the same shape.
+/// `Pattern` is purely structural — the input pair is *not* commutative
+/// (matmul-then-activation is order-significant) — so a single
+/// ordering match suffices.
+///
+/// Witness — `hologram-ai-conformance::real_model_generation::smollm2`
+/// asserts ORT logit parity; every transformer layer's FFN runs the
+/// fused matmul + activation path through this fusion (the activation
+/// path on the up/gate projection, prior to SwiGLU).
+fn matmul_activation_rule(
+    name: &'static str,
+    act: OpMatcher,
+    fused: AiOp,
+) -> Rule {
+    let a = VarId(1);
+    let w = VarId(2);
+    Rule {
+        name,
+        witness: "real_model_generation::smollm2 (EE-3 ORT logit parity, ADR-0018)",
+        pattern: Pattern::op(
+            act,
+            vec![Pattern::op(
+                OpMatcher::exact_matmul(),
+                vec![Pattern::Var(a), Pattern::Var(w)],
+            )],
+        ),
+        replacement: Replacement::new(fused, vec![a, w]),
+    }
+}
+
+pub fn matmul_silu_rule() -> Rule {
+    matmul_activation_rule(
+        "matmul_silu",
+        OpMatcher::exact_silu(),
+        AiOp::MatMulSilu,
+    )
+}
+
+pub fn matmul_gelu_rule() -> Rule {
+    matmul_activation_rule(
+        "matmul_gelu",
+        OpMatcher::Exact(crate::rules::AiOpDiscriminant::Gelu),
+        AiOp::MatMulGelu,
+    )
+}
+
+pub fn matmul_relu_rule() -> Rule {
+    matmul_activation_rule(
+        "matmul_relu",
+        OpMatcher::exact_relu(),
+        AiOp::MatMulRelu,
+    )
+}
+
+/// The full MatMul + Activation rule set — one rule per supported
+/// activation. Each one's witness is the same SmolLM2 ORT-parity test;
+/// they share a single witness because they're variants of one canonical
+/// transform.
+pub fn matmul_activation_rules() -> RuleSet {
+    RuleSet::new()
+        .with_rule(matmul_silu_rule())
+        .with_rule(matmul_gelu_rule())
+        .with_rule(matmul_relu_rule())
+}
