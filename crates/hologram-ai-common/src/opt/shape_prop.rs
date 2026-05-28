@@ -74,6 +74,15 @@ fn propagate_shapes(mut graph: AiGraph, protect_settled: bool) -> anyhow::Result
             None => continue,
         };
 
+        // UOR-native: collect input shapes strictly from tensor_info.
+        // A missing input shape isn't a thing to fabricate with
+        // `Shape::default()` (= empty shape) — the inference would then
+        // silently produce a wrong-shaped output. We collect what's
+        // available (using empty Shape as a tombstone for "absent")
+        // and let `infer_output_shapes` decide whether enough is known
+        // to compute the output. When the fixed-point loop revisits
+        // this node after other passes fill the missing info, the
+        // inference completes.
         let input_shapes: Vec<Shape> = graph.nodes[idx]
             .inputs
             .iter()

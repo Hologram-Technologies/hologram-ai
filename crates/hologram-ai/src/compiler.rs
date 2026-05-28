@@ -647,7 +647,8 @@ fn infer_llm_metadata_from_graph(graph: &mut AiGraph) {
 /// 3. Replaces any remaining Dynamic/Var dims with `Concrete(1)`.
 /// 4. Converts Slice→Gather (hologram has no native Slice).
 /// 5. Runs shape healing to fill any remaining empty shapes.
-fn post_concretization_repair(mut ai_graph: AiGraph) -> anyhow::Result<AiGraph> {
+#[doc(hidden)]
+pub fn post_concretization_repair(mut ai_graph: AiGraph) -> anyhow::Result<AiGraph> {
     use hologram_ai_common::{
         opt::{
             const_eval::ConstantEvaluation, constant_fold::ConstantFolding,
@@ -798,7 +799,8 @@ fn post_concretization_repair(mut ai_graph: AiGraph) -> anyhow::Result<AiGraph> 
 /// identifying which tensor dimensions were originally seq-dependent DimVars.
 /// The lowering pass uses this to emit 0-sentinels for those dims so the
 /// runtime can resolve them from actual buffer sizes.
-fn concretize_all_dims(
+#[doc(hidden)]
+pub fn concretize_all_dims(
     mut graph: AiGraph,
     seq_len_override: Option<u64>,
     spatial_scale: Option<u32>,

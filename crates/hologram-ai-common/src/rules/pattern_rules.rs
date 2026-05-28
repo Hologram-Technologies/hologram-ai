@@ -155,32 +155,45 @@ pub fn matmul_activation_rules() -> RuleSet {
 /// out = RmsNorm(Add(x, residual), weight)
 /// ```
 ///
-/// The outer `RmsNorm` is non-commutative (input 0 is the value,
-/// input 1 is the weight); the inner `Add` IS commutative — exporters
-/// emit either `Add(x, residual)` or `Add(residual, x)` depending on
-/// the source's expression order — so the inner pattern is matched
-/// commutatively.
+/// **Shape constraint** (load-bearing): `x` and `residual` must have
+/// the **same** declared shape. The fused kernel does element-wise
+/// `x + residual`, so a broadcast-only Add (e.g. `MatMul(...) +
+/// bias_1d`) is a **different** transform that this rule MUST NOT
+/// match — fusing it as `FusedLayerNormResidual` produces a kernel
+/// call with a 1D `residual` BufferRef where the kernel expects a
+/// full-shape one. (Witness: Qwen2-0.5B has a biased-projection +
+/// RmsNorm sequence the unconstrained rule used to match by mistake.)
 ///
-/// The replacement's epsilon is carried from the matched `RmsNorm`'s
-/// attribute via `Replacement::from_root` — the engine's
-/// attribute-propagation hook. If the matched op isn't an `RmsNorm`
-/// (a programming error in the pattern), the builder returns `None`
-/// and the rewrite aborts — no approximation.
+/// The outer `RmsNorm` is non-commutative (input 0 is the value,
+/// input 1 is the weight); the inner `Add` IS commutative; epsilon
+/// is carried from the matched `RmsNorm` via `Replacement::from_match`
+/// (which also enforces the shape-equality constraint via
+/// `MatchView::shape`).
 ///
 /// Witness — `hologram-ai-conformance::real_model_generation::smollm2`
-/// (EE-3 ORT parity). Every SmolLM2 transformer layer has two of
-/// these blocks (post-attention and post-MLP). A regression in this
-/// fusion makes the residual stream's RmsNorm produce different
-/// numerics than ORT.
+/// (EE-3 ORT parity) — and the Qwen2 diag harness
+/// `tests/diag_backend.rs` (used to surface this constraint failure
+/// at call #993 before the shape check was added).
 pub fn add_rmsnorm_rule() -> Rule {
     let x = VarId(1);
     let residual = VarId(2);
     let weight = VarId(3);
-    fn carry_epsilon(root: &AiOp) -> Option<AiOp> {
-        match root {
-            AiOp::RmsNorm { epsilon } => Some(AiOp::FusedLayerNormResidual { epsilon: *epsilon }),
-            _ => None,
+    fn build(root: &AiOp, view: &super::MatchView) -> Option<AiOp> {
+        let AiOp::RmsNorm { epsilon } = root else {
+            return None;
+        };
+        // Shape constraint: both Add operands must have the same
+        // declared shape. Without this, a `RmsNorm(Add(matmul, bias),
+        // weight)` matches as if `bias` were the residual, producing a
+        // FusedLayerNormResidual whose residual BufferRef is 1D where
+        // the kernel expects full-shape — buffer-size mismatch at
+        // dispatch.
+        let x_shape = view.shape(VarId(1))?;
+        let r_shape = view.shape(VarId(2))?;
+        if x_shape != r_shape {
+            return None;
         }
+        Some(AiOp::FusedLayerNormResidual { epsilon: *epsilon })
     }
     Rule {
         name: "add_rmsnorm_fusion",
@@ -196,7 +209,7 @@ pub fn add_rmsnorm_rule() -> Rule {
                 Pattern::Var(weight),
             ],
         ),
-        replacement: Replacement::from_root(carry_epsilon, vec![x, residual, weight]),
+        replacement: Replacement::from_match(build, vec![x, residual, weight]),
     }
 }
 

@@ -75,8 +75,13 @@ pub fn build_ai_graph(
         .into_iter()
         .map(|vi| {
             let tid = alloc_tid(&vi.name, &mut name_to_tid);
-            let info = value_info_to_tensor_info(vi, &mut dim_vars);
-            tensor_info.insert(tid, info);
+            // Skip if we can't represent the input's dtype/shape. The
+            // tensor_info entry will be left absent — downstream code
+            // either fills it in (params, value_info, inference) or
+            // surfaces the gap as a propagation precondition failure.
+            if let Some(info) = value_info_to_tensor_info(vi, &mut dim_vars) {
+                tensor_info.insert(tid, info);
+            }
             (tid, vi.name.clone())
         })
         .collect();
@@ -93,9 +98,13 @@ pub fn build_ai_graph(
             continue;
         }
         let tid = alloc_tid(&vi.name, &mut name_to_tid);
-        let info = value_info_to_tensor_info(vi, &mut dim_vars);
-        // Only insert if not already populated (params/inputs take priority).
-        tensor_info.entry(tid).or_insert(info);
+        // Only insert if not already populated (params/inputs take
+        // priority). A ValueInfo we can't represent is skipped — the
+        // tensor's dtype/shape will be left to forward inference (or
+        // surfaced as a precondition failure).
+        if let Some(info) = value_info_to_tensor_info(vi, &mut dim_vars) {
+            tensor_info.entry(tid).or_insert(info);
+        }
     }
 
     // ── Nodes ─────────────────────────────────────────────────────────────
@@ -219,17 +228,22 @@ pub fn build_ai_graph(
         .iter()
         .map(|vi| {
             let tid = alloc_tid(&vi.name, &mut name_to_tid);
-            // Populate shape/dtype from output's ValueInfoProto if available.
-            let info = value_info_to_tensor_info(vi, &mut dim_vars);
-            if !info.shape.is_empty() {
-                tensor_info
-                    .entry(tid)
-                    .and_modify(|existing| {
-                        if existing.shape.is_empty() {
-                            *existing = info.clone();
-                        }
-                    })
-                    .or_insert(info);
+            // Populate shape/dtype from output's ValueInfoProto. If the
+            // ValueInfo isn't a TensorType with a representable dtype,
+            // leave the tensor_info entry alone — forward inference will
+            // fill it from the producer's output, and a true gap
+            // surfaces downstream.
+            if let Some(info) = value_info_to_tensor_info(vi, &mut dim_vars) {
+                if !info.shape.is_empty() {
+                    tensor_info
+                        .entry(tid)
+                        .and_modify(|existing| {
+                            if existing.shape.is_empty() {
+                                *existing = info.clone();
+                            }
+                        })
+                        .or_insert(info);
+                }
             }
             (tid, vi.name.clone())
         })
@@ -261,9 +275,13 @@ pub fn build_ai_graph(
             if params.contains_key(&tid) {
                 continue;
             }
-            let info = value_info_to_tensor_info(vi, &mut dim_vars);
-            if !info.shape.is_empty() {
-                oracle.insert(tid, info);
+            // Only record oracle entries we can fully represent. A
+            // missing/empty TensorType is left absent rather than
+            // approximated.
+            if let Some(info) = value_info_to_tensor_info(vi, &mut dim_vars) {
+                if !info.shape.is_empty() {
+                    oracle.insert(tid, info);
+                }
             }
         }
     }
@@ -375,31 +393,37 @@ fn resolve_attention_head_dims(
     }
 }
 
-fn value_info_to_tensor_info(vi: &ValueInfoProto, dim_vars: &mut DimVarTable) -> TensorInfo {
-    let (dtype, shape) = match &vi.r#type {
-        Some(tp) => match &tp.value {
-            Some(crate::onnx_pb::type_proto::Value::TensorType(t)) => {
-                let dtype = onnx_dtype(t.elem_type).unwrap_or(DType::F32);
-                let shape = t
-                    .shape
-                    .as_ref()
-                    .map(|s| shape_from_shape_proto(s, dim_vars))
-                    .unwrap_or_default();
-                (dtype, shape)
-            }
-            _ => (DType::F32, Shape::new()),
-        },
-        None => (DType::F32, Shape::new()),
+/// Build a `TensorInfo` from an ONNX `ValueInfoProto`.
+///
+/// UOR-native: returns `None` when the ValueInfo doesn't carry a
+/// TensorType (the only kind hologram-ai handles) or when its
+/// `elem_type` isn't a representable dtype. Callers either skip the
+/// value (when it's truly informational, e.g. an unused intermediate)
+/// or propagate the import failure. There is no F32 + empty-shape
+/// fallback — fabricating a dtype produces silently-wrong downstream
+/// inference (see ADR-0018 + the Qwen2 GQA dtype-prop trail).
+fn value_info_to_tensor_info(
+    vi: &ValueInfoProto,
+    dim_vars: &mut DimVarTable,
+) -> Option<TensorInfo> {
+    let tp = vi.r#type.as_ref()?;
+    let Some(crate::onnx_pb::type_proto::Value::TensorType(t)) = &tp.value else {
+        return None;
     };
-
-    TensorInfo {
+    let dtype = onnx_dtype(t.elem_type)?;
+    let shape = t
+        .shape
+        .as_ref()
+        .map(|s| shape_from_shape_proto(s, dim_vars))
+        .unwrap_or_default();
+    Some(TensorInfo {
         logical_dtype: dtype,
         storage_dtype: dtype,
         shape,
         quant: QuantDescriptor::none(),
         known_i64_values: None,
         semantic: SemanticHint::Unknown,
-    }
+    })
 }
 
 /// Resolve op parameters that ONNX opset 10+/13+/18+ provides as tensor inputs
