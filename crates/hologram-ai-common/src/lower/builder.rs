@@ -1594,11 +1594,18 @@ impl<'a> Ctx<'a> {
         let dtype = self.dtype_of(node.inputs[0]);
         let x_dims = self.in_dims(node, 0)?;
         let (norm, wstart) = if has_residual_add {
-            // [x, residual, norm_weight, W_0..]
+            // FusedNormProjection inputs (AI side, residual variant):
+            //   [x, residual, norm_weight, W_0..]
+            // Compiler boundary requires the AddRmsNorm operand order
+            // [x, gamma, residual] (matches `NormCall { x: inp0(),
+            // gamma: inp1(), residual: inp2() }` in
+            // hologram_compiler::lower::lower). Emit them in the
+            // compiler order; the FusedLayerNormResidual desugar uses
+            // the same convention.
             let x = self.src(node.inputs[0])?;
             let res = self.src(node.inputs[1])?;
             let w = self.src(node.inputs[2])?;
-            let n = self.op(OpKind::AddRmsNorm, &[x, res, w], dtype, &x_dims);
+            let n = self.op(OpKind::AddRmsNorm, &[x, w, res], dtype, &x_dims);
             (n, 3)
         } else {
             let x = self.src(node.inputs[0])?;
@@ -1685,11 +1692,22 @@ impl<'a> Ctx<'a> {
         let mut operands: SmallVec<[InputSource; 4]> = SmallVec::new();
         operands.push(x2d);
         if residual {
-            // AddRmsNorm: [x, residual, gamma] — residual shares x's shape.
+            // AddRmsNorm operand order on the compiler boundary is
+            // **[x, gamma, residual]**: hologram_compiler::lower::lower
+            // builds `NormCall { x: inp0(), gamma: inp1(), residual:
+            // inp2(), … }`. The AI-side input order on the
+            // `FusedLayerNormResidual` AiNode is [x, residual, gamma]
+            // (residual is input[1], gamma is input[2]) — we must emit
+            // them swapped so the kernel reads them at the slots the
+            // compiler expects. Both x and residual are reshaped to
+            // [rows, feature] for the strict-shape kernel; gamma is
+            // rank-1 [feature] and passes through.
             let res = self.src(node.inputs[1])?;
             let res2d = self.reshape_to(res, dtype, &[rows, feature]);
+            let gamma = self.src(node.inputs[2])?;
+            operands.push(gamma);
             operands.push(res2d);
-            for &tid in node.inputs.iter().skip(2) {
+            for &tid in node.inputs.iter().skip(3) {
                 operands.push(self.src(tid)?);
             }
         } else {
