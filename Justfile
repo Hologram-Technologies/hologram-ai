@@ -25,9 +25,14 @@ vv-arch: fmt-check clippy build test
 # Axis 2/3/4 — Import + correctness + e2e + addressing (classes IM/LW/CF/QZ/TK/EE/MA).
 vv-conformance: conformance conformance-ort
 
-# Axis 5 — Structural guarantees: zero-alloc (ZA), zero-movement (ZM), elision (CE).
+# Axis 5 — Structural guarantees: zero-alloc (ZA), zero-movement (ZM),
+# elision (CE), canonical-forms (CF), lowering-vs-reference (LW), and the
+# import-byte-parsing perimeter (IM-3). Each axis lives in its own
+# `structural_<class>.rs` test file under `crates/hologram-ai-conformance/tests`.
 vv-structural:
-    cargo test -p hologram-ai-conformance --features=structural -- structural
+    cargo test -p hologram-ai-conformance --features=structural \
+        --test structural_ce --test structural_za --test structural_zm \
+        --test structural_cf --test structural_lw --test structural_im
 
 # Axis 6 — Portability (class NS): runtime core builds no_std on wasm + embedded.
 vv-portability: vv-wasm vv-embedded

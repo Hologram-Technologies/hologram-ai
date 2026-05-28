@@ -31,8 +31,10 @@ conformance = ["ort", "ndarray", "hologram-ai", "hologram-ai-onnx", "hologram-ai
 # spec's expected outputs. No ORT needed — the corpus ships the outputs.
 onnx-spec = ["hologram-ai", "hologram-ai-onnx", "hologram-ai-tokenizer"]
 # Structural V&V (classes ZA/ZM/CE): counting-allocator harness + zero-movement
-# instrumentation. See CONFORMANCE.md.
-structural = []
+# / content-addressed-elision instrumentation. The CE/ZM tests need the full
+# compile→exec stack (a real schedule to walk + κ-label-counting accessors on
+# `HoloRunner`); the ZA tests are self-contained on the counting allocator.
+structural = ["hologram-ai", "hologram-ai-onnx", "hologram-ai-tokenizer"]
 # Performance V&V (class PV): release benches with per-stage budgets.
 perf = []
 
@@ -41,3 +43,7 @@ approx = { workspace = true }
 rand = "0.8"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# Authoritative tokenizer reference (HuggingFace `tokenizers`) for the TK class.
+# Loads `tokenizer.json` and validates encode/decode against the published
+# tokenizer the model was trained with — never against our own output.
+tokenizers = { version = "0.20", default-features = false, features = ["onig"] }

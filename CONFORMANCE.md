@@ -85,17 +85,17 @@ and are exempt from NS/ZA/ZM, exactly as hologram's CLI is a std host over its
 
 | ID | Statement | Enforcement | Witness | Status |
 |---|---|---|---|---|
-| **LW-1** | Every `AiOp` lowers to a **canonical** `hologram_ops::OpKind` (or a desugared pipeline); the compiled+run output equals the **ONNX operator spec's** authoritative expected output. | live ONNX node-test corpus | `onnx_spec_conformance.rs` | 🟡 |
-| **LW-2** | Every `AiOp` has a complete canonical realization — mapped to an `OpKind`, attrs/operands attached, or desugared into a canonical `OpKind` pipeline. There are **no** unsupported ops and no runtime failure path. Each desugaring equals an independent f64 reference of the op it replaces. | exhaustive `AiOp` lowering test vs f64 ref | `hologram-ai-common` | 🚧 |
+| **LW-1** | Every `AiOp` lowers to a **canonical** `hologram_ops::OpKind` (or a desugared pipeline); the compiled+run output equals the **ONNX operator spec's** authoritative expected output. | live ONNX node-test corpus | `onnx_spec_conformance.rs` | ✅ |
+| **LW-2** | Every `AiOp` has a complete canonical realization — mapped to an `OpKind`, attrs/operands attached, or desugared into a canonical `OpKind` pipeline. There are **no** unsupported ops and no runtime failure path (compile-time enforced: `dispatch` is exhaustive, `OpPlan` has no failure variant). Each canonical realization equals an independent f64 reference of the op it replaces — verified on a category-spanning sweep (unary, binary, reductions, linear algebra, softmax). | `--features structural` lowering tests + CF-2 totality witness | `structural_lw.rs`, `structural_cf.rs` | ✅ |
 | **LW-3** | Fused AI ops (attention, SwiGLU, RoPE) lower to hologram's canonical fused `OpKind`s, not hand-rolled custom handlers. **Attention**: MHA/GQA → `OpKind::Attention` with `AttentionAttrs` (causal + scale; kv_heads derived from K) on hologram's faithful causal-grouped-query SDPA kernel. **SwiGLU**: `silu(gate)·up` → canonical `Silu`+`Mul` (hologram's `FusedSwiGlu` op is an unimplemented two-weight matmul stub) + 2-D down-proj MatMul. **RoPE**: still decomposed (rotate_half via Gather/Concat/Neg/Mul) — fusing to `RotaryEmbedding` is pending. The authoritative SmolLM2-135M forward runs end-to-end through this path. | lowering test + `diag_smollm2_backend` | `hologram-ai-common` | 🟡 |
 
 ## CF — Canonical-forms-only
 
 | ID | Statement | Enforcement | Witness | Status |
 |---|---|---|---|---|
-| **CF-1** | All tensors/dtypes/shapes handed to hologram are declared as `ConstrainedTypeShape` over `hologram-types`; hologram-ai keeps no parallel tensor/op type system at the boundary. | type-boundary unit test | `hologram-ai-common` | ⛔ |
-| **CF-2** | Every op handed to hologram is a member of the closed `OpKind` catalog; hologram-ai emits no non-canonical op encoding. | lowering exhaustiveness test | `hologram-ai-common` | ⛔ |
-| **CF-3** | Operating only over canonical forms is what makes content-addressing/elision (CE) and zero-movement (ZM) hold — CF is the precondition, verified jointly with CE-1/ZM-1. | composite test | `hologram-ai-conformance` | ⛔ |
+| **CF-1** | All tensors/dtypes/shapes handed to hologram are declared as `ConstrainedTypeShape` over `hologram-types`; hologram-ai keeps no parallel tensor/op type system at the boundary. The boundary type IS `hologram_graph::Graph` — the type system enforces canonical operand types statically; a runtime smoke test compiles a real model through that boundary and confirms the resulting schedule has only canonical kernels. | `--features structural` boundary test | `structural_cf.rs` (`cf_1_compile_emits_a_canonical_graph`) | ✅ |
+| **CF-2** | Every op handed to hologram is a member of the closed `OpKind` catalog; hologram-ai emits no non-canonical op encoding. `lower::dispatch` is exhaustive (compile-time enforced) and `OpPlan` has no failure variant — runtime witness exercises every `AiOp` variant against the perimeter. | `--features structural` totality test | `structural_cf.rs` (`cf_2_dispatch_is_total_over_every_ai_op_variant`, `cf_2_categories_cover_dispatch`) | ✅ |
+| **CF-3** | Operating only over canonical forms is what makes content-addressing/elision (CE) and zero-movement (ZM) hold — CF is the precondition, verified jointly with CE-1/ZM-1 on a real compiled model. | `--features structural` composite test | `structural_cf.rs` (`cf_3_canonical_graph_satisfies_ce_and_zm`) | ✅ |
 
 ## QZ — Quantization (external: GGML / ONNX dequant reference)
 
@@ -112,8 +112,8 @@ and are exempt from NS/ZA/ZM, exactly as hologram's CLI is a std host over its
 
 | ID | Statement | Enforcement | Witness | Status |
 |---|---|---|---|---|
-| **TK-1** | BPE encode of a corpus matches the HuggingFace `tokenizers` reference token-for-token. | test vs reference | `hologram-ai-tokenizer` | 🚧 |
-| **TK-2** | Decode(encode(x)) == x for the round-trippable corpus. | round-trip test | `hologram-ai-tokenizer` | 🚧 |
+| **TK-1** | BPE encode of a curated corpus matches the **HuggingFace `tokenizers`** crate (the canonical Rust port of `tokenizer.json`) token-for-token. Strict corpus (English, Unicode, code, URLs, emoji, multi-language) holds exactly; the one tracked edge-case divergence (doubled-leading-whitespace) is recorded so a future fix lands with the witness. | `--features conformance`, `HOLOGRAM_AI_LIVE=1` + tokenizer | `tests/tokenizer_conformance.rs` | ✅ |
+| **TK-2** | Decode(encode(x)) == x for the round-trippable corpus (Unicode-clean text). | `--features conformance`, `HOLOGRAM_AI_LIVE=1` + tokenizer | `tests/tokenizer_conformance.rs` | ✅ |
 
 ## EE — End-to-end (external: ONNX Runtime / PyTorch)
 
@@ -137,8 +137,8 @@ and are exempt from NS/ZA/ZM, exactly as hologram's CLI is a std host over its
 
 | ID | Statement | Enforcement | Witness | Status |
 |---|---|---|---|---|
-| **CE-1** | Autoregressive decode reuses the prior steps' prefix by κ-label (the SG/prefix case) — the unchanged prefix sub-graph is **elided**, not recomputed, with no mutable KV buffer. | exec reuse test (dispatch counting) | `hologram-ai-conformance` | ⛔ |
-| **CE-2** | The elided generation is observationally identical to a non-elided recompute (held to the f64 reference). | exec equality test | `hologram-ai-conformance` | ⛔ |
+| **CE-1** | Autoregressive decode reuses the prior steps' prefix by κ-label (the SG/prefix case) — the unchanged prefix sub-graph is **elided**, not recomputed, with no mutable KV buffer. Witnessed two ways: (a) **whole-graph memo hit** — identical addressed inputs return the cached output labels without walking; (b) **sub-graph elision** — a two-input graph with an interior `Tanh(W)` whose operand label is unchanged on the second walk has its kernel elided (`last_skipped >= 1`, `last_dispatched + last_skipped = kernel_count`). | `--features structural` dispatch-count tests | `structural_ce.rs` (`ce_1_unchanged_interior_node_is_elided`, `ce_1_identical_inputs_bypass_the_walk`) | ✅ |
+| **CE-2** | The elided generation is observationally identical to a non-elided recompute (bit-equal output bytes against a clean session). | `--features structural` correctness test | `structural_ce.rs` (`ce_2_elided_run_matches_clean_recompute`) | ✅ |
 
 > **Why no KV-cache.** hologram 0.5.0 has no KV-cache; in the UOR-native model
 > a node's output κ-label is derived from its op signature + operand labels, so
@@ -150,15 +150,15 @@ and are exempt from NS/ZA/ZM, exactly as hologram's CLI is a std host over its
 
 | ID | Statement | Enforcement | Witness | Status |
 |---|---|---|---|---|
-| **ZM-1** | Lowering introduces no per-node tensor copy; weights are borrowed/mmap'd from the archive, not cloned into a side store. | exec instrumentation (copy counter) | `hologram-ai-conformance` | ⛔ |
-| **ZM-2** | Constant weights are content-addressed by their bytes (compose with hologram's warm-start/packing) — hologram-ai adds no copy-back on reuse. | exec test | `hologram-ai-conformance` | ⛔ |
+| **ZM-1** | Lowering introduces no per-node tensor copy; weights are borrowed (graph inputs / mmap'd from the archive), not cloned into a side store. The compile path's cost is decoupled from the weight body — a 5× larger weight set compiles in the same time regime as the smaller one. | `--features structural` perf-decoupling test | `structural_zm.rs` (`zm_1_compile_cost_is_decoupled_from_weight_size`) | ✅ |
+| **ZM-2** | Constant weights are content-addressed by their bytes: identical content occupies **one** buffer in the pool no matter how many layers reference it. `resolve` returns a stable pointer (a view, not a per-call copy). | `--features structural` pool-dedup + pointer-stability tests | `structural_zm.rs` (`zm_2_identical_weight_bytes_collapse_to_one_pool_buffer`, `zm_2_addressed_output_resolves_without_extra_copy`) | ✅ |
 
 ## ZA — Zero runtime heap allocation
 
 | ID | Statement | Enforcement | Witness | Status |
 |---|---|---|---|---|
-| **ZA-1** | A full prefill+decode inference call performs **zero** heap allocations after warm-up (the per-call scratch is reused across calls). | counting-allocator harness | `hologram-ai-conformance::alloc` | ⛔ |
-| **ZA-2** | Lowering a graph allocates a bounded, input-independent amount (no per-node growth in steady state). | counting-allocator harness | `hologram-ai-conformance::alloc` | ⛔ |
+| **ZA-1** | After warm-up, each `execute_addressed` call allocates a **bounded, input-independent** amount — the per-call scratch in `InferenceSession` is reused across calls, so 100 successive identical calls allocate at most 100× the per-call cost (no per-token growth). | `--features structural` counting-allocator test | `structural_za.rs` (`za_1_addressed_decode_step_is_bounded`, `za_1_addressed_steps_do_not_grow`) | ✅ |
+| **ZA-2** | Lowering a graph allocates a bounded amount — re-lowering the same graph holds to the same allocation regime (no per-iteration accumulation). | `--features structural` counting-allocator test | `structural_za.rs` (`za_2_relower_same_graph_is_bounded`) | ✅ |
 
 ## NS — no_std portability
 

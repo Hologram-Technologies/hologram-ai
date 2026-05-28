@@ -190,6 +190,33 @@ impl HoloRunner {
     pub fn dequant_matmul_fused_count(&self) -> usize {
         self.session.dequant_fused_count()
     }
+
+    /// Kernels dispatched in the most recent compute walk (class **CE** —
+    /// content-addressed elision). The contract:
+    ///
+    /// - A whole-graph memo hit doesn't walk at all — the counter retains its
+    ///   previous value (use [`Self::resolve`] + cached output labels to check).
+    /// - A walk: every node whose reuse key is already resident is **elided**
+    ///   (counted by [`Self::last_skipped`]); the rest are dispatched. So
+    ///   `last_dispatched + last_skipped == kernel_count` on a walked call.
+    ///
+    /// Re-executing on inputs that share a prefix with a prior walk drops this
+    /// below [`Self::kernel_count`] — the sub-graph elision that replaces a
+    /// mutable KV-cache in autoregressive decode.
+    pub fn last_dispatched(&self) -> usize {
+        self.session.last_dispatched()
+    }
+
+    /// Kernels elided in the most recent walk because their output κ-label was
+    /// already resident — the count of reused sub-graph nodes (class **CE**).
+    pub fn last_skipped(&self) -> usize {
+        self.session.last_skipped()
+    }
+
+    /// Total kernels in the loaded schedule (denominator for the elision ratio).
+    pub fn kernel_count(&self) -> usize {
+        self.session.kernel_count()
+    }
 }
 
 /// Build a [`PortInfo`] from an archive [`PortDescriptor`] (name + dtype +
