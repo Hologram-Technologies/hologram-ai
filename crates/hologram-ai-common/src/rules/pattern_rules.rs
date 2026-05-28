@@ -815,3 +815,152 @@ pub fn position_ids_rule() -> Rule {
 pub fn position_ids_rules() -> RuleSet {
     RuleSet::new().with_rule(position_ids_rule())
 }
+
+// ── KvSlotInjection: per-GQA, wrap K/V with KvSlotWrite ─────────────────
+
+/// Inject `KvSlotWrite` nodes on the K/V inputs of a
+/// `GroupedQueryAttention` node. Each GQA gets two appended
+/// `KvSlotWrite` nodes (one for K, one for V), and the GQA's K/V
+/// input slots are rewired to the new outputs. The rewrite is
+/// idempotent: if K's producer is already a `KvSlotWrite`, the
+/// rewrite returns None (already wired) and the engine converges.
+///
+/// `layer` is the GQA's index among GQAs in graph order. We compute
+/// it on the fly by scanning the graph for GQAs up to `root_idx`.
+fn kv_slot_inject(
+    graph: &mut crate::ir::AiGraph,
+    _binds: &std::collections::HashMap<super::VarId, crate::ir::TensorId>,
+    root_idx: usize,
+) -> Option<crate::ir::AiNode> {
+    let (nkv, hd, layout) = {
+        let node = graph.nodes.get(root_idx)?;
+        let AiOp::GroupedQueryAttention {
+            num_kv_heads,
+            head_dim,
+            heads_first,
+            ..
+        } = &node.op
+        else {
+            return None;
+        };
+        let layout = if *heads_first {
+            crate::ir::KvLayout::HeadsFirst
+        } else {
+            crate::ir::KvLayout::SeqFirst
+        };
+        (*num_kv_heads, *head_dim, layout)
+    };
+
+    // K/V tensor IDs (current).
+    let (k_tid, v_tid) = {
+        let node = graph.nodes.get(root_idx)?;
+        if node.inputs.len() < 3 {
+            return None;
+        }
+        (node.inputs[1], node.inputs[2])
+    };
+
+    // Idempotence: already wired through KvSlotWrite? No-op.
+    let already_wired = graph
+        .nodes
+        .iter()
+        .any(|n| n.outputs.contains(&k_tid) && matches!(n.op, AiOp::KvSlotWrite { .. }));
+    if already_wired {
+        return None;
+    }
+
+    // The layer index is this GQA's position among all GQAs.
+    let layer = graph
+        .nodes
+        .iter()
+        .take(root_idx)
+        .filter(|n| matches!(n.op, AiOp::GroupedQueryAttention { .. }))
+        .count();
+
+    // Allocate fresh tensor + node IDs.
+    let max_input_tid = graph
+        .nodes
+        .iter()
+        .flat_map(|n| n.inputs.iter().chain(n.outputs.iter()))
+        .copied()
+        .max()
+        .unwrap_or(0);
+    let max_info_tid = graph.tensor_info.keys().copied().max().unwrap_or(0);
+    let max_param_tid = graph.params.keys().copied().max().unwrap_or(0);
+    let mut next_tid = max_input_tid.max(max_info_tid).max(max_param_tid) + 1;
+    let mut next_nid = graph.nodes.iter().map(|n| n.id).max().unwrap_or(0) + 1;
+
+    let k_out = next_tid;
+    next_tid += 1;
+    let v_out = next_tid;
+    next_tid += 1;
+    let _ = next_tid;
+
+    if let Some(info) = graph.tensor_info.get(&k_tid).cloned() {
+        graph.tensor_info.insert(k_out, info);
+    }
+    if let Some(info) = graph.tensor_info.get(&v_tid).cloned() {
+        graph.tensor_info.insert(v_out, info);
+    }
+
+    let k_node = crate::ir::AiNode::new(
+        next_nid,
+        AiOp::KvSlotWrite {
+            layer,
+            is_key: true,
+            n_kv_heads: nkv,
+            head_dim: hd,
+            layout,
+        },
+        vec![k_tid],
+        vec![k_out],
+    );
+    next_nid += 1;
+    let v_node = crate::ir::AiNode::new(
+        next_nid,
+        AiOp::KvSlotWrite {
+            layer,
+            is_key: false,
+            n_kv_heads: nkv,
+            head_dim: hd,
+            layout,
+        },
+        vec![v_tid],
+        vec![v_out],
+    );
+
+    graph.nodes.push(k_node);
+    graph.nodes.push(v_node);
+
+    // Return the GQA with its K/V inputs rewired. The engine puts this
+    // node at root_idx (replacing the matched GQA).
+    let gqa = &graph.nodes[root_idx];
+    let mut new_inputs = gqa.inputs.clone();
+    new_inputs[1] = k_out;
+    new_inputs[2] = v_out;
+    Some(crate::ir::AiNode::new(
+        gqa.id,
+        gqa.op.clone(),
+        new_inputs,
+        gqa.outputs.clone(),
+    ))
+}
+
+pub fn kv_slot_injection_rule() -> Rule {
+    let q = VarId(1);
+    let k = VarId(2);
+    let v = VarId(3);
+    Rule {
+        name: "kv_slot_injection",
+        witness: "real_model_generation::smollm2 (EE-3 ORT logit parity, ADR-0018)",
+        pattern: Pattern::op(
+            OpMatcher::exact_gqa(),
+            vec![Pattern::Var(q), Pattern::Var(k), Pattern::Var(v)],
+        ),
+        replacement: Replacement::custom(kv_slot_inject),
+    }
+}
+
+pub fn kv_slot_injection_rules() -> RuleSet {
+    RuleSet::new().with_rule(kv_slot_injection_rule())
+}

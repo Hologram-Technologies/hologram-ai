@@ -89,6 +89,9 @@ impl OpMatcher {
     pub fn exact_gather() -> Self {
         OpMatcher::Exact(AiOpDiscriminant::Gather)
     }
+    pub fn exact_gqa() -> Self {
+        OpMatcher::Exact(AiOpDiscriminant::GroupedQueryAttention)
+    }
 }
 
 /// Discriminant identity of an `AiOp` value — strips per-variant
@@ -129,6 +132,8 @@ pub enum AiOpDiscriminant {
     Equal,
     Where,
     FusedSwiGLU,
+    GroupedQueryAttention,
+    Identity,
     Other,
 }
 
@@ -166,6 +171,8 @@ impl AiOpDiscriminant {
             Equal => Self::Equal,
             Where => Self::Where,
             FusedSwiGLU => Self::FusedSwiGLU,
+            GroupedQueryAttention { .. } => Self::GroupedQueryAttention,
+            Identity => Self::Identity,
             _ => Self::Other,
         }
     }

@@ -30,16 +30,16 @@ impl OptPipeline {
             attention_fusion::AttentionFusion, const_dedup::ConstantDeduplication,
             const_eval::ConstantEvaluation, constant_fold::ConstantFolding,
             data_prop::DataPropagation, dead_node::DeadNodeElimination, decompose::OpDecomposition,
-            kv_slot_injection::KvSlotInjection, norm_projection_fusion::NormProjectionFusion,
-            resolve_slice_params::ResolveSliceParams, semantic_prop::SemanticPropagation,
-            shape_prop::ShapePropagation,
+            norm_projection_fusion::NormProjectionFusion, resolve_slice_params::ResolveSliceParams,
+            semantic_prop::SemanticPropagation, shape_prop::ShapePropagation,
             shared_input_projection_fusion::SharedInputProjectionFusion,
         };
         use crate::rules::{
             pattern_rules::{
-                add_rmsnorm_rules, layernorm_rules, matmul_activation_rules, position_ids_rules,
-                rmsnorm_rules, scalar_absorption_rules, slice_to_gather_rules,
-                swiglu_projection_rules, swiglu_rules, transpose_matmul_rules,
+                add_rmsnorm_rules, kv_slot_injection_rules, layernorm_rules,
+                matmul_activation_rules, position_ids_rules, rmsnorm_rules,
+                scalar_absorption_rules, slice_to_gather_rules, swiglu_projection_rules,
+                swiglu_rules, transpose_matmul_rules,
             },
             RulePass,
         };
@@ -136,7 +136,7 @@ impl OptPipeline {
             // generation loop.
             Box::new(RulePass::new("PositionIdsInjection", position_ids_rules())),
             Box::new(AttentionFusion { force_causal: None }),
-            Box::new(KvSlotInjection),
+            Box::new(RulePass::new("KvSlotInjection", kv_slot_injection_rules())),
             // Rewrite non-axis-0 slices (RoPE rotate_half, QKV/gate-up splits)
             // into first-class Gather. ADR-0018 declarative rule using
             // `Replacement::custom` — the rewrite mints a new i64 indices
