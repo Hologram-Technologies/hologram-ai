@@ -531,3 +531,155 @@ pub fn layernorm_rule() -> Rule {
 pub fn layernorm_rules() -> RuleSet {
     RuleSet::new().with_rule(layernorm_rule())
 }
+
+// ── SliceToGather: single-axis Slice → first-class Gather ──────────────
+
+/// Convert a single-axis, step-1 `Slice` along a concrete axis into a
+/// first-class `Gather`. hologram's compiler realizes `Slice` only as
+/// an axis-0 contiguous byte view; any slice along a non-zero axis
+/// (RoPE `rotate_half`, the last-axis QKV / gate-up projection splits)
+/// cannot be expressed that way. Gather's `[outer, axis_dim, inner]`
+/// flattening handles batched arbitrary-axis selects directly.
+///
+/// This is a `Replacement::custom` rewrite: the rewrite emits a new
+/// `i64[num_indices]` constant param (the index list `start..end`),
+/// inserts it into `graph.params` + `graph.tensor_info`, and returns
+/// a `Gather { axis }(data, indices)` node to replace the matched
+/// Slice — all data-driven from the Slice's `axes`/`starts`/`ends`/
+/// `steps` attributes + the input's declared shape.
+///
+/// Only rewrites cases Gather represents exactly: 1-axis, step-1,
+/// concrete sliced dim. Multi-axis / non-unit-step Slices are left as
+/// is (the lowering will error rather than silently produce a wrong
+/// result — no approximation).
+fn slice_to_gather_rewrite(
+    graph: &mut crate::ir::AiGraph,
+    _binds: &std::collections::HashMap<super::VarId, crate::ir::TensorId>,
+    root_idx: usize,
+) -> Option<crate::ir::AiNode> {
+    use crate::ir::shape::DimExpr;
+    use crate::ir::{shape_from_concrete, AiParam, DType, SemanticHint, TensorInfo};
+    use hologram_ai_quant::QuantDescriptor;
+
+    let (axis, start, end, data_tid, dim_val) = {
+        let node = graph.nodes.get(root_idx)?;
+        let AiOp::Slice {
+            axes,
+            starts,
+            ends,
+            steps,
+        } = &node.op
+        else {
+            return None;
+        };
+        if axes.len() != 1 || starts.len() != 1 || ends.len() != 1 {
+            return None;
+        }
+        let step = steps.first().copied().unwrap_or(1);
+        if step != 1 {
+            return None;
+        }
+        let axis = axes[0];
+        let start = starts[0];
+        let end = ends[0];
+        let data_tid = *node.inputs.first()?;
+        let info = graph.tensor_info.get(&data_tid)?;
+        let ndim = info.shape.len();
+        let norm_axis = if axis < 0 {
+            (ndim as i64 + axis).max(0) as usize
+        } else {
+            axis as usize
+        };
+        let dim_val = info.shape.get(norm_axis)?.as_concrete()? as i64;
+        (axis, start, end, data_tid, dim_val)
+    };
+
+    let s = {
+        let v = if start < 0 { dim_val + start } else { start };
+        v.clamp(0, dim_val)
+    };
+    let e = {
+        let v = if end < 0 { dim_val + end } else { end };
+        v.clamp(0, dim_val)
+    };
+    if s >= e {
+        return None;
+    }
+    // No-op slice (selecting ALL elements) is an Identity — don't rewrite.
+    if s == 0 && e == dim_val {
+        return None;
+    }
+
+    let indices: Vec<i64> = (s..e).collect();
+    let num_indices = indices.len();
+
+    let mut next_tid = graph.tensor_info.keys().copied().max().unwrap_or(0) + 1;
+    let indices_tid = next_tid;
+    next_tid += 1;
+    let _ = next_tid; // silence unused
+
+    let index_bytes: Vec<u8> = indices.iter().flat_map(|&v| v.to_le_bytes()).collect();
+    let index_shape = shape_from_concrete(&[num_indices as u64]);
+    let index_info = TensorInfo {
+        logical_dtype: DType::INT64,
+        storage_dtype: DType::INT64,
+        shape: index_shape,
+        quant: QuantDescriptor::none(),
+        known_i64_values: Some(indices.iter().map(|&v| Some(v)).collect()),
+        semantic: SemanticHint::Unknown,
+    };
+
+    graph.tensor_info.insert(indices_tid, index_info.clone());
+    graph
+        .params
+        .insert(indices_tid, AiParam::inline(index_bytes, index_info));
+
+    // Update output shape to reflect the new dim.
+    let out_tid = graph.nodes[root_idx].outputs.first().copied()?;
+    if let Some(info) = graph.tensor_info.get_mut(&out_tid) {
+        let ndim = info.shape.len();
+        let norm_axis = if axis < 0 {
+            (ndim as i64 + axis).max(0) as usize
+        } else {
+            axis as usize
+        };
+        if norm_axis < info.shape.len() {
+            info.shape[norm_axis] = DimExpr::Concrete(num_indices as u64);
+        }
+    }
+
+    let nid = graph.nodes[root_idx].id;
+    Some(crate::ir::AiNode::new(
+        nid,
+        AiOp::Gather { axis },
+        vec![data_tid, indices_tid],
+        vec![out_tid],
+    ))
+}
+
+/// Predicate: only match Slice nodes the rewrite can actually convert
+/// (single-axis, step-1).
+fn slice_is_single_axis_step1(op: &AiOp) -> bool {
+    matches!(op,
+        AiOp::Slice { axes, starts, ends, steps }
+            if axes.len() == 1
+                && starts.len() == 1
+                && ends.len() == 1
+                && steps.first().copied().unwrap_or(1) == 1
+    )
+}
+
+pub fn slice_to_gather_rule() -> Rule {
+    let data = VarId(1);
+    Rule {
+        name: "slice_to_gather",
+        witness: "real_model_generation::smollm2 (EE-3 ORT logit parity, ADR-0018)",
+        pattern: Pattern::op(OpMatcher::exact_slice(), vec![Pattern::Var(data)])
+            .with_predicate(slice_is_single_axis_step1),
+        replacement: Replacement::custom(slice_to_gather_rewrite),
+    }
+}
+
+pub fn slice_to_gather_rules() -> RuleSet {
+    RuleSet::new().with_rule(slice_to_gather_rule())
+}

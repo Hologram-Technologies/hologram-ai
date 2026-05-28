@@ -26,5 +26,6 @@ pub use lower::{lower, LowerPhase, LoweringOptions, LoweringOutput, OptProfile, 
 pub use mem::{KvCacheLayout, MemoryPlan, MemoryPlanner};
 pub use opt::{
     AggressiveShapePropagation, ConstantDeduplication, OptPipeline, Pass, ShapeHealing,
-    ShapeOraclePass, SliceToGather,
+    ShapeOraclePass,
 };
+pub use rules::{pattern_rules::slice_to_gather_rules, RulePass};

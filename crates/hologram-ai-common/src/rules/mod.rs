@@ -244,6 +244,19 @@ enum ReplacementOp {
     /// `AttentionFusion`. Returning `None` aborts the rewrite — the
     /// engine refuses to approximate.
     FromMatch(fn(&AiOp, &MatchView) -> Option<AiOp>),
+    /// Graph-mutating rewrite. The closure takes the graph mutably,
+    /// the matched bindings, and the matched root's node index; it
+    /// applies whatever multi-node / new-param / new-input mutation
+    /// the rule needs and returns the **new root node** to be put in
+    /// place of the matched root (or `None` to abort with no
+    /// approximation). The engine then deletes the consumed interior
+    /// nodes as for other replacements.
+    ///
+    /// Used by rewrites that don't fit the single-node-replace model:
+    /// `SliceToGather` (emits a new `i64[]` indices param + a Gather
+    /// node), `NormProjectionFusion` (multi-output projection), the
+    /// injection passes (`KvSlotInjection`, `PositionIdsInjection`).
+    Custom(fn(&mut AiGraph, &HashMap<VarId, TensorId>, usize) -> Option<AiNode>),
 }
 
 impl std::fmt::Debug for Replacement {
@@ -252,6 +265,7 @@ impl std::fmt::Debug for Replacement {
             ReplacementOp::Static(_) => "Static",
             ReplacementOp::FromRoot(_) => "FromRoot",
             ReplacementOp::FromMatch(_) => "FromMatch",
+            ReplacementOp::Custom(_) => "Custom",
         };
         f.debug_struct("Replacement")
             .field("kind", &kind)
@@ -293,6 +307,23 @@ impl Replacement {
         }
     }
 
+    /// Graph-mutating rewrite. The closure mutates the graph (params,
+    /// inputs, tensor_info, nodes) and returns the new root node to be
+    /// put in place of the matched root, or `None` to abort. The
+    /// engine deletes consumed interior nodes as usual. The closure
+    /// is a `fn` pointer (no captured state), keeping its identity
+    /// content-addressable. The `inputs` list is unused for `Custom`
+    /// rewrites — the rewrite reads bindings directly from the
+    /// supplied `&HashMap<VarId, TensorId>`.
+    pub fn custom(
+        rewrite: fn(&mut AiGraph, &HashMap<VarId, TensorId>, usize) -> Option<AiNode>,
+    ) -> Self {
+        Self {
+            op: ReplacementOp::Custom(rewrite),
+            inputs: Vec::new(),
+        }
+    }
+
     pub fn inputs(&self) -> &[VarId] {
         &self.inputs
     }
@@ -302,6 +333,24 @@ impl Replacement {
             ReplacementOp::Static(op) => Some((**op).clone()),
             ReplacementOp::FromRoot(builder) => builder(root_op),
             ReplacementOp::FromMatch(builder) => builder(root_op, view),
+            ReplacementOp::Custom(_) => None, // dispatched separately in apply_pass
+        }
+    }
+
+    fn is_custom(&self) -> bool {
+        matches!(self.op, ReplacementOp::Custom(_))
+    }
+
+    fn run_custom(
+        &self,
+        graph: &mut AiGraph,
+        binds: &HashMap<VarId, TensorId>,
+        root_idx: usize,
+    ) -> Option<AiNode> {
+        if let ReplacementOp::Custom(rewrite) = self.op {
+            rewrite(graph, binds, root_idx)
+        } else {
+            None
         }
     }
 }
@@ -491,19 +540,31 @@ impl RuleSet {
                 let Some(root_out) = graph.nodes[root_idx].outputs.first().copied() else {
                     continue;
                 };
-                let view = MatchView {
-                    binds: &m.binds,
-                    graph,
-                };
-                let Some(new_node) = materialize(
-                    &rule.replacement,
-                    &m,
-                    &root_op,
-                    &view,
-                    root_out,
-                    &mut next_id,
-                ) else {
-                    continue;
+                let new_node = if rule.replacement.is_custom() {
+                    // Custom rewrite: mutates graph (params, tensor_info,
+                    // possibly new nodes) and returns the new root node.
+                    // The engine puts the returned node at `root_idx` and
+                    // deletes consumed interior nodes as usual.
+                    match rule.replacement.run_custom(graph, &m.binds, root_idx) {
+                        Some(n) => n,
+                        None => continue,
+                    }
+                } else {
+                    let view = MatchView {
+                        binds: &m.binds,
+                        graph,
+                    };
+                    let Some(n) = materialize(
+                        &rule.replacement,
+                        &m,
+                        &root_op,
+                        &view,
+                        root_out,
+                        &mut next_id,
+                    ) else {
+                        continue;
+                    };
+                    n
                 };
                 rewritten.insert(root_idx, new_node);
                 for &idx in &m.consumed {

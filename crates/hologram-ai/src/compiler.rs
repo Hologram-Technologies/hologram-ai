@@ -766,9 +766,13 @@ fn post_concretization_repair(mut ai_graph: AiGraph) -> anyhow::Result<AiGraph> 
 
     // Convert Slice→Gather (hologram has no native Slice).
     // Must run after concretization so dim values are known.
-    let ai_graph = hologram_ai_common::SliceToGather
-        .run(ai_graph)
-        .context("slice-to-gather conversion failed")?;
+    // ADR-0018 declarative rule (Replacement::custom).
+    let ai_graph = hologram_ai_common::RulePass::new(
+        "SliceToGather",
+        hologram_ai_common::slice_to_gather_rules(),
+    )
+    .run(ai_graph)
+    .context("slice-to-gather conversion failed")?;
 
     // Shape healing: fill in any remaining empty shapes.
     let ai_graph = hologram_ai_common::ShapeHealing

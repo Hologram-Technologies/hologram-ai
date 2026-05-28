@@ -22,7 +22,6 @@ pub mod shape_helpers;
 pub mod shape_inference;
 pub mod shape_prop;
 pub mod shared_input_projection_fusion;
-pub mod slice_to_gather;
 
 pub use attention_fusion::AttentionFusion;
 pub use const_dedup::ConstantDeduplication;
@@ -35,4 +34,3 @@ pub use shape_consistency::ShapeConsistencyCheck;
 pub use shape_heal::ShapeHealing;
 pub use shape_prop::AggressiveShapePropagation;
 pub use shared_input_projection_fusion::SharedInputProjectionFusion;
-pub use slice_to_gather::SliceToGather;

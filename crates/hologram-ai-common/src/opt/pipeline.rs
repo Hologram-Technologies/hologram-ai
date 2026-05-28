@@ -34,13 +34,12 @@ impl OptPipeline {
             position_ids_injection::PositionIdsInjection, resolve_slice_params::ResolveSliceParams,
             semantic_prop::SemanticPropagation, shape_prop::ShapePropagation,
             shared_input_projection_fusion::SharedInputProjectionFusion,
-            slice_to_gather::SliceToGather,
         };
         use crate::rules::{
             pattern_rules::{
                 add_rmsnorm_rules, layernorm_rules, matmul_activation_rules, rmsnorm_rules,
-                scalar_absorption_rules, swiglu_projection_rules, swiglu_rules,
-                transpose_matmul_rules,
+                scalar_absorption_rules, slice_to_gather_rules, swiglu_projection_rules,
+                swiglu_rules, transpose_matmul_rules,
             },
             RulePass,
         };
@@ -135,10 +134,12 @@ impl OptPipeline {
             Box::new(AttentionFusion { force_causal: None }),
             Box::new(KvSlotInjection),
             // Rewrite non-axis-0 slices (RoPE rotate_half, QKV/gate-up splits)
-            // into first-class Gather. Runs after AttentionFusion so it can't
-            // disturb SDPA pattern matching, and after SharedInputProjectionFusion
-            // so the projection-split slices it introduces are converted too.
-            Box::new(SliceToGather),
+            // into first-class Gather. ADR-0018 declarative rule using
+            // `Replacement::custom` — the rewrite mints a new i64 indices
+            // param + Gather node from the Slice's axes/starts/ends/steps
+            // attributes + the input's declared shape. Runs after
+            // AttentionFusion + SharedInputProjectionFusion.
+            Box::new(RulePass::new("SliceToGather", slice_to_gather_rules())),
             // Infer semantic hints (Embedding, AttentionWeight, Residual, etc.)
             // from op types. Runs after all fusion passes so fused ops are present.
             Box::new(SemanticPropagation),
