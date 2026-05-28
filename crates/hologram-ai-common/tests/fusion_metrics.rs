@@ -309,15 +309,15 @@ fn ffn_block_swiglu_projection_fusion() {
     // SwiGluFusion is the ADR-0018 declarative rule set (RulePass over
     // `pattern_rules::swiglu_rules()`); the others are still imperative
     // passes pending their own rule-set port.
-    use hologram_ai_common::opt::{
-        norm_projection_fusion::NormProjectionFusion, pipeline::Pass, rmsnorm_fusion::RmsNormFusion,
-    };
+    use hologram_ai_common::opt::{norm_projection_fusion::NormProjectionFusion, pipeline::Pass};
     use hologram_ai_common::rules::{
-        pattern_rules::{swiglu_projection_rules, swiglu_rules},
+        pattern_rules::{rmsnorm_rules, swiglu_projection_rules, swiglu_rules},
         RulePass,
     };
 
-    let g = RmsNormFusion.run(g).expect("RmsNormFusion");
+    let g = RulePass::new("RmsNormFusion", rmsnorm_rules())
+        .run(g)
+        .expect("RmsNormFusion");
     let g = RulePass::new("SwiGluFusion", swiglu_rules())
         .run(g)
         .expect("SwiGluFusion");
@@ -469,15 +469,15 @@ fn multi_layer_ffn_fusion_scaling() {
     g.outputs = vec![current_hidden];
     let before_nodes = g.nodes.len();
 
-    use hologram_ai_common::opt::{
-        norm_projection_fusion::NormProjectionFusion, pipeline::Pass, rmsnorm_fusion::RmsNormFusion,
-    };
+    use hologram_ai_common::opt::{norm_projection_fusion::NormProjectionFusion, pipeline::Pass};
     use hologram_ai_common::rules::{
-        pattern_rules::{swiglu_projection_rules, swiglu_rules},
+        pattern_rules::{rmsnorm_rules, swiglu_projection_rules, swiglu_rules},
         RulePass,
     };
 
-    let g = RmsNormFusion.run(g).expect("RmsNormFusion");
+    let g = RulePass::new("RmsNormFusion", rmsnorm_rules())
+        .run(g)
+        .expect("RmsNormFusion");
     let g = RulePass::new("SwiGluFusion", swiglu_rules())
         .run(g)
         .expect("SwiGluFusion");

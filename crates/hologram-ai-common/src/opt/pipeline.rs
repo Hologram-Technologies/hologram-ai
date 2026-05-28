@@ -30,18 +30,17 @@ impl OptPipeline {
             attention_fusion::AttentionFusion, const_dedup::ConstantDeduplication,
             const_eval::ConstantEvaluation, constant_fold::ConstantFolding,
             data_prop::DataPropagation, dead_node::DeadNodeElimination, decompose::OpDecomposition,
-            kv_slot_injection::KvSlotInjection, layernorm_fusion::LayerNormFusion,
-            norm_projection_fusion::NormProjectionFusion,
+            kv_slot_injection::KvSlotInjection, norm_projection_fusion::NormProjectionFusion,
             position_ids_injection::PositionIdsInjection, resolve_slice_params::ResolveSliceParams,
-            rmsnorm_fusion::RmsNormFusion, semantic_prop::SemanticPropagation,
-            shape_prop::ShapePropagation,
+            semantic_prop::SemanticPropagation, shape_prop::ShapePropagation,
             shared_input_projection_fusion::SharedInputProjectionFusion,
             slice_to_gather::SliceToGather,
         };
         use crate::rules::{
             pattern_rules::{
-                add_rmsnorm_rules, matmul_activation_rules, scalar_absorption_rules,
-                swiglu_projection_rules, swiglu_rules, transpose_matmul_rules,
+                add_rmsnorm_rules, layernorm_rules, matmul_activation_rules, rmsnorm_rules,
+                scalar_absorption_rules, swiglu_projection_rules, swiglu_rules,
+                transpose_matmul_rules,
             },
             RulePass,
         };
@@ -67,8 +66,16 @@ impl OptPipeline {
             // chains into AiOp::LayerNorm. Runs BEFORE RmsNormFusion because
             // LayerNorm is a superset pattern — RmsNormFusion would otherwise
             // consume the inner Pow→ReduceMean→Sqrt→Div subchain.
-            Box::new(LayerNormFusion),
-            Box::new(RmsNormFusion),
+            // LayerNorm chain → AiOp::LayerNorm{axis:-1, epsilon}. ADR-0018
+            // declarative rule: matches the ReduceMean→Sub→Pow→ReduceMean→
+            // Add(eps)→Sqrt→Div→Mul(weight)→Add(bias) chain via same-var
+            // binding on the centered=Sub(X, ReduceMean(X)) tensor.
+            Box::new(RulePass::new("LayerNormFusion", layernorm_rules())),
+            // RmsNorm chain → AiOp::RmsNorm. ADR-0018 declarative rule
+            // set: matches both Mul-Reciprocal and Div variants of the
+            // explicit ONNX chain. Pulls epsilon from a bound Const var
+            // via from_match.
+            Box::new(RulePass::new("RmsNormFusion", rmsnorm_rules())),
             // Fuse SiLU(gate) * up → FusedSwiGLU. ADR-0018 declarative
             // rule set: matches both the direct (`Silu`) and decomposed
             // (`Mul(x, Sigmoid(x))`) exporter variants commutatively.

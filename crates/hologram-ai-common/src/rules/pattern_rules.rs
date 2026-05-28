@@ -360,3 +360,174 @@ pub fn scalar_absorption_rule() -> Rule {
 pub fn scalar_absorption_rules() -> RuleSet {
     RuleSet::new().with_rule(scalar_absorption_rule())
 }
+
+// ── RmsNormFusion: explicit ONNX RmsNorm chain → AiOp::RmsNorm ──────────
+
+/// Build `AiOp::RmsNorm { epsilon }` from a matched chain. Pulls the
+/// epsilon out of the bound `eps:Const` var and verifies that the
+/// bound `two:Const` actually equals 2.0 (the Pow exponent must be 2).
+/// If either fails the rewrite aborts.
+fn build_rmsnorm(_root: &AiOp, view: &super::MatchView) -> Option<AiOp> {
+    let two = view.scalar_f32(VarId(3))?;
+    if (two - 2.0).abs() > 1e-6 {
+        return None;
+    }
+    let eps = view.scalar_f32(VarId(4))?;
+    Some(AiOp::RmsNorm { epsilon: eps })
+}
+
+/// Build the common `Sqrt(Add(ReduceMean(Pow(x, 2)), eps))` sub-pattern.
+fn rms_denom_pattern(x: VarId, two: VarId, eps: VarId) -> Pattern {
+    Pattern::op(
+        OpMatcher::exact_sqrt(),
+        vec![Pattern::op_comm(
+            OpMatcher::exact_add(),
+            Pattern::op(
+                OpMatcher::exact_reduce_mean(),
+                vec![Pattern::op(
+                    OpMatcher::exact_pow(),
+                    vec![Pattern::Var(x), Pattern::Const(two)],
+                )],
+            ),
+            Pattern::Const(eps),
+        )],
+    )
+}
+
+/// `Mul`-variant: `weight * (x * Reciprocal(Sqrt(Add(ReduceMean(Pow(x,2)), eps))))`.
+pub fn rmsnorm_mul_variant_rule() -> Rule {
+    let x = VarId(1);
+    let weight = VarId(2);
+    let two = VarId(3);
+    let eps = VarId(4);
+    Rule {
+        name: "rmsnorm_mul_variant",
+        witness: "real_model_generation::smollm2 (EE-3 ORT logit parity, ADR-0018)",
+        pattern: Pattern::op_comm(
+            OpMatcher::exact_mul(),
+            Pattern::Var(weight),
+            Pattern::op(
+                OpMatcher::exact_mul(),
+                vec![
+                    Pattern::Var(x),
+                    Pattern::op(
+                        OpMatcher::exact_reciprocal(),
+                        vec![rms_denom_pattern(x, two, eps)],
+                    ),
+                ],
+            ),
+        ),
+        replacement: Replacement::from_match(build_rmsnorm, vec![x, weight]),
+    }
+}
+
+/// `Div`-variant: `weight * (x / Sqrt(Add(ReduceMean(Pow(x,2)), eps)))`.
+pub fn rmsnorm_div_variant_rule() -> Rule {
+    let x = VarId(1);
+    let weight = VarId(2);
+    let two = VarId(3);
+    let eps = VarId(4);
+    Rule {
+        name: "rmsnorm_div_variant",
+        witness: "real_model_generation::smollm2 (EE-3 ORT logit parity, ADR-0018)",
+        pattern: Pattern::op_comm(
+            OpMatcher::exact_mul(),
+            Pattern::Var(weight),
+            Pattern::op(
+                OpMatcher::exact_div(),
+                vec![Pattern::Var(x), rms_denom_pattern(x, two, eps)],
+            ),
+        ),
+        replacement: Replacement::from_match(build_rmsnorm, vec![x, weight]),
+    }
+}
+
+pub fn rmsnorm_rules() -> RuleSet {
+    RuleSet::new()
+        .with_rule(rmsnorm_mul_variant_rule())
+        .with_rule(rmsnorm_div_variant_rule())
+}
+
+// ── LayerNormFusion: explicit ONNX LayerNorm chain → AiOp::LayerNorm ────
+
+/// Build `AiOp::LayerNorm { axis:-1, epsilon }` from a matched chain.
+/// Verifies the Pow exponent is 2.0 and pulls the epsilon out of the
+/// bound `eps:Const` var.
+fn build_layernorm(_root: &AiOp, view: &super::MatchView) -> Option<AiOp> {
+    let two = view.scalar_f32(VarId(5))?;
+    if (two - 2.0).abs() > 1e-6 {
+        return None;
+    }
+    let eps = view.scalar_f32(VarId(4))?;
+    Some(AiOp::LayerNorm {
+        axis: -1,
+        epsilon: eps,
+    })
+}
+
+/// `Add(Mul(Div(Sub(X, ReduceMean(X)),
+///           Sqrt(Add(ReduceMean(Pow(centered, 2)), eps))),
+///       weight),
+///   bias)`
+/// → `LayerNorm{axis:-1, epsilon}(X, weight, bias)`.
+///
+/// The `centered = Sub(X, ReduceMean(X))` tensor appears twice (once
+/// as the Div numerator, once as the Pow input); the matcher binds it
+/// via `bind: Some(VarId)` on the `Sub` and re-asserts it as a
+/// `Pattern::Var(centered)` in the Pow input — same-var-binding
+/// enforces the equality.
+pub fn layernorm_rule() -> Rule {
+    let x = VarId(1);
+    let weight = VarId(2);
+    let bias = VarId(3);
+    let eps = VarId(4);
+    let two = VarId(5);
+    let centered = VarId(6);
+    Rule {
+        name: "layernorm_fusion",
+        witness: "real_model_generation::smollm2 (EE-3 ORT logit parity, ADR-0018)",
+        pattern: Pattern::op_comm(
+            OpMatcher::exact_add(),
+            Pattern::Var(bias),
+            Pattern::op_comm(
+                OpMatcher::exact_mul(),
+                Pattern::Var(weight),
+                Pattern::op(
+                    OpMatcher::exact_div(),
+                    vec![
+                        // numerator: Sub(X, mean=ReduceMean(X)); bind output
+                        // as `centered`.
+                        Pattern::op_bind(
+                            OpMatcher::exact_sub(),
+                            vec![
+                                Pattern::Var(x),
+                                Pattern::op(OpMatcher::exact_reduce_mean(), vec![Pattern::Var(x)]),
+                            ],
+                            centered,
+                        ),
+                        // denominator: Sqrt(Add(ReduceMean(Pow(centered, 2)), eps)).
+                        Pattern::op(
+                            OpMatcher::exact_sqrt(),
+                            vec![Pattern::op_comm(
+                                OpMatcher::exact_add(),
+                                Pattern::op(
+                                    OpMatcher::exact_reduce_mean(),
+                                    vec![Pattern::op(
+                                        OpMatcher::exact_pow(),
+                                        vec![Pattern::Var(centered), Pattern::Const(two)],
+                                    )],
+                                ),
+                                Pattern::Const(eps),
+                            )],
+                        ),
+                    ],
+                ),
+            ),
+        ),
+        replacement: Replacement::from_match(build_layernorm, vec![x, weight, bias]),
+    }
+}
+
+pub fn layernorm_rules() -> RuleSet {
+    RuleSet::new().with_rule(layernorm_rule())
+}

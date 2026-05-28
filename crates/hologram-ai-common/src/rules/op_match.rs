@@ -62,6 +62,33 @@ impl OpMatcher {
     pub fn exact_fused_swiglu() -> Self {
         OpMatcher::Exact(AiOpDiscriminant::FusedSwiGLU)
     }
+    pub fn exact_div() -> Self {
+        OpMatcher::Exact(AiOpDiscriminant::Div)
+    }
+    pub fn exact_sub() -> Self {
+        OpMatcher::Exact(AiOpDiscriminant::Sub)
+    }
+    pub fn exact_pow() -> Self {
+        OpMatcher::Exact(AiOpDiscriminant::Pow)
+    }
+    pub fn exact_sqrt() -> Self {
+        OpMatcher::Exact(AiOpDiscriminant::Sqrt)
+    }
+    pub fn exact_reciprocal() -> Self {
+        OpMatcher::Exact(AiOpDiscriminant::Reciprocal)
+    }
+    pub fn exact_reduce_mean() -> Self {
+        OpMatcher::Exact(AiOpDiscriminant::ReduceMean)
+    }
+    pub fn exact_concat() -> Self {
+        OpMatcher::Exact(AiOpDiscriminant::Concat)
+    }
+    pub fn exact_slice() -> Self {
+        OpMatcher::Exact(AiOpDiscriminant::Slice)
+    }
+    pub fn exact_gather() -> Self {
+        OpMatcher::Exact(AiOpDiscriminant::Gather)
+    }
 }
 
 /// Discriminant identity of an `AiOp` value — strips per-variant
@@ -86,6 +113,11 @@ pub enum AiOpDiscriminant {
     Sub,
     Mul,
     Div,
+    Pow,
+    Sqrt,
+    Reciprocal,
+    ReduceMean,
+    ReduceSum,
     Transpose,
     Reshape,
     Concat,
@@ -93,6 +125,9 @@ pub enum AiOpDiscriminant {
     Gather,
     Cast,
     Dequantize,
+    Range,
+    Equal,
+    Where,
     FusedSwiGLU,
     Other,
 }
@@ -122,6 +157,14 @@ impl AiOpDiscriminant {
             Gather { .. } => Self::Gather,
             Cast { .. } => Self::Cast,
             Dequantize { .. } => Self::Dequantize,
+            Pow => Self::Pow,
+            Sqrt => Self::Sqrt,
+            Reciprocal => Self::Reciprocal,
+            ReduceMean { .. } => Self::ReduceMean,
+            ReduceSum { .. } => Self::ReduceSum,
+            Range => Self::Range,
+            Equal => Self::Equal,
+            Where => Self::Where,
             FusedSwiGLU => Self::FusedSwiGLU,
             _ => Self::Other,
         }
