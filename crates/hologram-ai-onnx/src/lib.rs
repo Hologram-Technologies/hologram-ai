@@ -305,9 +305,7 @@ fn inject_lm_head_if_needed(mut graph: AiGraph) -> AiGraph {
     graph
         .tensor_info
         .insert(logits_tid, TensorInfo::new(DType::F32, logits_shape));
-    graph
-        .tensor_names
-        .insert(logits_tid, "logits".to_string());
+    graph.tensor_names.insert(logits_tid, "logits".to_string());
     graph.nodes.push(AiNode::new(
         next_nid(),
         AiOp::MatMul,

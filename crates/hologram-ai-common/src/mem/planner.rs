@@ -111,13 +111,15 @@ fn compute_kv_layout(graph: &AiGraph) -> anyhow::Result<KvCacheLayout> {
 
     match (n_layers, n_kv_heads, head_dim, max_seq_len) {
         (None, None, None, None) => Ok(KvCacheLayout::none()),
-        (Some(n_layers), Some(n_kv_heads), Some(head_dim), Some(max_seq_len)) => Ok(KvCacheLayout {
-            n_layers,
-            n_kv_heads,
-            head_dim,
-            max_seq_len,
-            dtype: DType::F32,
-        }),
+        (Some(n_layers), Some(n_kv_heads), Some(head_dim), Some(max_seq_len)) => {
+            Ok(KvCacheLayout {
+                n_layers,
+                n_kv_heads,
+                head_dim,
+                max_seq_len,
+                dtype: DType::F32,
+            })
+        }
         _ => anyhow::bail!(
             "KV-cache metadata partially present: n_layers={n_layers:?}, \
              n_kv_heads={n_kv_heads:?}, head_dim={head_dim:?}, \

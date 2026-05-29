@@ -150,7 +150,16 @@ pub fn assert_alloc_bounded<R>(label: &str, max_allocations: usize, f: impl FnOn
 /// Sanity guard: verify the counting allocator is actually wired in as the
 /// global allocator, so [`assert_no_alloc`] cannot pass vacuously.
 pub fn assert_allocator_installed() {
-    let (_v, delta) = measure(|| Vec::<u8>::with_capacity(64));
+    // `core::hint::black_box` around both the input and result keeps a
+    // release-mode optimizer (which would otherwise see an unused
+    // capacity-64 Vec and elide the heap allocation entirely) from
+    // making this check vacuous.
+    let (v, delta) = measure(|| {
+        let mut v = Vec::<u8>::with_capacity(core::hint::black_box(64));
+        v.push(core::hint::black_box(0));
+        v
+    });
+    let _ = core::hint::black_box(v);
     assert!(
         delta.allocations > 0,
         "CountingAllocator is not installed as #[global_allocator]; \
