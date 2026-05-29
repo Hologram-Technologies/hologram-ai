@@ -1,0 +1,162 @@
+name: Architecture Regression Matrix
+
+# One job per supported transformer architecture. Each job downloads its
+# model from HuggingFace, compiles end-to-end, and runs the architecture's
+# generation/parity test — so a regression in any single architecture is
+# visibly isolated (vs. a single "live-models" job where the first failure
+# hides every later one).
+#
+# Triggers:
+#   - nightly (08:00 UTC, after the existing 06:00 UTC nightly.yml so cache
+#     reuse stays sequential)
+#   - workflow_dispatch (manual)
+#   - PRs that touch the load-bearing import / lowering / opt paths, the
+#     conformance crate, the Cargo.lock (for hologram dep bumps), or the
+#     workflows themselves
+#
+# Auth model mirrors ci.yml / nightly.yml: an App-token + git insteadOf so
+# cargo's `git-fetch-with-cli` can authenticate against the private
+# hologram repo. No sibling clone.
+
+on:
+  schedule:
+    - cron: '0 8 * * *'
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - 'crates/hologram-ai-onnx/**'
+      - 'crates/hologram-ai-common/src/lower/**'
+      - 'crates/hologram-ai-common/src/opt/**'
+      - 'crates/hologram-ai-common/src/rules/**'
+      - 'crates/hologram-ai-conformance/**'
+      - 'crates/hologram-ai/src/compiler.rs'
+      - 'crates/hologram-ai/src/runner.rs'
+      - 'crates/hologram-ai/src/engine.rs'
+      - 'crates/hologram-ai/src/commands/generate.rs'
+      - 'Cargo.lock'
+      - '.github/workflows/architectures.yml'
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  RUST_BACKTRACE: 1
+  HOLOGRAM_AI_LIVE: "1"
+
+jobs:
+  smollm2-135m:
+    name: SmolLM2-135M-Instruct
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Generate GitHub App token (hologram read access)
+        id: app-token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.APP_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+          owner: Hologram-Technologies
+          repositories: hologram
+
+      - name: Configure git auth for cargo
+        run: |
+          git config --global \
+            url."https://x-access-token:${{ steps.app-token.outputs.token }}@github.com/Hologram-Technologies/".insteadOf \
+            "https://github.com/Hologram-Technologies/"
+
+      - name: Install protoc
+        uses: arduino/setup-protoc@v3
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: arch-smollm2-135m
+
+      # Llama-family decoder: RoPE + GQA (9 Q heads / 3 KV heads = ratio
+      # 3:1) + RMSNorm + SwiGLU MLP + tied LM head (exported without an
+      # explicit logits output — exercises hologram-ai's LM-head injection
+      # path). 135M params ≈ 540 MB f32; ONNX export uses split external
+      # data (model.onnx + model.onnx_data).
+      - name: Download SmolLM2-135M-Instruct
+        run: |
+          mkdir -p models/smollm2-135m
+          BASE="https://huggingface.co/HuggingFaceTB/SmolLM2-135M-Instruct/resolve/main/onnx"
+          wget -q -O models/smollm2-135m/model.onnx       "$BASE/model.onnx"
+          wget -q -O models/smollm2-135m/model.onnx_data  "$BASE/model.onnx_data" || true
+          wget -q -O models/smollm2-135m/tokenizer.json \
+            "https://huggingface.co/HuggingFaceTB/SmolLM2-135M-Instruct/resolve/main/tokenizer.json"
+
+      # EE-2 / EE-3 — coherence + token-for-token ORT logit parity
+      # ("The capital of France is" → " Paris. Paris is the largest city
+      # in France and").
+      - name: SmolLM2 generation (EE-2/EE-3)
+        run: cargo test --release -p hologram-ai-conformance --features=onnx-spec --test real_model_generation -- --nocapture
+
+  qwen2-0_5b-instruct:
+    name: Qwen2-0.5B-Instruct
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Generate GitHub App token (hologram read access)
+        id: app-token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.APP_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+          owner: Hologram-Technologies
+          repositories: hologram
+
+      - name: Configure git auth for cargo
+        run: |
+          git config --global \
+            url."https://x-access-token:${{ steps.app-token.outputs.token }}@github.com/Hologram-Technologies/".insteadOf \
+            "https://github.com/Hologram-Technologies/"
+
+      - name: Install protoc
+        uses: arduino/setup-protoc@v3
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: arch-qwen2-0_5b-instruct
+
+      # Qwen2 family — exercises code paths SmolLM2 does not:
+      #   * GQA ratio 7:1 (14 Q heads / 2 KV heads, vs SmolLM2's 3:1),
+      #   * biased Q/K/V projections (Llama-family has no bias),
+      #   * native `logits` graph output (no LM-head injection — the
+      #     ONNX export already projects to vocab),
+      #   * full rank-3 norm-projection chain through
+      #     `desugar_norm_projection`.
+      # Regression witness for the UOR-native rank-3 MatMul fix + Gemm
+      # trans_b silent-drop eradication (commit 61b26de) and the
+      # subsequent const-dedup shape-key fix (commit 7527764). 500M
+      # params ≈ 950 MB f32; needs config.json for the compiler's
+      # context_length seed.
+      - name: Download Qwen2-0.5B-Instruct
+        run: |
+          mkdir -p models/Qwen2-0.5B-Instruct
+          BASE="https://huggingface.co/onnx-community/Qwen2-0.5B-Instruct/resolve/main/onnx"
+          wget -q -O models/Qwen2-0.5B-Instruct/model.onnx       "$BASE/model.onnx"
+          wget -q -O models/Qwen2-0.5B-Instruct/model.onnx_data  "$BASE/model.onnx_data" || true
+          wget -q -O models/Qwen2-0.5B-Instruct/tokenizer.json \
+            "https://huggingface.co/onnx-community/Qwen2-0.5B-Instruct/resolve/main/tokenizer.json"
+          wget -q -O models/Qwen2-0.5B-Instruct/config.json \
+            "https://huggingface.co/onnx-community/Qwen2-0.5B-Instruct/resolve/main/config.json"
+
+      # EE — instruct-style multi-word continuation, prompt-relevance,
+      # determinism. Qwen2 hits the GQA-7:1 + native-logits paths.
+      - name: Qwen2 generation
+        run: cargo test --release -p hologram-ai-conformance --features=onnx-spec --test real_model_generation_qwen2 -- --nocapture
