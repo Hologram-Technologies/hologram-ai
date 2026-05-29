@@ -15,7 +15,7 @@
 //! constants have been produced and dead intermediates removed.
 
 use super::pipeline::Pass;
-use crate::ir::{AiGraph, AiParam, DType, TensorId};
+use crate::ir::{AiGraph, AiParam, DType, Shape, TensorId};
 use hologram_archive::WeightFingerprint;
 use std::collections::HashMap;
 
@@ -28,13 +28,21 @@ impl Pass for ConstantDeduplication {
     }
 
     fn run(&self, mut graph: AiGraph) -> anyhow::Result<AiGraph> {
-        // Canonical owner per (content address, dtype). Equal address ⇒ equal
-        // content (BLAKE3 is collision-resistant — the premise of content
-        // addressing, and exactly what hologram's WeightStore relies on), so no
-        // byte re-comparison is needed. The dtype scopes the address so two
-        // weights with identical bytes but different dtype interpretations stay
-        // distinct (the IR merge carries the param's dtype with it).
-        let mut canonical: HashMap<(WeightFingerprint, DType), TensorId> = HashMap::new();
+        // Canonical owner per (content address, dtype, shape). Equal address
+        // ⇒ equal bytes (BLAKE3 is collision-resistant — the premise of
+        // content addressing, and exactly what hologram's WeightStore relies
+        // on), so no byte re-comparison is needed. The dtype + shape scope
+        // the address so two weights with identical bytes but different
+        // *interpretations* stay distinct: a `[32, 64]` and a `[64, 32]`
+        // tensor full of zeros are byte-identical but semantically different
+        // tensors (transposes of each other), and downstream ops read them
+        // as their declared shape (the matmul's k = A.dim(1) must equal
+        // B.dim(0)). Merging them would silently rewrite a MatMul's B
+        // operand to a wrong-shape constant — caught loud by hologram's
+        // rank-2 k-mismatch check, but the right fix is to never merge
+        // them in the first place. Tensor identity = (content, dtype,
+        // shape).
+        let mut canonical: HashMap<(WeightFingerprint, DType, Shape), TensorId> = HashMap::new();
         let mut remap: HashMap<TensorId, TensorId> = HashMap::new();
 
         // Collect param TIDs sorted so we get deterministic canonical choices.
@@ -52,7 +60,11 @@ impl Pass for ConstantDeduplication {
                 continue;
             }
 
-            let key = (WeightFingerprint::of(data), info.logical_dtype);
+            let key = (
+                WeightFingerprint::of(data),
+                info.logical_dtype,
+                info.shape.clone(),
+            );
 
             if let Some(&canon_tid) = canonical.get(&key) {
                 remap.insert(tid, canon_tid);
@@ -202,6 +214,35 @@ mod tests {
 
         let g2 = ConstantDeduplication.run(g).unwrap();
         assert_eq!(g2.params.len(), 2);
+    }
+
+    #[test]
+    fn no_dedup_same_bytes_different_shapes() {
+        // Regression: a `[32, 64]` and a `[64, 32]` tensor full of zeros are
+        // byte-identical but semantically different — transposes of each
+        // other. Merging them would silently rewrite a MatMul's B operand
+        // to a wrong-shape constant (caught loud by hologram's k-mismatch
+        // check, but the right fix is to never merge them). Tensor identity
+        // = (content, dtype, shape).
+        let data = vec![0u8; 32 * 64 * 4]; // 8192 bytes, >= 256 threshold
+        let info_a = TensorInfo::new(DType::F32, shape_from_concrete(&[32, 64]));
+        let info_b = TensorInfo::new(DType::F32, shape_from_concrete(&[64, 32]));
+
+        let mut params = HashMap::new();
+        params.insert(10u32, AiParam::inline(data.clone(), info_a.clone()));
+        params.insert(20u32, AiParam::inline(data, info_b.clone()));
+
+        let mut ti = HashMap::new();
+        ti.insert(10u32, info_a);
+        ti.insert(20u32, info_b);
+
+        let g = make_graph(vec![], vec![], vec![], params, ti);
+
+        let g2 = ConstantDeduplication.run(g).unwrap();
+        // Both must remain — shape disagreement blocks merging.
+        assert_eq!(g2.params.len(), 2);
+        assert!(g2.params.contains_key(&10));
+        assert!(g2.params.contains_key(&20));
     }
 
     #[test]
