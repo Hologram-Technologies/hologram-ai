@@ -27,14 +27,29 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-        # The web build needs the sibling hologram repo (path dependency).
-        # Adjust `repository`/`ref` to your hologram remote, or vendor it.
-      - name: Check out hologram (sibling path dependency)
-        uses: actions/checkout@v4
+
+      # hologram-* crates are git deps on a private repo. CI generates an
+      # App token scoped to that repo and configures git's `insteadOf` so
+      # cargo's `git-fetch-with-cli` picks it up. No sibling clone.
+      - name: Generate GitHub App token (hologram read access)
+        id: app-token
+        uses: actions/create-github-app-token@v1
         with:
-          repository: uor-framework/hologram
-          path: ../hologram
-          # token: ${{ secrets.HOLOGRAM_REPO_TOKEN }}  # if private
+          app-id: ${{ secrets.APP_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+          owner: Hologram-Technologies
+          repositories: hologram
+
+      - name: Configure git auth for cargo
+        run: |
+          git config --global \
+            url."https://x-access-token:${{ steps.app-token.outputs.token }}@github.com/Hologram-Technologies/".insteadOf \
+            "https://github.com/Hologram-Technologies/"
+
+      - name: Install protoc
+        uses: arduino/setup-protoc@v3
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Rust toolchain + wasm target
         run: |

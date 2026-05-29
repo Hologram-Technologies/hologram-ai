@@ -1,22 +1,34 @@
 name: CI
 
+# Per-PR + per-push contract. Mirrors `just vv-arch` (fmt + clippy + build +
+# test) plus the structural and portability V&V axes that don't need live
+# models or network access. The live-model EE classes run via
+# `nightly.yml` (manual or scheduled).
+#
+# Auth model: the hologram-* crates are git deps on a private repo. CI
+# generates a GitHub App token scoped to that repo and configures git's
+# `insteadOf` so cargo's `git-fetch-with-cli` (set in `.cargo/config.toml`)
+# picks it up transparently. No sibling-checkout step — cargo fetches the
+# dep itself.
+
 on:
   push:
-    branches: [ main, master ]
+    branches: [main]
   pull_request:
 
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  RUST_BACKTRACE: 1
+
 jobs:
-  test:
-    name: Test (${{ matrix.os }})
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, macos-latest]
-    runs-on: ${{ matrix.os }}
+  build-test:
+    name: Build + Test
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      - name: Generate GitHub App token
+      - name: Generate GitHub App token (hologram read access)
         id: app-token
         uses: actions/create-github-app-token@v1
         with:
@@ -25,10 +37,11 @@ jobs:
           owner: Hologram-Technologies
           repositories: hologram
 
-      - name: Checkout hologram (sibling dependency)
-        run: git clone --depth 1 "https://x-access-token:${TOKEN}@github.com/Hologram-Technologies/hologram.git" ../hologram
-        env:
-          TOKEN: ${{ steps.app-token.outputs.token }}
+      - name: Configure git auth for cargo
+        run: |
+          git config --global \
+            url."https://x-access-token:${{ steps.app-token.outputs.token }}@github.com/Hologram-Technologies/".insteadOf \
+            "https://github.com/Hologram-Technologies/"
 
       - name: Install protoc
         uses: arduino/setup-protoc@v3
@@ -40,41 +53,33 @@ jobs:
         with:
           components: clippy, rustfmt
 
-      - name: Cache cargo registry + build
-        uses: actions/cache@v4
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-
-
-      - name: Generate ONNX fixtures
-        run: |
-          pip3 install onnx numpy --break-system-packages 2>/dev/null || pip install onnx numpy
-          python3 scripts/gen-fixtures.py
-
-      - name: Build workspace
-        run: cargo build --workspace
-
-      - name: Run unit tests
-        run: cargo test --workspace
-
-      - name: Clippy
-        run: cargo clippy --workspace -- -D warnings
+          shared-key: ci
 
       - name: Format check
-        run: cargo fmt --check
+        run: cargo fmt --all -- --check
 
-  conformance:
-    name: ORT Conformance
+      # hologram-ai-desktop depends on gdk-3.0 (system library) which is not
+      # available on ubuntu-latest by default. Its build/test is exercised
+      # by the dedicated macOS release-desktop workflow.
+      - name: Clippy
+        run: cargo clippy --workspace --tests --bins --exclude hologram-ai-desktop -- -D warnings
+
+      - name: Build
+        run: cargo build --workspace --tests --bins --exclude hologram-ai-desktop
+
+      - name: Unit tests
+        run: cargo test --workspace --exclude hologram-ai-desktop
+
+  structural:
+    name: Structural V&V (CE/ZA/ZM/CF/LW/IM)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      - name: Generate GitHub App token
+      - name: Generate GitHub App token (hologram read access)
         id: app-token
         uses: actions/create-github-app-token@v1
         with:
@@ -83,10 +88,11 @@ jobs:
           owner: Hologram-Technologies
           repositories: hologram
 
-      - name: Checkout hologram (sibling dependency)
-        run: git clone --depth 1 "https://x-access-token:${TOKEN}@github.com/Hologram-Technologies/hologram.git" ../hologram
-        env:
-          TOKEN: ${{ steps.app-token.outputs.token }}
+      - name: Configure git auth for cargo
+        run: |
+          git config --global \
+            url."https://x-access-token:${{ steps.app-token.outputs.token }}@github.com/Hologram-Technologies/".insteadOf \
+            "https://github.com/Hologram-Technologies/"
 
       - name: Install protoc
         uses: arduino/setup-protoc@v3
@@ -96,16 +102,108 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Cache cargo registry + build
-        uses: actions/cache@v4
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-conformance-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-conformance-
+          shared-key: structural
+
+      # Mirrors `just vv-structural`. Each axis lives in its own
+      # `structural_<class>.rs` so a failure pinpoints the broken
+      # invariant. CE = content-addressed elision; ZA = zero-alloc; ZM =
+      # zero-movement; CF = canonical-forms totality; LW = lowering vs
+      # reference; IM = import-byte-parsing perimeter.
+      - name: Structural witnesses
+        run: |
+          cargo test --release -p hologram-ai-conformance --features=structural \
+            --test structural_ce \
+            --test structural_za \
+            --test structural_zm \
+            --test structural_cf \
+            --test structural_lw \
+            --test structural_im
+
+  portability:
+    name: Portability V&V (NS — wasm + embedded)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Generate GitHub App token (hologram read access)
+        id: app-token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.APP_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+          owner: Hologram-Technologies
+          repositories: hologram
+
+      - name: Configure git auth for cargo
+        run: |
+          git config --global \
+            url."https://x-access-token:${{ steps.app-token.outputs.token }}@github.com/Hologram-Technologies/".insteadOf \
+            "https://github.com/Hologram-Technologies/"
+
+      - name: Install protoc
+        uses: arduino/setup-protoc@v3
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install Rust toolchain + cross targets
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown,thumbv7em-none-eabi
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: portability
+
+      # NS-1: runtime core (dequant + tokenizer encode/decode) on
+      # wasm32-unknown-unknown (no_std + alloc).
+      - name: Build runtime core on wasm32
+        run: |
+          cargo build --target wasm32-unknown-unknown -p hologram-ai-quant
+          cargo build --target wasm32-unknown-unknown -p hologram-ai-tokenizer --no-default-features
+
+      # NS-2: runtime core on thumbv7em-none-eabi (no_std, bare metal).
+      - name: Build runtime core on thumbv7em-none-eabi
+        run: |
+          cargo build --target thumbv7em-none-eabi -p hologram-ai-quant
+          cargo build --target thumbv7em-none-eabi -p hologram-ai-tokenizer --no-default-features
+
+  ort-conformance:
+    name: ORT Conformance (EE-1)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Generate GitHub App token (hologram read access)
+        id: app-token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.APP_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+          owner: Hologram-Technologies
+          repositories: hologram
+
+      - name: Configure git auth for cargo
+        run: |
+          git config --global \
+            url."https://x-access-token:${{ steps.app-token.outputs.token }}@github.com/Hologram-Technologies/".insteadOf \
+            "https://github.com/Hologram-Technologies/"
+
+      - name: Install protoc
+        uses: arduino/setup-protoc@v3
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ort
 
       - name: Install ONNX Runtime
         run: |
@@ -113,5 +211,8 @@ jobs:
           tar xzf onnxruntime-linux-x64-1.18.1.tgz
           echo "ORT_DYLIB_PATH=$(pwd)/onnxruntime-linux-x64-1.18.1/lib/libonnxruntime.so" >> "$GITHUB_ENV"
 
-      - name: Run conformance tests (Tier 2)
-        run: cargo test -p hologram-ai-conformance --features=conformance
+      # EE-1 mini transformer vs ORT (max rel err 2.2e-5). Doesn't need
+      # HOLOGRAM_AI_LIVE — the fixture is built in-test from
+      # `onnx_builder`.
+      - name: ORT conformance
+        run: cargo test --release -p hologram-ai-conformance --features=conformance
