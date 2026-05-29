@@ -82,14 +82,19 @@ jobs:
       # 3:1) + RMSNorm + SwiGLU MLP + tied LM head (exported without an
       # explicit logits output — exercises hologram-ai's LM-head injection
       # path). 135M params ≈ 540 MB f32; ONNX export uses split external
-      # data (model.onnx + model.onnx_data).
+      # data (model.onnx + model.onnx_data). `HF_READ_TOKEN` is forwarded
+      # so this download survives if HF gates the repo (sibling Qwen2
+      # repo was already gated).
       - name: Download SmolLM2-135M-Instruct
+        env:
+          HF_READ_TOKEN: ${{ secrets.HF_READ_TOKEN }}
         run: |
           mkdir -p models/smollm2-135m
           BASE="https://huggingface.co/HuggingFaceTB/SmolLM2-135M-Instruct/resolve/main/onnx"
-          wget -q -O models/smollm2-135m/model.onnx       "$BASE/model.onnx"
-          wget -q -O models/smollm2-135m/model.onnx_data  "$BASE/model.onnx_data" || true
-          wget -q -O models/smollm2-135m/tokenizer.json \
+          AUTH=(--header="Authorization: Bearer $HF_READ_TOKEN")
+          wget -q "${AUTH[@]}" -O models/smollm2-135m/model.onnx       "$BASE/model.onnx"
+          wget -q "${AUTH[@]}" -O models/smollm2-135m/model.onnx_data  "$BASE/model.onnx_data" || true
+          wget -q "${AUTH[@]}" -O models/smollm2-135m/tokenizer.json \
             "https://huggingface.co/HuggingFaceTB/SmolLM2-135M-Instruct/resolve/main/tokenizer.json"
 
       # EE-2 / EE-3 — coherence + token-for-token ORT logit parity
@@ -144,16 +149,21 @@ jobs:
       # trans_b silent-drop eradication (commit 61b26de) and the
       # subsequent const-dedup shape-key fix (commit 7527764). 500M
       # params ≈ 950 MB f32; needs config.json for the compiler's
-      # context_length seed.
+      # context_length seed. The `onnx-community/Qwen2-0.5B-Instruct`
+      # repo is gated behind HF auth — `HF_READ_TOKEN` (org-level
+      # secret) is forwarded as a `Bearer` header.
       - name: Download Qwen2-0.5B-Instruct
+        env:
+          HF_READ_TOKEN: ${{ secrets.HF_READ_TOKEN }}
         run: |
           mkdir -p models/Qwen2-0.5B-Instruct
           BASE="https://huggingface.co/onnx-community/Qwen2-0.5B-Instruct/resolve/main/onnx"
-          wget -q -O models/Qwen2-0.5B-Instruct/model.onnx       "$BASE/model.onnx"
-          wget -q -O models/Qwen2-0.5B-Instruct/model.onnx_data  "$BASE/model.onnx_data" || true
-          wget -q -O models/Qwen2-0.5B-Instruct/tokenizer.json \
+          AUTH=(--header="Authorization: Bearer $HF_READ_TOKEN")
+          wget -q "${AUTH[@]}" -O models/Qwen2-0.5B-Instruct/model.onnx       "$BASE/model.onnx"
+          wget -q "${AUTH[@]}" -O models/Qwen2-0.5B-Instruct/model.onnx_data  "$BASE/model.onnx_data" || true
+          wget -q "${AUTH[@]}" -O models/Qwen2-0.5B-Instruct/tokenizer.json \
             "https://huggingface.co/onnx-community/Qwen2-0.5B-Instruct/resolve/main/tokenizer.json"
-          wget -q -O models/Qwen2-0.5B-Instruct/config.json \
+          wget -q "${AUTH[@]}" -O models/Qwen2-0.5B-Instruct/config.json \
             "https://huggingface.co/onnx-community/Qwen2-0.5B-Instruct/resolve/main/config.json"
 
       # EE — instruct-style multi-word continuation, prompt-relevance,
