@@ -117,7 +117,7 @@ fn qwen2_attention_k_shape_at_gqa_inputs() {
         // assume some seq; we report kv_total at seq=16 — the diag
         // harness's seq_len_override).
         let seq = 16u64;
-        let expected_k_bytes = 1 * (*num_kv_heads as u64) * seq * (*head_dim as u64) * 4;
+        let expected_k_bytes = (*num_kv_heads as u64) * seq * (*head_dim as u64) * 4;
 
         eprintln!(
             "GQA[{gqa_count}] node_idx={idx} num_heads={num_heads} num_kv_heads={num_kv_heads} head_dim={head_dim}\n  \

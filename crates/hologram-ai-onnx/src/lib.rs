@@ -518,12 +518,16 @@ mod tests {
             .and_then(|d| d.as_concrete())
             .expect("last dim should be concrete vocab_size");
         assert_eq!(last_dim, 32000);
-        // A Gemm node should have been appended.
-        assert_eq!(result.nodes.len(), 1);
+        // Transpose(W) + MatMul nodes should have been appended.
+        // (Gemm{trans_b: true} cannot be used here — hologram_compiler's
+        // Gemm lowering silently drops trans_b; see compiler boundary
+        // discussion in `inject_lm_head_if_needed`.)
+        assert_eq!(result.nodes.len(), 2);
         assert!(matches!(
             result.nodes[0].op,
-            AiOp::Gemm { trans_b: true, .. }
+            AiOp::Transpose { ref perm } if perm.as_slice() == [1, 0]
         ));
+        assert!(matches!(result.nodes[1].op, AiOp::MatMul));
     }
 
     /// `inject_lm_head_if_needed` must be a no-op when `embed_tokens.weight` is

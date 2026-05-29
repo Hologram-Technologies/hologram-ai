@@ -37,14 +37,18 @@ pub struct ComponentInput {
 // ── Model metadata ────────────────────────────────────────────────────────────
 
 /// High-level metadata extracted from the model.
+///
+/// Numeric fields are `Option<u32>` so a missing value is distinct from a
+/// legitimate zero — refuse-not-fabricate (no silent `unwrap_or(0)`).
+/// `arch` is `Option<String>` for the same reason.
 pub struct ModelMetadata {
-    pub arch: String,
-    pub vocab_size: u32,
-    pub context_len: u32,
-    pub n_layers: u32,
-    pub n_embd: u32,
-    pub n_kv_heads: u32,
-    pub head_dim: u32,
+    pub arch: Option<String>,
+    pub vocab_size: Option<u32>,
+    pub context_len: Option<u32>,
+    pub n_layers: Option<u32>,
+    pub n_embd: Option<u32>,
+    pub n_kv_heads: Option<u32>,
+    pub head_dim: Option<u32>,
     /// The source model's uor-addr κ-label (`<axis>:<hex>`) — its canonical
     /// content identity for dedup / warm-start (architecture §8, class MA).
     /// `None` when compiled from a pre-built `AiGraph` (no source bytes).
@@ -465,24 +469,17 @@ fn extract_metadata(graph: &AiGraph) -> ModelMetadata {
     use hologram_ai_common::MetaValue;
 
     let arch = match graph.metadata.get("arch") {
-        Some(MetaValue::Str(s)) => s.clone(),
-        _ => "unknown".into(),
+        Some(MetaValue::Str(s)) => Some(s.clone()),
+        _ => None,
     };
-    let vocab_size = meta_u32(graph, "vocab_size").unwrap_or(0);
-    let context_len = meta_u32(graph, "context_length").unwrap_or(0);
-    let n_layers = meta_u32(graph, "n_layers").unwrap_or(0);
-    let n_embd = meta_u32(graph, "n_embd").unwrap_or(0);
-    let n_kv_heads = meta_u32(graph, "n_kv_heads").unwrap_or(0);
-    let head_dim = meta_u32(graph, "head_dim").unwrap_or(0);
-
     ModelMetadata {
         arch,
-        vocab_size,
-        context_len,
-        n_layers,
-        n_embd,
-        n_kv_heads,
-        head_dim,
+        vocab_size: meta_u32(graph, "vocab_size"),
+        context_len: meta_u32(graph, "context_length"),
+        n_layers: meta_u32(graph, "n_layers"),
+        n_embd: meta_u32(graph, "n_embd"),
+        n_kv_heads: meta_u32(graph, "n_kv_heads"),
+        head_dim: meta_u32(graph, "head_dim"),
         kappa_label: None,
     }
 }
