@@ -241,10 +241,54 @@ impl Pass for DataPropagation {
             if vals.iter().all(|v| v.is_some()) {
                 // All values concrete — materialize directly.
                 let concrete: Vec<i64> = vals.iter().map(|v| v.unwrap()).collect();
-                let bytes: Vec<u8> = concrete.iter().flat_map(|v| v.to_le_bytes()).collect();
-                let shape = crate::ir::shape_from_concrete(&[concrete.len() as u64]);
-                let info = TensorInfo::new(DType::INT64, shape);
-                graph.params.insert(*tid, AiParam::inline(bytes, info));
+                // Preserve the tensor's existing dtype and (rank≥2) shape when
+                // both are known. The default fallback below treats the result
+                // as a 1-D INT64 shape vector — correct for the original use
+                // case (RoPE/index subgraphs) but wrong for rank≥2 integer
+                // weights that DataProp can now fold through MatMulInteger's
+                // Cast→Sub→Cast decomposition. A 2-D INT8 weight like [896,128]
+                // would otherwise be materialized as [114688] INT64, which
+                // breaks downstream MatMul shape inference.
+                let existing = graph.tensor_info.get(tid);
+                let preserve_shape: Option<crate::Shape> = existing.and_then(|ti| {
+                    let concrete_dims: Vec<u64> =
+                        ti.shape.iter().filter_map(|d| d.as_concrete()).collect();
+                    if concrete_dims.len() == ti.shape.len() && !ti.shape.is_empty() {
+                        let prod: u64 = concrete_dims.iter().product();
+                        if prod as usize == concrete.len() {
+                            return Some(crate::ir::shape_from_concrete(&concrete_dims));
+                        }
+                    }
+                    None
+                });
+                let preserve_dtype = existing.map(|ti| ti.logical_dtype).filter(|dt| {
+                    matches!(dt, DType::INT64 | DType::INT32 | DType::INT8 | DType::U8)
+                });
+                if let (Some(shape), Some(dtype)) = (preserve_shape, preserve_dtype) {
+                    // Re-encode in the tensor's native dtype so byte counts
+                    // and downstream interpretation stay consistent.
+                    let bytes: Vec<u8> = match dtype {
+                        DType::INT64 => {
+                            concrete.iter().flat_map(|v| v.to_le_bytes()).collect()
+                        }
+                        DType::INT32 => concrete
+                            .iter()
+                            .flat_map(|v| (*v as i32).to_le_bytes())
+                            .collect(),
+                        DType::INT8 => concrete.iter().map(|v| *v as i8 as u8).collect(),
+                        DType::U8 => concrete.iter().map(|v| *v as u8).collect(),
+                        _ => unreachable!("filter above"),
+                    };
+                    let info = TensorInfo::new(dtype, shape);
+                    graph.params.insert(*tid, AiParam::inline(bytes, info));
+                } else {
+                    // Fallback: shape vector (1-D INT64). Original behavior.
+                    let bytes: Vec<u8> =
+                        concrete.iter().flat_map(|v| v.to_le_bytes()).collect();
+                    let shape = crate::ir::shape_from_concrete(&[concrete.len() as u64]);
+                    let info = TensorInfo::new(DType::INT64, shape);
+                    graph.params.insert(*tid, AiParam::inline(bytes, info));
+                }
             }
         }
 

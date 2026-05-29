@@ -148,6 +148,364 @@ pub fn build_ai_graph(
             });
         }
 
+        // Decompose ONNX standard `DynamicQuantizeLinear` (opset 11+)
+        // into canonical AiOps at import time. The ONNX op packs
+        // amax/amin reduction, scale derivation, zero-point quantization,
+        // and the x → uint8 quantization into a single node with three
+        // outputs; routing to `AiOp::Opaque` leaves all three TensorIds
+        // undefined at lowering, which surfaces as `tensor T<n>
+        // referenced before definition` once the Qwen2.5 int8 graph (96
+        // DQL instances feeding 168 MatMulInteger consumers) hits the
+        // pipeline. Spec: https://onnx.ai/onnx/operators/onnx__DynamicQuantizeLinear.html
+        //
+        //   Inputs:  [x]            (f32)
+        //   Outputs: [y, y_scale, y_zero_point]
+        //
+        //   max_x      = ReduceMax(x)
+        //   min_x      = ReduceMin(x)
+        //   max_clip   = Max(max_x, 0)
+        //   min_clip   = Min(min_x, 0)
+        //   range      = max_clip - min_clip
+        //   y_scale    = range / 255                       → output[1]
+        //   neg_min    = Neg(min_clip)
+        //   zp_f32     = neg_min / y_scale
+        //   zp_round   = Round(zp_f32)
+        //   zp_clip    = Min(Max(zp_round, 0), 255)        // canonical clip
+        //   y_zero     = Cast(zp_clip, U8)                 → output[2]
+        //   x_scaled   = x / y_scale
+        //   x_round    = Round(x_scaled)
+        //   x_shift    = x_round + zp_f32
+        //   x_clip     = Min(Max(x_shift, 0), 255)         // canonical clip
+        //   y          = Cast(x_clip, U8)                  → output[0]
+        if n.op_type == "DynamicQuantizeLinear" {
+            if input_tids.is_empty() || output_tids.len() < 3 {
+                warnings.push(ImportWarning {
+                    message: format!(
+                        "DynamicQuantizeLinear '{}' has too few inputs/outputs ({}/{}); skipping",
+                        n.name,
+                        input_tids.len(),
+                        output_tids.len()
+                    ),
+                    node_name: Some(n.name.clone()),
+                });
+                continue;
+            }
+
+            let x_tid = input_tids[0];
+            let y_tid = output_tids[0];
+            let scale_tid = output_tids[1];
+            let zp_tid = output_tids[2];
+
+            // Override the placeholder F32 dtype for the uint8 outputs.
+            // `y` keeps `x`'s shape; `y_scale`/`y_zero_point` are scalars.
+            if let Some(info) = tensor_info.get_mut(&y_tid) {
+                info.logical_dtype = DType::U8;
+                info.storage_dtype = DType::U8;
+            }
+            if let Some(info) = tensor_info.get_mut(&scale_tid) {
+                info.logical_dtype = DType::F32;
+                info.storage_dtype = DType::F32;
+            }
+            if let Some(info) = tensor_info.get_mut(&zp_tid) {
+                info.logical_dtype = DType::U8;
+                info.storage_dtype = DType::U8;
+            }
+
+            let mut synth_counter: u32 = 0;
+            macro_rules! new_intermediate {
+                ($tag:expr, $dtype:expr) => {{
+                    let name = format!("__hai_dql_{}_{}_{}", n.name, $tag, synth_counter);
+                    synth_counter += 1;
+                    let tid = alloc_tid(&name, &mut name_to_tid);
+                    tensor_info.insert(
+                        tid,
+                        TensorInfo {
+                            logical_dtype: $dtype,
+                            storage_dtype: $dtype,
+                            shape: Shape::new(),
+                            quant: QuantDescriptor::none(),
+                            known_i64_values: None,
+                            semantic: SemanticHint::Unknown,
+                        },
+                    );
+                    tid
+                }};
+            }
+            macro_rules! new_f32_const {
+                ($tag:expr, $value:expr) => {{
+                    let v: f32 = $value;
+                    let name = format!("__hai_dql_{}_{}_const_{}", n.name, $tag, synth_counter);
+                    synth_counter += 1;
+                    let tid = alloc_tid(&name, &mut name_to_tid);
+                    let info = TensorInfo {
+                        logical_dtype: DType::F32,
+                        storage_dtype: DType::F32,
+                        shape: Shape::new(),
+                        quant: QuantDescriptor::none(),
+                        known_i64_values: None,
+                        semantic: SemanticHint::Unknown,
+                    };
+                    tensor_info.insert(tid, info.clone());
+                    params.insert(tid, AiParam::inline(v.to_le_bytes().to_vec(), info));
+                    tid
+                }};
+            }
+            macro_rules! push_node {
+                ($op:expr, $inputs:expr, $outputs:expr) => {{
+                    let nid = next_nid;
+                    next_nid += 1;
+                    nodes.push(AiNode::new(nid, $op, $inputs, $outputs));
+                }};
+            }
+
+            // 1. max_x = ReduceMax(x, axes=[], keepdims=false)
+            let max_x_tid = new_intermediate!("max_x", DType::F32);
+            push_node!(
+                AiOp::ReduceMax {
+                    axes: vec![],
+                    keepdims: false,
+                },
+                vec![x_tid],
+                vec![max_x_tid]
+            );
+
+            // 2. min_x = ReduceMin(x, axes=[], keepdims=false)
+            let min_x_tid = new_intermediate!("min_x", DType::F32);
+            push_node!(
+                AiOp::ReduceMin {
+                    axes: vec![],
+                    keepdims: false,
+                },
+                vec![x_tid],
+                vec![min_x_tid]
+            );
+
+            // 3. Constants 0.0 and 255.0.
+            let c0_tid = new_f32_const!("c0", 0.0);
+            let c255_tid = new_f32_const!("c255", 255.0);
+
+            // 4. max_clip = Max(max_x, 0)
+            let max_clip_tid = new_intermediate!("max_clip", DType::F32);
+            push_node!(AiOp::Max, vec![max_x_tid, c0_tid], vec![max_clip_tid]);
+
+            // 5. min_clip = Min(min_x, 0)
+            let min_clip_tid = new_intermediate!("min_clip", DType::F32);
+            push_node!(AiOp::Min, vec![min_x_tid, c0_tid], vec![min_clip_tid]);
+
+            // 6. range = max_clip - min_clip
+            let range_tid = new_intermediate!("range", DType::F32);
+            push_node!(
+                AiOp::Sub,
+                vec![max_clip_tid, min_clip_tid],
+                vec![range_tid]
+            );
+
+            // 7. y_scale = range / 255       → output[1]
+            push_node!(AiOp::Div, vec![range_tid, c255_tid], vec![scale_tid]);
+
+            // 8. neg_min = Neg(min_clip)
+            let neg_min_tid = new_intermediate!("neg_min", DType::F32);
+            push_node!(AiOp::Neg, vec![min_clip_tid], vec![neg_min_tid]);
+
+            // 9. zp_f32 = neg_min / y_scale
+            let zp_f32_tid = new_intermediate!("zp_f32", DType::F32);
+            push_node!(AiOp::Div, vec![neg_min_tid, scale_tid], vec![zp_f32_tid]);
+
+            // 10. zp_rounded = Round(zp_f32)
+            let zp_round_tid = new_intermediate!("zp_round", DType::F32);
+            push_node!(AiOp::Round, vec![zp_f32_tid], vec![zp_round_tid]);
+
+            // 11. zp_clip = Min(Max(zp_round, 0), 255)
+            //
+            // We emit Min∘Max instead of AiOp::Clip because the canonical
+            // lowering treats Clip's bounds as trailing operands (read from
+            // AiNode.inputs positionally), not from the AiOp::Clip struct
+            // fields. With only one input, the backend's Clip kernel fails
+            // with UnsupportedOp ("(min, max) bounds not represented in
+            // UnaryCall"). Min∘Max routes through binary_w8 directly and
+            // has identical semantics for finite bounds.
+            let zp_max_tid = new_intermediate!("zp_max", DType::F32);
+            push_node!(AiOp::Max, vec![zp_round_tid, c0_tid], vec![zp_max_tid]);
+            let zp_clip_tid = new_intermediate!("zp_clip", DType::F32);
+            push_node!(AiOp::Min, vec![zp_max_tid, c255_tid], vec![zp_clip_tid]);
+
+            // 12. y_zero = Cast(zp_clip, U8)  → output[2]
+            push_node!(AiOp::Cast { to: DType::U8 }, vec![zp_clip_tid], vec![zp_tid]);
+
+            // 13. x_scaled = x / y_scale
+            let x_scaled_tid = new_intermediate!("x_scaled", DType::F32);
+            push_node!(AiOp::Div, vec![x_tid, scale_tid], vec![x_scaled_tid]);
+
+            // 14. x_round = Round(x_scaled)
+            let x_round_tid = new_intermediate!("x_round", DType::F32);
+            push_node!(AiOp::Round, vec![x_scaled_tid], vec![x_round_tid]);
+
+            // 15. x_shift = x_round + zp_f32
+            let x_shift_tid = new_intermediate!("x_shift", DType::F32);
+            push_node!(
+                AiOp::Add,
+                vec![x_round_tid, zp_f32_tid],
+                vec![x_shift_tid]
+            );
+
+            // 16. x_clip = Min(Max(x_shift, 0), 255)
+            //   (see zp_clip above for the Min∘Max vs Clip rationale)
+            let x_max_tid = new_intermediate!("x_max", DType::F32);
+            push_node!(AiOp::Max, vec![x_shift_tid, c0_tid], vec![x_max_tid]);
+            let x_clip_tid = new_intermediate!("x_clip", DType::F32);
+            push_node!(AiOp::Min, vec![x_max_tid, c255_tid], vec![x_clip_tid]);
+
+            // 17. y = Cast(x_clip, U8)        → output[0]
+            push_node!(AiOp::Cast { to: DType::U8 }, vec![x_clip_tid], vec![y_tid]);
+
+            let _ = synth_counter; // final increment is unused; silence lint.
+            continue;
+        }
+
+        // Decompose ONNX standard `MatMulInteger` (opset 10+) into
+        // canonical AiOps: cast int operands to f32, subtract optional
+        // per-row/per-column zero points (also cast), MatMul in f32,
+        // then cast the product back to int32. f32 has a 24-bit
+        // mantissa, so for K ≤ ~2^24 with u8/i8 inputs the int32
+        // accumulator value is exact (Qwen2.5-0.5B hidden_size=896, well
+        // under 2^24). Spec: https://onnx.ai/onnx/operators/onnx__MatMulInteger.html
+        //
+        //   Inputs:  [A, B, a_zero_point?, b_zero_point?]
+        //   Output:  [Y]   int32
+        //
+        //   a_i32 = Cast(A, INT32)
+        //   b_i32 = Cast(B, INT32)
+        //   a_centered = (a_zp present) ? Sub(a_i32, Cast(a_zp, INT32)) : a_i32
+        //   b_centered = (b_zp present) ? Sub(b_i32, Cast(b_zp, INT32)) : b_i32
+        //   a_f32 = Cast(a_centered, FLOAT)
+        //   b_f32 = Cast(b_centered, FLOAT)
+        //   mm    = MatMul(a_f32, b_f32)
+        //   Y     = Cast(mm, INT32)
+        if n.op_type == "MatMulInteger" {
+            if input_tids.len() < 2 || output_tids.is_empty() {
+                warnings.push(ImportWarning {
+                    message: format!(
+                        "MatMulInteger '{}' has too few inputs/outputs ({}/{}); skipping",
+                        n.name,
+                        input_tids.len(),
+                        output_tids.len()
+                    ),
+                    node_name: Some(n.name.clone()),
+                });
+                continue;
+            }
+
+            let a_tid = input_tids[0];
+            let b_tid = input_tids[1];
+            let a_zp_tid = input_tids.get(2).copied();
+            let b_zp_tid = input_tids.get(3).copied();
+            let y_tid = output_tids[0];
+
+            if let Some(info) = tensor_info.get_mut(&y_tid) {
+                info.logical_dtype = DType::INT32;
+                info.storage_dtype = DType::INT32;
+            }
+
+            let mut synth_counter: u32 = 0;
+            macro_rules! new_intermediate {
+                ($tag:expr, $dtype:expr) => {{
+                    let name = format!("__hai_mmi_{}_{}_{}", n.name, $tag, synth_counter);
+                    synth_counter += 1;
+                    let tid = alloc_tid(&name, &mut name_to_tid);
+                    tensor_info.insert(
+                        tid,
+                        TensorInfo {
+                            logical_dtype: $dtype,
+                            storage_dtype: $dtype,
+                            shape: Shape::new(),
+                            quant: QuantDescriptor::none(),
+                            known_i64_values: None,
+                            semantic: SemanticHint::Unknown,
+                        },
+                    );
+                    tid
+                }};
+            }
+            macro_rules! push_node {
+                ($op:expr, $inputs:expr, $outputs:expr) => {{
+                    let nid = next_nid;
+                    next_nid += 1;
+                    nodes.push(AiNode::new(nid, $op, $inputs, $outputs));
+                }};
+            }
+
+            // Cast A and B to INT32.
+            let a_i32_tid = new_intermediate!("a_i32", DType::INT32);
+            push_node!(AiOp::Cast { to: DType::INT32 }, vec![a_tid], vec![a_i32_tid]);
+            let b_i32_tid = new_intermediate!("b_i32", DType::INT32);
+            push_node!(AiOp::Cast { to: DType::INT32 }, vec![b_tid], vec![b_i32_tid]);
+
+            // Subtract zero points if present (broadcasted by AiOp::Sub).
+            let a_centered_tid = if let Some(zp_tid) = a_zp_tid {
+                let a_zp_i32_tid = new_intermediate!("a_zp_i32", DType::INT32);
+                push_node!(
+                    AiOp::Cast { to: DType::INT32 },
+                    vec![zp_tid],
+                    vec![a_zp_i32_tid]
+                );
+                let centered = new_intermediate!("a_centered", DType::INT32);
+                push_node!(
+                    AiOp::Sub,
+                    vec![a_i32_tid, a_zp_i32_tid],
+                    vec![centered]
+                );
+                centered
+            } else {
+                a_i32_tid
+            };
+
+            let b_centered_tid = if let Some(zp_tid) = b_zp_tid {
+                let b_zp_i32_tid = new_intermediate!("b_zp_i32", DType::INT32);
+                push_node!(
+                    AiOp::Cast { to: DType::INT32 },
+                    vec![zp_tid],
+                    vec![b_zp_i32_tid]
+                );
+                let centered = new_intermediate!("b_centered", DType::INT32);
+                push_node!(
+                    AiOp::Sub,
+                    vec![b_i32_tid, b_zp_i32_tid],
+                    vec![centered]
+                );
+                centered
+            } else {
+                b_i32_tid
+            };
+
+            // Cast to f32 → MatMul → Cast back to INT32 (→ output[0]).
+            let a_f32_tid = new_intermediate!("a_f32", DType::F32);
+            push_node!(
+                AiOp::Cast { to: DType::F32 },
+                vec![a_centered_tid],
+                vec![a_f32_tid]
+            );
+            let b_f32_tid = new_intermediate!("b_f32", DType::F32);
+            push_node!(
+                AiOp::Cast { to: DType::F32 },
+                vec![b_centered_tid],
+                vec![b_f32_tid]
+            );
+            let mm_f32_tid = new_intermediate!("mm_f32", DType::F32);
+            push_node!(
+                AiOp::MatMul,
+                vec![a_f32_tid, b_f32_tid],
+                vec![mm_f32_tid]
+            );
+            push_node!(
+                AiOp::Cast { to: DType::INT32 },
+                vec![mm_f32_tid],
+                vec![y_tid]
+            );
+
+            let _ = synth_counter; // final increment is unused; silence lint.
+            continue;
+        }
+
         // Decompose ONNX Microsoft-contrib `RotaryEmbedding` into a
         // canonical sequence of shape ops + Gather + arithmetic. The
         // contrib op fuses position lookup and the paired-halves rotation
