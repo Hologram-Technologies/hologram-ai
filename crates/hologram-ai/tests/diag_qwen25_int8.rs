@@ -65,8 +65,16 @@ fn dump_int8_qwen25_around_t5147() {
         }
         let b = n.inputs.get(1).copied().unwrap_or(u32::MAX);
         let a = n.inputs.first().copied().unwrap_or(u32::MAX);
-        let a_rank = opted.tensor_info.get(&a).map(|i| i.shape.len()).unwrap_or(0);
-        let b_rank = opted.tensor_info.get(&b).map(|i| i.shape.len()).unwrap_or(0);
+        let a_rank = opted
+            .tensor_info
+            .get(&a)
+            .map(|i| i.shape.len())
+            .unwrap_or(0);
+        let b_rank = opted
+            .tensor_info
+            .get(&b)
+            .map(|i| i.shape.len())
+            .unwrap_or(0);
         if a_rank >= 3 && b_rank < 2 {
             bad += 1;
         }
@@ -87,5 +95,8 @@ fn dump_int8_qwen25_around_t5147() {
         }
     }
     assert_eq!(bad, 0, "MatMul shape anomalies regressed");
-    assert!(opaque.is_empty(), "Opaque op survivors regressed: {opaque:?}");
+    assert!(
+        opaque.is_empty(),
+        "Opaque op survivors regressed: {opaque:?}"
+    );
 }

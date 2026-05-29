@@ -268,9 +268,7 @@ impl Pass for DataPropagation {
                     // Re-encode in the tensor's native dtype so byte counts
                     // and downstream interpretation stay consistent.
                     let bytes: Vec<u8> = match dtype {
-                        DType::INT64 => {
-                            concrete.iter().flat_map(|v| v.to_le_bytes()).collect()
-                        }
+                        DType::INT64 => concrete.iter().flat_map(|v| v.to_le_bytes()).collect(),
                         DType::INT32 => concrete
                             .iter()
                             .flat_map(|v| (*v as i32).to_le_bytes())
@@ -283,8 +281,7 @@ impl Pass for DataPropagation {
                     graph.params.insert(*tid, AiParam::inline(bytes, info));
                 } else {
                     // Fallback: shape vector (1-D INT64). Original behavior.
-                    let bytes: Vec<u8> =
-                        concrete.iter().flat_map(|v| v.to_le_bytes()).collect();
+                    let bytes: Vec<u8> = concrete.iter().flat_map(|v| v.to_le_bytes()).collect();
                     let shape = crate::ir::shape_from_concrete(&[concrete.len() as u64]);
                     let info = TensorInfo::new(DType::INT64, shape);
                     graph.params.insert(*tid, AiParam::inline(bytes, info));

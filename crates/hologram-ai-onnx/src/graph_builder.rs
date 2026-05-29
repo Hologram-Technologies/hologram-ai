@@ -294,11 +294,7 @@ pub fn build_ai_graph(
 
             // 6. range = max_clip - min_clip
             let range_tid = new_intermediate!("range", DType::F32);
-            push_node!(
-                AiOp::Sub,
-                vec![max_clip_tid, min_clip_tid],
-                vec![range_tid]
-            );
+            push_node!(AiOp::Sub, vec![max_clip_tid, min_clip_tid], vec![range_tid]);
 
             // 7. y_scale = range / 255       → output[1]
             push_node!(AiOp::Div, vec![range_tid, c255_tid], vec![scale_tid]);
@@ -330,7 +326,11 @@ pub fn build_ai_graph(
             push_node!(AiOp::Min, vec![zp_max_tid, c255_tid], vec![zp_clip_tid]);
 
             // 12. y_zero = Cast(zp_clip, U8)  → output[2]
-            push_node!(AiOp::Cast { to: DType::U8 }, vec![zp_clip_tid], vec![zp_tid]);
+            push_node!(
+                AiOp::Cast { to: DType::U8 },
+                vec![zp_clip_tid],
+                vec![zp_tid]
+            );
 
             // 13. x_scaled = x / y_scale
             let x_scaled_tid = new_intermediate!("x_scaled", DType::F32);
@@ -342,11 +342,7 @@ pub fn build_ai_graph(
 
             // 15. x_shift = x_round + zp_f32
             let x_shift_tid = new_intermediate!("x_shift", DType::F32);
-            push_node!(
-                AiOp::Add,
-                vec![x_round_tid, zp_f32_tid],
-                vec![x_shift_tid]
-            );
+            push_node!(AiOp::Add, vec![x_round_tid, zp_f32_tid], vec![x_shift_tid]);
 
             // 16. x_clip = Min(Max(x_shift, 0), 255)
             //   (see zp_clip above for the Min∘Max vs Clip rationale)
@@ -436,9 +432,17 @@ pub fn build_ai_graph(
 
             // Cast A and B to INT32.
             let a_i32_tid = new_intermediate!("a_i32", DType::INT32);
-            push_node!(AiOp::Cast { to: DType::INT32 }, vec![a_tid], vec![a_i32_tid]);
+            push_node!(
+                AiOp::Cast { to: DType::INT32 },
+                vec![a_tid],
+                vec![a_i32_tid]
+            );
             let b_i32_tid = new_intermediate!("b_i32", DType::INT32);
-            push_node!(AiOp::Cast { to: DType::INT32 }, vec![b_tid], vec![b_i32_tid]);
+            push_node!(
+                AiOp::Cast { to: DType::INT32 },
+                vec![b_tid],
+                vec![b_i32_tid]
+            );
 
             // Subtract zero points if present (broadcasted by AiOp::Sub).
             let a_centered_tid = if let Some(zp_tid) = a_zp_tid {
@@ -449,11 +453,7 @@ pub fn build_ai_graph(
                     vec![a_zp_i32_tid]
                 );
                 let centered = new_intermediate!("a_centered", DType::INT32);
-                push_node!(
-                    AiOp::Sub,
-                    vec![a_i32_tid, a_zp_i32_tid],
-                    vec![centered]
-                );
+                push_node!(AiOp::Sub, vec![a_i32_tid, a_zp_i32_tid], vec![centered]);
                 centered
             } else {
                 a_i32_tid
@@ -467,11 +467,7 @@ pub fn build_ai_graph(
                     vec![b_zp_i32_tid]
                 );
                 let centered = new_intermediate!("b_centered", DType::INT32);
-                push_node!(
-                    AiOp::Sub,
-                    vec![b_i32_tid, b_zp_i32_tid],
-                    vec![centered]
-                );
+                push_node!(AiOp::Sub, vec![b_i32_tid, b_zp_i32_tid], vec![centered]);
                 centered
             } else {
                 b_i32_tid
@@ -491,11 +487,7 @@ pub fn build_ai_graph(
                 vec![b_f32_tid]
             );
             let mm_f32_tid = new_intermediate!("mm_f32", DType::F32);
-            push_node!(
-                AiOp::MatMul,
-                vec![a_f32_tid, b_f32_tid],
-                vec![mm_f32_tid]
-            );
+            push_node!(AiOp::MatMul, vec![a_f32_tid, b_f32_tid], vec![mm_f32_tid]);
             push_node!(
                 AiOp::Cast { to: DType::INT32 },
                 vec![mm_f32_tid],
