@@ -79,23 +79,41 @@ jobs:
           shared-key: arch-smollm2-135m
 
       # Llama-family decoder: RoPE + GQA (9 Q heads / 3 KV heads = ratio
-      # 3:1) + RMSNorm + SwiGLU MLP + tied LM head (exported without an
-      # explicit logits output — exercises hologram-ai's LM-head injection
-      # path). 135M params ≈ 540 MB f32; ONNX export uses split external
-      # data (model.onnx + model.onnx_data). `HF_READ_TOKEN` is forwarded
-      # so this download survives if HF gates the repo (sibling Qwen2
-      # repo was already gated).
+      # 3:1) + RMSNorm + SwiGLU MLP + tied LM head. The current
+      # `HuggingFaceTB/SmolLM2-135M-Instruct` ONNX export uses three
+      # Microsoft contrib ops (RotaryEmbedding, GroupQueryAttention,
+      # SkipSimplifiedLayerNormalization) which hologram-ai-onnx
+      # decomposes to canonical AiOps at import time (see
+      # `graph_builder.rs`). 135M params; ONNX export uses split
+      # external data (model.onnx + model.onnx_data).
+      #
+      # SmolLM2 is pinned to a specific HF commit so the witness bytes
+      # are deterministic. If the upstream export style changes, this
+      # job must continue to validate the FROZEN bytes the import path
+      # was V&V'd against; a new commit pin is a deliberate scope
+      # bump, not a silent drift.
+      #
+      # `HF_READ_TOKEN` is forwarded as Bearer auth so the workflow
+      # survives if HF gates the repo (sibling Qwen2 repo went behind
+      # a gate after the original public window).
       - name: Download SmolLM2-135M-Instruct
         env:
           HF_READ_TOKEN: ${{ secrets.HF_READ_TOKEN }}
         run: |
+          set -euo pipefail
           mkdir -p models/smollm2-135m
-          BASE="https://huggingface.co/HuggingFaceTB/SmolLM2-135M-Instruct/resolve/main/onnx"
-          AUTH=(--header="Authorization: Bearer $HF_READ_TOKEN")
-          wget -q "${AUTH[@]}" -O models/smollm2-135m/model.onnx       "$BASE/model.onnx"
-          wget -q "${AUTH[@]}" -O models/smollm2-135m/model.onnx_data  "$BASE/model.onnx_data" || true
-          wget -q "${AUTH[@]}" -O models/smollm2-135m/tokenizer.json \
-            "https://huggingface.co/HuggingFaceTB/SmolLM2-135M-Instruct/resolve/main/tokenizer.json"
+          COMMIT="12fd25f77366fa6b3b4b768ec3050bf629380bac"
+          BASE="https://huggingface.co/HuggingFaceTB/SmolLM2-135M-Instruct/resolve/$COMMIT"
+          fetch() {
+            local dest="$1" url="$2"
+            curl --silent --show-error --fail --location \
+              ${HF_READ_TOKEN:+--header "Authorization: Bearer $HF_READ_TOKEN"} \
+              --output "$dest" "$url"
+          }
+          fetch models/smollm2-135m/model.onnx        "$BASE/onnx/model.onnx"
+          fetch models/smollm2-135m/model.onnx_data   "$BASE/onnx/model.onnx_data" || true
+          fetch models/smollm2-135m/tokenizer.json    "$BASE/tokenizer.json"
+          ls -la models/smollm2-135m/
 
       # EE-2 / EE-3 — coherence + token-for-token ORT logit parity
       # ("The capital of France is" → " Paris. Paris is the largest city
@@ -148,23 +166,65 @@ jobs:
       # Regression witness for the UOR-native rank-3 MatMul fix + Gemm
       # trans_b silent-drop eradication (commit 61b26de) and the
       # subsequent const-dedup shape-key fix (commit 7527764). 500M
-      # params ≈ 950 MB f32; needs config.json for the compiler's
-      # context_length seed. The `onnx-community/Qwen2-0.5B-Instruct`
-      # repo is gated behind HF auth — `HF_READ_TOKEN` (org-level
-      # secret) is forwarded as a `Bearer` header.
+      # params ≈ 950 MB f32. The `onnx-community/Qwen2-0.5B-Instruct`
+      # repo went behind HF auth after the original public window —
+      # `HF_READ_TOKEN` (org secret) is forwarded as Bearer auth.
+
+      # Pre-flight: verify HF_READ_TOKEN is present and authenticates.
+      # If this fails we want the loud, specific error rather than a
+      # later 401/403 on the model download.
+      - name: Verify HF auth (preflight)
+        env:
+          HF_READ_TOKEN: ${{ secrets.HF_READ_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z "${HF_READ_TOKEN:-}" ]; then
+            echo "::error::HF_READ_TOKEN secret is empty or not set." >&2
+            exit 1
+          fi
+          echo "HF_READ_TOKEN length: ${#HF_READ_TOKEN}"
+          # whoami-v2 returns 200 + JSON identity on a valid token,
+          # 401 on missing/bad, 403 on token without scope. Surface
+          # the actual response code so failures are diagnosable.
+          status=$(curl --silent --output /tmp/whoami.json --write-out '%{http_code}' \
+            --header "Authorization: Bearer $HF_READ_TOKEN" \
+            "https://huggingface.co/api/whoami-v2")
+          echo "whoami-v2 HTTP status: $status"
+          if [ "$status" != "200" ]; then
+            echo "::error::HF token failed whoami-v2 (status $status). Body:" >&2
+            cat /tmp/whoami.json >&2
+            exit 1
+          fi
+          # Probe model access without downloading the body.
+          probe=$(curl --silent --output /tmp/probe.txt --write-out '%{http_code}' \
+            --head --location \
+            --header "Authorization: Bearer $HF_READ_TOKEN" \
+            "https://huggingface.co/onnx-community/Qwen2-0.5B-Instruct/resolve/main/config.json")
+          echo "Qwen2 config.json HEAD status: $probe"
+          if [ "$probe" != "200" ] && [ "$probe" != "302" ]; then
+            echo "::error::HF token cannot read onnx-community/Qwen2-0.5B-Instruct (status $probe)." >&2
+            cat /tmp/probe.txt >&2
+            exit 1
+          fi
+
       - name: Download Qwen2-0.5B-Instruct
         env:
           HF_READ_TOKEN: ${{ secrets.HF_READ_TOKEN }}
         run: |
+          set -euo pipefail
           mkdir -p models/Qwen2-0.5B-Instruct
-          BASE="https://huggingface.co/onnx-community/Qwen2-0.5B-Instruct/resolve/main/onnx"
-          AUTH=(--header="Authorization: Bearer $HF_READ_TOKEN")
-          wget -q "${AUTH[@]}" -O models/Qwen2-0.5B-Instruct/model.onnx       "$BASE/model.onnx"
-          wget -q "${AUTH[@]}" -O models/Qwen2-0.5B-Instruct/model.onnx_data  "$BASE/model.onnx_data" || true
-          wget -q "${AUTH[@]}" -O models/Qwen2-0.5B-Instruct/tokenizer.json \
-            "https://huggingface.co/onnx-community/Qwen2-0.5B-Instruct/resolve/main/tokenizer.json"
-          wget -q "${AUTH[@]}" -O models/Qwen2-0.5B-Instruct/config.json \
-            "https://huggingface.co/onnx-community/Qwen2-0.5B-Instruct/resolve/main/config.json"
+          BASE="https://huggingface.co/onnx-community/Qwen2-0.5B-Instruct/resolve/main"
+          fetch() {
+            local dest="$1" url="$2"
+            curl --silent --show-error --fail --location \
+              --header "Authorization: Bearer $HF_READ_TOKEN" \
+              --output "$dest" "$url"
+          }
+          fetch models/Qwen2-0.5B-Instruct/model.onnx       "$BASE/onnx/model.onnx"
+          fetch models/Qwen2-0.5B-Instruct/model.onnx_data  "$BASE/onnx/model.onnx_data" || true
+          fetch models/Qwen2-0.5B-Instruct/tokenizer.json   "$BASE/tokenizer.json"
+          fetch models/Qwen2-0.5B-Instruct/config.json      "$BASE/config.json"
+          ls -la models/Qwen2-0.5B-Instruct/
 
       # EE — instruct-style multi-word continuation, prompt-relevance,
       # determinism. Qwen2 hits the GQA-7:1 + native-logits paths.
