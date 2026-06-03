@@ -4,7 +4,7 @@
 use alloc::vec;
 use alloc::vec::Vec;
 
-/// `no_std`-safe f32 round-half-to-even via libm (f32::round is not in core).
+/// `no_std`-safe f32 round-half-away-from-zero via libm (`f32::round` is not in core).
 #[inline(always)]
 fn round_f32(x: f32) -> f32 {
     libm::roundf(x)
@@ -85,5 +85,18 @@ mod tests {
         let (q, scales) = encode_int8_per_channel(&w, k, n);
         assert_eq!(scales[0], 1.0 / 127.0);
         assert_eq!(q[1], -127);
+        assert_eq!(q[0], 64); // 63.5 rounds half-away-from-zero
+    }
+
+    #[test]
+    fn negative_only_column_round_trips() {
+        let (k, n) = (3usize, 1usize);
+        let w = vec![-0.5f32, -1.0, -0.25];
+        let (q, scales) = encode_int8_per_channel(&w, k, n);
+        assert_eq!(scales[0], 1.0 / 127.0);
+        for i in 0..k {
+            let deq = q[i] as f32 * scales[0];
+            assert!((deq - w[i]).abs() <= scales[0] / 2.0 + 1e-6);
+        }
     }
 }
