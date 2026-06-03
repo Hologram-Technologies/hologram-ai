@@ -122,7 +122,7 @@ jobs:
         run: cargo test --release -p hologram-ai-conformance --features=onnx-spec --test real_model_generation -- --nocapture
 
   qwen2-0_5b-instruct:
-    name: Qwen2-0.5B-Instruct
+    name: Qwen2.5-0.5B-Instruct
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -166,9 +166,18 @@ jobs:
       # Regression witness for the UOR-native rank-3 MatMul fix + Gemm
       # trans_b silent-drop eradication (commit 61b26de) and the
       # subsequent const-dedup shape-key fix (commit 7527764). 500M
-      # params ≈ 950 MB f32. The `onnx-community/Qwen2-0.5B-Instruct`
-      # repo went behind HF auth after the original public window —
-      # `HF_READ_TOKEN` (org secret) is forwarded as Bearer auth.
+      # params ≈ 950 MB f32.
+      #
+      # Model swap (2026-06): the original `onnx-community/Qwen2-0.5B-Instruct`
+      # repo was removed from the Hub (`RepoNotFound` 404 on resolve, see PR #1
+      # CI history). We now validate against the in-family successor
+      # `onnx-community/Qwen2.5-0.5B-Instruct`, which is the same architecture
+      # family (Qwen2 GQA, biased Q/K/V, native logits output) at the same
+      # 0.5B scale. The EE assertions are loose (Paris in the France
+      # completion, multi-word continuation, greedy determinism) so the
+      # successor satisfies them without test changes.
+      # `HF_READ_TOKEN` (org secret) is still forwarded as Bearer auth so
+      # the preflight + download work even if the repo is later gated.
 
       # Pre-flight: verify HF_READ_TOKEN is present and authenticates.
       # If this fails we want the loud, specific error rather than a
@@ -199,34 +208,37 @@ jobs:
           probe=$(curl --silent --output /tmp/probe.txt --write-out '%{http_code}' \
             --head --location \
             --header "Authorization: Bearer $HF_READ_TOKEN" \
-            "https://huggingface.co/onnx-community/Qwen2-0.5B-Instruct/resolve/main/config.json")
-          echo "Qwen2 config.json HEAD status: $probe"
+            "https://huggingface.co/onnx-community/Qwen2.5-0.5B-Instruct/resolve/main/config.json")
+          echo "Qwen2.5 config.json HEAD status: $probe"
           if [ "$probe" != "200" ] && [ "$probe" != "302" ]; then
-            echo "::error::HF token cannot read onnx-community/Qwen2-0.5B-Instruct (status $probe)." >&2
+            echo "::error::HF token cannot read onnx-community/Qwen2.5-0.5B-Instruct (status $probe)." >&2
             cat /tmp/probe.txt >&2
             exit 1
           fi
 
-      - name: Download Qwen2-0.5B-Instruct
+      - name: Download Qwen2.5-0.5B-Instruct
         env:
           HF_READ_TOKEN: ${{ secrets.HF_READ_TOKEN }}
         run: |
           set -euo pipefail
-          mkdir -p models/Qwen2-0.5B-Instruct
-          BASE="https://huggingface.co/onnx-community/Qwen2-0.5B-Instruct/resolve/main"
+          mkdir -p models/Qwen2.5-0.5B-Instruct
+          BASE="https://huggingface.co/onnx-community/Qwen2.5-0.5B-Instruct/resolve/main"
           fetch() {
             local dest="$1" url="$2"
             curl --silent --show-error --fail --location \
               --header "Authorization: Bearer $HF_READ_TOKEN" \
               --output "$dest" "$url"
           }
-          fetch models/Qwen2-0.5B-Instruct/model.onnx       "$BASE/onnx/model.onnx"
-          fetch models/Qwen2-0.5B-Instruct/model.onnx_data  "$BASE/onnx/model.onnx_data" || true
-          fetch models/Qwen2-0.5B-Instruct/tokenizer.json   "$BASE/tokenizer.json"
-          fetch models/Qwen2-0.5B-Instruct/config.json      "$BASE/config.json"
-          ls -la models/Qwen2-0.5B-Instruct/
+          fetch models/Qwen2.5-0.5B-Instruct/model.onnx       "$BASE/onnx/model.onnx"
+          fetch models/Qwen2.5-0.5B-Instruct/model.onnx_data  "$BASE/onnx/model.onnx_data" || true
+          fetch models/Qwen2.5-0.5B-Instruct/tokenizer.json   "$BASE/tokenizer.json"
+          fetch models/Qwen2.5-0.5B-Instruct/config.json      "$BASE/config.json"
+          ls -la models/Qwen2.5-0.5B-Instruct/
 
       # EE — instruct-style multi-word continuation, prompt-relevance,
-      # determinism. Qwen2 hits the GQA-7:1 + native-logits paths.
-      - name: Qwen2 generation
+      # determinism. Qwen2.5 hits the same GQA-7:1 + native-logits paths
+      # as the original Qwen2 — same architecture family at the same scale.
+      - name: Qwen2.5 generation
+        env:
+          HOLOGRAM_AI_QWEN2_ONNX: ${{ github.workspace }}/models/Qwen2.5-0.5B-Instruct/model.onnx
         run: cargo test --release -p hologram-ai-conformance --features=onnx-spec --test real_model_generation_qwen2 -- --nocapture
