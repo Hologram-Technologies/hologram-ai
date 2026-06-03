@@ -49,7 +49,7 @@ pub struct RunArgs {
     #[arg(long, value_name = "FILE")]
     pub tokenizer: Option<PathBuf>,
     /// Weight quantization for the growable (model-source) generation path:
-    /// `none`/`f32`, `q4_0`, `q8_0`, `q2_0`. Ignored when running a precompiled
+    /// `none`/`f32`, `int8`, `int4`. Ignored when running a precompiled
     /// `.holo` (it is already quantized as compiled).
     #[arg(long, value_name = "SCHEME")]
     pub quantize: Option<String>,
