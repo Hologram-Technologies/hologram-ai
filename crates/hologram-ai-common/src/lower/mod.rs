@@ -1,9 +1,11 @@
 pub mod builder;
 pub mod dispatch;
 pub mod dtype;
+pub mod quantize;
 
 pub use builder::{lower, LoweringOptions, LoweringOutput, QuantStrategy};
 pub use dispatch::{dispatch, AttrSpec, DesugarKind, OpPlan};
+pub use quantize::quantize_weights;
 
 // The runtime shape-projection / strategy / op-resolver machinery is removed:
 // hologram's compiler derives every op parameter from the concrete interned
