@@ -10,3 +10,4 @@ license.workspace = true
 half       = { version = "2", default-features = false }
 smallvec.workspace = true
 bytemuck.workspace = true
+libm = { version = "0.2.16", default-features = false }
