@@ -54,6 +54,11 @@ pub enum QuantStrategy {
     Q8_0,
     /// Quantize f32 weights to Q2_0.
     Q2_0,
+    /// Per-channel symmetric int8 weight quantization.
+    Int8,
+    /// Per-group int4 (not yet implemented; accepted by the parser, rejected
+    /// by the quantize pass until the int4 work lands).
+    Int4,
 }
 
 /// Output of the lowering pass.

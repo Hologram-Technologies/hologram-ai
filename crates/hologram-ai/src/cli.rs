@@ -41,7 +41,7 @@ enum Command {
         /// Fixed sequence length for compilation (default: model's context_length).
         #[arg(long, value_name = "N")]
         seq_len: Option<u64>,
-        /// Weight quantization scheme: `none`/`f32`, `q4_0`, `q8_0`, `q2_0`.
+        /// Weight quantization scheme: 'none'/'f32', 'int8', 'int4'.
         #[arg(long, value_name = "SCHEME")]
         quantize: Option<String>,
         /// Scale spatial dims (H, W) of 4-D inputs by this factor for lower
@@ -122,11 +122,10 @@ fn compile(
 fn parse_quant(s: Option<&str>) -> anyhow::Result<QuantStrategy> {
     Ok(match s.map(|s| s.to_ascii_lowercase()).as_deref() {
         None | Some("none") | Some("f32") => QuantStrategy::None,
-        Some("q2_0") => QuantStrategy::Q2_0,
-        Some("q4_0") => QuantStrategy::Q4_0,
-        Some("q8_0") => QuantStrategy::Q8_0,
+        Some("int8") => QuantStrategy::Int8,
+        Some("int4") => QuantStrategy::Int4,
         Some(other) => {
-            anyhow::bail!("unknown quantization scheme {other:?} (expected none/q2_0/q4_0/q8_0)")
+            anyhow::bail!("unknown quantization scheme {other:?} (expected none/int8/int4)")
         }
     })
 }

@@ -414,11 +414,10 @@ fn parse_quant(s: Option<&str>) -> Result<hologram_ai_common::lower::QuantStrate
     use hologram_ai_common::lower::QuantStrategy;
     Ok(match s.map(|s| s.to_ascii_lowercase()).as_deref() {
         None | Some("none") | Some("f32") => QuantStrategy::None,
-        Some("q2_0") => QuantStrategy::Q2_0,
-        Some("q4_0") => QuantStrategy::Q4_0,
-        Some("q8_0") => QuantStrategy::Q8_0,
+        Some("int8") => QuantStrategy::Int8,
+        Some("int4") => QuantStrategy::Int4,
         Some(other) => {
-            bail!("unknown quantization scheme {other:?} (expected none/q2_0/q4_0/q8_0)")
+            bail!("unknown quantization scheme {other:?} (expected none/int8/int4)")
         }
     })
 }
