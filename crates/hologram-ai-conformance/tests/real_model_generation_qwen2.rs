@@ -1,18 +1,26 @@
-//! **Real Qwen2-0.5B-Instruct generation (V&V class EE).**
+//! **Real Qwen2-family 0.5B-Instruct generation (V&V class EE).**
 //!
 //! Sibling of `real_model_generation.rs` (SmolLM2). Compiles the
-//! authoritative Qwen2-0.5B-Instruct ONNX export and drives the
-//! `generate_stream` loop. Qwen2 exercises code paths SmolLM2 does
-//! not: grouped-query attention with kv_heads=2 (Q heads=14 → 7:1
-//! GQA ratio), an explicit `logits` graph output (no LM-head
-//! injection), and the full rank-3 norm-projection / down-projection
-//! chain through `desugar_norm_projection`. This is the regression
-//! witness behind the UOR-native fix that eradicated rank-3 MatMul
-//! shape corruption and Gemm `trans_b` silent drop (commit 61b26de).
+//! authoritative Qwen2-family ONNX export and drives the
+//! `generate_stream` loop. The Qwen2 family exercises code paths
+//! SmolLM2 does not: grouped-query attention with kv_heads=2 (Q
+//! heads=14 → 7:1 GQA ratio), an explicit `logits` graph output (no
+//! LM-head injection), and the full rank-3 norm-projection /
+//! down-projection chain through `desugar_norm_projection`. This is
+//! the regression witness behind the UOR-native fix that eradicated
+//! rank-3 MatMul shape corruption and Gemm `trans_b` silent drop
+//! (commit 61b26de).
+//!
+//! Model: CI uses `onnx-community/Qwen2.5-0.5B-Instruct`. The original
+//! `onnx-community/Qwen2-0.5B-Instruct` repo was removed from the Hub
+//! (`RepoNotFound`); Qwen2.5 at 0.5B is the same architecture family at
+//! the same scale, so the structural code paths above are still
+//! exercised. The assertions below are loose enough that either model
+//! satisfies them.
 //!
 //! Skip-safe: runs only with `HOLOGRAM_AI_LIVE=1` and the (git-ignored)
 //! model present via `HOLOGRAM_AI_QWEN2_ONNX` or
-//! `<workspace>/models/Qwen2-0.5B-Instruct/{model.onnx,tokenizer.json}`.
+//! `<workspace>/models/Qwen2.5-0.5B-Instruct/{model.onnx,tokenizer.json}`.
 //! Build with `--features onnx-spec`.
 #![cfg(feature = "onnx-spec")]
 
@@ -28,7 +36,7 @@ fn model_path() -> Option<PathBuf> {
         return p.exists().then_some(p);
     }
     let p = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../models/Qwen2-0.5B-Instruct/model.onnx");
+        .join("../../models/Qwen2.5-0.5B-Instruct/model.onnx");
     p.exists().then_some(p)
 }
 
@@ -50,7 +58,7 @@ fn qwen2_generates_coherent_text() {
 
     let prepared = ModelCompiler::default()
         .prepare(ModelSource::OnnxPath(onnx))
-        .expect("prepare Qwen2");
+        .expect("prepare Qwen2-family model");
     let mut provider = GrowableSession::new(prepared);
     let tok = NativeTokenizer::from_tokenizer_json(&tok_path).expect("load tokenizer");
 
@@ -66,8 +74,9 @@ fn qwen2_generates_coherent_text() {
     };
 
     // Correctness: greedy decoding must produce the factually-correct
-    // answer. Qwen2-0.5B-Instruct answers "The capital of France is"
-    // with an instruct-style multiple-choice that lists Paris first.
+    // answer. Qwen2-family 0.5B-Instruct models answer "The capital of
+    // France is" with an instruct-style multiple-choice that lists Paris
+    // first.
     let france = gen("The capital of France is");
     println!("[gen] The capital of France is →{france}");
     assert!(
