@@ -4,7 +4,6 @@
 use std::sync::Arc;
 
 use anyhow::{bail, Result};
-
 use hologram_ai_quant::encode_int8_per_channel;
 
 use crate::ir::{shape_from_concrete, AiGraph, AiNode, AiOp, AiParam, DType, TensorId, TensorInfo};
@@ -36,6 +35,9 @@ pub fn quantize_weights(graph: &mut AiGraph, strategy: QuantStrategy) -> Result<
         _ => return Ok(()),
     }
 
+    // tensor_info and params share the TensorId namespace; max() over both
+    // deduplicates. Three ids are allocated per rewritten MatMul: i8 weight,
+    // per-channel scale, and the Dequantize output tensor.
     let mut next_tid: TensorId = graph
         .tensor_info
         .keys()
@@ -49,6 +51,7 @@ pub fn quantize_weights(graph: &mut AiGraph, strategy: QuantStrategy) -> Result<
     let mut new_nodes: Vec<AiNode> = Vec::new();
     let mut dead_params: Vec<TensorId> = Vec::new();
     let mut changed = false;
+    let mut rewritten: usize = 0;
 
     for idx in 0..graph.nodes.len() {
         if !matches!(graph.nodes[idx].op, AiOp::MatMul) {
@@ -85,7 +88,9 @@ pub fn quantize_weights(graph: &mut AiGraph, strategy: QuantStrategy) -> Result<
         next_tid += 3;
 
         // i8 weight constant [k, n].
-        let q_bytes: Vec<u8> = q.iter().map(|&v| v as u8).collect();
+        // Reinterpret the signed quantized values as raw bytes for storage in
+        // AiParam::Inline; the lowering reads them back as i8 via INT8 dtype.
+        let q_bytes: Vec<u8> = bytemuck::cast_slice::<i8, u8>(&q).to_vec();
         let wq_info = TensorInfo::new(DType::INT8, info.shape.clone());
         graph.params.insert(
             wq_tid,
@@ -128,6 +133,7 @@ pub fn quantize_weights(graph: &mut AiGraph, strategy: QuantStrategy) -> Result<
         graph.nodes[idx].inputs[1] = deq_tid;
         dead_params.push(b_tid);
         changed = true;
+        rewritten += 1;
     }
 
     graph.nodes.extend(new_nodes);
@@ -136,6 +142,10 @@ pub fn quantize_weights(graph: &mut AiGraph, strategy: QuantStrategy) -> Result<
         graph.tensor_info.remove(&t);
     }
     if changed {
+        tracing::debug!(
+            matmuls_rewritten = rewritten,
+            "quantize_weights: int8 per-channel"
+        );
         graph.invalidate_topo_cache();
     }
     Ok(())
@@ -240,5 +250,95 @@ mod tests {
     fn int4_errors() {
         let mut g = f32_weight_matmul_graph();
         assert!(quantize_weights(&mut g, QuantStrategy::Int4).is_err());
+    }
+
+    #[test]
+    fn activation_b_is_not_quantized() {
+        // B is a runtime activation (no param) → pass leaves the graph untouched.
+        let mut g = f32_weight_matmul_graph();
+        g.params.remove(&1); // W is no longer a constant
+        let node_count = g.nodes.len();
+        quantize_weights(&mut g, QuantStrategy::Int8).unwrap();
+        assert_eq!(g.nodes.len(), node_count, "no Dequantize inserted");
+        assert!(!g.params.contains_key(&1));
+    }
+
+    #[test]
+    fn two_matmuls_get_distinct_ids() {
+        // Build a graph with two MatMul nodes each with their own inline f32
+        // weight constant. After Int8 quantization both must get a Dequantize
+        // node and all newly-created TensorIds/NodeIds must be unique.
+        let mut ti: HashMap<TensorId, TensorInfo> = HashMap::new();
+        let mut params: HashMap<TensorId, AiParam> = HashMap::new();
+
+        // X = input [1, 4]
+        ti.insert(0, TensorInfo::new(DType::F32, shape_from_concrete(&[1, 4])));
+
+        // W1 = f32 weight [4, 2] for first MatMul
+        let w: Vec<f32> = vec![0.1, -0.2, 0.3, -0.4, 0.5, -0.6, 0.7, -0.8];
+        let w_bytes: Vec<u8> = w.iter().flat_map(|v| v.to_le_bytes()).collect();
+        let w_info = TensorInfo::new(DType::F32, shape_from_concrete(&[4, 2]));
+        params.insert(1, AiParam::inline(w_bytes.clone(), w_info.clone()));
+        ti.insert(1, w_info.clone());
+
+        // Y1 = first MatMul output [1, 2]
+        ti.insert(2, TensorInfo::new(DType::F32, shape_from_concrete(&[1, 2])));
+
+        // W2 = separate f32 weight [4, 2] for second MatMul (tid=3)
+        params.insert(3, AiParam::inline(w_bytes, w_info.clone()));
+        ti.insert(3, w_info);
+
+        // Y2 = second MatMul output [1, 2] (tid=4)
+        ti.insert(4, TensorInfo::new(DType::F32, shape_from_concrete(&[1, 2])));
+
+        let mut g = AiGraph {
+            name: "two_mm".into(),
+            nodes: vec![
+                AiNode::new(0, AiOp::MatMul, vec![0, 1], vec![2]),
+                AiNode::new(1, AiOp::MatMul, vec![0, 3], vec![4]),
+            ],
+            inputs: vec![0],
+            outputs: vec![2, 4],
+            input_names: Vec::new(),
+            output_names: Vec::new(),
+            params,
+            tensor_info: ti,
+            metadata: HashMap::new(),
+            warnings: Vec::new(),
+            dim_vars: crate::ir::DimVarTable::default(),
+            shape_constraints: crate::ir::ConstraintStore::default(),
+            subgraphs: HashMap::new(),
+            tensor_names: HashMap::new(),
+            topo_cache: Default::default(),
+        };
+
+        quantize_weights(&mut g, QuantStrategy::Int8).unwrap();
+
+        // Both MatMuls must have a Dequantize node.
+        let deq_nodes: Vec<_> = g
+            .nodes
+            .iter()
+            .filter(|n| matches!(n.op, AiOp::Dequantize { .. }))
+            .collect();
+        assert_eq!(deq_nodes.len(), 2, "expected 2 Dequantize nodes");
+
+        // The two Dequantize output TensorIds must be distinct.
+        let deq_out_0 = deq_nodes[0].outputs[0];
+        let deq_out_1 = deq_nodes[1].outputs[0];
+        assert_ne!(
+            deq_out_0, deq_out_1,
+            "dequant outputs must have distinct TensorIds"
+        );
+
+        // The two Dequantize NodeIds must be distinct.
+        assert_ne!(
+            deq_nodes[0].id, deq_nodes[1].id,
+            "dequant nodes must have distinct NodeIds"
+        );
+
+        // All tensor_info keys are unique (HashMap guarantees this); just
+        // assert the two dequant output tids actually appear in tensor_info.
+        assert!(g.tensor_info.contains_key(&deq_out_0));
+        assert!(g.tensor_info.contains_key(&deq_out_1));
     }
 }
