@@ -401,8 +401,14 @@ impl PreparedModel {
         let (ai_graph, _zeroed) =
             concretize_all_dims(ai_graph, seq_len_override, compiler.spatial_scale)
                 .context("dimension concretization failed")?;
-        let ai_graph =
+        let mut ai_graph =
             post_concretization_repair(ai_graph).context("post-concretization repair failed")?;
+
+        // Step 3b — compile-time weight quantization (no-op unless the strategy
+        // is Int8/Int4). Runs on the concretized graph whose MatMul weights are
+        // still f32 constants, before lowering fuses Dequantize→MatMul.
+        hologram_ai_common::lower::quantize_weights(&mut ai_graph, compiler.quant_strategy)
+            .context("weight quantization pass failed")?;
 
         let mut metadata = extract_metadata(&ai_graph);
         metadata.kappa_label = kappa_label;
