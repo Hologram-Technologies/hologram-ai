@@ -29,7 +29,7 @@ pub struct KnownModel {
     /// Approximate `.holo` archive size after compile, for the "you'll need
     /// ~X GB free" hint.
     pub approx_archive_mb: u32,
-    /// Default quantization scheme (`q4_0`, `q8_0`, etc.).
+    /// Quantization scheme passed to `--quantize` (one of `none`, `int8`, `int4`).
     pub quantize: &'static str,
     /// Optional prompt-template suggestion (Jinja-style or plain).
     pub prompt_template: Option<&'static str>,

@@ -147,6 +147,14 @@ pub fn quantize_weights(graph: &mut AiGraph, strategy: QuantStrategy) -> Result<
             "quantize_weights: int8 per-channel"
         );
         graph.invalidate_topo_cache();
+    } else {
+        // Int8 was requested but nothing matched (e.g. weights are mmap'd, not
+        // inline f32 — which this baseline skips). Warn so the flag isn't a
+        // silent no-op.
+        tracing::warn!(
+            "quantize_weights: --quantize int8 requested but no inline f32 MatMul \
+             weights were found to quantize (mmap weights are skipped in this baseline)"
+        );
     }
     Ok(())
 }
