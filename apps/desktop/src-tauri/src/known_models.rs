@@ -66,9 +66,14 @@ pub const CATALOGUE: &[KnownModel] = &[
         chat_turn_separator: Some("</s>\n<|assistant|>\n{response}</s>\n<|user|>\n"),
     },
     KnownModel {
-        id: "qwen2-0.5b-instruct",
-        hf_id: "Qwen/Qwen2-0.5B-Instruct",
-        display_name: "Qwen2 0.5B Instruct",
+        id: "qwen2.5-0.5b-instruct",
+        // onnx-community publishes the ONNX export; the official Qwen
+        // org repo ships PyTorch/safetensors only. Qwen2 was removed
+        // from the Hub (RepoNotFound), Qwen2.5 is the in-family
+        // successor at the same 0.5B scale with the same ChatML
+        // template.
+        hf_id: "onnx-community/Qwen2.5-0.5B-Instruct",
+        display_name: "Qwen2.5 0.5B Instruct",
         description: "Small chat-tuned model — follows instructions and answers questions.",
         modality: Modality::TextChat,
         size: "0.5B",

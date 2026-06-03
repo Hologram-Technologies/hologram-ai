@@ -95,6 +95,13 @@ export interface GenerateOpts {
   temperature?: number;
   topK?: number;
   stop?: string[];
+  /**
+   * Chat prompt template with a `{prompt}` placeholder. Forwarded to the
+   * CLI as `--prompt-template` so the model's native format wraps the
+   * inner multi-turn content. Templates are no longer baked into `.holo`
+   * archives (closed section set) — they must be supplied per invocation.
+   */
+  promptTemplate?: string;
 }
 
 export async function generate(opts: GenerateOpts): Promise<number> {
@@ -106,6 +113,7 @@ export async function generate(opts: GenerateOpts): Promise<number> {
       temperature: opts.temperature,
       top_k: opts.topK,
       stop: opts.stop ?? [],
+      prompt_template: opts.promptTemplate,
     },
   });
 }

@@ -215,16 +215,17 @@ export function Chat() {
     setPrompt("");
     setRunning(true);
     streamingRef.current = "";
-    // When we fall back to the generic User/Assistant separator, the model
-    // has no native chat-template stop token to terminate at end-of-turn —
-    // base or non-instruct models will just keep writing "\nUser:" turns of
-    // their own. Passing `\nUser:` as a stop string cuts the generation at
-    // the start of a fake user turn before it leaks into the bubble. For
-    // catalogue-matched archives we leave `stop` empty so the CLI inherits
-    // the embedded `host_meta.sampling.stop` (e.g. `<|im_end|>` for Qwen2).
-    const stopStrings = selectedKnown?.chatTurnSeparator
-      ? undefined
+    // Stop strings: catalogue archives ship their native stop tokens
+    // (e.g. Qwen2 ChatML's `<|im_end|>`); for non-catalogue / generic-
+    // separator fallback, pass `\nUser:` / `\nAssistant:` so base models
+    // can't keep writing fake turns past end-of-response.
+    const stopStrings = selectedKnown?.stop?.length
+      ? selectedKnown.stop
       : ["\nUser:", "\nAssistant:"];
+    // Prompt template: templates are no longer baked into the `.holo` at
+    // compile time, so we forward the catalogue's `prompt_template`
+    // (containing `{prompt}`) every run. The CLI substitutes our
+    // multi-turn `promptForModel` into the `{prompt}` slot.
     try {
       await generate({
         archive,
@@ -232,6 +233,7 @@ export function Chat() {
         maxTokens,
         temperature,
         stop: stopStrings,
+        promptTemplate: selectedKnown?.promptTemplate ?? undefined,
       });
     } catch (e) {
       setMessages((prev) => [
