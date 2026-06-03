@@ -131,6 +131,17 @@ clippy-base:
 # Full CI across both repos
 ci-all: ci test-base
 
+# Run the desktop Tauri app in dev mode. Builds the CLI in debug (fast
+# rebuilds; the desktop spawns it as a subprocess and falls back to
+# `target/debug/hologram-ai` when no release binary is present). Override
+# the lookup with HOLOGRAM_AI_BIN pointing at a different binary.
+tauri-dev:
+    cargo build -p hologram-ai
+    cd apps/desktop && pnpm install && pnpm tauri dev
+
+# Short alias.
+alias tauri := tauri-dev
+
 # Cut a desktop release: tags `desktop-vVERSION` and pushes it, which
 # triggers .github/workflows/release-desktop.yml on GitHub. The workflow
 # builds the universal macOS .dmg and creates a draft GitHub Release.
