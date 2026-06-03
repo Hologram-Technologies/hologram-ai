@@ -1,0 +1,93 @@
+name: Deploy web GUI to GitHub Pages
+
+# Builds the hologram-ai browser GUI (ADR-0017): compile the real runtime core to
+# WebAssembly, bundle the React app, publish the static site to Pages.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "crates/**"
+      - "apps/web/**"
+      - ".github/workflows/pages.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# One in-flight deployment; don't cancel a running one.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # hologram-* crates are git deps on a private repo. CI generates an
+      # App token scoped to that repo and configures git's `insteadOf` so
+      # cargo's `git-fetch-with-cli` picks it up. No sibling clone.
+      - name: Generate GitHub App token (hologram read access)
+        id: app-token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.APP_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+          owner: Hologram-Technologies
+          repositories: hologram
+
+      - name: Configure git auth for cargo
+        run: |
+          git config --global \
+            url."https://x-access-token:${{ steps.app-token.outputs.token }}@github.com/Hologram-Technologies/".insteadOf \
+            "https://github.com/Hologram-Technologies/"
+
+      - name: Install protoc
+        uses: arduino/setup-protoc@v3
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Rust toolchain + wasm target
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup target add wasm32-unknown-unknown
+      - name: Install wasm-pack
+        run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
+
+      - uses: pnpm/action-setup@v4
+        with: { version: 9 }
+      - uses: actions/setup-node@v4
+        with: { node-version: 20, cache: pnpm, cache-dependency-path: apps/web/pnpm-lock.yaml }
+
+      - name: Build wasm (no parallel — wasm32 is single-threaded)
+        run: wasm-pack build crates/hologram-ai-wasm --target web --out-dir ../../apps/web/src/wasm --release
+
+      - name: Build web bundle
+        working-directory: apps/web
+        env:
+          VITE_BASE: /hologram-ai/
+          # Don't let pnpm's pre-run deps check fail on build-script approval.
+          npm_config_verify_deps_before_run: "false"
+        run: |
+          pnpm install --no-frozen-lockfile
+          pnpm rebuild esbuild
+          pnpm exec tsc -b
+          pnpm exec vite build
+
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with: { path: apps/web/dist }
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

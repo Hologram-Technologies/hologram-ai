@@ -23,6 +23,14 @@ pub struct GenerateRequest {
     pub temperature: Option<f32>,
     pub top_k: Option<usize>,
     pub stop: Vec<String>,
+    /// HuggingFace `tokenizer.json`. The `.holo` carries no tokenizer (closed
+    /// section set), so generation needs it at run time. Defaults to
+    /// `tokenizer.json` beside the archive when omitted.
+    #[serde(default)]
+    pub tokenizer: Option<PathBuf>,
+    /// Prompt template with a `{prompt}` placeholder (chat template).
+    #[serde(default)]
+    pub prompt_template: Option<String>,
 }
 
 #[tauri::command]
@@ -34,12 +42,23 @@ pub async fn generate(
     let bin = paths::hologram_ai_bin().map_err(|e| e.to_string())?;
     let cwd = paths::workspace_root();
 
+    // The tokenizer is baked into the compiled archive (self-describing), so
+    // `run --prompt` needs no tokenizer file; only pass `--tokenizer` when the
+    // request explicitly overrides it.
     let mut args = vec![
         "run".to_string(),
         req.archive.to_string_lossy().into_owned(),
         "--prompt".into(),
         req.prompt,
     ];
+    if let Some(tok) = &req.tokenizer {
+        args.push("--tokenizer".into());
+        args.push(tok.to_string_lossy().into_owned());
+    }
+    if let Some(t) = &req.prompt_template {
+        args.push("--prompt-template".into());
+        args.push(t.clone());
+    }
     if let Some(n) = req.max_tokens {
         args.push("--max-tokens".into());
         args.push(n.to_string());
@@ -67,17 +86,10 @@ pub async fn generate(
     }
 
     let logs = state.logs.clone();
-    let result = process_runner::spawn_streaming(
-        app,
-        bin,
-        args,
-        cwd,
-        logs,
-        "chat://line",
-        cancel_rx,
-    )
-    .await
-    .map_err(|e| e.to_string());
+    let result =
+        process_runner::spawn_streaming(app, bin, args, cwd, logs, "chat://line", cancel_rx)
+            .await
+            .map_err(|e| e.to_string());
 
     state.active_generation.lock().take();
     result

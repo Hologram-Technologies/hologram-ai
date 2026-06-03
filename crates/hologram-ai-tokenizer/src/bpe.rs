@@ -2,7 +2,9 @@
 
 use crate::config::PreTokenizerConfig;
 use crate::vocab::{MergeRules, VocabTable};
-use std::collections::HashMap;
+use alloc::string::{String, ToString};
+use alloc::vec::Vec;
+use hashbrown::HashMap;
 
 /// BPE encoder/decoder.
 pub struct BpeEncoder {
@@ -11,6 +13,10 @@ pub struct BpeEncoder {
     merge_ranks: HashMap<(Vec<u8>, Vec<u8>), u32>,
     byte_fallback: bool,
     pre_tokenizer: PreTokenizerConfig,
+    /// Byte-level / regex pre-tokenizer pattern, compiled once at
+    /// construction (recompiling per `encode` would be wasteful). `None` when
+    /// the pre-tokenizer takes no pattern or the pattern failed to compile.
+    split_re: Option<regex_automata::meta::Regex>,
 }
 
 impl BpeEncoder {
@@ -26,11 +32,18 @@ impl BpeEncoder {
             .enumerate()
             .map(|(rank, pair)| (pair, rank as u32))
             .collect();
+        let pattern = match &pre_tokenizer {
+            PreTokenizerConfig::Regex(p) => Some(p.as_str()),
+            PreTokenizerConfig::ByteLevel { regex: Some(p) } => Some(p.as_str()),
+            _ => None,
+        };
+        let split_re = pattern.and_then(|p| regex_automata::meta::Regex::new(p).ok());
         Self {
             vocab,
             merge_ranks,
             byte_fallback,
             pre_tokenizer,
+            split_re,
         }
     }
 
@@ -103,40 +116,36 @@ impl BpeEncoder {
                 replacement,
                 prepend,
             } => self.pre_tokenize_metaspace(text, *replacement, *prepend),
-            PreTokenizerConfig::Regex(_pattern) => {
-                // TODO: regex pre-tokenization for GPT-2/LLaMA-3
-                vec![text.to_string()]
+            PreTokenizerConfig::Regex(_) => {
+                // GPT-2 / LLaMA-3 regex split, no byte→unicode remapping.
+                self.split_fragments(text)
+                    .into_iter()
+                    .map(|f| f.to_string())
+                    .collect()
             }
-            PreTokenizerConfig::ByteLevel { regex } => {
-                self.pre_tokenize_byte_level(text, regex.as_deref())
-            }
+            PreTokenizerConfig::ByteLevel { .. } => self.pre_tokenize_byte_level(text),
+        }
+    }
+
+    /// Split `text` into pre-token fragments using the compiled regex
+    /// (`self.split_re`), falling back to the whole text when no pattern is
+    /// configured or it failed to compile.
+    fn split_fragments<'t>(&self, text: &'t str) -> Vec<&'t str> {
+        match &self.split_re {
+            Some(re) => re.find_iter(text).map(|m| &text[m.range()]).collect(),
+            None => vec![text],
         }
     }
 
     /// Byte-level pre-tokenization (GPT-2 / Qwen style):
-    /// 1. Optionally split text using a regex pattern
+    /// 1. Optionally split text using the compiled regex pattern
     /// 2. Map each byte to a Unicode character via the GPT-2 byte-to-unicode table
-    fn pre_tokenize_byte_level(&self, text: &str, regex_pattern: Option<&str>) -> Vec<String> {
+    fn pre_tokenize_byte_level(&self, text: &str) -> Vec<String> {
         let table = byte_to_unicode_table();
-
-        // Split with regex if provided, otherwise use whole text
-        let fragments: Vec<&str> = if let Some(pattern) = regex_pattern {
-            match regex::Regex::new(pattern) {
-                Ok(re) => re.find_iter(text).map(|m| m.as_str()).collect(),
-                Err(_) => vec![text],
-            }
-        } else {
-            vec![text]
-        };
-
         // Map each fragment's bytes through the byte-to-unicode table
-        fragments
+        self.split_fragments(text)
             .into_iter()
-            .map(|frag| {
-                frag.bytes()
-                    .map(|b| table[b as usize])
-                    .collect::<String>()
-            })
+            .map(|frag| frag.bytes().map(|b| table[b as usize]).collect::<String>())
             .collect()
     }
 

@@ -2,6 +2,12 @@
 //!
 //! Provides block-quantized weight formats (Q4_0, Q8_0, etc.) with fast
 //! dequantization. No IR dependency — safe to use from any crate.
+//!
+//! `no_std` runtime core (V&V class NS): dequantization runs on-device
+//! (wasm / embedded), so this crate is `#![no_std]` + `alloc`.
+#![no_std]
+
+extern crate alloc;
 
 pub mod q4_0;
 pub mod q8_0;

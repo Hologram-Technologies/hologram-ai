@@ -1,7 +1,7 @@
 //! Map ONNX `op_type` strings to `AiOp`.
 
 use crate::onnx_pb::AttributeProto;
-use hologram_ai_common::{AiOp, DType};
+use hologram_ai_common::AiOp;
 
 /// Context passed to op converters (attributes, domain, etc.)
 pub struct OpContext<'a> {
@@ -263,8 +263,19 @@ pub fn map_op(ctx: &OpContext<'_>) -> anyhow::Result<Option<AiOp>> {
 
         // ── Type / cast ───────────────────────────────────────────────────
         "Cast" => {
-            let to = ctx.attr_i_or("to", 1);
-            let dtype = crate::dtype_map::onnx_dtype(to as i32).unwrap_or(DType::F32);
+            // `to` is required on ONNX Cast (no default in the spec). The
+            // canonical realization needs the exact target dtype — silently
+            // substituting F32 for an unrecognized `to` would produce
+            // wrong-typed values. Refuse instead of approximate.
+            let to = ctx
+                .attr_i("to")
+                .ok_or_else(|| anyhow::anyhow!("Cast: missing required `to` attribute"))?;
+            let dtype = crate::dtype_map::onnx_dtype(to as i32).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Cast: unsupported `to` dtype {to} ({})",
+                    crate::dtype_map::onnx_dtype_name(to as i32)
+                )
+            })?;
             Cast { to: dtype }
         }
         "Identity" => Identity,
@@ -425,7 +436,9 @@ pub fn map_op(ctx: &OpContext<'_>) -> anyhow::Result<Option<AiOp>> {
         "QuantizeLinear" => Quantize {
             scheme: hologram_ai_quant::QuantScheme::Q8_0,
         },
-        "DequantizeLinear" => Dequantize,
+        "DequantizeLinear" => Dequantize {
+            axis: ctx.attr_i_or("axis", 1),
+        },
 
         // ── Control flow (subgraphs imported by graph_builder) ────────
         // Branch names are placeholders; graph_builder rewrites them to

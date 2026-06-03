@@ -1,8 +1,27 @@
 //! Native tokenizer for hologram-ai.
 //!
-//! Provides BPE tokenization with support for HuggingFace `tokenizer.json`
-//! format. Tokenizer data can be embedded in `.holo` archives (Phase 2).
+//! Provides BPE / Unigram / WordPiece tokenization. Split the way the rest of
+//! hologram-ai is (architecture §2/§3):
+//!
+//! - **Runtime core** (`no_std` + `alloc`, on-device) — the `Tokenizer` trait
+//!   and the encode/decode path (`NativeTokenizer` + the algorithm encoders,
+//!   `VocabTable`, `MergeRules`). Builds on wasm / embedded. Byte-level
+//!   pre-tokenization uses `regex-automata` (no_std).
+//! - **Host shell** (`std` feature) — loading a HuggingFace `tokenizer.json`
+//!   and embedding/reading `.holo` archive sections (serde_json, rkyv, file
+//!   I/O). Never linked into a no_std build.
+#![no_std]
 
+#[macro_use]
+extern crate alloc;
+
+#[cfg(feature = "std")]
+extern crate std;
+
+use alloc::string::String;
+use alloc::vec::Vec;
+
+#[cfg(feature = "std")]
 pub mod archive;
 mod bpe;
 mod config;

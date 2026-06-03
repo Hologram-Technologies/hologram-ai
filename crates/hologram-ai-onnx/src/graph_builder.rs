@@ -7,8 +7,8 @@ use crate::{
     tensor_map::tensor_to_param,
 };
 use hologram_ai_common::{
-    AiGraph, AiNode, AiOp, DType, Dim, DimVarSource, DimVarTable, ImportWarning, NodeId,
-    QuantDescriptor, SemanticHint, Shape, TensorId, TensorInfo,
+    shape_from_concrete, AiGraph, AiNode, AiOp, AiParam, DType, Dim, DimVarSource, DimVarTable,
+    ImportWarning, NodeId, QuantDescriptor, SemanticHint, Shape, TensorId, TensorInfo,
 };
 use std::collections::HashMap;
 use std::path::Path;
@@ -75,8 +75,13 @@ pub fn build_ai_graph(
         .into_iter()
         .map(|vi| {
             let tid = alloc_tid(&vi.name, &mut name_to_tid);
-            let info = value_info_to_tensor_info(vi, &mut dim_vars);
-            tensor_info.insert(tid, info);
+            // Skip if we can't represent the input's dtype/shape. The
+            // tensor_info entry will be left absent — downstream code
+            // either fills it in (params, value_info, inference) or
+            // surfaces the gap as a propagation precondition failure.
+            if let Some(info) = value_info_to_tensor_info(vi, &mut dim_vars) {
+                tensor_info.insert(tid, info);
+            }
             (tid, vi.name.clone())
         })
         .collect();
@@ -93,9 +98,13 @@ pub fn build_ai_graph(
             continue;
         }
         let tid = alloc_tid(&vi.name, &mut name_to_tid);
-        let info = value_info_to_tensor_info(vi, &mut dim_vars);
-        // Only insert if not already populated (params/inputs take priority).
-        tensor_info.entry(tid).or_insert(info);
+        // Only insert if not already populated (params/inputs take
+        // priority). A ValueInfo we can't represent is skipped — the
+        // tensor's dtype/shape will be left to forward inference (or
+        // surfaced as a precondition failure).
+        if let Some(info) = value_info_to_tensor_info(vi, &mut dim_vars) {
+            tensor_info.entry(tid).or_insert(info);
+        }
     }
 
     // ── Nodes ─────────────────────────────────────────────────────────────
@@ -137,6 +146,990 @@ pub fn build_ai_graph(
                 known_i64_values: None,
                 semantic: SemanticHint::Unknown,
             });
+        }
+
+        // Decompose ONNX standard `DynamicQuantizeLinear` (opset 11+)
+        // into canonical AiOps at import time. The ONNX op packs
+        // amax/amin reduction, scale derivation, zero-point quantization,
+        // and the x → uint8 quantization into a single node with three
+        // outputs; routing to `AiOp::Opaque` leaves all three TensorIds
+        // undefined at lowering, which surfaces as `tensor T<n>
+        // referenced before definition` once the Qwen2.5 int8 graph (96
+        // DQL instances feeding 168 MatMulInteger consumers) hits the
+        // pipeline. Spec: https://onnx.ai/onnx/operators/onnx__DynamicQuantizeLinear.html
+        //
+        //   Inputs:  [x]            (f32)
+        //   Outputs: [y, y_scale, y_zero_point]
+        //
+        //   max_x      = ReduceMax(x)
+        //   min_x      = ReduceMin(x)
+        //   max_clip   = Max(max_x, 0)
+        //   min_clip   = Min(min_x, 0)
+        //   range      = max_clip - min_clip
+        //   y_scale    = range / 255                       → output[1]
+        //   neg_min    = Neg(min_clip)
+        //   zp_f32     = neg_min / y_scale
+        //   zp_round   = Round(zp_f32)
+        //   zp_clip    = Min(Max(zp_round, 0), 255)        // canonical clip
+        //   y_zero     = Cast(zp_clip, U8)                 → output[2]
+        //   x_scaled   = x / y_scale
+        //   x_round    = Round(x_scaled)
+        //   x_shift    = x_round + zp_f32
+        //   x_clip     = Min(Max(x_shift, 0), 255)         // canonical clip
+        //   y          = Cast(x_clip, U8)                  → output[0]
+        if n.op_type == "DynamicQuantizeLinear" {
+            if input_tids.is_empty() || output_tids.len() < 3 {
+                warnings.push(ImportWarning {
+                    message: format!(
+                        "DynamicQuantizeLinear '{}' has too few inputs/outputs ({}/{}); skipping",
+                        n.name,
+                        input_tids.len(),
+                        output_tids.len()
+                    ),
+                    node_name: Some(n.name.clone()),
+                });
+                continue;
+            }
+
+            let x_tid = input_tids[0];
+            let y_tid = output_tids[0];
+            let scale_tid = output_tids[1];
+            let zp_tid = output_tids[2];
+
+            // Override the placeholder F32 dtype for the uint8 outputs.
+            // `y` keeps `x`'s shape; `y_scale`/`y_zero_point` are scalars.
+            if let Some(info) = tensor_info.get_mut(&y_tid) {
+                info.logical_dtype = DType::U8;
+                info.storage_dtype = DType::U8;
+            }
+            if let Some(info) = tensor_info.get_mut(&scale_tid) {
+                info.logical_dtype = DType::F32;
+                info.storage_dtype = DType::F32;
+            }
+            if let Some(info) = tensor_info.get_mut(&zp_tid) {
+                info.logical_dtype = DType::U8;
+                info.storage_dtype = DType::U8;
+            }
+
+            let mut synth_counter: u32 = 0;
+            macro_rules! new_intermediate {
+                ($tag:expr, $dtype:expr) => {{
+                    let name = format!("__hai_dql_{}_{}_{}", n.name, $tag, synth_counter);
+                    synth_counter += 1;
+                    let tid = alloc_tid(&name, &mut name_to_tid);
+                    tensor_info.insert(
+                        tid,
+                        TensorInfo {
+                            logical_dtype: $dtype,
+                            storage_dtype: $dtype,
+                            shape: Shape::new(),
+                            quant: QuantDescriptor::none(),
+                            known_i64_values: None,
+                            semantic: SemanticHint::Unknown,
+                        },
+                    );
+                    tid
+                }};
+            }
+            macro_rules! new_f32_const {
+                ($tag:expr, $value:expr) => {{
+                    let v: f32 = $value;
+                    let name = format!("__hai_dql_{}_{}_const_{}", n.name, $tag, synth_counter);
+                    synth_counter += 1;
+                    let tid = alloc_tid(&name, &mut name_to_tid);
+                    let info = TensorInfo {
+                        logical_dtype: DType::F32,
+                        storage_dtype: DType::F32,
+                        shape: Shape::new(),
+                        quant: QuantDescriptor::none(),
+                        known_i64_values: None,
+                        semantic: SemanticHint::Unknown,
+                    };
+                    tensor_info.insert(tid, info.clone());
+                    params.insert(tid, AiParam::inline(v.to_le_bytes().to_vec(), info));
+                    tid
+                }};
+            }
+            macro_rules! push_node {
+                ($op:expr, $inputs:expr, $outputs:expr) => {{
+                    let nid = next_nid;
+                    next_nid += 1;
+                    nodes.push(AiNode::new(nid, $op, $inputs, $outputs));
+                }};
+            }
+
+            // 1. max_x = ReduceMax(x, axes=[], keepdims=false)
+            let max_x_tid = new_intermediate!("max_x", DType::F32);
+            push_node!(
+                AiOp::ReduceMax {
+                    axes: vec![],
+                    keepdims: false,
+                },
+                vec![x_tid],
+                vec![max_x_tid]
+            );
+
+            // 2. min_x = ReduceMin(x, axes=[], keepdims=false)
+            let min_x_tid = new_intermediate!("min_x", DType::F32);
+            push_node!(
+                AiOp::ReduceMin {
+                    axes: vec![],
+                    keepdims: false,
+                },
+                vec![x_tid],
+                vec![min_x_tid]
+            );
+
+            // 3. Constants 0.0 and 255.0.
+            let c0_tid = new_f32_const!("c0", 0.0);
+            let c255_tid = new_f32_const!("c255", 255.0);
+
+            // 4. max_clip = Max(max_x, 0)
+            let max_clip_tid = new_intermediate!("max_clip", DType::F32);
+            push_node!(AiOp::Max, vec![max_x_tid, c0_tid], vec![max_clip_tid]);
+
+            // 5. min_clip = Min(min_x, 0)
+            let min_clip_tid = new_intermediate!("min_clip", DType::F32);
+            push_node!(AiOp::Min, vec![min_x_tid, c0_tid], vec![min_clip_tid]);
+
+            // 6. range = max_clip - min_clip
+            let range_tid = new_intermediate!("range", DType::F32);
+            push_node!(AiOp::Sub, vec![max_clip_tid, min_clip_tid], vec![range_tid]);
+
+            // 7. y_scale = range / 255       → output[1]
+            push_node!(AiOp::Div, vec![range_tid, c255_tid], vec![scale_tid]);
+
+            // 8. neg_min = Neg(min_clip)
+            let neg_min_tid = new_intermediate!("neg_min", DType::F32);
+            push_node!(AiOp::Neg, vec![min_clip_tid], vec![neg_min_tid]);
+
+            // 9. zp_f32 = neg_min / y_scale
+            let zp_f32_tid = new_intermediate!("zp_f32", DType::F32);
+            push_node!(AiOp::Div, vec![neg_min_tid, scale_tid], vec![zp_f32_tid]);
+
+            // 10. zp_rounded = Round(zp_f32)
+            let zp_round_tid = new_intermediate!("zp_round", DType::F32);
+            push_node!(AiOp::Round, vec![zp_f32_tid], vec![zp_round_tid]);
+
+            // 11. zp_clip = Min(Max(zp_round, 0), 255)
+            //
+            // We emit Min∘Max instead of AiOp::Clip because the canonical
+            // lowering treats Clip's bounds as trailing operands (read from
+            // AiNode.inputs positionally), not from the AiOp::Clip struct
+            // fields. With only one input, the backend's Clip kernel fails
+            // with UnsupportedOp ("(min, max) bounds not represented in
+            // UnaryCall"). Min∘Max routes through binary_w8 directly and
+            // has identical semantics for finite bounds.
+            let zp_max_tid = new_intermediate!("zp_max", DType::F32);
+            push_node!(AiOp::Max, vec![zp_round_tid, c0_tid], vec![zp_max_tid]);
+            let zp_clip_tid = new_intermediate!("zp_clip", DType::F32);
+            push_node!(AiOp::Min, vec![zp_max_tid, c255_tid], vec![zp_clip_tid]);
+
+            // 12. y_zero = Cast(zp_clip, U8)  → output[2]
+            push_node!(
+                AiOp::Cast { to: DType::U8 },
+                vec![zp_clip_tid],
+                vec![zp_tid]
+            );
+
+            // 13. x_scaled = x / y_scale
+            let x_scaled_tid = new_intermediate!("x_scaled", DType::F32);
+            push_node!(AiOp::Div, vec![x_tid, scale_tid], vec![x_scaled_tid]);
+
+            // 14. x_round = Round(x_scaled)
+            let x_round_tid = new_intermediate!("x_round", DType::F32);
+            push_node!(AiOp::Round, vec![x_scaled_tid], vec![x_round_tid]);
+
+            // 15. x_shift = x_round + zp_f32
+            let x_shift_tid = new_intermediate!("x_shift", DType::F32);
+            push_node!(AiOp::Add, vec![x_round_tid, zp_f32_tid], vec![x_shift_tid]);
+
+            // 16. x_clip = Min(Max(x_shift, 0), 255)
+            //   (see zp_clip above for the Min∘Max vs Clip rationale)
+            let x_max_tid = new_intermediate!("x_max", DType::F32);
+            push_node!(AiOp::Max, vec![x_shift_tid, c0_tid], vec![x_max_tid]);
+            let x_clip_tid = new_intermediate!("x_clip", DType::F32);
+            push_node!(AiOp::Min, vec![x_max_tid, c255_tid], vec![x_clip_tid]);
+
+            // 17. y = Cast(x_clip, U8)        → output[0]
+            push_node!(AiOp::Cast { to: DType::U8 }, vec![x_clip_tid], vec![y_tid]);
+
+            let _ = synth_counter; // final increment is unused; silence lint.
+            continue;
+        }
+
+        // Decompose ONNX standard `MatMulInteger` (opset 10+) into
+        // canonical AiOps: cast int operands to f32, subtract optional
+        // per-row/per-column zero points (also cast), MatMul in f32,
+        // then cast the product back to int32. f32 has a 24-bit
+        // mantissa, so for K ≤ ~2^24 with u8/i8 inputs the int32
+        // accumulator value is exact (Qwen2.5-0.5B hidden_size=896, well
+        // under 2^24). Spec: https://onnx.ai/onnx/operators/onnx__MatMulInteger.html
+        //
+        //   Inputs:  [A, B, a_zero_point?, b_zero_point?]
+        //   Output:  [Y]   int32
+        //
+        //   a_i32 = Cast(A, INT32)
+        //   b_i32 = Cast(B, INT32)
+        //   a_centered = (a_zp present) ? Sub(a_i32, Cast(a_zp, INT32)) : a_i32
+        //   b_centered = (b_zp present) ? Sub(b_i32, Cast(b_zp, INT32)) : b_i32
+        //   a_f32 = Cast(a_centered, FLOAT)
+        //   b_f32 = Cast(b_centered, FLOAT)
+        //   mm    = MatMul(a_f32, b_f32)
+        //   Y     = Cast(mm, INT32)
+        if n.op_type == "MatMulInteger" {
+            if input_tids.len() < 2 || output_tids.is_empty() {
+                warnings.push(ImportWarning {
+                    message: format!(
+                        "MatMulInteger '{}' has too few inputs/outputs ({}/{}); skipping",
+                        n.name,
+                        input_tids.len(),
+                        output_tids.len()
+                    ),
+                    node_name: Some(n.name.clone()),
+                });
+                continue;
+            }
+
+            let a_tid = input_tids[0];
+            let b_tid = input_tids[1];
+            let a_zp_tid = input_tids.get(2).copied();
+            let b_zp_tid = input_tids.get(3).copied();
+            let y_tid = output_tids[0];
+
+            if let Some(info) = tensor_info.get_mut(&y_tid) {
+                info.logical_dtype = DType::INT32;
+                info.storage_dtype = DType::INT32;
+            }
+
+            let mut synth_counter: u32 = 0;
+            macro_rules! new_intermediate {
+                ($tag:expr, $dtype:expr) => {{
+                    let name = format!("__hai_mmi_{}_{}_{}", n.name, $tag, synth_counter);
+                    synth_counter += 1;
+                    let tid = alloc_tid(&name, &mut name_to_tid);
+                    tensor_info.insert(
+                        tid,
+                        TensorInfo {
+                            logical_dtype: $dtype,
+                            storage_dtype: $dtype,
+                            shape: Shape::new(),
+                            quant: QuantDescriptor::none(),
+                            known_i64_values: None,
+                            semantic: SemanticHint::Unknown,
+                        },
+                    );
+                    tid
+                }};
+            }
+            macro_rules! push_node {
+                ($op:expr, $inputs:expr, $outputs:expr) => {{
+                    let nid = next_nid;
+                    next_nid += 1;
+                    nodes.push(AiNode::new(nid, $op, $inputs, $outputs));
+                }};
+            }
+
+            // Cast A and B to INT32.
+            let a_i32_tid = new_intermediate!("a_i32", DType::INT32);
+            push_node!(
+                AiOp::Cast { to: DType::INT32 },
+                vec![a_tid],
+                vec![a_i32_tid]
+            );
+            let b_i32_tid = new_intermediate!("b_i32", DType::INT32);
+            push_node!(
+                AiOp::Cast { to: DType::INT32 },
+                vec![b_tid],
+                vec![b_i32_tid]
+            );
+
+            // Subtract zero points if present (broadcasted by AiOp::Sub).
+            let a_centered_tid = if let Some(zp_tid) = a_zp_tid {
+                let a_zp_i32_tid = new_intermediate!("a_zp_i32", DType::INT32);
+                push_node!(
+                    AiOp::Cast { to: DType::INT32 },
+                    vec![zp_tid],
+                    vec![a_zp_i32_tid]
+                );
+                let centered = new_intermediate!("a_centered", DType::INT32);
+                push_node!(AiOp::Sub, vec![a_i32_tid, a_zp_i32_tid], vec![centered]);
+                centered
+            } else {
+                a_i32_tid
+            };
+
+            let b_centered_tid = if let Some(zp_tid) = b_zp_tid {
+                let b_zp_i32_tid = new_intermediate!("b_zp_i32", DType::INT32);
+                push_node!(
+                    AiOp::Cast { to: DType::INT32 },
+                    vec![zp_tid],
+                    vec![b_zp_i32_tid]
+                );
+                let centered = new_intermediate!("b_centered", DType::INT32);
+                push_node!(AiOp::Sub, vec![b_i32_tid, b_zp_i32_tid], vec![centered]);
+                centered
+            } else {
+                b_i32_tid
+            };
+
+            // Cast to f32 → MatMul → Cast back to INT32 (→ output[0]).
+            let a_f32_tid = new_intermediate!("a_f32", DType::F32);
+            push_node!(
+                AiOp::Cast { to: DType::F32 },
+                vec![a_centered_tid],
+                vec![a_f32_tid]
+            );
+            let b_f32_tid = new_intermediate!("b_f32", DType::F32);
+            push_node!(
+                AiOp::Cast { to: DType::F32 },
+                vec![b_centered_tid],
+                vec![b_f32_tid]
+            );
+            let mm_f32_tid = new_intermediate!("mm_f32", DType::F32);
+            push_node!(AiOp::MatMul, vec![a_f32_tid, b_f32_tid], vec![mm_f32_tid]);
+            push_node!(
+                AiOp::Cast { to: DType::INT32 },
+                vec![mm_f32_tid],
+                vec![y_tid]
+            );
+
+            let _ = synth_counter; // final increment is unused; silence lint.
+            continue;
+        }
+
+        // Decompose ONNX Microsoft-contrib `RotaryEmbedding` into a
+        // canonical sequence of shape ops + Gather + arithmetic. The
+        // contrib op fuses position lookup and the paired-halves rotation
+        // into a single opaque node; routing it to `AiOp::Opaque` leaves
+        // every downstream tensor undefined at lowering. We accept the
+        // SmolLM2 case (3D input `[B, S, num_heads*head_dim]`, paired
+        // halves, `interleaved=0`) and reject all others by skipping —
+        // an opaque routing has the same fail-fast effect at lowering
+        // but with a structured warning that pinpoints the cause.
+        //
+        //   Inputs:  [input, position_ids, cos_cache, sin_cache]
+        //   Output:  rotated input (same shape)
+        //
+        //   half = head_dim / 2
+        //   cos  = Gather(cos_cache, position_ids, axis=0)   [B, S, half]
+        //   sin  = Gather(sin_cache, position_ids, axis=0)
+        //   x_4d = Reshape(input, [0, 0, num_heads, head_dim])
+        //   x1   = Slice(x_4d, axes=[-1], starts=[0], ends=[half])
+        //   x2   = Slice(x_4d, axes=[-1], starts=[half], ends=[head_dim])
+        //   cos4 = Unsqueeze(cos, axes=[2])                  [B, S, 1, half]
+        //   sin4 = Unsqueeze(sin, axes=[2])
+        //   first  = x1*cos4 - x2*sin4
+        //   second = x1*sin4 + x2*cos4
+        //   y_4d = Concat([first, second], axis=-1)
+        //   out  = Reshape(y_4d, [0, 0, -1])
+        //
+        // `num_heads` and `rotary_embedding_dim` default to 0 in the
+        // ORT contrib spec, meaning "derive from cos_cache": head_dim =
+        // 2 * cos_cache.last_dim, num_heads = input.last_dim / head_dim.
+        // We honor explicit nonzero attribute values when present.
+        if n.op_type == "RotaryEmbedding" {
+            let interleaved = n
+                .attribute
+                .iter()
+                .find(|a| a.name == "interleaved")
+                .map(|a| a.i)
+                .unwrap_or(0);
+            let num_heads_attr = n
+                .attribute
+                .iter()
+                .find(|a| a.name == "num_heads")
+                .map(|a| a.i)
+                .unwrap_or(0);
+            let rotary_dim_attr = n
+                .attribute
+                .iter()
+                .find(|a| a.name == "rotary_embedding_dim")
+                .map(|a| a.i)
+                .unwrap_or(0);
+
+            if interleaved != 0 {
+                warnings.push(ImportWarning {
+                    message: format!(
+                        "RotaryEmbedding '{}': interleaved=1 not supported; skipping",
+                        n.name
+                    ),
+                    node_name: Some(n.name.clone()),
+                });
+                continue;
+            }
+            if input_tids.len() < 4 || output_tids.is_empty() {
+                warnings.push(ImportWarning {
+                    message: format!(
+                        "RotaryEmbedding '{}' has too few inputs/outputs ({}/{}); skipping",
+                        n.name,
+                        input_tids.len(),
+                        output_tids.len()
+                    ),
+                    node_name: Some(n.name.clone()),
+                });
+                continue;
+            }
+
+            let input_tid = input_tids[0];
+            let pos_ids_tid = input_tids[1];
+            let cos_cache_tid = input_tids[2];
+            let sin_cache_tid = input_tids[3];
+
+            // Derive head_dim. Priority: explicit `rotary_embedding_dim`
+            // attr if nonzero, otherwise 2 * cos_cache.last_dim.
+            let cos_last_dim = tensor_info
+                .get(&cos_cache_tid)
+                .and_then(|info| info.shape.last())
+                .and_then(|d| d.as_concrete());
+            let head_dim_u64: Option<u64> = if rotary_dim_attr > 0 {
+                Some(rotary_dim_attr as u64)
+            } else {
+                cos_last_dim.map(|h| h * 2)
+            };
+
+            // Derive num_heads. Priority: explicit `num_heads` attr if
+            // nonzero, otherwise input.last_dim / head_dim.
+            let input_last_dim = tensor_info
+                .get(&input_tid)
+                .and_then(|info| info.shape.last())
+                .and_then(|d| d.as_concrete());
+            let num_heads_u64: Option<u64> = if num_heads_attr > 0 {
+                Some(num_heads_attr as u64)
+            } else {
+                match (input_last_dim, head_dim_u64) {
+                    (Some(ld), Some(hd)) if hd > 0 && ld.is_multiple_of(hd) => Some(ld / hd),
+                    _ => None,
+                }
+            };
+
+            let (head_dim, num_heads) = match (head_dim_u64, num_heads_u64) {
+                (Some(hd), Some(nh)) if hd > 0 && nh > 0 && hd.is_multiple_of(2) => (hd, nh),
+                _ => {
+                    warnings.push(ImportWarning {
+                        message: format!(
+                            "RotaryEmbedding '{}': cannot derive head_dim/num_heads (head_dim={:?}, num_heads={:?}); skipping",
+                            n.name, head_dim_u64, num_heads_u64
+                        ),
+                        node_name: Some(n.name.clone()),
+                    });
+                    continue;
+                }
+            };
+            let half = head_dim / 2;
+
+            // Synthesized names use a per-node counter to stay unique.
+            // Macros (not closures) — macros expand inline, so they
+            // don't conflict with the outer `alloc_tid` closure that
+            // captures `&mut next_tid`. The trailing `synth_counter +=
+            // 1` after the last macro invocation produces an unused-
+            // assignment warning that's structural to the pattern.
+            let mut synth_counter: u32 = 0;
+            macro_rules! new_intermediate {
+                ($tag:expr) => {{
+                    let name = format!("__hai_rope_{}_{}_{}", n.name, $tag, synth_counter);
+                    synth_counter += 1;
+                    let tid = alloc_tid(&name, &mut name_to_tid);
+                    tensor_info.insert(
+                        tid,
+                        TensorInfo {
+                            logical_dtype: DType::F32,
+                            storage_dtype: DType::F32,
+                            shape: Shape::new(),
+                            quant: QuantDescriptor::none(),
+                            known_i64_values: None,
+                            semantic: SemanticHint::Unknown,
+                        },
+                    );
+                    tid
+                }};
+            }
+            macro_rules! new_i64_const {
+                ($tag:expr, $values:expr) => {{
+                    let values: &[i64] = $values;
+                    let name = format!("__hai_rope_{}_{}_const_{}", n.name, $tag, synth_counter);
+                    synth_counter += 1;
+                    let tid = alloc_tid(&name, &mut name_to_tid);
+                    let info = TensorInfo {
+                        logical_dtype: DType::INT64,
+                        storage_dtype: DType::INT64,
+                        shape: shape_from_concrete(&[values.len() as u64]),
+                        quant: QuantDescriptor::none(),
+                        known_i64_values: Some(values.iter().map(|v| Some(*v)).collect()),
+                        semantic: SemanticHint::Unknown,
+                    };
+                    let mut bytes = Vec::with_capacity(values.len() * 8);
+                    for v in values {
+                        bytes.extend_from_slice(&v.to_le_bytes());
+                    }
+                    tensor_info.insert(tid, info.clone());
+                    params.insert(tid, AiParam::inline(bytes, info));
+                    tid
+                }};
+            }
+            macro_rules! push_node {
+                ($op:expr, $inputs:expr, $outputs:expr) => {{
+                    let nid = next_nid;
+                    next_nid += 1;
+                    nodes.push(AiNode::new(nid, $op, $inputs, $outputs));
+                }};
+            }
+
+            // 1. cos = Gather(cos_cache, position_ids, axis=0)
+            let cos_tid = new_intermediate!("cos");
+            push_node!(
+                AiOp::Gather { axis: 0 },
+                vec![cos_cache_tid, pos_ids_tid],
+                vec![cos_tid]
+            );
+
+            // 2. sin = Gather(sin_cache, position_ids, axis=0)
+            let sin_tid = new_intermediate!("sin");
+            push_node!(
+                AiOp::Gather { axis: 0 },
+                vec![sin_cache_tid, pos_ids_tid],
+                vec![sin_tid]
+            );
+
+            // 3. input_4d = Reshape(input, [0, 0, num_heads, head_dim])
+            let reshape_in_shape_tid =
+                new_i64_const!("in_shape", &[0, 0, num_heads as i64, head_dim as i64]);
+            let input_4d_tid = new_intermediate!("in_4d");
+            push_node!(
+                AiOp::Reshape { allow_zero: false },
+                vec![input_tid, reshape_in_shape_tid],
+                vec![input_4d_tid]
+            );
+
+            // 4. x1 = Slice(input_4d, axes=[-1], starts=[0], ends=[half])
+            let x1_tid = new_intermediate!("x1");
+            push_node!(
+                AiOp::Slice {
+                    axes: vec![-1],
+                    starts: vec![0],
+                    ends: vec![half as i64],
+                    steps: vec![1],
+                },
+                vec![input_4d_tid],
+                vec![x1_tid]
+            );
+
+            // 5. x2 = Slice(input_4d, axes=[-1], starts=[half], ends=[head_dim])
+            let x2_tid = new_intermediate!("x2");
+            push_node!(
+                AiOp::Slice {
+                    axes: vec![-1],
+                    starts: vec![half as i64],
+                    ends: vec![head_dim as i64],
+                    steps: vec![1],
+                },
+                vec![input_4d_tid],
+                vec![x2_tid]
+            );
+
+            // 6. cos_4d = Unsqueeze(cos, axes=[2])
+            let cos_4d_tid = new_intermediate!("cos_4d");
+            push_node!(
+                AiOp::Unsqueeze { axes: vec![2] },
+                vec![cos_tid],
+                vec![cos_4d_tid]
+            );
+
+            // 7. sin_4d = Unsqueeze(sin, axes=[2])
+            let sin_4d_tid = new_intermediate!("sin_4d");
+            push_node!(
+                AiOp::Unsqueeze { axes: vec![2] },
+                vec![sin_tid],
+                vec![sin_4d_tid]
+            );
+
+            // 8. x1_cos = Mul(x1, cos_4d)
+            let x1_cos_tid = new_intermediate!("x1_cos");
+            push_node!(AiOp::Mul, vec![x1_tid, cos_4d_tid], vec![x1_cos_tid]);
+
+            // 9. x2_sin = Mul(x2, sin_4d)
+            let x2_sin_tid = new_intermediate!("x2_sin");
+            push_node!(AiOp::Mul, vec![x2_tid, sin_4d_tid], vec![x2_sin_tid]);
+
+            // 10. first = Sub(x1_cos, x2_sin)
+            let first_tid = new_intermediate!("first");
+            push_node!(AiOp::Sub, vec![x1_cos_tid, x2_sin_tid], vec![first_tid]);
+
+            // 11. x1_sin = Mul(x1, sin_4d)
+            let x1_sin_tid = new_intermediate!("x1_sin");
+            push_node!(AiOp::Mul, vec![x1_tid, sin_4d_tid], vec![x1_sin_tid]);
+
+            // 12. x2_cos = Mul(x2, cos_4d)
+            let x2_cos_tid = new_intermediate!("x2_cos");
+            push_node!(AiOp::Mul, vec![x2_tid, cos_4d_tid], vec![x2_cos_tid]);
+
+            // 13. second = Add(x1_sin, x2_cos)
+            let second_tid = new_intermediate!("second");
+            push_node!(AiOp::Add, vec![x1_sin_tid, x2_cos_tid], vec![second_tid]);
+
+            // 14. rotated_4d = Concat([first, second], axis=-1)
+            let rotated_4d_tid = new_intermediate!("rot_4d");
+            push_node!(
+                AiOp::Concat { axis: -1 },
+                vec![first_tid, second_tid],
+                vec![rotated_4d_tid]
+            );
+
+            // 15. output = Reshape(rotated_4d, [0, 0, -1])  → bind to output_tids[0]
+            let reshape_out_shape_tid = new_i64_const!("out_shape", &[0, 0, -1]);
+            push_node!(
+                AiOp::Reshape { allow_zero: false },
+                vec![rotated_4d_tid, reshape_out_shape_tid],
+                vec![output_tids[0]]
+            );
+            let _ = synth_counter; // Final increment in new_i64_const is unused; silence lint.
+            continue;
+        }
+
+        // Decompose ONNX Microsoft-contrib `GroupQueryAttention` into
+        // canonical Reshape/Transpose ops + `AiOp::GroupedQueryAttention`.
+        // The contrib op fuses head-reshape, head-first transpose, SDPA,
+        // and the produces-present-K/V semantics; routing to Opaque
+        // leaves three downstream tensors undefined at lowering. We
+        // accept the SmolLM2 case (do_rotary=0, post-RoPE Q/K/V, no
+        // past) and reject `do_rotary=1`.
+        //
+        //   Inputs:  [Q, K, V, past_k, past_v, seqlens_k, total_seq_len,
+        //             cos_cache?, sin_cache?]    (past + seqlens ignored)
+        //   Outputs: [output, present_key, present_value]
+        //
+        //   Q_4d  = Reshape(Q, [0, 0, num_heads, head_dim])
+        //   Q_t   = Transpose(Q_4d, perm=[0, 2, 1, 3])
+        //   K_4d  = Reshape(K, [0, 0, kv_num_heads, head_dim])
+        //   K_t   = Transpose(K_4d, perm=[0, 2, 1, 3])     // → present_key
+        //   V_4d  = Reshape(V, [0, 0, kv_num_heads, head_dim])
+        //   V_t   = Transpose(V_4d, perm=[0, 2, 1, 3])     // → present_value
+        //   out4d = GroupedQueryAttention(Q_t, K_t, V_t)   // [B,H,S,head_dim]
+        //   out_t = Transpose(out4d, perm=[0, 2, 1, 3])
+        //   out   = Reshape(out_t, [0, 0, -1])             // → output
+        if n.op_type == "GroupQueryAttention" {
+            let num_heads = n
+                .attribute
+                .iter()
+                .find(|a| a.name == "num_heads")
+                .map(|a| a.i)
+                .unwrap_or(0);
+            let kv_num_heads = n
+                .attribute
+                .iter()
+                .find(|a| a.name == "kv_num_heads")
+                .map(|a| a.i)
+                .unwrap_or(0);
+            let do_rotary = n
+                .attribute
+                .iter()
+                .find(|a| a.name == "do_rotary")
+                .map(|a| a.i)
+                .unwrap_or(0);
+
+            if do_rotary != 0 {
+                warnings.push(ImportWarning {
+                    message: format!(
+                        "GroupQueryAttention '{}': do_rotary=1 not supported; skipping",
+                        n.name
+                    ),
+                    node_name: Some(n.name.clone()),
+                });
+                continue;
+            }
+            if input_tids.len() < 3 || output_tids.len() < 3 {
+                warnings.push(ImportWarning {
+                    message: format!(
+                        "GroupQueryAttention '{}' has too few inputs/outputs ({}/{}); skipping",
+                        n.name,
+                        input_tids.len(),
+                        output_tids.len()
+                    ),
+                    node_name: Some(n.name.clone()),
+                });
+                continue;
+            }
+            if num_heads <= 0 || kv_num_heads <= 0 {
+                warnings.push(ImportWarning {
+                    message: format!(
+                        "GroupQueryAttention '{}': num_heads={}, kv_num_heads={} (both must be > 0); skipping",
+                        n.name, num_heads, kv_num_heads
+                    ),
+                    node_name: Some(n.name.clone()),
+                });
+                continue;
+            }
+
+            let q_tid = input_tids[0];
+            let k_tid = input_tids[1];
+            let v_tid = input_tids[2];
+
+            // Derive head_dim from Q.last_dim / num_heads.
+            let q_last = tensor_info
+                .get(&q_tid)
+                .and_then(|info| info.shape.last())
+                .and_then(|d| d.as_concrete());
+            let head_dim_u64 = match q_last {
+                Some(ld) if num_heads > 0 && ld % (num_heads as u64) == 0 => {
+                    Some(ld / num_heads as u64)
+                }
+                _ => None,
+            };
+            let head_dim = match head_dim_u64 {
+                Some(hd) if hd > 0 => hd,
+                _ => {
+                    warnings.push(ImportWarning {
+                        message: format!(
+                            "GroupQueryAttention '{}': cannot derive head_dim from Q (q_last={:?}, num_heads={}); skipping",
+                            n.name, q_last, num_heads
+                        ),
+                        node_name: Some(n.name.clone()),
+                    });
+                    continue;
+                }
+            };
+
+            // Sanity-check K and V's last dim if known. Non-fatal — if
+            // the oracle hasn't filled the value_info yet, we skip the
+            // check and trust the contrib spec's attribute layout.
+            let check_last = |tid: TensorId, expected: u64| -> bool {
+                tensor_info
+                    .get(&tid)
+                    .and_then(|info| info.shape.last())
+                    .and_then(|d| d.as_concrete())
+                    .is_none_or(|ld| ld == expected)
+            };
+            let kv_hidden = (kv_num_heads as u64) * head_dim;
+            if !check_last(k_tid, kv_hidden) || !check_last(v_tid, kv_hidden) {
+                warnings.push(ImportWarning {
+                    message: format!(
+                        "GroupQueryAttention '{}': K/V last-dim does not match kv_num_heads*head_dim={}; skipping",
+                        n.name, kv_hidden
+                    ),
+                    node_name: Some(n.name.clone()),
+                });
+                continue;
+            }
+
+            // Macro-based helpers (see RotaryEmbedding handler for rationale).
+            let mut synth_counter: u32 = 0;
+            macro_rules! new_intermediate {
+                ($tag:expr) => {{
+                    let name = format!("__hai_gqa_{}_{}_{}", n.name, $tag, synth_counter);
+                    synth_counter += 1;
+                    let tid = alloc_tid(&name, &mut name_to_tid);
+                    tensor_info.insert(
+                        tid,
+                        TensorInfo {
+                            logical_dtype: DType::F32,
+                            storage_dtype: DType::F32,
+                            shape: Shape::new(),
+                            quant: QuantDescriptor::none(),
+                            known_i64_values: None,
+                            semantic: SemanticHint::Unknown,
+                        },
+                    );
+                    tid
+                }};
+            }
+            macro_rules! new_i64_const {
+                ($tag:expr, $values:expr) => {{
+                    let values: &[i64] = $values;
+                    let name = format!("__hai_gqa_{}_{}_const_{}", n.name, $tag, synth_counter);
+                    synth_counter += 1;
+                    let tid = alloc_tid(&name, &mut name_to_tid);
+                    let info = TensorInfo {
+                        logical_dtype: DType::INT64,
+                        storage_dtype: DType::INT64,
+                        shape: shape_from_concrete(&[values.len() as u64]),
+                        quant: QuantDescriptor::none(),
+                        known_i64_values: Some(values.iter().map(|v| Some(*v)).collect()),
+                        semantic: SemanticHint::Unknown,
+                    };
+                    let mut bytes = Vec::with_capacity(values.len() * 8);
+                    for v in values {
+                        bytes.extend_from_slice(&v.to_le_bytes());
+                    }
+                    tensor_info.insert(tid, info.clone());
+                    params.insert(tid, AiParam::inline(bytes, info));
+                    tid
+                }};
+            }
+            macro_rules! push_node {
+                ($op:expr, $inputs:expr, $outputs:expr) => {{
+                    let nid = next_nid;
+                    next_nid += 1;
+                    nodes.push(AiNode::new(nid, $op, $inputs, $outputs));
+                }};
+            }
+
+            // Q: reshape [0,0,num_heads,head_dim] then transpose [0,2,1,3].
+            let q_shape_tid = new_i64_const!("q_shape", &[0, 0, num_heads, head_dim as i64]);
+            let q_4d_tid = new_intermediate!("q_4d");
+            push_node!(
+                AiOp::Reshape { allow_zero: false },
+                vec![q_tid, q_shape_tid],
+                vec![q_4d_tid]
+            );
+            let q_t_tid = new_intermediate!("q_t");
+            push_node!(
+                AiOp::Transpose {
+                    perm: vec![0, 2, 1, 3]
+                },
+                vec![q_4d_tid],
+                vec![q_t_tid]
+            );
+
+            // K: reshape [0,0,kv_num_heads,head_dim], transpose → present_key (output[1]).
+            let kv_shape_tid = new_i64_const!("kv_shape", &[0, 0, kv_num_heads, head_dim as i64]);
+            let k_4d_tid = new_intermediate!("k_4d");
+            push_node!(
+                AiOp::Reshape { allow_zero: false },
+                vec![k_tid, kv_shape_tid],
+                vec![k_4d_tid]
+            );
+            push_node!(
+                AiOp::Transpose {
+                    perm: vec![0, 2, 1, 3]
+                },
+                vec![k_4d_tid],
+                vec![output_tids[1]]
+            );
+            let k_t_tid = output_tids[1];
+
+            // V: reshape [0,0,kv_num_heads,head_dim], transpose → present_value (output[2]).
+            let v_4d_tid = new_intermediate!("v_4d");
+            push_node!(
+                AiOp::Reshape { allow_zero: false },
+                vec![v_tid, kv_shape_tid],
+                vec![v_4d_tid]
+            );
+            push_node!(
+                AiOp::Transpose {
+                    perm: vec![0, 2, 1, 3]
+                },
+                vec![v_4d_tid],
+                vec![output_tids[2]]
+            );
+            let v_t_tid = output_tids[2];
+
+            // GroupedQueryAttention(Q_t, K_t, V_t) → out_4d [B, num_heads, S, head_dim].
+            let out_4d_tid = new_intermediate!("out_4d");
+            push_node!(
+                AiOp::GroupedQueryAttention {
+                    num_heads: num_heads as u32,
+                    num_kv_heads: kv_num_heads as u32,
+                    head_dim: head_dim as u32,
+                    scale: None,
+                    causal: true,
+                    heads_first: true,
+                    qk_norm: false,
+                    rope: false,
+                    rope_base: 0.0,
+                },
+                vec![q_t_tid, k_t_tid, v_t_tid],
+                vec![out_4d_tid]
+            );
+
+            // Transpose back to [B, S, num_heads, head_dim] then reshape [0, 0, -1].
+            let out_pre_tid = new_intermediate!("out_pre");
+            push_node!(
+                AiOp::Transpose {
+                    perm: vec![0, 2, 1, 3]
+                },
+                vec![out_4d_tid],
+                vec![out_pre_tid]
+            );
+            let out_shape_tid = new_i64_const!("out_shape", &[0, 0, -1]);
+            push_node!(
+                AiOp::Reshape { allow_zero: false },
+                vec![out_pre_tid, out_shape_tid],
+                vec![output_tids[0]]
+            );
+            let _ = synth_counter; // Final increment in new_i64_const is unused; silence lint.
+            continue;
+        }
+
+        // Decompose ONNX Microsoft-contrib `SkipSimplifiedLayerNormalization`
+        // into canonical `Add` + `RmsNorm` at import time. This op has
+        // residual-fusion semantics that plain `AiOp::RmsNorm` does not
+        // express:
+        //
+        //   Inputs:  [input, skip, gamma (, bias)]
+        //   Outputs: [output, mean, inv_std_var, input_skip_sum]
+        //   output           = RmsNorm(input + skip) * gamma
+        //   input_skip_sum   = input + skip   (consumed by the next layer)
+        //
+        // Mapping the whole op to a single `AiOp::RmsNorm` discards both
+        // the residual fuse AND the input_skip_sum output. Later layers'
+        // SkipSimplifiedLayerNormalization nodes take *that orphaned sum*
+        // as their `skip` input, so when optimization removes the
+        // mis-imported parent the downstream reference becomes
+        // "tensor T<...> referenced before definition" at lowering. Fix
+        // it at the boundary: emit `Add(input, skip) → output_3` and
+        // `RmsNorm(sum, gamma, eps) → output_0`. Output[1] (mean) and
+        // output[2] (inv_std) are inference-time unused. The downstream
+        // `AddRmsNormFusion` rule then re-fuses Add+RmsNorm into
+        // `FusedLayerNormResidual` where the residual sum doesn't leak.
+        if n.op_type == "SkipSimplifiedLayerNormalization" {
+            // Must have at least input, skip, gamma + at least one
+            // output. The bias input (input[3]) and the mean/inv_std
+            // outputs (output[1], output[2]) are unused at inference.
+            if input_tids.len() < 3 || output_tids.is_empty() {
+                warnings.push(ImportWarning {
+                    message: format!(
+                        "SkipSimplifiedLayerNormalization '{}' has too few inputs/outputs ({}/{}); skipping",
+                        n.name,
+                        input_tids.len(),
+                        output_tids.len()
+                    ),
+                    node_name: Some(n.name.clone()),
+                });
+                continue;
+            }
+            // Determine the residual-sum TID. Where present, it is
+            // output[3]; otherwise synthesize one (no downstream
+            // consumer will reference an absent output).
+            let sum_tid = if output_tids.len() >= 4 {
+                output_tids[3]
+            } else {
+                // Synthesize a fresh TID — internal-only intermediate.
+                let synth = format!("__hai_skip_sum_{}", n.name);
+                alloc_tid(&synth, &mut name_to_tid)
+            };
+            tensor_info.entry(sum_tid).or_insert_with(|| TensorInfo {
+                logical_dtype: DType::F32,
+                storage_dtype: DType::F32,
+                shape: Shape::new(),
+                quant: QuantDescriptor::none(),
+                known_i64_values: None,
+                semantic: SemanticHint::Unknown,
+            });
+            let epsilon = n
+                .attribute
+                .iter()
+                .find(|a| a.name == "epsilon")
+                .map(|a| a.f)
+                .unwrap_or(1e-5);
+            // Emit Add(input, skip) → sum_tid.
+            let add_nid = next_nid;
+            next_nid += 1;
+            nodes.push(AiNode::new(
+                add_nid,
+                AiOp::Add,
+                vec![input_tids[0], input_tids[1]],
+                vec![sum_tid],
+            ));
+            // Emit RmsNorm(sum_tid, gamma, epsilon) → output_0.
+            let norm_nid = next_nid;
+            next_nid += 1;
+            nodes.push(AiNode::new(
+                norm_nid,
+                AiOp::RmsNorm { epsilon },
+                vec![sum_tid, input_tids[2]],
+                vec![output_tids[0]],
+            ));
+            continue;
         }
 
         // Handle Constant nodes: extract the `value` attribute as a param.
@@ -219,17 +1212,22 @@ pub fn build_ai_graph(
         .iter()
         .map(|vi| {
             let tid = alloc_tid(&vi.name, &mut name_to_tid);
-            // Populate shape/dtype from output's ValueInfoProto if available.
-            let info = value_info_to_tensor_info(vi, &mut dim_vars);
-            if !info.shape.is_empty() {
-                tensor_info
-                    .entry(tid)
-                    .and_modify(|existing| {
-                        if existing.shape.is_empty() {
-                            *existing = info.clone();
-                        }
-                    })
-                    .or_insert(info);
+            // Populate shape/dtype from output's ValueInfoProto. If the
+            // ValueInfo isn't a TensorType with a representable dtype,
+            // leave the tensor_info entry alone — forward inference will
+            // fill it from the producer's output, and a true gap
+            // surfaces downstream.
+            if let Some(info) = value_info_to_tensor_info(vi, &mut dim_vars) {
+                if !info.shape.is_empty() {
+                    tensor_info
+                        .entry(tid)
+                        .and_modify(|existing| {
+                            if existing.shape.is_empty() {
+                                *existing = info.clone();
+                            }
+                        })
+                        .or_insert(info);
+                }
             }
             (tid, vi.name.clone())
         })
@@ -261,9 +1259,13 @@ pub fn build_ai_graph(
             if params.contains_key(&tid) {
                 continue;
             }
-            let info = value_info_to_tensor_info(vi, &mut dim_vars);
-            if !info.shape.is_empty() {
-                oracle.insert(tid, info);
+            // Only record oracle entries we can fully represent. A
+            // missing/empty TensorType is left absent rather than
+            // approximated.
+            if let Some(info) = value_info_to_tensor_info(vi, &mut dim_vars) {
+                if !info.shape.is_empty() {
+                    oracle.insert(tid, info);
+                }
             }
         }
     }
@@ -375,31 +1377,37 @@ fn resolve_attention_head_dims(
     }
 }
 
-fn value_info_to_tensor_info(vi: &ValueInfoProto, dim_vars: &mut DimVarTable) -> TensorInfo {
-    let (dtype, shape) = match &vi.r#type {
-        Some(tp) => match &tp.value {
-            Some(crate::onnx_pb::type_proto::Value::TensorType(t)) => {
-                let dtype = onnx_dtype(t.elem_type).unwrap_or(DType::F32);
-                let shape = t
-                    .shape
-                    .as_ref()
-                    .map(|s| shape_from_shape_proto(s, dim_vars))
-                    .unwrap_or_default();
-                (dtype, shape)
-            }
-            _ => (DType::F32, Shape::new()),
-        },
-        None => (DType::F32, Shape::new()),
+/// Build a `TensorInfo` from an ONNX `ValueInfoProto`.
+///
+/// UOR-native: returns `None` when the ValueInfo doesn't carry a
+/// TensorType (the only kind hologram-ai handles) or when its
+/// `elem_type` isn't a representable dtype. Callers either skip the
+/// value (when it's truly informational, e.g. an unused intermediate)
+/// or propagate the import failure. There is no F32 + empty-shape
+/// fallback — fabricating a dtype produces silently-wrong downstream
+/// inference (see ADR-0018 + the Qwen2 GQA dtype-prop trail).
+fn value_info_to_tensor_info(
+    vi: &ValueInfoProto,
+    dim_vars: &mut DimVarTable,
+) -> Option<TensorInfo> {
+    let tp = vi.r#type.as_ref()?;
+    let Some(crate::onnx_pb::type_proto::Value::TensorType(t)) = &tp.value else {
+        return None;
     };
-
-    TensorInfo {
+    let dtype = onnx_dtype(t.elem_type)?;
+    let shape = t
+        .shape
+        .as_ref()
+        .map(|s| shape_from_shape_proto(s, dim_vars))
+        .unwrap_or_default();
+    Some(TensorInfo {
         logical_dtype: dtype,
         storage_dtype: dtype,
         shape,
         quant: QuantDescriptor::none(),
         known_i64_values: None,
         semantic: SemanticHint::Unknown,
-    }
+    })
 }
 
 /// Resolve op parameters that ONNX opset 10+/13+/18+ provides as tensor inputs
@@ -447,7 +1455,7 @@ fn resolve_dynamic_op_params(
                 let starts_vals = extract_i64_const(node.inputs[1], params, tensor_info);
                 let ends_vals = extract_i64_const(node.inputs[2], params, tensor_info);
                 if starts_vals.is_none() || ends_vals.is_none() {
-                    tracing::warn!(
+                    tracing::debug!(
                         node_id = node.id,
                         n_inputs = node.inputs.len(),
                         starts_tid = node.inputs[1],
@@ -483,7 +1491,10 @@ fn resolve_dynamic_op_params(
                         node.inputs.truncate(1);
                     }
                     _ => {
-                        tracing::warn!(
+                        // Expected for dynamic/with-past slices (resolved later by
+                        // SliceToGather after concretization); recorded structurally
+                        // in `warnings`, so keep the per-node log at debug.
+                        tracing::debug!(
                             node_id = node.id,
                             starts_tid = node.inputs.get(1).copied().unwrap_or(0),
                             ends_tid = node.inputs.get(2).copied().unwrap_or(0),
@@ -500,28 +1511,28 @@ fn resolve_dynamic_op_params(
                 }
             }
 
-            AiOp::Unsqueeze { axes } if axes.is_empty() => {
+            AiOp::Unsqueeze { axes }
+                if axes.is_empty()
                 // ONNX opset 13+: Unsqueeze(data, axes)
-                if node.inputs.len() >= 2 {
-                    if let Some(axes_vals) = extract_i64_const(node.inputs[1], params, tensor_info)
-                    {
-                        node.op = AiOp::Unsqueeze { axes: axes_vals };
-                        node.inputs.truncate(1);
-                    }
+                && node.inputs.len() >= 2 =>
+            {
+                if let Some(axes_vals) = extract_i64_const(node.inputs[1], params, tensor_info) {
+                    node.op = AiOp::Unsqueeze { axes: axes_vals };
+                    node.inputs.truncate(1);
                 }
             }
 
-            AiOp::Squeeze { axes } if axes.is_empty() => {
+            AiOp::Squeeze { axes }
+                if axes.is_empty()
                 // ONNX opset 13+: Squeeze(data, [axes])
-                if node.inputs.len() >= 2 {
-                    if let Some(axes_vals) = extract_i64_const(node.inputs[1], params, tensor_info)
-                    {
-                        node.op = AiOp::Squeeze { axes: axes_vals };
-                        node.inputs.truncate(1);
-                    }
+                && node.inputs.len() >= 2 =>
+            {
+                if let Some(axes_vals) = extract_i64_const(node.inputs[1], params, tensor_info) {
+                    node.op = AiOp::Squeeze { axes: axes_vals };
+                    node.inputs.truncate(1);
                 }
-                // If only 1 input, Squeeze with empty axes = squeeze all size-1 dims (already correct).
             }
+            // If only 1 input, Squeeze with empty axes = squeeze all size-1 dims (already correct).
 
             // ONNX opset 18+: ReduceMean/Sum/Max/Min(data, axes) — axes as input tensor.
             AiOp::ReduceMean { axes, keepdims } if axes.is_empty() => {
@@ -580,31 +1591,27 @@ fn resolve_dynamic_op_params(
             // ONNX opset 11+: Pad(data, pads, constant_value?)
             // FloatOp::PadOp expects arity 2: [data, pads].
             // Drop optional constant_value input (input[2]).
-            AiOp::Pad { .. } => {
-                if node.inputs.len() > 2 {
-                    node.inputs.truncate(2);
-                }
+            AiOp::Pad { .. } if node.inputs.len() > 2 => {
+                node.inputs.truncate(2);
             }
 
             // ONNX opset 11+: Resize(X, roi, scales, sizes)
             // Empty-name inputs are already filtered, so we may have 2-4 inputs.
             // FloatOp::Resize expects arity 2: [data, scales_or_sizes].
             // Prefer sizes (i64) over scales (f32); drop roi.
-            AiOp::Resize { .. } => {
-                if node.inputs.len() > 2 {
-                    let data = node.inputs[0];
-                    // Find the best param: prefer i64 (sizes) over f32 (scales).
-                    let mut best = node.inputs[node.inputs.len() - 1];
-                    for &tid in &node.inputs[1..] {
-                        if let Some(info) = tensor_info.get(&tid) {
-                            if info.logical_dtype == DType::INT64 {
-                                best = tid;
-                                break;
-                            }
+            AiOp::Resize { .. } if node.inputs.len() > 2 => {
+                let data = node.inputs[0];
+                // Find the best param: prefer i64 (sizes) over f32 (scales).
+                let mut best = node.inputs[node.inputs.len() - 1];
+                for &tid in &node.inputs[1..] {
+                    if let Some(info) = tensor_info.get(&tid) {
+                        if info.logical_dtype == DType::INT64 {
+                            best = tid;
+                            break;
                         }
                     }
-                    node.inputs = vec![data, best];
                 }
+                node.inputs = vec![data, best];
             }
 
             // ONNX opset 11+: Clip(input, min?, max?)

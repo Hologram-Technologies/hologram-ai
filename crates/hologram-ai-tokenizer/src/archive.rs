@@ -4,9 +4,11 @@
 //! section for zero-copy access from memory-mapped archives.
 
 use anyhow::Context;
-use hologram::hologram_archive::section::{EmbeddableSection, SECTION_CUSTOM_BASE};
+use hologram_ai_common::exec_context::{Section, SECTION_CUSTOM_BASE};
 use std::collections::HashMap;
 use std::path::Path;
+use std::string::{String, ToString};
+use std::vec::Vec;
 
 /// Section kind for tokenizer data.
 pub const SECTION_TOKENIZER: u32 = SECTION_CUSTOM_BASE + 0x01;
@@ -139,7 +141,7 @@ impl TokenizerSectionData {
     }
 }
 
-impl EmbeddableSection for TokenizerSectionData {
+impl Section for TokenizerSectionData {
     fn section_kind(&self) -> u32 {
         SECTION_TOKENIZER
     }

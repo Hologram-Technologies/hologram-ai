@@ -4,9 +4,7 @@
 //! Uses `SECTION_CUSTOM_BASE + 0x11` until hologram adds a built-in type.
 //! Serialized via rkyv for zero-copy access from memory-mapped archives.
 
-use hologram::hologram_archive::section::{EmbeddableSection, SECTION_CUSTOM_BASE};
-
-use crate::exec_context::ExecContext;
+use crate::exec_context::{Section, SECTION_CUSTOM_BASE};
 
 /// Section kind for LLM metadata.
 pub const SECTION_LLM_META: u32 = SECTION_CUSTOM_BASE + 0x11;
@@ -61,7 +59,7 @@ impl LlmMetaSection {
     }
 }
 
-impl EmbeddableSection for LlmMetaSection {
+impl Section for LlmMetaSection {
     fn section_kind(&self) -> u32 {
         SECTION_LLM_META
     }
@@ -73,12 +71,14 @@ impl EmbeddableSection for LlmMetaSection {
     }
 }
 
-impl ExecContext for LlmMetaSection {
-    fn section_id() -> u32 {
+impl LlmMetaSection {
+    /// Section kind constant (matches [`Section::section_kind`]).
+    pub fn section_id() -> u32 {
         SECTION_LLM_META
     }
 
-    fn from_context_bytes(bytes: &[u8]) -> anyhow::Result<Self> {
+    /// Deserialize from custom-section bytes.
+    pub fn from_context_bytes(bytes: &[u8]) -> anyhow::Result<Self> {
         Self::deserialize_from(bytes).map_err(|e| anyhow::anyhow!("deserialize LlmMeta: {e}"))
     }
 }

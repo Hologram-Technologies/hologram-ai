@@ -27,19 +27,21 @@ impl OptPipeline {
     /// Standard optimization pipeline.
     pub fn mvp() -> Self {
         use super::{
-            add_rmsnorm_fusion::AddRmsNormFusion, attention_fusion::AttentionFusion,
-            const_dedup::ConstantDeduplication, const_eval::ConstantEvaluation,
-            constant_fold::ConstantFolding, data_prop::DataPropagation,
-            dead_node::DeadNodeElimination, decompose::OpDecomposition,
-            kv_slot_injection::KvSlotInjection, layernorm_fusion::LayerNormFusion,
-            matmul_activation_fusion::MatMulActivationFusion,
-            norm_projection_fusion::NormProjectionFusion,
-            position_ids_injection::PositionIdsInjection, resolve_slice_params::ResolveSliceParams,
-            rmsnorm_fusion::RmsNormFusion, scalar_absorption::ScalarAbsorption,
+            attention_fusion::AttentionFusion, const_dedup::ConstantDeduplication,
+            const_eval::ConstantEvaluation, constant_fold::ConstantFolding,
+            data_prop::DataPropagation, dead_node::DeadNodeElimination, decompose::OpDecomposition,
+            norm_projection_fusion::NormProjectionFusion, resolve_slice_params::ResolveSliceParams,
             semantic_prop::SemanticPropagation, shape_prop::ShapePropagation,
             shared_input_projection_fusion::SharedInputProjectionFusion,
-            swiglu_fusion::SwiGluFusion, swiglu_projection_fusion::SwiGluProjectionFusion,
-            transpose_matmul_fusion::TransposeMatMulFusion,
+        };
+        use crate::rules::{
+            pattern_rules::{
+                add_rmsnorm_rules, kv_slot_injection_rules, layernorm_rules,
+                matmul_activation_rules, position_ids_rules, rmsnorm_rules,
+                scalar_absorption_rules, slice_to_gather_rules, swiglu_projection_rules,
+                swiglu_rules,
+            },
+            RulePass,
         };
         Self::new(vec![
             // Resolve ONNX opset 10+ Slice params from constant inputs
@@ -63,45 +65,90 @@ impl OptPipeline {
             // chains into AiOp::LayerNorm. Runs BEFORE RmsNormFusion because
             // LayerNorm is a superset pattern — RmsNormFusion would otherwise
             // consume the inner Pow→ReduceMean→Sqrt→Div subchain.
-            Box::new(LayerNormFusion),
-            Box::new(RmsNormFusion),
-            // Fuse SiLU(gate) * up → FusedSwiGLU. Runs after RmsNormFusion
-            // so norm chains are already collapsed. Must run before
-            // AttentionFusion to avoid interfering with SDPA pattern matching.
-            Box::new(SwiGluFusion),
-            // Absorb Transpose(swap-last-2) → MatMul into Gemm { trans_a/trans_b }.
-            // Eliminates intermediate transposed buffer. Must run before
-            // MatMulActivationFusion (which matches on MatMul nodes).
-            Box::new(TransposeMatMulFusion),
+            // LayerNorm chain → AiOp::LayerNorm{axis:-1, epsilon}. ADR-0018
+            // declarative rule: matches the ReduceMean→Sub→Pow→ReduceMean→
+            // Add(eps)→Sqrt→Div→Mul(weight)→Add(bias) chain via same-var
+            // binding on the centered=Sub(X, ReduceMean(X)) tensor.
+            Box::new(RulePass::new("LayerNormFusion", layernorm_rules())),
+            // RmsNorm chain → AiOp::RmsNorm. ADR-0018 declarative rule
+            // set: matches both Mul-Reciprocal and Div variants of the
+            // explicit ONNX chain. Pulls epsilon from a bound Const var
+            // via from_match.
+            Box::new(RulePass::new("RmsNormFusion", rmsnorm_rules())),
+            // Fuse SiLU(gate) * up → FusedSwiGLU. ADR-0018 declarative
+            // rule set: matches both the direct (`Silu`) and decomposed
+            // (`Mul(x, Sigmoid(x))`) exporter variants commutatively.
+            // Runs after RmsNormFusion so norm chains are already
+            // collapsed; before AttentionFusion to avoid interfering
+            // with SDPA pattern matching.
+            Box::new(RulePass::new("SwiGluFusion", swiglu_rules())),
+            // TransposeMatMulFusion is DISABLED because the
+            // hologram-compiler Gemm lowering does not honour
+            // `trans_a`/`trans_b` (GemmCall has no transpose fields,
+            // and lower.rs reads `m=A.dim(0), k=A.dim(1),
+            // n=B.dim(1)` directly — see hologram-compiler/src/
+            // lower.rs:99-101). Absorbing Transpose into Gemm with
+            // trans flags is therefore silent corruption: the kernel
+            // computes with the *un-transposed* B, which only
+            // accidentally coincides with the correct result when B
+            // is square (a constraint the rule did not enforce). The
+            // explicit Transpose stays in the IR; if a future
+            // dedicated fusion preserves correctness (e.g. by
+            // packing B in transposed layout via b_packed), it can
+            // re-enable absorption then.
             // Absorb MatMul → Mul(scalar) into Gemm { alpha }.
-            // Eliminates full-tensor scalar multiply. Must run before other
-            // matmul fusions to simplify the graph.
-            Box::new(ScalarAbsorption),
+            // ADR-0018 declarative rule using `Pattern::Const` to require
+            // the scalar to be a constant param + `Replacement::from_match`
+            // to read its f32 value into Gemm's `alpha`. Eliminates the
+            // full-tensor scalar multiply.
+            Box::new(RulePass::new("ScalarAbsorption", scalar_absorption_rules())),
             // Fuse MatMul → SiLU/GeLU/ReLU into MatMulSilu/Gelu/Relu.
-            // Eliminates intermediate activation buffer; the tape kernel
-            // applies activation in-register during matmul writeback.
-            Box::new(MatMulActivationFusion),
+            // ADR-0018 declarative rule set — one rule per supported
+            // activation. Eliminates the intermediate activation buffer;
+            // the matmul kernel applies the activation in-register on
+            // writeback.
+            Box::new(RulePass::new(
+                "MatMulActivationFusion",
+                matmul_activation_rules(),
+            )),
             // Fuse Add(x, residual) → RmsNorm(sum, weight, eps) into
-            // FusedLayerNormResidual. Runs after RmsNormFusion (needs fused
-            // RmsNorm nodes) and before AttentionFusion.
-            Box::new(AddRmsNormFusion),
+            // FusedLayerNormResidual. ADR-0018 declarative rule with
+            // `Replacement::from_root` carrying epsilon from the matched
+            // RmsNorm. Runs after RmsNormFusion (needs fused RmsNorm
+            // nodes) and before AttentionFusion.
+            Box::new(RulePass::new("AddRmsNormFusion", add_rmsnorm_rules())),
             // Deep decode fusions (Plan 054):
             // Fuse [Add+]RmsNorm → multi-way MatMul projection.
             // Lowered as MultiOutput: 1 norm node + N MatMul nodes sharing
             // the norm output. No weight concatenation — original params reused.
             Box::new(NormProjectionFusion),
-            // Fuse FusedSwiGLU → MatMul (down projection).
-            Box::new(SwiGluProjectionFusion),
+            // Fuse FusedSwiGLU → MatMul (down projection) → FusedSwiGluProjection.
+            // ADR-0018 declarative rule.
+            Box::new(RulePass::new(
+                "SwiGluProjectionFusion",
+                swiglu_projection_rules(),
+            )),
             // Fuse shared-input MatMul projections:
             // QKV: 3 MatMuls → 1 MatMul + 3 Slices (saves 44 BLAS calls)
             // Gate+Up: 2 MatMuls → 1 MatMul + 2 Slices (saves 22 BLAS calls)
             Box::new(SharedInputProjectionFusion),
             // Replace Range(0, seq, 1) position generators with a position_ids
-            // input. Enables KV cache decode at seq=1 by passing the correct
-            // absolute position from the generation loop.
-            Box::new(PositionIdsInjection),
+            // input. ADR-0018 declarative rule via `Replacement::custom`:
+            // the rewrite verifies start==0 + step==1, allocates (or reuses)
+            // a `position_ids` graph input, and replaces the matched Range
+            // with `Identity(position_ids)`. Enables KV cache decode at
+            // seq=1 by passing the correct absolute position from the
+            // generation loop.
+            Box::new(RulePass::new("PositionIdsInjection", position_ids_rules())),
             Box::new(AttentionFusion { force_causal: None }),
-            Box::new(KvSlotInjection),
+            Box::new(RulePass::new("KvSlotInjection", kv_slot_injection_rules())),
+            // Rewrite non-axis-0 slices (RoPE rotate_half, QKV/gate-up splits)
+            // into first-class Gather. ADR-0018 declarative rule using
+            // `Replacement::custom` — the rewrite mints a new i64 indices
+            // param + Gather node from the Slice's axes/starts/ends/steps
+            // attributes + the input's declared shape. Runs after
+            // AttentionFusion + SharedInputProjectionFusion.
+            Box::new(RulePass::new("SliceToGather", slice_to_gather_rules())),
             // Infer semantic hints (Embedding, AttentionWeight, Residual, etc.)
             // from op types. Runs after all fusion passes so fused ops are present.
             Box::new(SemanticPropagation),

@@ -74,6 +74,15 @@ fn propagate_shapes(mut graph: AiGraph, protect_settled: bool) -> anyhow::Result
             None => continue,
         };
 
+        // UOR-native: collect input shapes strictly from tensor_info.
+        // A missing input shape isn't a thing to fabricate with
+        // `Shape::default()` (= empty shape) — the inference would then
+        // silently produce a wrong-shaped output. We collect what's
+        // available (using empty Shape as a tombstone for "absent")
+        // and let `infer_output_shapes` decide whether enough is known
+        // to compute the output. When the fixed-point loop revisits
+        // this node after other passes fill the missing info, the
+        // inference completes.
         let input_shapes: Vec<Shape> = graph.nodes[idx]
             .inputs
             .iter()
@@ -222,31 +231,46 @@ fn propagate_shapes(mut graph: AiGraph, protect_settled: bool) -> anyhow::Result
                 None => continue,
             };
 
-            let input_dtypes: Vec<DType> = graph.nodes[idx]
-                .inputs
-                .iter()
-                .map(|tid| {
-                    graph
-                        .tensor_info
-                        .get(tid)
-                        .map(|ti| ti.logical_dtype)
-                        .unwrap_or(DType::F32)
-                })
-                .collect();
+            // UOR-native dtype propagation: an input lacking `tensor_info`
+            // is a propagation **precondition failure**, not a thing to
+            // approximate with an F32 fallback. Skip this node — its
+            // output dtype is left as-is, and the fixed-point loop will
+            // revisit it after other passes / iterations fill the
+            // missing info. (The old code's `.unwrap_or(F32)` fabricated
+            // a dtype and then guarded against the fabrication
+            // overriding good data; the principled fix is to not
+            // fabricate at all.)
+            let mut input_dtypes: Vec<DType> = Vec::with_capacity(graph.nodes[idx].inputs.len());
+            let mut incomplete = false;
+            for tid in &graph.nodes[idx].inputs {
+                match graph.tensor_info.get(tid) {
+                    Some(ti) => input_dtypes.push(ti.logical_dtype),
+                    None => {
+                        incomplete = true;
+                        break;
+                    }
+                }
+            }
+            if incomplete {
+                continue;
+            }
 
             let output_tids = graph.nodes[idx].outputs.clone();
             let op = graph.nodes[idx].op.clone();
-            let inferred_dtypes = infer_output_dtypes(&op, &input_dtypes, output_tids.len());
+            let Some(inferred_dtypes) = infer_output_dtypes(&op, &input_dtypes, output_tids.len())
+            else {
+                // The inference itself couldn't determine a dtype
+                // (e.g. Cast with an unrecognized target). Leave the
+                // output dtype as-is; never invent one.
+                continue;
+            };
 
             for (i, tid) in output_tids.iter().enumerate() {
-                let inferred_dtype = inferred_dtypes
-                    .get(i)
-                    .copied()
-                    .unwrap_or_else(|| input_dtypes.first().copied().unwrap_or(DType::F32));
+                let Some(&inferred_dtype) = inferred_dtypes.get(i) else {
+                    continue;
+                };
                 if let Some(info) = graph.tensor_info.get_mut(tid) {
-                    // Update if the current dtype differs from inferred AND
-                    // the inferred dtype is more specific than F32 default.
-                    if info.logical_dtype != inferred_dtype && inferred_dtype != DType::F32 {
+                    if info.logical_dtype != inferred_dtype {
                         info.logical_dtype = inferred_dtype;
                         info.storage_dtype = inferred_dtype;
                         changed = true;

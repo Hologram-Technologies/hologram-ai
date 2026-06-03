@@ -7,9 +7,7 @@
 //!
 //! Serialized via rkyv for zero-copy access from memory-mapped archives.
 
-use hologram::hologram_archive::section::{EmbeddableSection, SECTION_CUSTOM_BASE};
-
-use crate::exec_context::ExecContext;
+use crate::exec_context::{Section, SECTION_CUSTOM_BASE};
 
 /// Section kind for pipeline component metadata.
 pub const SECTION_META: u32 = SECTION_CUSTOM_BASE + 0x11;
@@ -130,7 +128,7 @@ impl MetaSection {
     }
 }
 
-impl EmbeddableSection for MetaSection {
+impl Section for MetaSection {
     fn section_kind(&self) -> u32 {
         SECTION_META
     }
@@ -142,12 +140,14 @@ impl EmbeddableSection for MetaSection {
     }
 }
 
-impl ExecContext for MetaSection {
-    fn section_id() -> u32 {
+impl MetaSection {
+    /// Section kind constant (matches [`Section::section_kind`]).
+    pub fn section_id() -> u32 {
         SECTION_META
     }
 
-    fn from_context_bytes(bytes: &[u8]) -> anyhow::Result<Self> {
+    /// Deserialize from custom-section bytes.
+    pub fn from_context_bytes(bytes: &[u8]) -> anyhow::Result<Self> {
         Self::deserialize_from(bytes).map_err(|e| anyhow::anyhow!("deserialize MetaSection: {e}"))
     }
 }

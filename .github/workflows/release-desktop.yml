@@ -39,7 +39,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Generate GitHub App token
+      - name: Generate GitHub App token (hologram read access)
         id: app-token
         uses: actions/create-github-app-token@v1
         with:
@@ -48,10 +48,13 @@ jobs:
           owner: Hologram-Technologies
           repositories: hologram
 
-      - name: Checkout hologram (sibling dependency)
-        env:
-          TOKEN: ${{ steps.app-token.outputs.token }}
-        run: git clone --depth 1 "https://x-access-token:${TOKEN}@github.com/Hologram-Technologies/hologram.git" ../hologram
+      # hologram-* crates are git deps on a private repo. Configure git's
+      # `insteadOf` so cargo's `git-fetch-with-cli` picks up the App token.
+      - name: Configure git auth for cargo
+        run: |
+          git config --global \
+            url."https://x-access-token:${{ steps.app-token.outputs.token }}@github.com/Hologram-Technologies/".insteadOf \
+            "https://github.com/Hologram-Technologies/"
 
       - name: Install protoc
         uses: arduino/setup-protoc@v3

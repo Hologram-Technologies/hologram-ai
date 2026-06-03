@@ -103,6 +103,29 @@ fn infer_custom_output_shapes(
             }
         }
 
+        // SwiGLU activation `silu(gate)·up` — element-wise, output = gate shape.
+        AiOp::FusedSwiGLU => {
+            if !inputs.is_empty() && !inputs[0].is_empty() {
+                vec![Shape::from(inputs[0].clone())]
+            } else {
+                vec![Shape::new()]
+            }
+        }
+
+        // SwiGLU + down projection: `(silu(gate)·up) · W_down`. gate/up are
+        // `[..., intermediate]`; W_down is `[intermediate, hidden]`. Output keeps
+        // gate's leading (batch/seq) dims and replaces the last with W_down's N —
+        // a matmul shape, NOT a broadcast (the default Custom rule returns empty,
+        // which then heals to a wrong batch=seq shape).
+        AiOp::FusedSwiGluProjection => match (inputs.first(), inputs.get(2)) {
+            (Some(gate), Some(wdown)) if !gate.is_empty() && wdown.len() >= 2 => {
+                let mut out: Vec<DimExpr> = gate[..gate.len() - 1].to_vec();
+                out.push(wdown[wdown.len() - 1].clone());
+                vec![Shape::from(out)]
+            }
+            _ => vec![Shape::new()],
+        },
+
         // Reductions.
         AiOp::ReduceSum { axes, keepdims }
         | AiOp::ReduceMean { axes, keepdims }
@@ -226,16 +249,22 @@ fn infer_custom_output_shapes(
             }
         }
 
-        // Transpose: permute dims.
+        // Transpose: permute dims. An empty `perm` is the ONNX default —
+        // *reverse* all axes (not identity); leaving the shape unchanged is
+        // wrong (e.g. a tied-embedding LM head `Transpose(W[V,H]) → [H,V]`
+        // would keep [V,H], breaking the downstream matmul contraction).
         AiOp::Transpose { perm } => {
             if let Some(input) = inputs.first() {
-                if input.is_empty() || perm.is_empty() {
+                if input.is_empty() {
                     return inputs.first().cloned().into_iter().collect();
                 }
-                let shape: Vec<DimExpr> = perm
-                    .iter()
-                    .map(|&p| input.get(p as usize).cloned().unwrap_or(DimExpr::Dynamic))
-                    .collect();
+                let shape: Vec<DimExpr> = if perm.is_empty() {
+                    input.iter().rev().cloned().collect()
+                } else {
+                    perm.iter()
+                        .map(|&p| input.get(p as usize).cloned().unwrap_or(DimExpr::Dynamic))
+                        .collect()
+                };
                 vec![Shape::from(shape)]
             } else {
                 vec![Shape::new()]
@@ -334,20 +363,27 @@ fn infer_custom_output_shapes(
             }
         }
 
-        // Expand: use known_i64_values from the shape input if available.
+        // Expand (ONNX): the output is the *broadcast* of the input shape and
+        // the given target shape — NOT the target shape verbatim. A target dim
+        // of 1 broadcasts to the input's dim (e.g. `Expand([1,32,1], [1,1,1])`
+        // → `[1,32,1]`, not `[1,1,1]`). This is the idiom HF dynamic exports use
+        // for `.expand(batch, -1, 1)`: the `-1` is materialized as `1` via a
+        // `Where`, and Expand's broadcast restores the kept dimension. Taking
+        // the target verbatim silently dropped those dims (e.g. RoPE inv_freq's
+        // head_dim/2), so it must broadcast against the input.
         AiOp::Expand => {
             if let Some(vals) = shape_known_values {
-                let shape: Vec<DimExpr> = vals
+                let target: Shape = vals
                     .iter()
                     .map(|v| match v {
                         Some(n) if *n >= 0 => DimExpr::Concrete(*n as u64),
                         _ => DimExpr::Dynamic,
                     })
                     .collect();
-                if shape.is_empty() {
-                    inputs.first().cloned().into_iter().collect()
-                } else {
-                    vec![Shape::from(shape)]
+                match (target.is_empty(), inputs.first()) {
+                    (true, _) => inputs.first().cloned().into_iter().collect(),
+                    (false, Some(input)) => vec![broadcast_shape(input, &target)],
+                    (false, None) => vec![target],
                 }
             } else {
                 inputs.first().cloned().into_iter().collect()

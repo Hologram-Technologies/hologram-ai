@@ -9,6 +9,61 @@ default:
 # Full CI: format check, clippy, tests
 ci: fmt-check clippy test
 
+# ─────────────────────────────────────────────────────────────────────────────
+# V&V — Verification & Validation (see CONFORMANCE.md / VERIFICATION.md)
+#
+# Reproduces the full invariant catalog. Mirrors hologram's `just vv`.
+# Sub-targets map to the V&V axes; an axis fails loud if its invariant breaks.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Full V&V suite: architecture, conformance, structural, portability, perf.
+vv: vv-arch vv-conformance vv-structural vv-portability vv-perf
+
+# Axis 1 — Architecture (class AR): fmt, clippy, build, test against hologram 0.5.0.
+vv-arch: fmt-check clippy build test
+
+# Axis 2/3/4 — Import + correctness + e2e + addressing (classes IM/LW/CF/QZ/TK/EE/MA).
+vv-conformance: conformance conformance-ort
+
+# Axis 5 — Structural guarantees: zero-alloc (ZA), zero-movement (ZM),
+# elision (CE), canonical-forms (CF), lowering-vs-reference (LW), and the
+# import-byte-parsing perimeter (IM-3). Each axis lives in its own
+# `structural_<class>.rs` test file under `crates/hologram-ai-conformance/tests`.
+vv-structural:
+    cargo test -p hologram-ai-conformance --features=structural \
+        --test structural_ce --test structural_za --test structural_zm \
+        --test structural_cf --test structural_lw --test structural_im
+
+# Axis 6 — Portability (class NS): runtime core builds no_std on wasm + embedded.
+vv-portability: vv-wasm vv-embedded
+
+# NS-1 — the runtime core (dequant + tokenizer encode/decode) builds on
+# wasm32-unknown-unknown (no_std + alloc).
+vv-wasm:
+    cargo build --target wasm32-unknown-unknown -p hologram-ai-quant
+    cargo build --target wasm32-unknown-unknown -p hologram-ai-tokenizer --no-default-features
+
+# NS-2 — the runtime core builds on thumbv7em-none-eabi (no_std, bare metal).
+vv-embedded:
+    cargo build --target thumbv7em-none-eabi -p hologram-ai-quant
+    cargo build --target thumbv7em-none-eabi -p hologram-ai-tokenizer --no-default-features
+
+# Axis 7 — Performance (class PV): the asserted contract floors (no arbitrary
+# limit at 1B–20B params, content-addressed reuse O(1), weight-size-independent
+# compile, the 64/128/256/512 matmul sweep) plus the criterion scaling benches.
+vv-perf:
+    cargo test --release -p hologram-ai --test perf_contract -- --nocapture
+    cargo bench -p hologram-ai --bench scaling
+
+# PV-5 — full-weight billion-parameter execution (real ~4 GB weight set).
+# Hardware-bound: needs RAM ≳ weight set. HOLOGRAM_AI_PARAMS scales the target.
+vv-perf-large:
+    HOLOGRAM_AI_LARGE=1 cargo test --release -p hologram-ai --test perf_contract_large -- --nocapture --test-threads=1
+
+# Install the cross-compilation targets the portability axis needs.
+vv-setup:
+    rustup target add wasm32-unknown-unknown thumbv7em-none-eabi
+
 # Run all tests
 test:
     cargo nextest run --workspace

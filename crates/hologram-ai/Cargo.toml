@@ -9,6 +9,30 @@ name = "hologram-ai"
 path = "src/cli.rs"
 
 [features]
+default = ["native", "parallel"]
+# Native host capabilities: the model downloader + CLI logging. Off for the wasm
+# build (these crates don't compile on wasm32). The compile/run/generate core is
+# feature-independent and builds on both.
+native = [
+    "dep:futures",
+    "dep:reqwest",
+    "dep:indicatif",
+    "dep:tokio",
+    "dep:tempfile",
+    "dep:sha2",
+    "dep:dirs",
+    "dep:which",
+    "dep:memmap2",
+    "dep:tracing-subscriber",
+]
+# Multi-core execution (rayon), defaulted on for the native lib/CLI/benches so
+# performance (class PV) is unchanged. The wasm build (`hologram-ai-wasm`) omits
+# it — rayon cannot spawn threads on wasm32. See ADR-0017.
+parallel = [
+    "hologram-exec/parallel",
+    "hologram-backend/parallel",
+    "hologram-ai-common/parallel",
+]
 # Feature-gate large model E2E tests that require local model files (not run in CI).
 e2e = []
 
@@ -17,31 +41,45 @@ hologram-ai-common.workspace = true
 hologram-ai-quant.workspace  = true
 hologram-ai-onnx.workspace   = true
 hologram-ai-tokenizer.workspace = true
-# hologram with compiler feature — needed for hologram::compile()
-# default features already include compiler; workspace dep points to local path
-hologram.workspace = true
+# hologram 0.5.0 member crates (host-shell build: std + cpu backend + compiler).
+hologram-types.workspace    = true
+hologram-ops.workspace      = true
+hologram-graph.workspace    = true
+hologram-compiler.workspace = true
+hologram-exec.workspace     = true
+hologram-archive.workspace  = true
+hologram-backend.workspace  = true
+hologram-host.workspace     = true
+uor-foundation = "0.5.2"
+# Model-file content addressing (MA): mints a model's uor-addr κ-label used
+# as its dedup / warm-start identity (architecture §8). The format features
+# enable the ONNX / GGUF / JSON canonical realizations.
+uor-addr = { version = "0.2", features = ["onnx", "gguf"] }
 
 bytemuck.workspace     = true
 anyhow.workspace       = true
 thiserror.workspace    = true
-futures.workspace      = true
 clap.workspace         = true
 tracing.workspace      = true
 serde.workspace        = true
 serde_json.workspace   = true
 toml.workspace         = true
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-reqwest.workspace    = true
-indicatif.workspace  = true
-tokio.workspace      = true
-tempfile.workspace   = true
-sha2.workspace       = true
-dirs.workspace       = true
-which.workspace      = true
-memmap2.workspace    = true
-rayon.workspace      = true
-rkyv.workspace       = true
-parking_lot.workspace = true
+rkyv.workspace         = true
+parking_lot.workspace  = true
+
+# Native-only (the `native` feature): the model downloader + its toolchain.
+# These do not build on wasm32, so the browser build omits them (the wasm crate
+# depends on this facade with `default-features = false`). See ADR-0017.
+futures              = { workspace = true, optional = true }
+reqwest              = { workspace = true, optional = true }
+indicatif            = { workspace = true, optional = true }
+tokio                = { workspace = true, optional = true }
+tempfile             = { workspace = true, optional = true }
+sha2                 = { workspace = true, optional = true }
+dirs                 = { workspace = true, optional = true }
+which                = { workspace = true, optional = true }
+memmap2              = { workspace = true, optional = true }
+tracing-subscriber   = { version = "0.3", features = ["env-filter"], optional = true }
 
 [dev-dependencies]
 # Provides onnx_builder (pure Rust, no ORT) for mini fixture tests.
@@ -52,4 +90,8 @@ criterion = { workspace = true }
 
 [[bench]]
 name = "inference"
+harness = false
+
+[[bench]]
+name = "scaling"
 harness = false

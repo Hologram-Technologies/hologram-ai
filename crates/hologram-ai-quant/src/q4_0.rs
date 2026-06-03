@@ -1,3 +1,4 @@
+use alloc::vec::Vec;
 /// Q4_0 block: 18 bytes — [f16 scale (2 bytes)][32 nibbles packed into 16 bytes].
 ///
 /// Dequantization: weight = (nibble − 8) × scale
@@ -13,7 +14,7 @@ pub struct Q4_0Block {
 /// Size of a single Q4_0 block in bytes.
 pub const Q4_0_BLOCK_SIZE: usize = 18;
 
-const _: [u8; Q4_0_BLOCK_SIZE] = [0u8; std::mem::size_of::<Q4_0Block>()];
+const _: [u8; Q4_0_BLOCK_SIZE] = [0u8; core::mem::size_of::<Q4_0Block>()];
 
 /// Dequantize a single Q4_0 block to 32 f32 values.
 pub fn dequant_q4_0_block(block: &Q4_0Block) -> [f32; 32] {
@@ -49,6 +50,7 @@ pub fn dequant_q4_0(data: &[u8]) -> Vec<f32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::vec;
 
     #[test]
     fn dequant_zero_block() {

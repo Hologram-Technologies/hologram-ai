@@ -1,6 +1,7 @@
 //! SentencePiece Unigram encoder (Viterbi segmentation).
 
 use crate::vocab::VocabTable;
+use alloc::vec::Vec;
 
 /// Unigram encoder using Viterbi dynamic programming.
 pub struct UnigramEncoder<'a> {
@@ -36,7 +37,7 @@ impl<'a> UnigramEncoder<'a> {
             for len in 1..=max_len {
                 let end = i + len;
                 let substr = &bytes[i..end];
-                if let Ok(s) = std::str::from_utf8(substr) {
+                if let Ok(s) = core::str::from_utf8(substr) {
                     if let Some(id) = self.vocab.str_to_id(s) {
                         let score = if (id as usize) < self.scores.len() {
                             self.scores[id as usize] as f64

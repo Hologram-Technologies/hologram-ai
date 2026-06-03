@@ -87,7 +87,7 @@ impl MemoryPlanner {
 
         let total_activation_bytes = max_activation * graph.nodes.len() as u64;
 
-        let kv_cache_layout = compute_kv_layout(graph);
+        let kv_cache_layout = compute_kv_layout(graph)?;
 
         Ok(MemoryPlan {
             kv_cache_layout,
@@ -100,23 +100,31 @@ impl MemoryPlanner {
 /// Compute KV-cache layout from graph architecture metadata.
 ///
 /// Reads `n_layers`, `n_kv_heads`, `head_dim`, and `context_length` from
-/// `AiGraph::metadata`. Returns `KvCacheLayout::none()` if any are missing.
-fn compute_kv_layout(graph: &AiGraph) -> KvCacheLayout {
-    let n_layers = meta_u32(&graph.metadata, "n_layers").unwrap_or(0);
-    let n_kv_heads = meta_u32(&graph.metadata, "n_kv_heads").unwrap_or(0);
-    let head_dim = meta_u32(&graph.metadata, "head_dim").unwrap_or(0);
-    let max_seq_len = meta_u32(&graph.metadata, "context_length").unwrap_or(0);
+/// `AiGraph::metadata`. Returns `KvCacheLayout::none()` only when ALL keys
+/// are absent (no KV-cache role for this graph). When some are present and
+/// some are missing the metadata is malformed — refuse-not-fabricate.
+fn compute_kv_layout(graph: &AiGraph) -> anyhow::Result<KvCacheLayout> {
+    let n_layers = meta_u32(&graph.metadata, "n_layers");
+    let n_kv_heads = meta_u32(&graph.metadata, "n_kv_heads");
+    let head_dim = meta_u32(&graph.metadata, "head_dim");
+    let max_seq_len = meta_u32(&graph.metadata, "context_length");
 
-    if n_layers == 0 || n_kv_heads == 0 || head_dim == 0 || max_seq_len == 0 {
-        return KvCacheLayout::none();
-    }
-
-    KvCacheLayout {
-        n_layers,
-        n_kv_heads,
-        head_dim,
-        max_seq_len,
-        dtype: DType::F32,
+    match (n_layers, n_kv_heads, head_dim, max_seq_len) {
+        (None, None, None, None) => Ok(KvCacheLayout::none()),
+        (Some(n_layers), Some(n_kv_heads), Some(head_dim), Some(max_seq_len)) => {
+            Ok(KvCacheLayout {
+                n_layers,
+                n_kv_heads,
+                head_dim,
+                max_seq_len,
+                dtype: DType::F32,
+            })
+        }
+        _ => anyhow::bail!(
+            "KV-cache metadata partially present: n_layers={n_layers:?}, \
+             n_kv_heads={n_kv_heads:?}, head_dim={head_dim:?}, \
+             context_length={max_seq_len:?} — refuse to fabricate missing values"
+        ),
     }
 }
 

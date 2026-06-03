@@ -54,7 +54,10 @@ pub(crate) fn add_dims(a: &DimExpr, b: &DimExpr) -> DimExpr {
 ///
 /// Uses element count conservation to resolve -1 and unknown entries when
 /// the data input shape provides enough information.
-pub(crate) fn resolve_reshape_shape(vals: &[Option<i64>], data_shape: Option<&Shape>) -> Vec<DimExpr> {
+pub(crate) fn resolve_reshape_shape(
+    vals: &[Option<i64>],
+    data_shape: Option<&Shape>,
+) -> Vec<DimExpr> {
     // First pass: resolve all deterministic entries.
     // Track which indices need inference (None or -1).
     let mut shape: Vec<DimExpr> = Vec::with_capacity(vals.len());
@@ -298,23 +301,43 @@ pub(crate) fn reduce_shape(input: &Shape, axes: &[i64], keepdims: bool) -> Shape
     }
 }
 
-/// Infer per-output dtypes for an op given input dtypes.
-pub(crate) fn infer_output_dtypes(op: &AiOp, inputs: &[DType], num_outputs: usize) -> Vec<DType> {
-    let default = inputs.first().copied().unwrap_or(DType::F32);
-    let single = match op.category() {
+/// Infer per-output dtypes for an op given its input dtypes.
+///
+/// UOR-native: returns `None` when an output dtype cannot be determined
+/// from the inputs (no fabricated F32 fallback). Callers must accept
+/// the input dtypes are real (i.e. drawn from `tensor_info`, not made
+/// up). Output is `Some(Vec)` only when every output has a derivable
+/// dtype.
+pub(crate) fn infer_output_dtypes(
+    op: &AiOp,
+    inputs: &[DType],
+    num_outputs: usize,
+) -> Option<Vec<DType>> {
+    match op.category() {
         OpCategory::UnaryElementwise
         | OpCategory::BinaryElementwise
-        | OpCategory::ShapePreserving => default,
-        OpCategory::BinaryComparison => DType::BOOL,
+        | OpCategory::ShapePreserving => {
+            // Output dtype is the first input's dtype. Refuse to infer
+            // when no inputs were supplied.
+            let dt = *inputs.first()?;
+            Some(vec![dt; num_outputs])
+        }
+        OpCategory::BinaryComparison => Some(vec![DType::BOOL; num_outputs]),
         OpCategory::Custom => match op {
-            AiOp::Shape { .. } | AiOp::Range | AiOp::NonZero => DType::INT64,
-            AiOp::Cast { to, .. } => *to,
-            // TopK: output[0]=values (input dtype), output[1]=indices (INT64)
-            AiOp::TopK { .. } => {
-                return vec![default, DType::INT64];
+            AiOp::Shape { .. } | AiOp::Range | AiOp::NonZero => {
+                Some(vec![DType::INT64; num_outputs])
             }
-            _ => default,
+            AiOp::Cast { to, .. } => Some(vec![*to; num_outputs]),
+            // TopK: output[0]=values (input dtype), output[1]=indices (INT64).
+            AiOp::TopK { .. } => {
+                let dt = *inputs.first()?;
+                Some(vec![dt, DType::INT64])
+            }
+            _ => {
+                // Generic Custom op — output dtype = first input dtype.
+                let dt = *inputs.first()?;
+                Some(vec![dt; num_outputs])
+            }
         },
-    };
-    vec![single; num_outputs]
+    }
 }

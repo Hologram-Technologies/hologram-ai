@@ -33,6 +33,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "allocator-api2"
+version = "0.2.21"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "683d7910e743518b0e34f1186f92494becacb047c7b6bf616c96772180fef923"
+
+[[package]]
 name = "android_system_properties"
 version = "0.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -292,6 +298,12 @@ checksum = "c08606f8c3cbf4ce6ec8e28fb0014a2c086708fe954eaa885384a6165172e7e8"
 
 [[package]]
 name = "base64"
+version = "0.13.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9e1b586273c5702936fe7b7d6896644d8be71e6314cfe09d3167c95f712589e8"
+
+[[package]]
+name = "base64"
 version = "0.21.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9d297deb1925b89f2ccc13d7635fa0714f12c87adce1c75356b39ca9b7178567"
@@ -340,23 +352,16 @@ dependencies = [
 
 [[package]]
 name = "blake3"
-version = "1.8.3"
+version = "1.5.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2468ef7d57b3fb7e16b576e8377cdbde2320c60e1491e961d11da40fc4f02a2d"
+checksum = "b8ee0c1824c4dea5b5f81736aff91bae041d2c07ee1192bec91054e10e3e601e"
 dependencies = [
  "arrayref",
  "arrayvec",
  "cc",
  "cfg-if",
  "constant_time_eq",
- "cpufeatures",
 ]
-
-[[package]]
-name = "block"
-version = "0.1.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0d8c1fef690941d3e7788d328517591fecc684c084084702d6ff1641e993699a"
 
 [[package]]
 name = "block-buffer"
@@ -714,10 +719,20 @@ dependencies = [
 ]
 
 [[package]]
-name = "constant_time_eq"
-version = "0.4.2"
+name = "console_error_panic_hook"
+version = "0.1.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3d52eff69cd5e647efe296129160853a42795992097e8af39800e1060caeea9b"
+checksum = "a06aeb73f470f66dcdbf7223caeebb85984942f22f1adb2a088cf9668146bbbc"
+dependencies = [
+ "cfg-if",
+ "wasm-bindgen",
+]
+
+[[package]]
+name = "constant_time_eq"
+version = "0.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7c74b8349d32d297c9134b8c88677813a227df8f779daa29bfc29c183fe3dca6"
 
 [[package]]
 name = "convert_case"
@@ -931,12 +946,36 @@ dependencies = [
 
 [[package]]
 name = "darling"
+version = "0.20.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fc7f46116c46ff9ab3eb1597a45688b6715c6e628b5c133e288e709a29bcb4ee"
+dependencies = [
+ "darling_core 0.20.11",
+ "darling_macro 0.20.11",
+]
+
+[[package]]
+name = "darling"
 version = "0.23.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "25ae13da2f202d56bd7f91c25fba009e7717a1e4a1cc98a76d844b65ae912e9d"
 dependencies = [
- "darling_core",
- "darling_macro",
+ "darling_core 0.23.0",
+ "darling_macro 0.23.0",
+]
+
+[[package]]
+name = "darling_core"
+version = "0.20.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0d00b9596d185e565c2207a0b01f8bd1a135483d02d9b7b0a54b11da8d53412e"
+dependencies = [
+ "fnv",
+ "ident_case",
+ "proc-macro2",
+ "quote",
+ "strsim",
+ "syn 2.0.117",
 ]
 
 [[package]]
@@ -954,11 +993,22 @@ dependencies = [
 
 [[package]]
 name = "darling_macro"
+version = "0.20.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fc34b93ccb385b40dc71c6fceac4b2ad23662c7eeb248cf10d529b7e055b6ead"
+dependencies = [
+ "darling_core 0.20.11",
+ "quote",
+ "syn 2.0.117",
+]
+
+[[package]]
+name = "darling_macro"
 version = "0.23.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ac3984ec7bd6cfa798e62b4a642426a5be0e68f9401cfc2a01e3fa9ea2fcdb8d"
 dependencies = [
- "darling_core",
+ "darling_core 0.23.0",
  "quote",
  "syn 2.0.117",
 ]
@@ -981,6 +1031,37 @@ checksum = "7cd812cc2bc1d69d4764bd80df88b4317eaef9e773c75226407d9bc0876b211c"
 dependencies = [
  "powerfmt",
  "serde_core",
+]
+
+[[package]]
+name = "derive_builder"
+version = "0.20.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "507dfb09ea8b7fa618fcf76e953f4f5e192547945816d5358edffe39f6f94947"
+dependencies = [
+ "derive_builder_macro",
+]
+
+[[package]]
+name = "derive_builder_core"
+version = "0.20.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2d5bcf7b024d6835cfb3d473887cd966994907effbe9227e8c8219824d06c4e8"
+dependencies = [
+ "darling 0.20.11",
+ "proc-macro2",
+ "quote",
+ "syn 2.0.117",
+]
+
+[[package]]
+name = "derive_builder_macro"
+version = "0.20.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ab63b0e2bf4d5928aff72e83a7dace85d7bba5fe12dcc3c5a572d78caffd3f3c"
+dependencies = [
+ "derive_builder_core",
+ "syn 2.0.117",
 ]
 
 [[package]]
@@ -1257,6 +1338,12 @@ dependencies = [
  "libc",
  "windows-sys 0.61.2",
 ]
+
+[[package]]
+name = "esaxx-rs"
+version = "0.1.10"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d817e038c30374a4bcb22f94d0a8a0e216958d4c3dcde369b1439fec4bdda6e6"
 
 [[package]]
 name = "event-listener"
@@ -1846,6 +1933,8 @@ version = "0.15.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9229cfe53dfd69f0609a49f65461bd93001ea1ef889cd5529dd176593f5338a1"
 dependencies = [
+ "allocator-api2",
+ "equivalent",
  "foldhash 0.1.5",
 ]
 
@@ -1886,25 +1975,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ec9d92d097f4749b64e8cc33d924d9f40a2d4eb91402b458014b781f5733d60f"
 
 [[package]]
-name = "hologram"
-version = "0.4.1"
-dependencies = [
- "bytemuck",
- "hologram-archive",
- "hologram-backend",
- "hologram-cli",
- "hologram-compiler",
- "hologram-core",
- "hologram-exec",
- "hologram-graph",
- "hologram-ops",
- "rkyv",
- "serde",
- "tokio",
- "toml 0.8.2",
-]
-
-[[package]]
 name = "hologram-ai"
 version = "0.1.0"
 dependencies = [
@@ -1914,16 +1984,22 @@ dependencies = [
  "criterion",
  "dirs 5.0.1",
  "futures",
- "hologram",
  "hologram-ai-common",
  "hologram-ai-conformance",
  "hologram-ai-onnx",
  "hologram-ai-quant",
  "hologram-ai-tokenizer",
+ "hologram-archive",
+ "hologram-backend",
+ "hologram-compiler",
+ "hologram-exec",
+ "hologram-graph",
+ "hologram-host",
+ "hologram-ops",
+ "hologram-types",
  "indicatif",
  "memmap2",
  "parking_lot",
- "rayon",
  "reqwest 0.12.28",
  "rkyv",
  "serde",
@@ -1935,6 +2011,8 @@ dependencies = [
  "toml 0.8.2",
  "tracing",
  "tracing-subscriber",
+ "uor-addr",
+ "uor-foundation",
  "which",
 ]
 
@@ -1946,8 +2024,12 @@ dependencies = [
  "blake3",
  "bytemuck",
  "half",
- "hologram",
  "hologram-ai-quant",
+ "hologram-archive",
+ "hologram-exec",
+ "hologram-graph",
+ "hologram-ops",
+ "hologram-types",
  "indexmap 2.13.0",
  "rayon",
  "rkyv",
@@ -1965,16 +2047,22 @@ dependencies = [
  "approx",
  "bytemuck",
  "half",
- "hologram",
  "hologram-ai",
  "hologram-ai-common",
  "hologram-ai-onnx",
  "hologram-ai-quant",
+ "hologram-ai-tokenizer",
+ "hologram-archive",
+ "hologram-exec",
+ "hologram-graph",
+ "hologram-ops",
+ "hologram-types",
  "ndarray 0.16.1",
  "ort",
  "rand 0.8.5",
  "serde",
  "serde_json",
+ "tokenizers",
 ]
 
 [[package]]
@@ -2020,7 +2108,6 @@ dependencies = [
  "bytemuck",
  "half",
  "smallvec",
- "thiserror 2.0.18",
 ]
 
 [[package]]
@@ -2028,165 +2115,148 @@ name = "hologram-ai-tokenizer"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "hologram",
- "regex",
+ "hashbrown 0.15.5",
+ "hologram-ai-common",
+ "hologram-archive",
+ "hologram-types",
+ "regex-automata",
  "rkyv",
  "serde",
  "serde_json",
 ]
 
 [[package]]
-name = "hologram-archive"
-version = "0.4.1"
+name = "hologram-ai-wasm"
+version = "0.1.0"
 dependencies = [
- "blake3",
+ "console_error_panic_hook",
+ "half",
+ "hologram-ai",
+ "hologram-ai-common",
+ "hologram-ai-tokenizer",
+ "serde",
+ "serde-wasm-bindgen",
+ "serde_json",
+ "wasm-bindgen",
+ "wasm-bindgen-test",
+]
+
+[[package]]
+name = "hologram-archive"
+version = "0.6.0"
+source = "git+https://github.com/Hologram-Technologies/hologram.git?branch=main#18f553d8578997ce32e7b653786a0bcf9b09a2c0"
+dependencies = [
  "bytemuck",
- "hologram-compression",
- "hologram-core",
+ "hashbrown 0.15.5",
+ "hologram-backend",
  "hologram-graph",
+ "hologram-host",
  "memmap2",
- "rayon",
- "rkyv",
+ "smallvec",
+ "thiserror 2.0.18",
+ "uor-addr",
+ "uor-foundation",
+ "uor-foundation-sdk",
+ "uor-prism",
 ]
 
 [[package]]
 name = "hologram-backend"
-version = "0.1.0"
+version = "0.6.0"
+source = "git+https://github.com/Hologram-Technologies/hologram.git?branch=main#18f553d8578997ce32e7b653786a0bcf9b09a2c0"
 dependencies = [
  "bytemuck",
- "hologram-core",
- "hologram-transform",
- "metal",
- "objc",
+ "hologram-host",
+ "hologram-ops",
+ "hologram-types",
+ "libm",
  "smallvec",
  "thiserror 2.0.18",
- "tracing",
-]
-
-[[package]]
-name = "hologram-cascade"
-version = "0.4.1"
-dependencies = [
- "blake3",
- "hologram-archive",
- "hologram-core",
- "hologram-exec",
- "hologram-graph",
- "smallvec",
  "uor-foundation",
-]
-
-[[package]]
-name = "hologram-cli"
-version = "0.4.1"
-dependencies = [
- "clap",
- "hologram-archive",
- "hologram-compiler",
- "hologram-core",
- "hologram-exec",
- "hologram-graph",
- "parking_lot",
- "rkyv",
- "serde_json",
- "tokio",
+ "uor-foundation-sdk",
+ "uor-prism",
+ "uor-prism-tensor",
 ]
 
 [[package]]
 name = "hologram-compiler"
-version = "0.4.1"
+version = "0.6.0"
+source = "git+https://github.com/Hologram-Technologies/hologram.git?branch=main#18f553d8578997ce32e7b653786a0bcf9b09a2c0"
 dependencies = [
- "blake3",
+ "hashbrown 0.15.5",
  "hologram-archive",
- "hologram-cascade",
- "hologram-core",
+ "hologram-backend",
  "hologram-graph",
- "rayon",
+ "hologram-host",
+ "hologram-ops",
+ "hologram-types",
+ "smallvec",
+ "thiserror 2.0.18",
+ "tracing",
  "uor-foundation",
-]
-
-[[package]]
-name = "hologram-compression"
-version = "0.4.1"
-dependencies = [
- "hologram-core",
-]
-
-[[package]]
-name = "hologram-core"
-version = "0.4.1"
-dependencies = [
- "bytemuck",
- "hologram-ring",
- "libm",
- "rkyv",
- "uor-foundation",
+ "uor-prism",
 ]
 
 [[package]]
 name = "hologram-exec"
-version = "0.4.1"
+version = "0.6.0"
+source = "git+https://github.com/Hologram-Technologies/hologram.git?branch=main#18f553d8578997ce32e7b653786a0bcf9b09a2c0"
 dependencies = [
- "bytemuck",
+ "hashbrown 0.15.5",
  "hologram-archive",
  "hologram-backend",
- "hologram-core",
  "hologram-graph",
+ "hologram-host",
  "hologram-ops",
- "hologram-ring",
- "hologram-shape",
- "libc",
- "parking_lot",
- "rayon",
- "rkyv",
+ "hologram-types",
  "smallvec",
- "tracing",
+ "thiserror 2.0.18",
+ "uor-foundation",
+ "uor-prism",
 ]
 
 [[package]]
 name = "hologram-graph"
-version = "0.4.1"
+version = "0.6.0"
+source = "git+https://github.com/Hologram-Technologies/hologram.git?branch=main#18f553d8578997ce32e7b653786a0bcf9b09a2c0"
 dependencies = [
- "hologram-core",
  "hologram-ops",
- "rayon",
- "rkyv",
+ "hologram-types",
+ "libm",
  "smallvec",
- "tinyvec",
+]
+
+[[package]]
+name = "hologram-host"
+version = "0.6.0"
+source = "git+https://github.com/Hologram-Technologies/hologram.git?branch=main#18f553d8578997ce32e7b653786a0bcf9b09a2c0"
+dependencies = [
+ "uor-foundation",
+ "uor-foundation-sdk",
+ "uor-prism",
 ]
 
 [[package]]
 name = "hologram-ops"
-version = "0.4.1"
+version = "0.6.0"
+source = "git+https://github.com/Hologram-Technologies/hologram.git?branch=main#18f553d8578997ce32e7b653786a0bcf9b09a2c0"
 dependencies = [
+ "hologram-host",
+ "hologram-types",
  "libm",
- "rkyv",
-]
-
-[[package]]
-name = "hologram-ring"
-version = "0.4.1"
-dependencies = [
- "rkyv",
  "uor-foundation",
+ "uor-foundation-sdk",
+ "uor-prism",
 ]
 
 [[package]]
-name = "hologram-shape"
-version = "0.4.1"
+name = "hologram-types"
+version = "0.6.0"
+source = "git+https://github.com/Hologram-Technologies/hologram.git?branch=main#18f553d8578997ce32e7b653786a0bcf9b09a2c0"
 dependencies = [
- "hologram-core",
- "smallvec",
- "thiserror 2.0.18",
-]
-
-[[package]]
-name = "hologram-transform"
-version = "0.4.1"
-dependencies = [
- "hologram-ops",
- "smallvec",
- "thiserror 2.0.18",
+ "hologram-host",
+ "uor-foundation",
+ "uor-prism",
 ]
 
 [[package]]
@@ -2567,6 +2637,24 @@ dependencies = [
 
 [[package]]
 name = "itertools"
+version = "0.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b1c173a5686ce8bfa551b3563d0c2170bf24ca44da99c7ca4bfdab5418c3fe57"
+dependencies = [
+ "either",
+]
+
+[[package]]
+name = "itertools"
+version = "0.12.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ba291022dbbd398a455acf126c1e341954079855bc60dfdda641363bd6922569"
+dependencies = [
+ "either",
+]
+
+[[package]]
+name = "itertools"
 version = "0.14.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2b192c782037fadd9cfa75548310488aabdbf3d2da73885b31bd0abd03351285"
@@ -2677,6 +2765,15 @@ checksum = "5dea2b27dd239b2556ed7a25ba842fe47fd602e7fc7433c2a8d6106d4d9edd70"
 dependencies = [
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "keccak"
+version = "0.1.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cb26cec98cce3a3d96cbb7bced3c4b16e3d13f27ec56dbd62cbc8f39cfb9d653"
+dependencies = [
+ "cpufeatures",
 ]
 
 [[package]]
@@ -2815,13 +2912,20 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c41e0c4fef86961ac6d6f8a82609f55f31b05e4fce149ac5710e439df7619ba4"
 
 [[package]]
-name = "malloc_buf"
-version = "0.0.6"
+name = "macro_rules_attribute"
+version = "0.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "62bb907fe88d54d8d9ce32a3cceab4218ed2f6b7d35617cafe9adf84e43919cb"
+checksum = "65049d7923698040cd0b1ddcced9b0eb14dd22c5f86ae59c3740eab64a676520"
 dependencies = [
- "libc",
+ "macro_rules_attribute-proc_macro",
+ "paste",
 ]
+
+[[package]]
+name = "macro_rules_attribute-proc_macro"
+version = "0.2.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "670fdfda89751bc4a84ac13eaa63e205cf0fd22b4c9a5fbfa085b63c1f1d3a30"
 
 [[package]]
 name = "markup5ever"
@@ -2909,25 +3013,26 @@ dependencies = [
 ]
 
 [[package]]
-name = "metal"
-version = "0.33.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c7047791b5bc903b8cd963014b355f71dc9864a9a0b727057676c1dcae5cbc15"
-dependencies = [
- "bitflags 2.11.0",
- "block",
- "core-graphics-types",
- "foreign-types 0.5.0",
- "log",
- "objc",
- "paste",
-]
-
-[[package]]
 name = "mime"
 version = "0.3.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6877bb514081ee2a7ff5ef9de3281f14a4dd4bceac4c09388074a6b5df8a139a"
+
+[[package]]
+name = "minicov"
+version = "0.3.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4869b6a491569605d66d3952bcdf03df789e5b536e5f0cf7758a7f08a55ae24d"
+dependencies = [
+ "cc",
+ "walkdir",
+]
+
+[[package]]
+name = "minimal-lexical"
+version = "0.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "68354c5c6bd36d73ff3feceb05efa59b6acb7626617f4962be322a825e61f79a"
 
 [[package]]
 name = "miniz_oxide"
@@ -2948,6 +3053,28 @@ dependencies = [
  "libc",
  "wasi 0.11.1+wasi-snapshot-preview1",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "monostate"
+version = "0.1.18"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3341a273f6c9d5bef1908f17b7267bbab0e95c9bf69a0d4dcf8e9e1b2c76ef67"
+dependencies = [
+ "monostate-impl",
+ "serde",
+ "serde_core",
+]
+
+[[package]]
+name = "monostate-impl"
+version = "0.1.18"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e4db6d5580af57bf992f59068d4ea26fd518574ff48d7639b255a36f9de6e7e9"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.117",
 ]
 
 [[package]]
@@ -3087,6 +3214,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "72ef4a56884ca558e5ddb05a1d1e7e1bfd9a68d9ed024c21704cc98872dae1bb"
 
 [[package]]
+name = "nom"
+version = "7.1.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d273983c5a657a70a3e8f2a01329822f3b8c8172b73826411a55751e404a0a4a"
+dependencies = [
+ "memchr",
+ "minimal-lexical",
+]
+
+[[package]]
 name = "nu-ansi-term"
 version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3126,6 +3263,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "071dfc062690e90b734c0b2273ce72ad0ffa95f0c74596bc250dcfd960262841"
 dependencies = [
  "autocfg",
+ "libm",
 ]
 
 [[package]]
@@ -3155,15 +3293,6 @@ name = "number_prefix"
 version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "830b246a0e5f20af87141b25c173cd1b609bd7779a4617d6ec582abaf90870f3"
-
-[[package]]
-name = "objc"
-version = "0.2.7"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "915b1b472bc21c53464d6c8461c9d3af805ba1ef837e1cac254428f4a77177b1"
-dependencies = [
- "malloc_buf",
-]
 
 [[package]]
 name = "objc2"
@@ -3300,6 +3429,28 @@ name = "once_cell_polyfill"
 version = "1.70.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
+
+[[package]]
+name = "onig"
+version = "6.5.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0cc3cbf698f9438986c11a880c90a6d04b9de27575afd28bbf45b154b6c709e2"
+dependencies = [
+ "bitflags 2.11.0",
+ "libc",
+ "once_cell",
+ "onig_sys",
+]
+
+[[package]]
+name = "onig_sys"
+version = "69.9.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1e68317604e77e53b85896388e1a803c1d21b74c899ec9e5e1112db90735edd7"
+dependencies = [
+ "cc",
+ "pkg-config",
+]
 
 [[package]]
 name = "oorandom"
@@ -4034,7 +4185,7 @@ dependencies = [
  "once_cell",
  "socket2",
  "tracing",
- "windows-sys 0.59.0",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -4197,6 +4348,17 @@ checksum = "368f01d005bf8fd9b1206fb6fa653e6c4a81ceb1466406b81792d87c5677a58f"
 dependencies = [
  "either",
  "rayon-core",
+]
+
+[[package]]
+name = "rayon-cond"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "059f538b55efd2309c9794130bc149c6a553db90e9d99c2030785c82f0bd7df9"
+dependencies = [
+ "either",
+ "itertools 0.11.0",
+ "rayon",
 ]
 
 [[package]]
@@ -4684,6 +4846,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "serde-wasm-bindgen"
+version = "0.6.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8302e169f0eddcc139c70f139d19d6467353af16f9fce27e8c30158036a1e16b"
+dependencies = [
+ "js-sys",
+ "serde",
+ "wasm-bindgen",
+]
+
+[[package]]
 name = "serde_core"
 version = "1.0.228"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4793,7 +4966,7 @@ version = "3.18.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d3db8978e608f1fe7357e211969fd9abdcae80bac1ba7a3369bb7eb6b404eb65"
 dependencies = [
- "darling",
+ "darling 0.23.0",
  "proc-macro2",
  "quote",
  "syn 2.0.117",
@@ -4849,6 +5022,16 @@ dependencies = [
  "cfg-if",
  "cpufeatures",
  "digest",
+]
+
+[[package]]
+name = "sha3"
+version = "0.10.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "77fd7028345d415a4034cf8777cd4f8ab1851274233b45f84e3d955502d93874"
+dependencies = [
+ "digest",
+ "keccak",
 ]
 
 [[package]]
@@ -4979,6 +5162,18 @@ dependencies = [
  "gobject-sys",
  "libc",
  "system-deps",
+]
+
+[[package]]
+name = "spm_precompiled"
+version = "0.1.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5851699c4033c63636f7ea4cf7b7c1f1bf06d0cc03cfb42e711de5a5c46cf326"
+dependencies = [
+ "base64 0.13.1",
+ "nom",
+ "serde",
+ "unicode-segmentation",
 ]
 
 [[package]]
@@ -5471,7 +5666,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "82a72c767771b47409d2345987fda8628641887d5466101319899796367354a0"
 dependencies = [
  "fastrand",
- "getrandom 0.3.4",
+ "getrandom 0.4.2",
  "once_cell",
  "rustix",
  "windows-sys 0.61.2",
@@ -5612,6 +5807,37 @@ name = "tinyvec_macros"
 version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1f3ccbac311fea05f86f61904b462b55fb3df8837a366dfc601a0161d0532f20"
+
+[[package]]
+name = "tokenizers"
+version = "0.20.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3b08cc37428a476fc9e20ac850132a513a2e1ce32b6a31addf2b74fa7033b905"
+dependencies = [
+ "aho-corasick",
+ "derive_builder",
+ "esaxx-rs",
+ "getrandom 0.2.17",
+ "itertools 0.12.1",
+ "lazy_static",
+ "log",
+ "macro_rules_attribute",
+ "monostate",
+ "onig",
+ "paste",
+ "rand 0.8.5",
+ "rayon",
+ "rayon-cond",
+ "regex",
+ "regex-syntax",
+ "serde",
+ "serde_json",
+ "spm_precompiled",
+ "thiserror 1.0.69",
+ "unicode-normalization-alignments",
+ "unicode-segmentation",
+ "unicode_categories",
+]
 
 [[package]]
 name = "tokio"
@@ -5988,6 +6214,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e6e4313cd5fcd3dad5cafa179702e2b244f760991f45397d14d4ebf38247da75"
 
 [[package]]
+name = "unicode-normalization-alignments"
+version = "0.1.12"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "43f613e4fa046e69818dd287fdc4bc78175ff20331479dab6e1b0f98d57062de"
+dependencies = [
+ "smallvec",
+]
+
+[[package]]
 name = "unicode-segmentation"
 version = "1.13.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6006,29 +6241,106 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ebc1c04c71510c7f702b52b7c350734c9ff1295c464a03335b00bb84fc54f853"
 
 [[package]]
+name = "unicode_categories"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "39ec24b3121d976906ece63c9daad25b85969647682eee313cb5779fdd69e14e"
+
+[[package]]
 name = "untrusted"
 version = "0.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8ecb6da28b8a351d773b68d5825ac39017e680750f980f3a1a85cd8dd28a47c1"
 
 [[package]]
-name = "uor-foundation"
-version = "0.1.5"
+name = "uor-addr"
+version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7288701324f04949c717eb0d3947a396829699b10d896463e646628f0156bf26"
+checksum = "2b6e2d88d6ef066384c4eccbadc6dca625657493096b0776081dc106cd552eb6"
 dependencies = [
- "uor-foundation-macros",
+ "ryu",
+ "uor-foundation",
+ "uor-foundation-sdk",
+ "uor-prism",
+ "uor-prism-tensor",
 ]
 
 [[package]]
-name = "uor-foundation-macros"
-version = "0.1.5"
+name = "uor-foundation"
+version = "0.5.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "46799b53869e7321d93b4b14624ba987823e6a1edfa5783409e65f621a59ade2"
+checksum = "0179d3c29eb68e52ed03f9b48136159d4d4d26bd6b8008da3a9864b43ed0492f"
+dependencies = [
+ "libm",
+]
+
+[[package]]
+name = "uor-foundation-sdk"
+version = "0.5.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2c9ab22f2053e30eb0b748543182e236326a02c576aa46f1956ad4a3e4396490"
 dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.117",
+]
+
+[[package]]
+name = "uor-prism"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6d31f122d1466f5a48780fec22cdbef89dbd345e2b9aab8d8ebe89b5502fbb56"
+dependencies = [
+ "uor-foundation",
+ "uor-foundation-sdk",
+ "uor-prism-crypto",
+ "uor-prism-fhe",
+ "uor-prism-numerics",
+ "uor-prism-tensor",
+]
+
+[[package]]
+name = "uor-prism-crypto"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b363e64319dab5e809cd2524c6f9ff97150cc01b56e6c197feb574482c682542"
+dependencies = [
+ "blake3",
+ "sha2",
+ "sha3",
+ "uor-foundation",
+ "uor-foundation-sdk",
+]
+
+[[package]]
+name = "uor-prism-fhe"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "80bc3e193c5ca7a505d6db4937e30562d276ce6a90e9b0bb181815de64cd8ef2"
+dependencies = [
+ "uor-foundation",
+ "uor-foundation-sdk",
+]
+
+[[package]]
+name = "uor-prism-numerics"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "112180275b7f1b94f202f8894441bb7635fce583be291b91fc1be174435bdfa6"
+dependencies = [
+ "uor-foundation",
+ "uor-foundation-sdk",
+]
+
+[[package]]
+name = "uor-prism-tensor"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b69a4f7b49a8acc21823ca567fb962124d3d6b5b2891e20f5308ac1602211601"
+dependencies = [
+ "uor-foundation",
+ "uor-foundation-sdk",
+ "uor-prism-numerics",
 ]
 
 [[package]]
@@ -6267,6 +6579,45 @@ checksum = "75a326b8c223ee17883a4251907455a2431acc2791c98c26279376490c378c16"
 dependencies = [
  "unicode-ident",
 ]
+
+[[package]]
+name = "wasm-bindgen-test"
+version = "0.3.64"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6311c867385cc7d5602463b31825d454d0837a3aba7cdb5e56d5201792a3f7fe"
+dependencies = [
+ "async-trait",
+ "cast",
+ "js-sys",
+ "libm",
+ "minicov",
+ "nu-ansi-term",
+ "num-traits",
+ "oorandom",
+ "serde",
+ "serde_json",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "wasm-bindgen-test-macro",
+ "wasm-bindgen-test-shared",
+]
+
+[[package]]
+name = "wasm-bindgen-test-macro"
+version = "0.3.64"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "67008cdde4769831958536b0f11b3bdd0380bde882be17fff9c2f34bb4549abd"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.117",
+]
+
+[[package]]
+name = "wasm-bindgen-test-shared"
+version = "0.2.114"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cfe29135b180b72b04c74aa97b2b4a2ef275161eff9a6c7955ea9eaedc7e1d4e"
 
 [[package]]
 name = "wasm-encoder"

@@ -1,0 +1,50 @@
+# SmolLM2-135M-Instruct — real text generation (verified vs ONNX Runtime).
+#
+# This is the reference end-to-end example: a real pretrained Llama-family model
+# (RoPE + grouped-query attention + RMSNorm + SwiGLU) generated through
+# hologram-ai's canonical UOR-native pipeline. hologram-ai uses explicit CLI
+# flags (there is no `--config` mode).
+#
+# Download (lays out model.onnx + tokenizer.json + config.json under models/…):
+#   cargo run --release -- download HuggingFaceTB/SmolLM2-135M-Instruct
+#
+# ── Generate directly from the model source (arbitrary length) ──────────────────
+# Point `run` at the model DIRECTORY (or its model.onnx). No separate compile
+# step, no baked sequence length: the generation window is compiled on demand and
+# GROWS as the sequence does, up to the model's real context length (8192). So the
+# prompt and the continuation are bounded only by the model — never by an
+# arbitrary `--seq-len`:
+#   cargo run --release -- run models/SmolLM2-135M-Instruct \
+#     --prompt "The capital of France is" --max-tokens 64
+#
+# Observed (greedy, temperature 0 — deterministic, matches ONNX Runtime):
+#   "The capital of France is" → " Paris. Paris is the largest city in France and
+#                                  the capital of the French Republic."
+#
+# As the sequence crosses a window boundary (64 → 128 → 256 …) hologram-ai
+# recompiles a larger window; only the current window is kept resident, so a long
+# generation stays at ~one session's memory. Within a window, the unchanged prefix
+# is recognized by content address (κ-label) and elided — the UOR-native
+# replacement for a mutable KV-cache.
+#
+# ── Or precompile a fixed-window .holo (faster load, fixed seq_len) ─────────────
+#   cargo run --release -- compile \
+#     --model models/SmolLM2-135M-Instruct/model.onnx \
+#     --output models/SmolLM2-135M-Instruct --seq-len 128
+#   cargo run --release -- run models/SmolLM2-135M-Instruct/model.holo \
+#     --prompt "The capital of France is" --max-tokens 60
+# A precompiled .holo bakes its tokenizer and runs at its fixed window; a request
+# longer than that window is a clear error (recompile larger, or use the source
+# path above for an auto-growing window). See also
+# `cargo run -p hologram-ai --example text_generation` for the same loop on a
+# deterministic, closed-form-verified synthetic LM.
+
+[model]
+hf_id = "HuggingFaceTB/SmolLM2-135M-Instruct"
+
+[run]
+# Run from the model directory for the arbitrary-length growable window.
+model = "models/SmolLM2-135M-Instruct"
+prompt = "The capital of France is"
+max_tokens = 64
+temperature = 0.0

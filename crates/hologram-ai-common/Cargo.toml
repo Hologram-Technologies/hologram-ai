@@ -4,10 +4,20 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[features]
+# Multi-core execution (rayon). Off by default so the runtime core stays
+# wasm-buildable (class NS); native consumers enable it. Cascades to the backend
+# via hologram-exec's own `parallel` feature.
+parallel = ["hologram-exec/parallel"]
+
 [dependencies]
 hologram-ai-quant.workspace = true
-# hologram root crate — no compiler feature (lowering only produces Graph)
-hologram.workspace = true
+# hologram 0.5.0 member crates — lowering produces a canonical Graph of OpKinds.
+hologram-types.workspace   = true
+hologram-ops.workspace     = true
+hologram-graph.workspace   = true
+hologram-exec.workspace    = true
+hologram-archive.workspace = true
 
 half.workspace      = true
 smallvec.workspace  = true

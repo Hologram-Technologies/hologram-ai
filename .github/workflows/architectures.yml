@@ -1,0 +1,244 @@
+name: Architecture Regression Matrix
+
+# One job per supported transformer architecture. Each job downloads its
+# model from HuggingFace, compiles end-to-end, and runs the architecture's
+# generation/parity test — so a regression in any single architecture is
+# visibly isolated (vs. a single "live-models" job where the first failure
+# hides every later one).
+#
+# Triggers:
+#   - nightly (08:00 UTC, after the existing 06:00 UTC nightly.yml so cache
+#     reuse stays sequential)
+#   - workflow_dispatch (manual)
+#   - PRs that touch the load-bearing import / lowering / opt paths, the
+#     conformance crate, the Cargo.lock (for hologram dep bumps), or the
+#     workflows themselves
+#
+# Auth model mirrors ci.yml / nightly.yml: an App-token + git insteadOf so
+# cargo's `git-fetch-with-cli` can authenticate against the private
+# hologram repo. No sibling clone.
+
+on:
+  schedule:
+    - cron: '0 8 * * *'
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - 'crates/hologram-ai-onnx/**'
+      - 'crates/hologram-ai-common/src/lower/**'
+      - 'crates/hologram-ai-common/src/opt/**'
+      - 'crates/hologram-ai-common/src/rules/**'
+      - 'crates/hologram-ai-conformance/**'
+      - 'crates/hologram-ai/src/compiler.rs'
+      - 'crates/hologram-ai/src/runner.rs'
+      - 'crates/hologram-ai/src/engine.rs'
+      - 'crates/hologram-ai/src/commands/generate.rs'
+      - 'Cargo.lock'
+      - '.github/workflows/architectures.yml'
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  RUST_BACKTRACE: 1
+  HOLOGRAM_AI_LIVE: "1"
+
+jobs:
+  smollm2-135m:
+    name: SmolLM2-135M-Instruct
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Generate GitHub App token (hologram read access)
+        id: app-token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.APP_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+          owner: Hologram-Technologies
+          repositories: hologram
+
+      - name: Configure git auth for cargo
+        run: |
+          git config --global \
+            url."https://x-access-token:${{ steps.app-token.outputs.token }}@github.com/Hologram-Technologies/".insteadOf \
+            "https://github.com/Hologram-Technologies/"
+
+      - name: Install protoc
+        uses: arduino/setup-protoc@v3
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: arch-smollm2-135m
+
+      # Llama-family decoder: RoPE + GQA (9 Q heads / 3 KV heads = ratio
+      # 3:1) + RMSNorm + SwiGLU MLP + tied LM head. The current
+      # `HuggingFaceTB/SmolLM2-135M-Instruct` ONNX export uses three
+      # Microsoft contrib ops (RotaryEmbedding, GroupQueryAttention,
+      # SkipSimplifiedLayerNormalization) which hologram-ai-onnx
+      # decomposes to canonical AiOps at import time (see
+      # `graph_builder.rs`). 135M params; ONNX export uses split
+      # external data (model.onnx + model.onnx_data).
+      #
+      # SmolLM2 is pinned to a specific HF commit so the witness bytes
+      # are deterministic. If the upstream export style changes, this
+      # job must continue to validate the FROZEN bytes the import path
+      # was V&V'd against; a new commit pin is a deliberate scope
+      # bump, not a silent drift.
+      #
+      # `HF_READ_TOKEN` is forwarded as Bearer auth so the workflow
+      # survives if HF gates the repo (sibling Qwen2 repo went behind
+      # a gate after the original public window).
+      - name: Download SmolLM2-135M-Instruct
+        env:
+          HF_READ_TOKEN: ${{ secrets.HF_READ_TOKEN }}
+        run: |
+          set -euo pipefail
+          mkdir -p models/smollm2-135m
+          COMMIT="12fd25f77366fa6b3b4b768ec3050bf629380bac"
+          BASE="https://huggingface.co/HuggingFaceTB/SmolLM2-135M-Instruct/resolve/$COMMIT"
+          fetch() {
+            local dest="$1" url="$2"
+            curl --silent --show-error --fail --location \
+              ${HF_READ_TOKEN:+--header "Authorization: Bearer $HF_READ_TOKEN"} \
+              --output "$dest" "$url"
+          }
+          fetch models/smollm2-135m/model.onnx        "$BASE/onnx/model.onnx"
+          fetch models/smollm2-135m/model.onnx_data   "$BASE/onnx/model.onnx_data" || true
+          fetch models/smollm2-135m/tokenizer.json    "$BASE/tokenizer.json"
+          ls -la models/smollm2-135m/
+
+      # EE-2 / EE-3 — coherence + token-for-token ORT logit parity
+      # ("The capital of France is" → " Paris. Paris is the largest city
+      # in France and").
+      - name: SmolLM2 generation (EE-2/EE-3)
+        run: cargo test --release -p hologram-ai-conformance --features=onnx-spec --test real_model_generation -- --nocapture
+
+  qwen2-0_5b-instruct:
+    name: Qwen2.5-0.5B-Instruct
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Generate GitHub App token (hologram read access)
+        id: app-token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.APP_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+          owner: Hologram-Technologies
+          repositories: hologram
+
+      - name: Configure git auth for cargo
+        run: |
+          git config --global \
+            url."https://x-access-token:${{ steps.app-token.outputs.token }}@github.com/Hologram-Technologies/".insteadOf \
+            "https://github.com/Hologram-Technologies/"
+
+      - name: Install protoc
+        uses: arduino/setup-protoc@v3
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: arch-qwen2-0_5b-instruct
+
+      # Qwen2 family — exercises code paths SmolLM2 does not:
+      #   * GQA ratio 7:1 (14 Q heads / 2 KV heads, vs SmolLM2's 3:1),
+      #   * biased Q/K/V projections (Llama-family has no bias),
+      #   * native `logits` graph output (no LM-head injection — the
+      #     ONNX export already projects to vocab),
+      #   * full rank-3 norm-projection chain through
+      #     `desugar_norm_projection`.
+      # Regression witness for the UOR-native rank-3 MatMul fix + Gemm
+      # trans_b silent-drop eradication (commit 61b26de) and the
+      # subsequent const-dedup shape-key fix (commit 7527764). 500M
+      # params ≈ 950 MB f32.
+      #
+      # Model swap (2026-06): the original `onnx-community/Qwen2-0.5B-Instruct`
+      # repo was removed from the Hub (`RepoNotFound` 404 on resolve, see PR #1
+      # CI history). We now validate against the in-family successor
+      # `onnx-community/Qwen2.5-0.5B-Instruct`, which is the same architecture
+      # family (Qwen2 GQA, biased Q/K/V, native logits output) at the same
+      # 0.5B scale. The EE assertions are loose (Paris in the France
+      # completion, multi-word continuation, greedy determinism) so the
+      # successor satisfies them without test changes.
+      # `HF_READ_TOKEN` (org secret) is still forwarded as Bearer auth so
+      # the preflight + download work even if the repo is later gated.
+
+      # Pre-flight: verify HF_READ_TOKEN is present and authenticates.
+      # If this fails we want the loud, specific error rather than a
+      # later 401/403 on the model download.
+      - name: Verify HF auth (preflight)
+        env:
+          HF_READ_TOKEN: ${{ secrets.HF_READ_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z "${HF_READ_TOKEN:-}" ]; then
+            echo "::error::HF_READ_TOKEN secret is empty or not set." >&2
+            exit 1
+          fi
+          echo "HF_READ_TOKEN length: ${#HF_READ_TOKEN}"
+          # whoami-v2 returns 200 + JSON identity on a valid token,
+          # 401 on missing/bad, 403 on token without scope. Surface
+          # the actual response code so failures are diagnosable.
+          status=$(curl --silent --output /tmp/whoami.json --write-out '%{http_code}' \
+            --header "Authorization: Bearer $HF_READ_TOKEN" \
+            "https://huggingface.co/api/whoami-v2")
+          echo "whoami-v2 HTTP status: $status"
+          if [ "$status" != "200" ]; then
+            echo "::error::HF token failed whoami-v2 (status $status). Body:" >&2
+            cat /tmp/whoami.json >&2
+            exit 1
+          fi
+          # Probe model access without downloading the body.
+          probe=$(curl --silent --output /tmp/probe.txt --write-out '%{http_code}' \
+            --head --location \
+            --header "Authorization: Bearer $HF_READ_TOKEN" \
+            "https://huggingface.co/onnx-community/Qwen2.5-0.5B-Instruct/resolve/main/config.json")
+          echo "Qwen2.5 config.json HEAD status: $probe"
+          if [ "$probe" != "200" ] && [ "$probe" != "302" ]; then
+            echo "::error::HF token cannot read onnx-community/Qwen2.5-0.5B-Instruct (status $probe)." >&2
+            cat /tmp/probe.txt >&2
+            exit 1
+          fi
+
+      - name: Download Qwen2.5-0.5B-Instruct
+        env:
+          HF_READ_TOKEN: ${{ secrets.HF_READ_TOKEN }}
+        run: |
+          set -euo pipefail
+          mkdir -p models/Qwen2.5-0.5B-Instruct
+          BASE="https://huggingface.co/onnx-community/Qwen2.5-0.5B-Instruct/resolve/main"
+          fetch() {
+            local dest="$1" url="$2"
+            curl --silent --show-error --fail --location \
+              --header "Authorization: Bearer $HF_READ_TOKEN" \
+              --output "$dest" "$url"
+          }
+          fetch models/Qwen2.5-0.5B-Instruct/model.onnx       "$BASE/onnx/model.onnx"
+          fetch models/Qwen2.5-0.5B-Instruct/model.onnx_data  "$BASE/onnx/model.onnx_data" || true
+          fetch models/Qwen2.5-0.5B-Instruct/tokenizer.json   "$BASE/tokenizer.json"
+          fetch models/Qwen2.5-0.5B-Instruct/config.json      "$BASE/config.json"
+          ls -la models/Qwen2.5-0.5B-Instruct/
+
+      # EE — instruct-style multi-word continuation, prompt-relevance,
+      # determinism. Qwen2.5 hits the same GQA-7:1 + native-logits paths
+      # as the original Qwen2 — same architecture family at the same scale.
+      - name: Qwen2.5 generation
+        env:
+          HOLOGRAM_AI_QWEN2_ONNX: ${{ github.workspace }}/models/Qwen2.5-0.5B-Instruct/model.onnx
+        run: cargo test --release -p hologram-ai-conformance --features=onnx-spec --test real_model_generation_qwen2 -- --nocapture

@@ -1,15 +1,70 @@
-# Qwen2 0.5B — Q8 quantized compilation (auto-downgraded from Q4 for small models)
+# Qwen2 0.5B Instruct — Q8-quantized compile + generate.
 #
-# Compile: cargo run --release -- compile --config examples/qwen2.toml
-# Run:     cargo run --release -- run models/Qwen2-0.5B/model.holo --prompt "The capital of France is" --max-tokens 30
+# hologram-ai uses explicit CLI flags (there is no `--config` mode). The fields
+# below are reference values; the exact commands are:
+#
+# Download (lays out model.onnx + tokenizer.json + config.json under models/…):
+#   cargo run --release -- download Qwen/Qwen2-0.5B-Instruct
+#
+# Generate from the model source — arbitrary length, q8 weights (≈1 byte/param;
+# small models keep more precision than q4). The window grows on demand up to the
+# model's real context; ChatML template, stop at the assistant turn end:
+#   cargo run --release -- run models/Qwen2-0.5B-Instruct \
+#     --quantize q8_0 \
+#     --prompt "What is the capital of France?" \
+#     --prompt-template "<|im_start|>user\n{prompt}<|im_end|>\n<|im_start|>assistant\n" \
+#     --max-tokens 60 --temperature 0.0 --stop "<|im_end|>"
+#
+# Or precompile a fixed-window .holo (bakes the tokenizer; runs at one seq_len):
+#   cargo run --release -- compile \
+#     --model models/Qwen2-0.5B-Instruct/model.onnx \
+#     --output models/Qwen2-0.5B-Instruct --quantize q8_0 --seq-len 256
+#   cargo run --release -- run models/Qwen2-0.5B-Instruct/model.holo \
+#     --prompt "What is the capital of France?" \
+#     --prompt-template "<|im_start|>user\n{prompt}<|im_end|>\n<|im_start|>assistant\n" \
+#     --max-tokens 60 --stop "<|im_end|>"
+#
+# STATUS — Qwen2 family compiles but does NOT yet run end-to-end.
+#
+# Compile succeeds (q8_0, ~2 GB archive) on a 15 GB box with rust-analyzer
+# killed (peak 8 GB resident). Forward execution then fails at the GQA
+# attention call with:
+#   Backend error: buffer slot out of range  (K = slot 60, length 8192)
+# The K input buffer hologram allocates is smaller than the AttentionCall
+# requests. The diag harness
+#   HOLOGRAM_AI_LIVE=1 \
+#   HOLOGRAM_AI_DIAG_ONNX=models/Qwen2-0.5B-Instruct/model.onnx \
+#   cargo test --release -p hologram-ai --test diag_backend -- --ignored
+# surfaces the failing kernel.
+#
+# Root cause: hologram-compiler-level slot allocation under Qwen2's specific
+# graph shape — Qwen2 has biased Q/K/V projections (Llama-family models don't)
+# and GQA ratio 7 (vs SmolLM2's ratio 3). The K tensor's lifetime/shape
+# resolution interacts with these differences to produce a buffer smaller than
+# the AttentionCall's BufferRef.length. This is a compiler-level fix, separate
+# from the pipeline rule engine (ADR-0018) — the rule path is unchanged from
+# SmolLM2, which works.
+#
+# Llama-family path is verified end-to-end on the authoritative onnx-community
+# SmolLM2-135M — see `examples/smollm2.toml` for the same canonical pipeline
+# (RoPE + causal grouped-query attention + RMSNorm + SwiGLU + LM head).
+# Generation loop verified by `cargo run -p hologram-ai --example
+# text_generation` (deterministic closed-form check) and
+# `tests/generation_synthetic.rs`.
+#
+# hologram-ai replaces the mutable KV-cache with content-addressed κ-label
+# elision: it runs HuggingFace's with-past decoder exports as a full-recompute
+# prefill with an empty past (`Concat(past[…,0,…], cur) = cur`) and `run
+# --prompt` recomputes the growing token window, eliding the unchanged prefix
+# by content address.
 
 [model]
-path = "../models/Qwen2-0.5B/model.onnx"
-output = "../models/Qwen2-0.5B"
-quantize = "q4_0"
+hf_id = "Qwen/Qwen2-0.5B-Instruct"
+quantize = "q8_0"
 
 [run]
-prompt = "<|im_start|>system\nYou are a helpful assistant<|im_end|>\n<|im_start|>user\nWhat is the capital of France?<|im_end|>\n<|im_start|>assistant\n"
+prompt = "What is the capital of France?"
+prompt_template = "<|im_start|>user\n{prompt}<|im_end|>\n<|im_start|>assistant\n"
 max_tokens = 60
 temperature = 0.0
 stop = ["<|im_end|>"]

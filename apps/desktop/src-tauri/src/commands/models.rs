@@ -119,7 +119,10 @@ fn is_pipeline_submodel(p: &std::path::Path) -> bool {
     else {
         return false;
     };
-    matches!(parent, "text_encoder" | "unet" | "vae_decoder" | "vae_encoder")
+    matches!(
+        parent,
+        "text_encoder" | "unet" | "vae_decoder" | "vae_encoder"
+    )
 }
 
 #[derive(Deserialize)]
@@ -181,7 +184,11 @@ pub async fn compile_known_model(
 
     let bin = paths::hologram_ai_bin().map_err(|e| e.to_string())?;
     let cwd = paths::workspace_root();
-    let mut args = vec![
+    // Compile takes only model/output/name/quantize. The prompt template and
+    // stop strings are NOT baked into the archive (the `.holo` section set is
+    // closed — see specs/notes/generation-cli.md); they are supplied at run
+    // time by `generate` instead (catalogue → `--prompt-template` / `--stop`).
+    let args = vec![
         "compile".to_string(),
         "--model".into(),
         onnx.to_string_lossy().into_owned(),
@@ -192,16 +199,6 @@ pub async fn compile_known_model(
         "--quantize".into(),
         model.quantize.to_string(),
     ];
-    // Pass the prompt template through to the archive so the runtime can
-    // apply it without the desktop UI needing to know the format.
-    if let Some(template) = model.prompt_template {
-        args.push("--prompt-template".into());
-        args.push(template.to_string());
-    }
-    for s in model.stop {
-        args.push("--stop".into());
-        args.push((*s).to_string());
-    }
 
     let (_tx, rx) = oneshot::channel();
     process_runner::spawn_streaming(

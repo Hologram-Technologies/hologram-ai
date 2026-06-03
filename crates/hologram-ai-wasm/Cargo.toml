@@ -1,0 +1,28 @@
+[package]
+name    = "hologram-ai-wasm"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Browser (WebAssembly) entry point for hologram-ai — the real compile/run/generate pipeline, parallel-free. See ADR-0017."
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+# The real pipeline, reused: ModelCompiler + HoloRunner + the generation loop.
+# `default-features = false` drops the native downloader + rayon (neither builds
+# on wasm32), leaving the compile/run/generate core. See ADR-0017.
+hologram-ai = { path = "../hologram-ai", default-features = false }
+hologram-ai-tokenizer.workspace = true
+half.workspace = true
+
+wasm-bindgen = "0.2"
+serde = { workspace = true, features = ["derive"] }
+serde-wasm-bindgen = "0.6"
+console_error_panic_hook = "0.1"
+
+[dev-dependencies]
+wasm-bindgen-test = "0.3"
+# Build test-fixture models in-wasm (also exercises the compile path).
+hologram-ai-common.workspace = true
+serde_json.workspace = true

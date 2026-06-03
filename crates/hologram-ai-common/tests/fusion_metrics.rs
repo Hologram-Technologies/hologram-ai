@@ -306,16 +306,23 @@ fn ffn_block_swiglu_projection_fusion() {
     let before_counts = op_counts(&g);
 
     // Run just the fusion passes (not the full pipeline which needs shape prop).
-    use hologram_ai_common::opt::{
-        norm_projection_fusion::NormProjectionFusion, pipeline::Pass,
-        rmsnorm_fusion::RmsNormFusion, swiglu_fusion::SwiGluFusion,
-        swiglu_projection_fusion::SwiGluProjectionFusion,
+    // SwiGluFusion is the ADR-0018 declarative rule set (RulePass over
+    // `pattern_rules::swiglu_rules()`); the others are still imperative
+    // passes pending their own rule-set port.
+    use hologram_ai_common::opt::{norm_projection_fusion::NormProjectionFusion, pipeline::Pass};
+    use hologram_ai_common::rules::{
+        pattern_rules::{rmsnorm_rules, swiglu_projection_rules, swiglu_rules},
+        RulePass,
     };
 
-    let g = RmsNormFusion.run(g).expect("RmsNormFusion");
-    let g = SwiGluFusion.run(g).expect("SwiGluFusion");
+    let g = RulePass::new("RmsNormFusion", rmsnorm_rules())
+        .run(g)
+        .expect("RmsNormFusion");
+    let g = RulePass::new("SwiGluFusion", swiglu_rules())
+        .run(g)
+        .expect("SwiGluFusion");
     let g = NormProjectionFusion.run(g).expect("NormProjectionFusion");
-    let g = SwiGluProjectionFusion
+    let g = RulePass::new("SwiGluProjectionFusion", swiglu_projection_rules())
         .run(g)
         .expect("SwiGluProjectionFusion");
 
@@ -462,16 +469,20 @@ fn multi_layer_ffn_fusion_scaling() {
     g.outputs = vec![current_hidden];
     let before_nodes = g.nodes.len();
 
-    use hologram_ai_common::opt::{
-        norm_projection_fusion::NormProjectionFusion, pipeline::Pass,
-        rmsnorm_fusion::RmsNormFusion, swiglu_fusion::SwiGluFusion,
-        swiglu_projection_fusion::SwiGluProjectionFusion,
+    use hologram_ai_common::opt::{norm_projection_fusion::NormProjectionFusion, pipeline::Pass};
+    use hologram_ai_common::rules::{
+        pattern_rules::{rmsnorm_rules, swiglu_projection_rules, swiglu_rules},
+        RulePass,
     };
 
-    let g = RmsNormFusion.run(g).expect("RmsNormFusion");
-    let g = SwiGluFusion.run(g).expect("SwiGluFusion");
+    let g = RulePass::new("RmsNormFusion", rmsnorm_rules())
+        .run(g)
+        .expect("RmsNormFusion");
+    let g = RulePass::new("SwiGluFusion", swiglu_rules())
+        .run(g)
+        .expect("SwiGluFusion");
     let g = NormProjectionFusion.run(g).expect("NormProjectionFusion");
-    let g = SwiGluProjectionFusion
+    let g = RulePass::new("SwiGluProjectionFusion", swiglu_projection_rules())
         .run(g)
         .expect("SwiGluProjectionFusion");
 

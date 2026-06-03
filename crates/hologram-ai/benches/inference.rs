@@ -1,4 +1,10 @@
-//! Inference benchmarks: TTFT and decode tok/s for TinyLlama ONNX.
+//! Forward-pass inference benchmark (V&V class PV).
+//!
+//! In the UOR-native model there is no KV-cache: a `.holo` archive is loaded
+//! once into an `InferenceSession`, and every step — prefill or decode — is a
+//! single forward `execute`. Autoregressive reuse across steps is structural
+//! (content-addressed κ-label elision inside the session), not a host-managed
+//! cache. So the honest performance metric is forward-pass latency.
 //!
 //! Requires a pre-compiled `.holo` archive in `models/`. Run:
 //!   ./scripts/download-models.sh tinyllama
@@ -7,16 +13,13 @@
 //! Then:
 //!   cargo bench --bench inference
 //!
-//! Benchmarks are silently skipped if model files are not present.
+//! Benchmarks are silently skipped if the model archive is not present.
 
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use hologram::hologram_archive::section::model_meta::{ModelMetaSection, SECTION_MODEL_META};
-use hologram_ai::compiler::HoloRunner;
-
-// ── Model paths ──────────────────────────────────────────────────────────────
+use hologram_ai::runner::HoloRunner;
 
 fn workspace_root() -> PathBuf {
     let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -27,46 +30,12 @@ fn onnx_holo_path() -> PathBuf {
     workspace_root().join("models/TinyLlama-1.1B-Chat-v1.0/model.holo")
 }
 
-// ── Model wrapper ────────────────────────────────────────────────────────────
-
+/// A loaded model plus zeroed input buffers sized to the compiled graph's
+/// input ports. The archive carries concrete shapes, so the input byte sizes
+/// are fixed at compile time and read straight off the session.
 struct BenchModel {
     runner: HoloRunner,
-    input_slot: u32,
-    mask_slot: Option<u32>,
-    pos_slot: Option<u32>,
-    use_kv: bool,
-    n_layers: u32,
-    n_kv_heads: u32,
-    head_dim: u32,
-    max_seq: usize,
-    vocab_size: usize,
-}
-
-fn load_meta(runner: &HoloRunner) -> Option<ModelMetaSection> {
-    let bytes = runner.archive_bytes();
-    let plan = runner.plan();
-
-    // Try loading from plan's section table first.
-    if let Some(entry) = plan.sections().find(SECTION_MODEL_META) {
-        let offset = entry.offset as usize;
-        let size = entry.size as usize;
-        if offset + size <= bytes.len() {
-            if let Ok(meta) = ModelMetaSection::deserialize_from(&bytes[offset..offset + size]) {
-                return Some(meta);
-            }
-        }
-    }
-
-    // Fallback: re-parse the archive to find the section.
-    let fallback_plan = hologram::load_from_bytes(bytes).ok()?;
-    let entry = fallback_plan.sections().find(SECTION_MODEL_META)?;
-    let offset = entry.offset as usize;
-    let size = entry.size as usize;
-    if offset + size <= bytes.len() {
-        ModelMetaSection::deserialize_from(&bytes[offset..offset + size]).ok()
-    } else {
-        None
-    }
+    inputs: Vec<Vec<u8>>,
 }
 
 fn load_model(path: &Path) -> Option<BenchModel> {
@@ -75,239 +44,37 @@ fn load_model(path: &Path) -> Option<BenchModel> {
         return None;
     }
 
-    let runner = HoloRunner::from_path(path, None, None).ok()?;
-    let graph = runner.plan().graph();
+    let runner = HoloRunner::from_path(path, None).ok()?;
+    let inputs: Vec<Vec<u8>> = runner
+        .input_byte_sizes()
+        .into_iter()
+        .map(|n| vec![0u8; n])
+        .collect();
 
-    let input_slot = graph
-        .input_names
-        .iter()
-        .position(|n| n == "input_ids")
-        .unwrap_or(0) as u32;
-
-    let mask_slot = graph
-        .input_names
-        .iter()
-        .position(|n| n == "attention_mask")
-        .map(|i| i as u32);
-
-    let pos_slot = graph
-        .input_names
-        .iter()
-        .position(|n| n == "position_ids")
-        .map(|i| i as u32);
-
-    let meta = load_meta(&runner);
-
-    let (use_kv, n_layers, n_kv_heads, head_dim, max_seq) = match &meta {
-        Some(m) if m.n_layers > 0 => (
-            true,
-            m.n_layers,
-            m.n_kv_heads,
-            m.head_dim,
-            m.max_seq_len as usize,
-        ),
-        _ => (false, 0, 0, 0, 2048),
-    };
-
-    Some(BenchModel {
-        runner,
-        input_slot,
-        mask_slot,
-        pos_slot,
-        use_kv,
-        n_layers,
-        n_kv_heads,
-        head_dim,
-        max_seq,
-        vocab_size: 32000,
-    })
+    Some(BenchModel { runner, inputs })
 }
 
-// ── Input helpers ────────────────────────────────────────────────────────────
-
-fn build_inputs(
-    model: &BenchModel,
-    token_ids: &[i64],
-    kv_write_pos: usize,
-    is_decode: bool,
-) -> hologram::GraphInputs {
-    let mut inputs = hologram::GraphInputs::new();
-
-    let tokens: Vec<i64> = if is_decode {
-        vec![*token_ids.last().unwrap_or(&1)]
-    } else {
-        token_ids.to_vec()
-    };
-    let seq_len = tokens.len();
-
-    let input_bytes: Vec<u8> = tokens.iter().flat_map(|&v| v.to_le_bytes()).collect();
-    inputs.set_with_shape(model.input_slot, input_bytes, vec![1, seq_len]);
-
-    if let Some(slot) = model.mask_slot {
-        let mask_bytes: Vec<u8> = (0..seq_len).flat_map(|_| 1i64.to_le_bytes()).collect();
-        inputs.set_with_shape(slot, mask_bytes, vec![1, seq_len]);
-    }
-
-    if let Some(slot) = model.pos_slot {
-        let offset = if is_decode { kv_write_pos as i64 } else { 0i64 };
-        let pos_bytes: Vec<u8> = (0..seq_len as i64)
-            .map(|i| offset + i)
-            .flat_map(|v| v.to_le_bytes())
-            .collect();
-        inputs.set_with_shape(slot, pos_bytes, vec![1, seq_len]);
-    }
-
-    inputs
-}
-
-fn argmax_from_output(output: &hologram::GraphOutputs, pos: usize, vocab_size: usize) -> u32 {
-    let (_, data) = match output.get(0) {
-        Some(v) => v,
-        None => return 0,
-    };
-    let bytes_per_pos = vocab_size * 4;
-    let start = pos * bytes_per_pos;
-    let end = start + bytes_per_pos;
-    if end > data.len() {
-        return 0;
-    }
-    data[start..end]
-        .chunks_exact(4)
-        .enumerate()
-        .max_by(|(_, a), (_, b)| {
-            let fa = f32::from_le_bytes((*a).try_into().unwrap_or([0; 4]));
-            let fb = f32::from_le_bytes((*b).try_into().unwrap_or([0; 4]));
-            fa.partial_cmp(&fb).unwrap_or(std::cmp::Ordering::Equal)
-        })
-        .map(|(i, _)| i as u32)
-        .unwrap_or(0)
-}
-
-// ── Benchmarks ───────────────────────────────────────────────────────────────
-
-fn bench_ttft(c: &mut Criterion, name: &str, model: &BenchModel) {
-    let prompt_tokens: Vec<i64> = vec![1, 4, 5, 6, 7, 8, 9, 10];
-
-    let mut group = c.benchmark_group("ttft");
+fn bench_forward(c: &mut Criterion, name: &str, model: &mut BenchModel) {
+    let mut group = c.benchmark_group("forward");
     group.sample_size(10);
     group.measurement_time(Duration::from_secs(30));
 
-    group.bench_function(BenchmarkId::new("prefill_8tok", name), |b| {
+    group.bench_function(BenchmarkId::new("execute", name), |b| {
+        let input_refs: Vec<&[u8]> = model.inputs.iter().map(|v| v.as_slice()).collect();
         b.iter(|| {
-            let inputs = build_inputs(model, &prompt_tokens, 0, false);
-            if model.use_kv {
-                let mut kv = hologram::KvCacheState::new(
-                    model.n_layers,
-                    model.n_kv_heads,
-                    model.head_dim,
-                    model.max_seq,
-                );
-                model
-                    .runner
-                    .execute_with_kv(&inputs, &mut kv)
-                    .expect("prefill failed");
-            } else {
-                model.runner.execute(&inputs).expect("prefill failed");
-            }
-        });
-    });
-
-    group.finish();
-}
-
-fn bench_decode(c: &mut Criterion, name: &str, model: &BenchModel) {
-    if !model.use_kv {
-        return;
-    }
-
-    let prompt_tokens: Vec<i64> = vec![1, 4, 5, 6, 7, 8, 9, 10];
-    let decode_steps = 20;
-
-    let mut group = c.benchmark_group("decode");
-    group.sample_size(10);
-    group.measurement_time(Duration::from_secs(60));
-
-    group.bench_function(BenchmarkId::new("20_tokens", name), |b| {
-        b.iter(|| {
-            let mut kv = hologram::KvCacheState::new(
-                model.n_layers,
-                model.n_kv_heads,
-                model.head_dim,
-                model.max_seq,
-            );
-            let prefill_inputs = build_inputs(model, &prompt_tokens, 0, false);
-            let out = model
+            model
                 .runner
-                .execute_with_kv(&prefill_inputs, &mut kv)
-                .expect("prefill failed");
-
-            let mut token_ids = prompt_tokens.clone();
-            let next = argmax_from_output(&out, prompt_tokens.len() - 1, model.vocab_size);
-            token_ids.push(next as i64);
-
-            for _ in 0..decode_steps {
-                let inputs = build_inputs(model, &token_ids, kv.write_pos(), true);
-                let out = model
-                    .runner
-                    .execute_with_kv(&inputs, &mut kv)
-                    .expect("decode step failed");
-                let next = argmax_from_output(&out, 0, model.vocab_size);
-                token_ids.push(next as i64);
-            }
+                .execute(&input_refs)
+                .expect("forward pass failed");
         });
     });
 
     group.finish();
 }
-
-fn bench_single_decode_step(c: &mut Criterion, name: &str, model: &BenchModel) {
-    if !model.use_kv {
-        return;
-    }
-
-    let prompt_tokens: Vec<i64> = vec![1, 4, 5, 6, 7, 8, 9, 10];
-
-    let mut kv = hologram::KvCacheState::new(
-        model.n_layers,
-        model.n_kv_heads,
-        model.head_dim,
-        model.max_seq,
-    );
-    let prefill_inputs = build_inputs(model, &prompt_tokens, 0, false);
-    let out = model
-        .runner
-        .execute_with_kv(&prefill_inputs, &mut kv)
-        .expect("prefill failed");
-    let next = argmax_from_output(&out, prompt_tokens.len() - 1, model.vocab_size);
-    let mut token_ids = prompt_tokens.clone();
-    token_ids.push(next as i64);
-
-    let mut group = c.benchmark_group("decode_step");
-    group.sample_size(50);
-    group.measurement_time(Duration::from_secs(30));
-
-    group.bench_function(BenchmarkId::new("single", name), |b| {
-        b.iter(|| {
-            let inputs = build_inputs(model, &token_ids, kv.write_pos(), true);
-            let out = model
-                .runner
-                .execute_with_kv(&inputs, &mut kv)
-                .expect("decode step failed");
-            let next = argmax_from_output(&out, 0, model.vocab_size);
-            token_ids.push(next as i64);
-        });
-    });
-
-    group.finish();
-}
-
-// ── Criterion setup ──────────────────────────────────────────────────────────
 
 fn inference_benchmarks(c: &mut Criterion) {
-    if let Some(model) = load_model(&onnx_holo_path()) {
-        bench_ttft(c, "tinyllama_onnx", &model);
-        bench_decode(c, "tinyllama_onnx", &model);
-        bench_single_decode_step(c, "tinyllama_onnx", &model);
+    if let Some(mut model) = load_model(&onnx_holo_path()) {
+        bench_forward(c, "tinyllama_onnx", &mut model);
     }
 }
 

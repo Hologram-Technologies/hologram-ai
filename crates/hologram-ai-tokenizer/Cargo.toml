@@ -5,9 +5,33 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
-hologram.workspace   = true
-anyhow.workspace     = true
-serde.workspace      = true
-serde_json.workspace = true
-rkyv.workspace       = true
-regex                = "1"
+# ── Runtime core (no_std + alloc) ────────────────────────────────────────────
+# The encode/decode path runs on-device (wasm / embedded), so its deps are
+# no_std. `hashbrown` is the no_std HashMap; `regex-automata` (alloc, no_std)
+# drives byte-level pre-tokenization.
+hashbrown = { version = "0.15", default-features = false, features = ["default-hasher", "inline-more"] }
+regex-automata = { version = "0.4", default-features = false, features = ["alloc", "syntax", "meta", "unicode"] }
+
+# ── Host shell (std) ─────────────────────────────────────────────────────────
+# Model loading (tokenizer.json, archive sections, training). Compiled only
+# with the `std` feature; never linked into a no_std build.
+hologram-ai-common = { workspace = true, optional = true }
+hologram-types     = { workspace = true, optional = true }
+hologram-archive   = { workspace = true, optional = true }
+anyhow      = { workspace = true, optional = true }
+serde       = { workspace = true, optional = true }
+serde_json  = { workspace = true, optional = true }
+rkyv        = { workspace = true, optional = true }
+
+[features]
+default = ["std"]
+# Host-shell capabilities: JSON tokenizer loading + `.holo` archive sections.
+std = [
+    "dep:hologram-ai-common",
+    "dep:hologram-types",
+    "dep:hologram-archive",
+    "dep:anyhow",
+    "dep:serde",
+    "dep:serde_json",
+    "dep:rkyv",
+]

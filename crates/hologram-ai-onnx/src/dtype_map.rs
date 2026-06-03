@@ -41,7 +41,6 @@ pub fn is_widened_dtype(data_type: i32) -> bool {
 }
 
 /// Human-readable name for an ONNX data_type integer.
-#[allow(dead_code)]
 pub fn onnx_dtype_name(data_type: i32) -> &'static str {
     match data_type {
         1 => "FLOAT",

@@ -1,3 +1,4 @@
+use alloc::vec::Vec;
 /// Q8_0 block: 34 bytes — [f16 scale (2 bytes)][32 × i8].
 ///
 /// Dequantization: weight = i8_value × scale
@@ -13,7 +14,7 @@ pub struct Q8_0Block {
 /// Size of a single Q8_0 block in bytes.
 pub const Q8_0_BLOCK_SIZE: usize = 34;
 
-const _: [u8; Q8_0_BLOCK_SIZE] = [0u8; std::mem::size_of::<Q8_0Block>()];
+const _: [u8; Q8_0_BLOCK_SIZE] = [0u8; core::mem::size_of::<Q8_0Block>()];
 
 /// Dequantize a single Q8_0 block to 32 f32 values.
 pub fn dequant_q8_0_block(block: &Q8_0Block) -> [f32; 32] {
@@ -47,6 +48,7 @@ pub fn dequant_q8_0(data: &[u8]) -> Vec<f32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::vec;
 
     #[test]
     fn dequant_zero_block() {

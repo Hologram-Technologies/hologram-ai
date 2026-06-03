@@ -1,15 +1,26 @@
 //! `NativeTokenizer` — concrete tokenizer implementation.
 
 use crate::bpe::BpeEncoder;
-use crate::config::{
-    NormalizationConfig, PreTokenizerConfig, SpecialTokens, TokenizerAlgorithm, TokenizerConfig,
-};
+use crate::config::{TokenizerAlgorithm, TokenizerConfig};
 use crate::unigram::UnigramEncoder;
-use crate::vocab::{MergeRules, VocabTable};
+use crate::vocab::VocabTable;
 use crate::wordpiece::WordPieceEncoder;
 use crate::Tokenizer;
+use alloc::string::String;
+use alloc::vec::Vec;
+
+// ── Host-shell-only imports (JSON loading) ───────────────────────────────────
+#[cfg(feature = "std")]
+use crate::config::{NormalizationConfig, PreTokenizerConfig, SpecialTokens};
+#[cfg(feature = "std")]
+use crate::vocab::MergeRules;
+#[cfg(feature = "std")]
+use alloc::string::ToString;
+#[cfg(feature = "std")]
 use anyhow::{bail, Context, Result};
-use std::collections::HashMap;
+#[cfg(feature = "std")]
+use hashbrown::HashMap;
+#[cfg(feature = "std")]
 use std::path::Path;
 
 /// Encoder backend — dispatches to the algorithm-specific encoder.
@@ -35,12 +46,60 @@ pub struct NativeTokenizer {
 }
 
 impl NativeTokenizer {
+    /// Construct from an already-parsed [`TokenizerConfig`] — the no_std /
+    /// on-device entry point. The encode/decode path needs no `std`: a
+    /// pre-built vocab + merges (e.g. decoded from a `.holo` tokenizer
+    /// section) is turned into the algorithm-specific encoder here. The
+    /// host-shell `from_tokenizer_json` (behind the `std` feature) is just a
+    /// JSON front-end onto the same config.
+    pub fn from_config(mut config: TokenizerConfig) -> Self {
+        let pre_tokenizer = config.pre_tokenizer.clone();
+        let byte_fallback = config.byte_fallback;
+        // Move the (vocab-bearing) algorithm out into the backend; the stored
+        // config keeps only the lightweight metadata (special tokens, flags),
+        // so the large vocab is never duplicated.
+        let algorithm = core::mem::replace(
+            &mut config.algorithm,
+            TokenizerAlgorithm::Unigram {
+                vocab: VocabTable::new(Vec::new()),
+                scores: Vec::new(),
+            },
+        );
+        let backend = match algorithm {
+            TokenizerAlgorithm::Bpe { vocab, merges } => {
+                EncoderBackend::Bpe(BpeEncoder::new(vocab, merges, byte_fallback, pre_tokenizer))
+            }
+            TokenizerAlgorithm::Unigram { vocab, scores } => {
+                EncoderBackend::Unigram { vocab, scores }
+            }
+            TokenizerAlgorithm::WordPiece {
+                vocab,
+                continuing_subword_prefix,
+                max_input_chars_per_word,
+            } => EncoderBackend::WordPiece {
+                vocab,
+                continuing_prefix: continuing_subword_prefix,
+                max_input_chars_per_word,
+            },
+        };
+        Self { config, backend }
+    }
+}
+
+#[cfg(feature = "std")]
+impl NativeTokenizer {
     /// Construct from a HuggingFace `tokenizer.json` file.
     pub fn from_tokenizer_json(path: &Path) -> Result<Self> {
-        let data = std::fs::read_to_string(path)
+        let data = std::fs::read(path)
             .with_context(|| format!("reading tokenizer file: {}", path.display()))?;
+        Self::from_tokenizer_json_bytes(&data)
+    }
+
+    /// Construct from in-memory HuggingFace `tokenizer.json` bytes — used to load
+    /// the tokenizer baked into a `.holo` archive extension (no file needed).
+    pub fn from_tokenizer_json_bytes(bytes: &[u8]) -> Result<Self> {
         let json: serde_json::Value =
-            serde_json::from_str(&data).context("parsing tokenizer JSON")?;
+            serde_json::from_slice(bytes).context("parsing tokenizer JSON")?;
 
         let model = &json["model"];
         let model_type = model["type"].as_str().context("missing model.type")?;
@@ -299,8 +358,9 @@ impl Tokenizer for NativeTokenizer {
     }
 }
 
-// ── JSON parsing helpers ────────────────────────────────────────────────
+// ── JSON parsing helpers (host shell) ───────────────────────────────────
 
+#[cfg(feature = "std")]
 fn parse_special_tokens(json: &serde_json::Value) -> Result<SpecialTokens> {
     let added = json.get("added_tokens").and_then(|v| v.as_array());
 
@@ -338,6 +398,7 @@ fn parse_special_tokens(json: &serde_json::Value) -> Result<SpecialTokens> {
     })
 }
 
+#[cfg(feature = "std")]
 fn parse_pre_tokenizer(json: &serde_json::Value) -> PreTokenizerConfig {
     let pt = match json.get("pre_tokenizer") {
         Some(v) if !v.is_null() => v,
@@ -347,6 +408,7 @@ fn parse_pre_tokenizer(json: &serde_json::Value) -> PreTokenizerConfig {
     parse_pre_tokenizer_value(pt)
 }
 
+#[cfg(feature = "std")]
 fn parse_pre_tokenizer_value(pt: &serde_json::Value) -> PreTokenizerConfig {
     match pt["type"].as_str() {
         Some("Metaspace") => {
@@ -421,6 +483,7 @@ fn parse_pre_tokenizer_value(pt: &serde_json::Value) -> PreTokenizerConfig {
     }
 }
 
+#[cfg(feature = "std")]
 fn parse_normalization(json: &serde_json::Value) -> NormalizationConfig {
     let norm = match json.get("normalizer") {
         Some(v) if !v.is_null() => v,
@@ -435,7 +498,62 @@ fn parse_normalization(json: &serde_json::Value) -> NormalizationConfig {
     }
 }
 
+/// Core (no_std-buildable) tests: exercise `from_config` + encode/decode
+/// without any JSON loading, so they run on the no_std build too.
 #[cfg(test)]
+mod core_tests {
+    use super::*;
+    use crate::config::{NormalizationConfig, PreTokenizerConfig, SpecialTokens};
+    use alloc::vec;
+
+    fn bpe_config() -> TokenizerConfig {
+        // Vocab covers single bytes h,e,l,o plus the merge "ll".
+        let vocab = VocabTable::new(vec![
+            b"h".to_vec(),
+            b"e".to_vec(),
+            b"l".to_vec(),
+            b"o".to_vec(),
+            b"ll".to_vec(),
+        ]);
+        let merges = MergeRules {
+            merges: vec![(b"l".to_vec(), b"l".to_vec())],
+        };
+        TokenizerConfig {
+            algorithm: TokenizerAlgorithm::Bpe { vocab, merges },
+            special_tokens: SpecialTokens {
+                bos_id: None,
+                // Out of the content-token range (vocab ids 0..5) so decode's
+                // eos filtering never drops a real token.
+                eos_id: 100,
+                pad_id: None,
+                unk_id: None,
+                additional: Default::default(),
+            },
+            normalization: NormalizationConfig::None,
+            pre_tokenizer: PreTokenizerConfig::None,
+            byte_fallback: false,
+            add_bos: false,
+            add_eos: false,
+        }
+    }
+
+    #[test]
+    fn from_config_bpe_encodes_with_merges() {
+        let tok = NativeTokenizer::from_config(bpe_config());
+        // "hello" → h, e, ll (merged), o  → ids [0, 1, 4, 3]
+        assert_eq!(tok.encode("hello"), vec![0, 1, 4, 3]);
+        assert_eq!(tok.vocab_size(), 5);
+    }
+
+    #[test]
+    fn from_config_decode_roundtrips() {
+        let tok = NativeTokenizer::from_config(bpe_config());
+        let ids = tok.encode("hello");
+        assert_eq!(tok.decode(&ids), "hello");
+    }
+}
+
+#[cfg(all(test, feature = "std"))]
 mod tests {
     use super::*;
     use std::path::PathBuf;
@@ -453,7 +571,7 @@ mod tests {
     fn load_tinyllama_tokenizer() {
         let path = tokenizer_json_path();
         if !path.exists() {
-            eprintln!("skipping: tokenizer.json not found at {}", path.display());
+            std::eprintln!("skipping: tokenizer.json not found at {}", path.display());
             return;
         }
         let tok = NativeTokenizer::from_tokenizer_json(&path).unwrap();

@@ -1,5 +1,12 @@
 # Workspace-level Cargo configuration.
 
+[net]
+# Fetch git deps via the `git` CLI rather than libgit2. The hologram crates are
+# sourced from a private GitHub repo, which the `ghu_` env-supplied token 403s
+# on; the git CLI uses git's credential helper (the gh CLI keyring) which has
+# the necessary access. No-op once the dep is cached in ~/.cargo/git.
+git-fetch-with-cli = true
+
 [env]
 # Use the system-installed ONNX Runtime for conformance tests.
 # Prevents ORT from downloading a copy on every `cargo test`.

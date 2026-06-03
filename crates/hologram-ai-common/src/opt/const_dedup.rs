@@ -1,18 +1,25 @@
-//! Content-based constant deduplication.
+//! Content-addressed constant deduplication.
 //!
-//! Scans all `AiParam::Inline` constants, hashes their bytes, and merges
-//! duplicates by remapping TensorIds. This eliminates cross-layer duplication
-//! that op+inputTID CSE cannot catch (e.g., 22 transformer layers each
-//! independently computing the same RoPE constants from shared weights).
+//! Addresses every `AiParam::Inline` weight to its **uor-addr content
+//! fingerprint** — the canonical BLAKE3 content address
+//! ([`hologram_archive::WeightFingerprint`], the same address hologram's
+//! `WeightStore` dedups by and the same hasher family as a model's κ-label) —
+//! and merges weights that share an address by remapping TensorIds. A weight's
+//! identity is thus its uor-address, not its bytes: structurally-equal weights
+//! collapse to one, consistent with the canonical-forms model (the IR operates
+//! over addresses, not values). This catches cross-layer duplication that
+//! op+inputTID CSE cannot (e.g. 22 transformer layers independently
+//! materializing the same RoPE table, or tied embed/unembed weights).
 //!
 //! Runs after ConstantEvaluation + ConstantFolding so that all materializable
 //! constants have been produced and dead intermediates removed.
 
 use super::pipeline::Pass;
-use crate::ir::{AiGraph, AiParam, TensorId};
+use crate::ir::{AiGraph, AiParam, DType, Shape, TensorId};
+use hologram_archive::WeightFingerprint;
 use std::collections::HashMap;
 
-/// Deduplicate inline constants by content hash.
+/// Deduplicate inline constants by their uor-addr content fingerprint.
 pub struct ConstantDeduplication;
 
 impl Pass for ConstantDeduplication {
@@ -21,10 +28,21 @@ impl Pass for ConstantDeduplication {
     }
 
     fn run(&self, mut graph: AiGraph) -> anyhow::Result<AiGraph> {
-        // Build a map: content hash → canonical TensorId.
-        // We use (len, dtype, partial_hash) as the key for fast comparison,
-        // then do a full byte comparison to confirm.
-        let mut canonical: HashMap<ContentKey, TensorId> = HashMap::new();
+        // Canonical owner per (content address, dtype, shape). Equal address
+        // ⇒ equal bytes (BLAKE3 is collision-resistant — the premise of
+        // content addressing, and exactly what hologram's WeightStore relies
+        // on), so no byte re-comparison is needed. The dtype + shape scope
+        // the address so two weights with identical bytes but different
+        // *interpretations* stay distinct: a `[32, 64]` and a `[64, 32]`
+        // tensor full of zeros are byte-identical but semantically different
+        // tensors (transposes of each other), and downstream ops read them
+        // as their declared shape (the matmul's k = A.dim(1) must equal
+        // B.dim(0)). Merging them would silently rewrite a MatMul's B
+        // operand to a wrong-shape constant — caught loud by hologram's
+        // rank-2 k-mismatch check, but the right fix is to never merge
+        // them in the first place. Tensor identity = (content, dtype,
+        // shape).
+        let mut canonical: HashMap<(WeightFingerprint, DType, Shape), TensorId> = HashMap::new();
         let mut remap: HashMap<TensorId, TensorId> = HashMap::new();
 
         // Collect param TIDs sorted so we get deterministic canonical choices.
@@ -32,28 +50,24 @@ impl Pass for ConstantDeduplication {
         param_tids.sort();
 
         for &tid in &param_tids {
-            let param = match graph.params.get(&tid) {
+            let (data, info) = match graph.params.get(&tid) {
                 Some(AiParam::Inline { data, info }) => (data.as_slice(), info),
                 _ => continue,
             };
-            let (data, info) = param;
 
             // Skip small constants (dedup overhead not worth it).
             if data.len() < 256 {
                 continue;
             }
 
-            let key = ContentKey::from_bytes(data, info.logical_dtype);
+            let key = (
+                WeightFingerprint::of(data),
+                info.logical_dtype,
+                info.shape.clone(),
+            );
 
             if let Some(&canon_tid) = canonical.get(&key) {
-                // Verify full byte equality (hash collision guard).
-                let canon_data = match graph.params.get(&canon_tid) {
-                    Some(AiParam::Inline { data, .. }) => data.as_slice(),
-                    _ => continue,
-                };
-                if data == canon_data {
-                    remap.insert(tid, canon_tid);
-                }
+                remap.insert(tid, canon_tid);
             } else {
                 canonical.insert(key, tid);
             }
@@ -110,31 +124,6 @@ impl Pass for ConstantDeduplication {
         );
 
         Ok(graph)
-    }
-}
-
-/// Hash key for constant content: uses FNV-style hash of the full byte content
-/// plus dtype to avoid false matches across different interpretations.
-#[derive(Hash, PartialEq, Eq, Clone)]
-struct ContentKey {
-    len: usize,
-    dtype_tag: u8,
-    hash: u64,
-}
-
-impl ContentKey {
-    fn from_bytes(data: &[u8], dtype: crate::ir::DType) -> Self {
-        // FNV-1a hash of the full content.
-        let mut h: u64 = 0xcbf29ce484222325;
-        for &b in data {
-            h ^= b as u64;
-            h = h.wrapping_mul(0x100000001b3);
-        }
-        Self {
-            len: data.len(),
-            dtype_tag: dtype as u8,
-            hash: h,
-        }
     }
 }
 
@@ -225,6 +214,35 @@ mod tests {
 
         let g2 = ConstantDeduplication.run(g).unwrap();
         assert_eq!(g2.params.len(), 2);
+    }
+
+    #[test]
+    fn no_dedup_same_bytes_different_shapes() {
+        // Regression: a `[32, 64]` and a `[64, 32]` tensor full of zeros are
+        // byte-identical but semantically different — transposes of each
+        // other. Merging them would silently rewrite a MatMul's B operand
+        // to a wrong-shape constant (caught loud by hologram's k-mismatch
+        // check, but the right fix is to never merge them). Tensor identity
+        // = (content, dtype, shape).
+        let data = vec![0u8; 32 * 64 * 4]; // 8192 bytes, >= 256 threshold
+        let info_a = TensorInfo::new(DType::F32, shape_from_concrete(&[32, 64]));
+        let info_b = TensorInfo::new(DType::F32, shape_from_concrete(&[64, 32]));
+
+        let mut params = HashMap::new();
+        params.insert(10u32, AiParam::inline(data.clone(), info_a.clone()));
+        params.insert(20u32, AiParam::inline(data, info_b.clone()));
+
+        let mut ti = HashMap::new();
+        ti.insert(10u32, info_a);
+        ti.insert(20u32, info_b);
+
+        let g = make_graph(vec![], vec![], vec![], params, ti);
+
+        let g2 = ConstantDeduplication.run(g).unwrap();
+        // Both must remain — shape disagreement blocks merging.
+        assert_eq!(g2.params.len(), 2);
+        assert!(g2.params.contains_key(&10));
+        assert!(g2.params.contains_key(&20));
     }
 
     #[test]

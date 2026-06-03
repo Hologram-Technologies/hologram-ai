@@ -1,0 +1,1 @@
+{"default":{"identifier":"default","description":"default capabilities for hologram-ai-desktop","local":true,"windows":["main"],"permissions":["core:default","dialog:default","fs:default","opener:default"]}}

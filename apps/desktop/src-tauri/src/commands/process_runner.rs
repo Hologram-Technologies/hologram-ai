@@ -97,14 +97,7 @@ fn spawn_reader<R: tokio::io::AsyncRead + Unpin + Send + 'static>(
     tokio::spawn(async move {
         let mut buf = BufReader::new(reader).lines();
         while let Ok(Some(line)) = buf.next_line().await {
-            if tx
-                .send(ProcessLine {
-                    stream,
-                    line,
-                })
-                .await
-                .is_err()
-            {
+            if tx.send(ProcessLine { stream, line }).await.is_err() {
                 break;
             }
         }
