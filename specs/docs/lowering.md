@@ -14,9 +14,12 @@ used by `hologram::KvExecutor`.
 
 **Two-phase optimization:**
 
-1. **Pre-lowering** (`hologram-ai-common` opt passes): semantic AI fusions on `AiGraph`
-   — attention fusion, FFN fusion, QuantMatMul fusion. These require understanding of
-   model structure that `hologram-compiler` does not have.
+1. **Pre-lowering** (`hologram-ai-common` opt passes): semantic AI rewrites on
+   `AiGraph` — FFN fusion, conservative attention fusion, Gemm transpose
+   normalization, explicit Conv/MaxPool pad normalization, shape/data
+   propagation, constant evaluation/folding, and late broadcast/slice repair.
+   These require understanding of model structure and exporter quirks that
+   `hologram-compiler` does not have.
 
 2. **Post-lowering** (`hologram::compile`): generic graph passes on `hologram::Graph`
    — LUT chain fusion, CSE, liveness analysis, intermediate buffer slot reuse.
@@ -207,7 +210,7 @@ Passes must run before lowering. Minimum required passes:
 | `ConstantFolding` | Yes — eliminates shape ops that confuse lowering |
 | `ShapePropagation` | Yes — lowering needs shapes for buffer sizing |
 | `DeadNodeElimination` | Yes — prevents emitting unreachable plan nodes |
-| `AttentionFusion` | Recommended — enables fused MHA kernel |
+| `AttentionFusion` | Recommended — enables fused MHA kernel for maskless decoder SDPA and explicit masks that are provably causal |
 | `QuantMatMulFusion` | Recommended — enables quantized GEMM |
 
 ---
@@ -244,6 +247,16 @@ After `lower()` returns, the caller invokes `hologram::compile(graph)` to get
 the `ExecutionSchedule` and handle intermediate-buffer assignment (liveness
 analysis + workspace slot reuse). `lower()` does not produce a schedule — that
 is hologram-compiler's job. See ADR-0008.
+
+Two lowering behaviors matter for current ONNX correctness:
+
+- Rank-4 batched `MatMul` is decomposed into per-batch `Gather(axis=0)` +
+  2-D `MatMul` + `Concat`, rather than relying on a slice-view shortcut.
+  This keeps unfused encoder attention score matmuls bit-correct against ORT.
+- Explicit additive attention masks are **not** lowered through the fused
+  `Attention` kernel unless the pre-lowering pass has proven they are causal,
+  because the current runtime kernel only carries a `causal` flag, not an
+  arbitrary additive-mask operand.
 
 ---
 

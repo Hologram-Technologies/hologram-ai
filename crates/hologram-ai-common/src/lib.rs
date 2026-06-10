@@ -25,7 +25,7 @@ pub use ir::{
 pub use lower::{lower, LowerPhase, LoweringOptions, LoweringOutput, OptProfile, QuantStrategy};
 pub use mem::{KvCacheLayout, MemoryPlan, MemoryPlanner};
 pub use opt::{
-    AggressiveShapePropagation, ConstantDeduplication, OptPipeline, Pass, ShapeHealing,
-    ShapeOraclePass,
+    AggressiveShapePropagation, ConstantDeduplication, ExplicitBroadcastBinary, OptPipeline, Pass,
+    ShapeHealing, ShapeOraclePass,
 };
 pub use rules::{pattern_rules::slice_to_gather_rules, RulePass};

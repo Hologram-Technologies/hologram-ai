@@ -50,9 +50,11 @@ ModelSource
 
 The two optimization phases are complementary (see ADR-0008):
 
-- **`opt_pipeline`** — semantic AI passes on `AiGraph` (attention fusion, FFN fusion,
-  QuantMatMul fusion). Runs before lowering. `hologram-compiler` cannot perform
-  these because it has no concept of `AiOp` variants.
+- **`opt_pipeline`** — semantic AI passes on `AiGraph` (FFN fusion, conservative
+  attention fusion, Gemm/Conv pad normalization, shape/data propagation,
+  constant evaluation/folding, broadcast repair). Runs before lowering.
+  `hologram-compiler` cannot perform these because it has no concept of `AiOp`
+  variants or ONNX exporter quirks.
 
 - **`hologram::compile()`** — generic graph passes on `hologram::Graph` (LUT chain
   fusion, CSE, liveness analysis, workspace slot reuse via bin packing). Runs after
@@ -317,7 +319,10 @@ GenerativeHead, Decoder) and 3 connections describing data flow.
 Each component can specify an `OptProfile` to control which optimization
 passes run:
 - `Llm` — full MVP pipeline (attention fusion, KV injection, SwiGLU fusion)
-- `Generic` — shape/data propagation + constant folding only
+- `Generic` — shape/data propagation, constant evaluation/folding, exporter
+  normalization (for example Gemm transpose attrs, explicit Conv/MaxPool
+  padding, and conservative attention fusion that refuses unsupported runtime
+  masks)
 
 Components that don't use attention get `MemoryPlan::empty()` (no KV-cache
 allocation).

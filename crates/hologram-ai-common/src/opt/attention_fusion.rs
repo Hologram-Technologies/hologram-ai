@@ -20,12 +20,20 @@
 //! 1. The fused `dispatch_attention` kernel (with inline causal masking)
 //! 2. Unified KV cache injection for both ONNX and GGUF models
 //! 3. ~30% fewer graph nodes per transformer layer
+//!
+//! Important: the fused runtime kernel currently supports only the built-in
+//! causal mask flag, not an arbitrary additive mask operand. This pass must
+//! therefore preserve explicit `Add(scores, mask)` semantics exactly:
+//! - maskless SDPA may fuse and rely on `causal=true` when the model is a decoder
+//! - explicit masks may fuse only when the mask is provably a causal mask
+//! - padding / bidirectional / otherwise dynamic masks must remain decomposed
 
 use super::graph_utils::{
     apply_node_mutations, build_consumer_map, build_producer_map, next_node_id,
 };
 use super::pipeline::Pass;
 use crate::ir::{AiGraph, AiNode, AiOp, TensorId};
+use crate::MetaValue;
 use std::collections::{HashMap, HashSet};
 
 /// Fuse decomposed SDPA chains into `AiOp::GroupedQueryAttention`.
@@ -36,10 +44,10 @@ use std::collections::{HashMap, HashSet};
 /// `scaled_dot_product_attention` applies the causal mask internally without
 /// emitting it as an explicit Add node in the ONNX export.
 ///
-/// When `force_causal` is `None`, the pass auto-detects: if the graph's output
-/// names contain "logits" or "output" (causal LM signature), causal is forced.
-/// Encoder models (BERT, CLIP) and diffusion components (UNet, VAE) do not
-/// match and correctly get bidirectional attention.
+/// When `force_causal` is `None`, the pass auto-detects from graph metadata
+/// first (`arch` / `model_type`), then falls back to a `logits` output-name
+/// signature. Encoder models (BERT, CLIP) and diffusion components (UNet, VAE)
+/// do not match and correctly get bidirectional attention.
 pub struct AttentionFusion {
     pub force_causal: Option<bool>,
 }
@@ -50,15 +58,9 @@ impl Pass for AttentionFusion {
     }
 
     fn run(&self, mut graph: AiGraph) -> anyhow::Result<AiGraph> {
-        // Resolve force_causal: explicit override > auto-detect from graph outputs.
-        // Causal LMs output "logits" or "output"; encoders/diffusion output
-        // "last_hidden_state", "sample", etc.
-        let force_causal = self.force_causal.unwrap_or_else(|| {
-            graph
-                .output_names
-                .iter()
-                .any(|n| n == "logits" || n == "output")
-        });
+        let force_causal = self
+            .force_causal
+            .unwrap_or_else(|| auto_detect_force_causal(&graph));
         if force_causal {
             tracing::info!("AttentionFusion: forcing causal=true (causal LM detected)");
         }
@@ -157,6 +159,20 @@ impl Pass for AttentionFusion {
                 // GQA ratio instead of falling back to num_q_heads.
                 cached_heads = Some((num_heads, num_kv_heads, head_dim));
 
+                let explicit_causal_mask =
+                    is_supported_causal_mask(chain.mask_tid, &tid_to_node, &graph);
+                if chain.mask_tid.is_some() && !explicit_causal_mask {
+                    tracing::trace!(
+                        node_idx,
+                        qkt_out,
+                        mask_tid = ?chain.mask_tid,
+                        "SDPA: skipping fusion — explicit mask is not representable by causal-only kernel"
+                    );
+                    continue;
+                }
+
+                let causal = explicit_causal_mask || (chain.mask_tid.is_none() && force_causal);
+
                 // Mark all chain nodes for removal.
                 for &idx in &chain.node_indices {
                     to_remove.insert(idx);
@@ -170,7 +186,7 @@ impl Pass for AttentionFusion {
                         num_kv_heads,
                         head_dim,
                         scale: Some(effective_scale),
-                        causal: chain.has_mask || force_causal,
+                        causal,
                         heads_first: true,
                         qk_norm: false,
                         rope: false,
@@ -215,7 +231,7 @@ impl Pass for AttentionFusion {
                     num_kv_heads,
                     head_dim,
                     effective_scale,
-                    causal = chain.has_mask || force_causal,
+                    causal,
                     mask_in_graph = chain.has_mask,
                     force_causal,
                     "AttentionFusion: fused SDPA chain"
@@ -233,6 +249,43 @@ impl Pass for AttentionFusion {
         tracing::info!("AttentionFusion: fused {fused_count} SDPA chain(s)");
         Ok(graph)
     }
+}
+
+fn auto_detect_force_causal(graph: &AiGraph) -> bool {
+    match graph
+        .metadata
+        .get("arch")
+        .or_else(|| graph.metadata.get("model_type"))
+    {
+        Some(MetaValue::Str(arch)) if is_causal_arch(arch) => return true,
+        Some(MetaValue::Str(_)) => return false,
+        _ => {}
+    }
+
+    graph.output_names.iter().any(|name| name == "logits")
+}
+
+fn is_causal_arch(arch: &str) -> bool {
+    let arch = arch.to_ascii_lowercase();
+    matches!(
+        arch.as_str(),
+        "llama"
+            | "mistral"
+            | "gemma"
+            | "gemma2"
+            | "qwen"
+            | "qwen2"
+            | "phi"
+            | "phi3"
+            | "gpt2"
+            | "gpt_neo"
+            | "gptj"
+            | "gpt_bigcode"
+            | "bloom"
+            | "falcon"
+            | "stablelm"
+            | "smollm"
+    )
 }
 
 // ── Pattern matching ────────────────────────────────────────────────────────
@@ -283,27 +336,12 @@ fn match_sdpa_chain(
         "SDPA: chain consumers"
     );
 
-    // Optional: Mul(scores, scale_constant) — scale the attention scores.
-    if let Some(next) =
-        find_consumer_by_op(current_tid, consumers, graph, |op| matches!(op, AiOp::Mul))
-    {
-        let n = &graph.nodes[next];
-        if matches!(n.op, AiOp::Mul) && n.inputs.len() >= 2 {
-            // Check if one input is a scalar param (the scale factor).
-            let (other_idx, scale_val) = if let Some(s) = scalar_param(n.inputs[1], graph) {
-                (0, s)
-            } else if let Some(s) = scalar_param(n.inputs[0], graph) {
-                (1, s)
-            } else {
-                (usize::MAX, 0.0)
-            };
-            // Only consume if the other input is our scores tensor.
-            if other_idx < 2 && n.inputs[other_idx] == current_tid {
-                scale = scale_val;
-                chain_indices.push(next);
-                current_tid = *n.outputs.first()?;
-            }
-        }
+    // Optional: Mul(scores, scale_constant) or Div(scores, scalar_constant) —
+    // scale the attention scores before masking/softmax.
+    if let Some((next, scale_val)) = find_score_scale_consumer(current_tid, consumers, graph) {
+        scale = scale_val;
+        chain_indices.push(next);
+        current_tid = *graph.nodes[next].outputs.first()?;
     }
 
     // Optional: Add(scores, mask) — absorb into chain and capture mask tensor ID.
@@ -388,6 +426,41 @@ fn match_sdpa_chain(
     })
 }
 
+fn find_score_scale_consumer(
+    tid: TensorId,
+    consumers: &HashMap<TensorId, Vec<(usize, usize)>>,
+    graph: &AiGraph,
+) -> Option<(usize, f32)> {
+    let consumer = find_consumer_by_op(tid, consumers, graph, |op| {
+        matches!(op, AiOp::Mul | AiOp::Div)
+    })?;
+    let node = &graph.nodes[consumer];
+    if node.inputs.len() < 2 {
+        return None;
+    }
+
+    match node.op {
+        AiOp::Mul => {
+            let (other_idx, scale_val) = if let Some(s) = scalar_param(node.inputs[1], graph) {
+                (0, s)
+            } else if let Some(s) = scalar_param(node.inputs[0], graph) {
+                (1, s)
+            } else {
+                return None;
+            };
+            (node.inputs[other_idx] == tid).then_some((consumer, scale_val))
+        }
+        AiOp::Div => {
+            let denom = scalar_param(node.inputs[1], graph)?;
+            if node.inputs[0] != tid || denom == 0.0 {
+                return None;
+            }
+            Some((consumer, 1.0 / denom))
+        }
+        _ => None,
+    }
+}
+
 /// Find a consumer of a tensor whose op matches a predicate.
 /// Returns the first matching consumer's node index, or `None`.
 fn find_consumer_by_op(
@@ -425,6 +498,135 @@ fn scalar_param(tid: TensorId, graph: &AiGraph) -> Option<f32> {
         }
         _ => None,
     }
+}
+
+fn is_supported_causal_mask(
+    mask_tid: Option<TensorId>,
+    tid_to_node: &HashMap<TensorId, usize>,
+    graph: &AiGraph,
+) -> bool {
+    let Some(mask_tid) = mask_tid else {
+        return false;
+    };
+    is_supported_causal_mask_tensor(mask_tid, tid_to_node, graph)
+}
+
+fn is_supported_causal_mask_tensor(
+    tid: TensorId,
+    tid_to_node: &HashMap<TensorId, usize>,
+    graph: &AiGraph,
+) -> bool {
+    if inline_param_is_causal_mask(tid, graph) {
+        return true;
+    }
+
+    let Some(&producer_idx) = tid_to_node.get(&tid) else {
+        return false;
+    };
+    let producer = &graph.nodes[producer_idx];
+    match &producer.op {
+        AiOp::Identity | AiOp::Expand | AiOp::Reshape { .. } | AiOp::Unsqueeze { .. } => producer
+            .inputs
+            .first()
+            .copied()
+            .is_some_and(|input| is_supported_causal_mask_tensor(input, tid_to_node, graph)),
+        AiOp::Transpose { perm } if is_last_two_dim_swap(perm) => producer
+            .inputs
+            .first()
+            .copied()
+            .is_some_and(|input| is_supported_causal_mask_tensor(input, tid_to_node, graph)),
+        _ => false,
+    }
+}
+
+fn inline_param_is_causal_mask(tid: TensorId, graph: &AiGraph) -> bool {
+    use crate::ir::AiParam;
+
+    let Some(AiParam::Inline { data, info }) = graph.params.get(&tid) else {
+        return false;
+    };
+    if info.logical_dtype != crate::DType::F32 {
+        return false;
+    }
+
+    let dims = info
+        .shape
+        .as_slice()
+        .iter()
+        .map(crate::ir::DimExpr::evaluate)
+        .collect::<Option<Vec<_>>>();
+    let Some(dims) = dims else {
+        return false;
+    };
+    if dims.len() < 2 {
+        return false;
+    }
+
+    let rows = dims[dims.len() - 2] as usize;
+    let cols = dims[dims.len() - 1] as usize;
+    if rows == 0 || rows != cols {
+        return false;
+    }
+
+    let leading = dims[..dims.len() - 2]
+        .iter()
+        .try_fold(1usize, |acc, &dim| acc.checked_mul(dim as usize));
+    let Some(leading) = leading else {
+        return false;
+    };
+    let expected = leading
+        .checked_mul(rows)
+        .and_then(|n| n.checked_mul(cols))
+        .and_then(|n| n.checked_mul(std::mem::size_of::<f32>()));
+    if expected != Some(data.len()) {
+        return false;
+    }
+
+    let values: Vec<f32> = data
+        .chunks_exact(4)
+        .map(|chunk| {
+            let bytes: [u8; 4] = chunk.try_into().expect("4-byte f32 chunk");
+            f32::from_le_bytes(bytes)
+        })
+        .collect();
+
+    (0..leading).all(|plane| plane_is_causal_mask(&values, plane, rows, cols))
+}
+
+fn plane_is_causal_mask(values: &[f32], plane: usize, rows: usize, cols: usize) -> bool {
+    let plane_stride = rows * cols;
+    let base = plane * plane_stride;
+
+    (0..rows).all(|row| {
+        (0..cols).all(|col| {
+            let value = values[base + row * cols + col];
+            let allowed = col <= row;
+            causal_mask_entry_matches(value, allowed)
+        })
+    })
+}
+
+fn causal_mask_entry_matches(value: f32, allowed: bool) -> bool {
+    if allowed {
+        return value.abs() <= 1e-6;
+    }
+    value.is_infinite() && value.is_sign_negative() || value <= -1e4
+}
+
+fn is_last_two_dim_swap(perm: &[u32]) -> bool {
+    if perm.len() < 2 {
+        return false;
+    }
+    let tail = perm.len() - 2;
+    let prefix_ok = perm
+        .iter()
+        .take(tail)
+        .enumerate()
+        .all(|(idx, &axis)| axis as usize == idx);
+    if !prefix_ok {
+        return false;
+    }
+    perm[tail] as usize == tail + 1 && perm[tail + 1] as usize == tail
 }
 
 /// Infer (num_heads, num_kv_heads, head_dim) from Q, K, V tensor shapes.
@@ -738,9 +940,73 @@ mod tests {
         graph
     }
 
+    fn build_sdpa_div_graph() -> AiGraph {
+        let mut graph = build_sdpa_graph();
+        let scores = graph.nodes[0].outputs[0];
+        let scaled = graph.nodes[1].outputs[0];
+        let scale_val = graph.nodes[1].inputs[1];
+        graph.params.insert(
+            scale_val,
+            AiParam::Inline {
+                data: 4.0f32.to_le_bytes().to_vec().into(),
+                info: f32_info(crate::shape_from_concrete(&[1])),
+            },
+        );
+        graph.nodes[1] = AiNode::new(1, AiOp::Div, vec![scores, scale_val], vec![scaled]);
+        graph
+    }
+
     #[test]
-    fn sdpa_chain_fuses_to_gqa() {
+    fn sdpa_chain_with_runtime_mask_does_not_fuse() {
         let graph = build_sdpa_graph();
+        let original_nodes = graph.nodes.len();
+
+        let fused = AttentionFusion {
+            force_causal: Some(false),
+        }
+        .run(graph)
+        .expect("fusion failed");
+
+        assert_eq!(
+            fused.nodes.len(),
+            original_nodes,
+            "runtime padding masks must remain decomposed, got {} nodes: {:?}",
+            fused.nodes.len(),
+            fused.nodes.iter().map(|n| &n.op).collect::<Vec<_>>()
+        );
+        assert!(matches!(fused.nodes[2].op, AiOp::Add));
+    }
+
+    fn build_sdpa_constant_causal_mask_graph() -> AiGraph {
+        let mut graph = build_sdpa_graph();
+        let mask = graph.inputs[3];
+        graph.inputs.pop();
+        graph
+            .tensor_info
+            .insert(mask, f32_info(shape_4d(1, 1, 8, 8)));
+
+        let mask_values: Vec<f32> = (0..8usize)
+            .flat_map(|row| {
+                (0..8usize).map(move |col| if col <= row { 0.0 } else { f32::NEG_INFINITY })
+            })
+            .collect();
+        let mask_bytes: Vec<u8> = mask_values
+            .iter()
+            .flat_map(|value| value.to_le_bytes())
+            .collect();
+        graph.params.insert(
+            mask,
+            AiParam::Inline {
+                data: mask_bytes.into(),
+                info: f32_info(shape_4d(1, 1, 8, 8)),
+            },
+        );
+        graph
+    }
+
+    #[test]
+    fn sdpa_chain_with_constant_causal_mask_fuses_to_gqa() {
+        let graph = build_sdpa_constant_causal_mask_graph();
         assert_eq!(graph.nodes.len(), 5);
 
         let fused = AttentionFusion {
@@ -749,8 +1015,6 @@ mod tests {
         .run(graph)
         .expect("fusion failed");
 
-        // Should have 1 node: GroupedQueryAttention (Mul, Add, Softmax, output MatMul removed).
-        // The Q@K^T MatMul is also removed.
         assert_eq!(
             fused.nodes.len(),
             1,
@@ -776,6 +1040,58 @@ mod tests {
             }
             other => panic!("expected GroupedQueryAttention, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn sdpa_div_chain_fuses_to_gqa() {
+        let graph = {
+            let mut g = build_sdpa_div_graph();
+            let mask = g.inputs[3];
+            g.inputs.pop();
+            let mask_values: Vec<f32> = (0..8usize)
+                .flat_map(|row| {
+                    (0..8usize).map(move |col| if col <= row { 0.0 } else { f32::NEG_INFINITY })
+                })
+                .collect();
+            let mask_bytes: Vec<u8> = mask_values
+                .iter()
+                .flat_map(|value| value.to_le_bytes())
+                .collect();
+            g.params.insert(
+                mask,
+                AiParam::Inline {
+                    data: mask_bytes.into(),
+                    info: f32_info(shape_4d(1, 1, 8, 8)),
+                },
+            );
+            g
+        };
+        let fused = AttentionFusion {
+            force_causal: Some(false),
+        }
+        .run(graph)
+        .expect("fusion failed");
+
+        assert_eq!(fused.nodes.len(), 1);
+        match &fused.nodes[0].op {
+            AiOp::GroupedQueryAttention { scale, .. } => {
+                assert!((scale.expect("scale") - 0.25).abs() < 1e-6);
+            }
+            other => panic!("expected GroupedQueryAttention, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn runtime_mask_is_not_overridden_by_force_causal() {
+        let graph = build_sdpa_graph();
+        let fused = AttentionFusion {
+            force_causal: Some(true),
+        }
+        .run(graph)
+        .expect("fusion failed");
+
+        assert_eq!(fused.nodes.len(), 5);
+        assert!(matches!(fused.nodes[2].op, AiOp::Add));
     }
 
     /// Build a minimal SDPA graph WITHOUT the Add(mask) step:
