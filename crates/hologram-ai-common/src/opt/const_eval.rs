@@ -80,17 +80,23 @@ impl Pass for ConstantEvaluation {
                 continue; // not all inputs are constants
             }
 
-            // Get input shapes from tensor_info (prefer) or param info.
+            // Get input shapes from the inline param metadata first: once a
+            // value has been materialized as an inline constant, its param
+            // shape is the authoritative shape of the bytes. `tensor_info`
+            // can lag behind for intermediate constant subgraphs that were
+            // folded before a later shape pass would have corrected them.
             let input_shapes: Vec<Vec<usize>> = node
                 .inputs
                 .iter()
                 .zip(inputs.iter())
                 .map(|(tid, (_data, param_info))| {
-                    graph
-                        .tensor_info
-                        .get(tid)
-                        .and_then(|ti| concrete_shape(&ti.shape))
-                        .or_else(|| concrete_shape(&param_info.shape))
+                    concrete_shape(&param_info.shape)
+                        .or_else(|| {
+                            graph
+                                .tensor_info
+                                .get(tid)
+                                .and_then(|ti| concrete_shape(&ti.shape))
+                        })
                         .unwrap_or_else(|| {
                             let elem_sz = param_info.logical_dtype.byte_size().unwrap_or(1);
                             match _data.len().checked_div(elem_sz) {
@@ -461,5 +467,51 @@ mod tests {
             .collect();
         // col <= row: [0<=0, 0<=1, 0<=2, 1<=0, 1<=1, 1<=2, 2<=0, 2<=1, 2<=2]
         assert_eq!(vals, vec![1.0, 1.0, 1.0, 0.0, 1.0, 1.0, 0.0, 0.0, 1.0]);
+    }
+
+    #[test]
+    fn test_const_eval_gather_prefers_inline_param_shape_over_stale_tensor_info() {
+        let data: Vec<f32> = (0..64).map(|v| v as f32).collect();
+        let data_bytes: Vec<u8> = data.iter().flat_map(|v| v.to_le_bytes()).collect();
+        let index_bytes: Vec<u8> = [0i64, 1].iter().flat_map(|v| v.to_le_bytes()).collect();
+
+        let mut params = HashMap::new();
+        params.insert(
+            10u32,
+            AiParam::inline(data_bytes, make_ti(DType::F32, &[16, 4])),
+        );
+        params.insert(
+            11u32,
+            AiParam::inline(index_bytes, make_ti(DType::INT64, &[1, 2])),
+        );
+
+        let mut ti = HashMap::new();
+        ti.insert(10u32, make_ti(DType::F32, &[16, 4]));
+        // Simulate a stale upstream shape on a folded Slice(position_ids).
+        ti.insert(11u32, make_ti(DType::INT64, &[1, 16]));
+        ti.insert(12u32, make_ti(DType::F32, &[1, 16, 4]));
+
+        let g = make_graph_with_params(
+            vec![AiNode::new(
+                0,
+                AiOp::Gather { axis: 0 },
+                vec![10, 11],
+                vec![12],
+            )],
+            params,
+            ti,
+            vec![12],
+        );
+
+        let g2 = ConstantEvaluation.run(g).expect("const-eval succeeds");
+        let info = g2.tensor_info.get(&12).expect("output tensor info");
+        let out_shape = concrete_shape(&info.shape).expect("concrete output shape");
+        assert_eq!(out_shape, vec![1, 2, 4]);
+
+        let bytes = match g2.params.get(&12).expect("materialized output") {
+            AiParam::Inline { data, .. } => data,
+            _ => panic!("expected inline gather output"),
+        };
+        assert_eq!(bytes.len(), 8 * 4);
     }
 }

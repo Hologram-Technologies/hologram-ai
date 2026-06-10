@@ -1087,12 +1087,34 @@ impl<'a> Ctx<'a> {
         let b3 = self.reshape_to(b, b_dt, &[b_batch, k, n]);
         let mut acc: Option<InputSource> = None;
         for bi in 0..a_batch as i64 {
-            // Axis-0 contiguous slice [bi:bi+1] as the 3-operand form hologram
-            // realizes as a zero-movement view (data, starts, ends).
-            let (s0, e0) = (self.const_i64(&[bi]), self.const_i64(&[bi + 1]));
-            let a_sl = self.op(OpKind::Slice, &[a3, s0, e0], a_dt, &[1, m, k]);
-            let (s1, e1) = (self.const_i64(&[bi]), self.const_i64(&[bi + 1]));
-            let b_sl = self.op(OpKind::Slice, &[b3, s1, e1], b_dt, &[1, k, n]);
+            // Use Gather(axis=0, [bi]) for per-batch extraction. The specialized
+            // 3-input Slice view path is zero-movement, but on current hologram
+            // compiler/runtime it mis-materializes `bi > 0` batches for this
+            // reshape→slice→matmul pattern, which corrupts unfused rank-4
+            // attention score matmuls (BERT witness). Gather stays within the
+            // supported canonical surface and preserves correctness.
+            let idx = self.const_i64(&[bi]);
+            let a_shape = self.intern(&[1, m, k]);
+            let a_nid = self.add(
+                GraphOp::Op(OpKind::Gather),
+                SmallVec::from_iter([a3, idx]),
+                a_dt,
+                a_shape,
+            );
+            self.graph.set_gather_attrs(a_nid, GatherAttrs { axis: 0 });
+            let a_sl = InputSource::Node(a_nid);
+
+            let idx = self.const_i64(&[bi]);
+            let b_shape = self.intern(&[1, k, n]);
+            let b_nid = self.add(
+                GraphOp::Op(OpKind::Gather),
+                SmallVec::from_iter([b3, idx]),
+                b_dt,
+                b_shape,
+            );
+            self.graph.set_gather_attrs(b_nid, GatherAttrs { axis: 0 });
+            let b_sl = InputSource::Node(b_nid);
+
             let a2 = self.reshape_to(a_sl, a_dt, &[m, k]);
             let b2 = self.reshape_to(b_sl, b_dt, &[k, n]);
             let p = self.op(OpKind::MatMul, &[a2, b2], out_dtype, &[m, n]);

@@ -27,11 +27,19 @@ impl OptPipeline {
     /// Standard optimization pipeline.
     pub fn mvp() -> Self {
         use super::{
-            attention_fusion::AttentionFusion, const_dedup::ConstantDeduplication,
-            const_eval::ConstantEvaluation, constant_fold::ConstantFolding,
-            data_prop::DataPropagation, dead_node::DeadNodeElimination, decompose::OpDecomposition,
-            norm_projection_fusion::NormProjectionFusion, resolve_slice_params::ResolveSliceParams,
-            semantic_prop::SemanticPropagation, shape_prop::ShapePropagation,
+            attention_fusion::AttentionFusion,
+            const_dedup::ConstantDeduplication,
+            const_eval::ConstantEvaluation,
+            constant_fold::ConstantFolding,
+            conv_pad_norm::{ConvPadNormalization, NonNegativeMaxPoolPadNormalization},
+            data_prop::DataPropagation,
+            dead_node::DeadNodeElimination,
+            decompose::OpDecomposition,
+            gemm_transpose_norm::GemmTransposeNormalization,
+            norm_projection_fusion::NormProjectionFusion,
+            resolve_slice_params::ResolveSliceParams,
+            semantic_prop::SemanticPropagation,
+            shape_prop::ShapePropagation,
             shared_input_projection_fusion::SharedInputProjectionFusion,
         };
         use crate::rules::{
@@ -47,7 +55,17 @@ impl OptPipeline {
             // Resolve ONNX opset 10+ Slice params from constant inputs
             // before shape propagation needs the concrete slice bounds.
             Box::new(ResolveSliceParams),
+            // Reify ONNX Conv padding as an explicit Pad op because the
+            // pinned hologram runtime executes Conv as valid-only.
+            Box::new(ConvPadNormalization),
+            // ONNX Gemm transpose attrs must be structuralized before lowering:
+            // hologram's compiler boundary does not carry trans_a/trans_b.
+            Box::new(GemmTransposeNormalization),
             Box::new(ShapePropagation),
+            // MaxPool fixup needs concrete input/output shapes so it runs
+            // after the first shape pass, then the later passes propagate
+            // shapes through the inserted helper nodes.
+            Box::new(NonNegativeMaxPoolPadNormalization),
             Box::new(DataPropagation),
             // Second shape pass: DataPropagation fills known_i64_values for
             // Reshape/Expand shape tensors. This pass uses them to infer
@@ -172,15 +190,25 @@ impl OptPipeline {
     /// (attention fusion, KV-cache injection).
     pub fn vit(budget_ratio: f32) -> Self {
         use super::{
-            const_dedup::ConstantDeduplication, const_eval::ConstantEvaluation,
-            constant_fold::ConstantFolding, data_prop::DataPropagation,
-            dead_node::DeadNodeElimination, decompose::OpDecomposition,
-            patch_prune::PatchPruneInjection, resolve_slice_params::ResolveSliceParams,
-            semantic_prop::SemanticPropagation, shape_prop::ShapePropagation,
+            const_dedup::ConstantDeduplication,
+            const_eval::ConstantEvaluation,
+            constant_fold::ConstantFolding,
+            conv_pad_norm::{ConvPadNormalization, NonNegativeMaxPoolPadNormalization},
+            data_prop::DataPropagation,
+            dead_node::DeadNodeElimination,
+            decompose::OpDecomposition,
+            gemm_transpose_norm::GemmTransposeNormalization,
+            patch_prune::PatchPruneInjection,
+            resolve_slice_params::ResolveSliceParams,
+            semantic_prop::SemanticPropagation,
+            shape_prop::ShapePropagation,
         };
         Self::new(vec![
             Box::new(ResolveSliceParams),
+            Box::new(ConvPadNormalization),
+            Box::new(GemmTransposeNormalization),
             Box::new(ShapePropagation),
+            Box::new(NonNegativeMaxPoolPadNormalization),
             Box::new(DataPropagation),
             Box::new(ShapePropagation),
             Box::new(ConstantEvaluation),
@@ -200,24 +228,39 @@ impl OptPipeline {
 
     /// Generic optimization pipeline for non-transformer components.
     ///
-    /// Runs shape/data propagation, constant evaluation/folding, op
-    /// decomposition, and dead node elimination. Skips attention fusion,
-    /// KV-cache injection, and other LLM-specific passes.
+    /// Runs shape/data propagation, constant evaluation/folding, generic
+    /// attention fusion, op decomposition, and dead node elimination.
+    /// Skips causal/decoder-specific passes such as KV-cache injection.
     pub fn generic() -> Self {
         use super::{
-            const_dedup::ConstantDeduplication, const_eval::ConstantEvaluation,
-            constant_fold::ConstantFolding, data_prop::DataPropagation,
-            dead_node::DeadNodeElimination, decompose::OpDecomposition,
-            resolve_slice_params::ResolveSliceParams, semantic_prop::SemanticPropagation,
+            attention_fusion::AttentionFusion,
+            const_dedup::ConstantDeduplication,
+            const_eval::ConstantEvaluation,
+            constant_fold::ConstantFolding,
+            conv_pad_norm::{ConvPadNormalization, NonNegativeMaxPoolPadNormalization},
+            data_prop::DataPropagation,
+            dead_node::DeadNodeElimination,
+            decompose::OpDecomposition,
+            gemm_transpose_norm::GemmTransposeNormalization,
+            resolve_slice_params::ResolveSliceParams,
+            semantic_prop::SemanticPropagation,
             shape_prop::ShapePropagation,
         };
         Self::new(vec![
             Box::new(ResolveSliceParams),
+            Box::new(ConvPadNormalization),
+            Box::new(GemmTransposeNormalization),
             Box::new(ShapePropagation),
+            Box::new(NonNegativeMaxPoolPadNormalization),
             Box::new(DataPropagation),
             Box::new(ShapePropagation),
             Box::new(ConstantEvaluation),
             Box::new(ConstantFolding),
+            // Encoder-style attention chains (e.g. BERT) still lower to the
+            // canonical Attention op; only causal-specific rewrites stay in
+            // the LLM pipeline. Leaving generic SDPA unfused exposes upstream
+            // compile gaps in rank-4 score Add/Softmax regions.
+            Box::new(AttentionFusion { force_causal: None }),
             Box::new(OpDecomposition),
             Box::new(SemanticPropagation),
             Box::new(ConstantDeduplication),
