@@ -1,6 +1,7 @@
 use super::{graph_utils::next_node_id, pipeline::Pass};
 use crate::ir::{
-    shape_from_concrete, AiGraph, AiNode, AiOp, AiParam, DType, Dim, Shape, TensorId, TensorInfo,
+    shape_from_concrete, AiGraph, AiNode, AiOp, AiOpSemantics, AiParam, DType, Shape,
+    SymbolicShapeExt, TensorId, TensorInfo,
 };
 
 pub struct ExplicitBroadcastBinary;
@@ -12,7 +13,7 @@ impl Pass for ExplicitBroadcastBinary {
 
     fn should_run(&self, graph: &AiGraph) -> bool {
         graph.nodes.iter().any(|node| {
-            is_broadcast_binary(&node.op)
+            node.op.is_broadcast_binary()
                 && node
                     .outputs
                     .first()
@@ -22,8 +23,8 @@ impl Pass for ExplicitBroadcastBinary {
                         node.inputs.iter().any(|input_tid| {
                             graph.tensor_info.get(input_tid).is_some_and(|input_info| {
                                 input_info.shape != *out_shape
-                                    && is_concrete_shape(&input_info.shape)
-                                    && is_concrete_shape(out_shape)
+                                    && input_info.shape.as_slice().is_concrete()
+                                    && out_shape.as_slice().is_concrete()
                             })
                         })
                     })
@@ -37,7 +38,7 @@ impl Pass for ExplicitBroadcastBinary {
         let mut rewritten = Vec::with_capacity(original.len());
 
         for mut node in original {
-            if !is_broadcast_binary(&node.op) || node.inputs.len() < 2 {
+            if !node.op.is_broadcast_binary() || node.inputs.len() < 2 {
                 rewritten.push(node);
                 continue;
             }
@@ -54,7 +55,7 @@ impl Pass for ExplicitBroadcastBinary {
                 rewritten.push(node);
                 continue;
             };
-            if !is_concrete_shape(&output_shape) {
+            if !output_shape.as_slice().is_concrete() {
                 rewritten.push(node);
                 continue;
             }
@@ -67,15 +68,25 @@ impl Pass for ExplicitBroadcastBinary {
                 else {
                     continue;
                 };
-                if input_shape == output_shape || !is_concrete_shape(&input_shape) {
+                if input_shape == output_shape || !input_shape.as_slice().is_concrete() {
                     continue;
                 }
-                if !broadcastable_to(&input_shape, &output_shape) {
+                if input_shape
+                    .as_slice()
+                    .broadcast_to(output_shape.as_slice())
+                    .is_none()
+                {
                     continue;
                 }
 
-                let output_dims = concrete_dims(&output_shape);
-                let input_dims = concrete_dims(&input_shape);
+                let output_dims = output_shape
+                    .as_slice()
+                    .concrete_dims()
+                    .expect("explicit broadcast requires concrete output shape");
+                let input_dims = input_shape
+                    .as_slice()
+                    .concrete_dims()
+                    .expect("explicit broadcast requires concrete input shape");
                 let aligned_input_dims = align_input_dims(&input_dims, output_dims.len());
                 let mut current_tid = *input_tid;
 
@@ -113,7 +124,6 @@ impl Pass for ExplicitBroadcastBinary {
                 next_tid += 1;
                 let expanded_tid = next_tid;
                 next_tid += 1;
-                let output_dims = concrete_dims(&output_shape);
                 insert_shape_param(&mut graph, shape_tid, &output_dims);
                 clone_tensor_info(&mut graph, current_tid, expanded_tid, output_shape.clone());
                 graph
@@ -160,62 +170,10 @@ fn next_tensor_id(graph: &AiGraph) -> TensorId {
     next_tid
 }
 
-fn is_broadcast_binary(op: &AiOp) -> bool {
-    matches!(
-        op,
-        AiOp::Add
-            | AiOp::Sub
-            | AiOp::Mul
-            | AiOp::Div
-            | AiOp::Pow
-            | AiOp::Min
-            | AiOp::Max
-            | AiOp::And
-            | AiOp::Or
-            | AiOp::Xor
-            | AiOp::Equal
-            | AiOp::Less
-            | AiOp::LessOrEqual
-            | AiOp::Greater
-            | AiOp::GreaterOrEqual
-    )
-}
-
-fn is_concrete_shape(shape: &[Dim]) -> bool {
-    shape.iter().all(|dim| matches!(dim, Dim::Concrete(_)))
-}
-
-fn concrete_dims(shape: &[Dim]) -> Vec<u64> {
-    shape
-        .iter()
-        .map(|dim| dim.as_concrete().unwrap_or(1))
-        .collect()
-}
-
 fn align_input_dims(input_dims: &[u64], target_rank: usize) -> Vec<u64> {
     let mut aligned = vec![1; target_rank.saturating_sub(input_dims.len())];
     aligned.extend_from_slice(input_dims);
     aligned
-}
-
-fn broadcastable_to(input_shape: &[Dim], output_shape: &[Dim]) -> bool {
-    let in_dims = concrete_dims(input_shape);
-    let out_dims = concrete_dims(output_shape);
-    if in_dims.len() > out_dims.len() {
-        return false;
-    }
-    let rank_pad = out_dims.len() - in_dims.len();
-    for (idx, &out_dim) in out_dims.iter().enumerate() {
-        let in_dim = if idx < rank_pad {
-            1
-        } else {
-            in_dims[idx - rank_pad]
-        };
-        if in_dim != 1 && in_dim != out_dim {
-            return false;
-        }
-    }
-    true
 }
 
 fn insert_shape_param(graph: &mut AiGraph, tid: TensorId, dims: &[u64]) {

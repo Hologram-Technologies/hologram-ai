@@ -12,7 +12,7 @@
 
 use super::pipeline::Pass;
 use crate::ir::shape::DimExpr;
-use crate::ir::{AiGraph, AiOp, Shape};
+use crate::ir::{AiGraph, AiOp, BroadcastConflictPolicy, Shape, SymbolicShapeExt};
 
 pub struct ShapeHealing;
 
@@ -203,7 +203,10 @@ fn heal_shape(
         {
             if input_shapes.len() >= 2 && !input_shapes[0].is_empty() && !input_shapes[1].is_empty()
             {
-                Some(vec![broadcast_shape(&input_shapes[0], &input_shapes[1])])
+                Some(vec![input_shapes[0].as_slice().broadcast_shape_with(
+                    input_shapes[1].as_slice(),
+                    BroadcastConflictPolicy::Left,
+                )])
             } else {
                 input_shapes
                     .first()
@@ -378,30 +381,4 @@ fn heal_shape(
 
         _ => None,
     }
-}
-
-fn broadcast_shape(a: &Shape, b: &Shape) -> Shape {
-    let len = a.len().max(b.len());
-    let mut result = Shape::new();
-    for i in 0..len {
-        let ad = if i < a.len() {
-            &a[a.len() - 1 - i]
-        } else {
-            &DimExpr::Concrete(1)
-        };
-        let bd = if i < b.len() {
-            &b[b.len() - 1 - i]
-        } else {
-            &DimExpr::Concrete(1)
-        };
-        let dim = match (ad.as_concrete(), bd.as_concrete()) {
-            (Some(1), _) => bd.clone(),
-            (_, Some(1)) => ad.clone(),
-            (Some(av), Some(bv)) if av == bv => ad.clone(),
-            _ => ad.clone(), // best guess
-        };
-        result.push(dim);
-    }
-    result.reverse();
-    result
 }

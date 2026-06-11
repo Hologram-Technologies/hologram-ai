@@ -8,8 +8,11 @@ pub mod shape;
 pub use dtype::DType;
 pub use graph::{AiGraph, ImportWarning, MetaValue, SemanticHint, TensorInfo, ValidationError};
 pub use node::{AiNode, NodeId, TensorId};
-pub use op::{AiOp, KvLayout, OpCategory, ScatterReduce};
+pub use op::{AiOp, AiOpSemantics, KvLayout, OpCategory, ScatterReduce};
 pub use param::AiParam;
 pub use shape::{canonical_vars, DimVarEntry, DimVarSource, DimVarTable};
 pub use shape::{shape_from_concrete, Dim, DimExpr, DimVarId, Shape};
-pub use shape::{ConstraintStore, ShapeConstraint, ShapeError};
+pub use shape::{
+    BroadcastConflictPolicy, ConcreteShapeExt, ConstraintStore, ShapeConstraint, ShapeError,
+    SymbolicShapeExt,
+};
