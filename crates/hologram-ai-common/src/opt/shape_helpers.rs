@@ -5,7 +5,7 @@
 use crate::ir::dtype::DType;
 use crate::ir::op::OpCategory;
 use crate::ir::shape::DimExpr;
-use crate::ir::{shape_from_concrete, AiOp, Shape};
+use crate::ir::{shape_from_concrete, AiOp, Shape, SymbolicShapeExt};
 
 /// Compute pooling output dimension, with optional ceil_mode.
 pub(crate) fn pool_output_dim(
@@ -251,29 +251,7 @@ pub(crate) fn normalize_slice_bound(val: i64, dim_size: i64) -> i64 {
 }
 
 pub(crate) fn broadcast_shape(a: &Shape, b: &Shape) -> Shape {
-    let len = a.len().max(b.len());
-    let mut result = Shape::new();
-    for i in 0..len {
-        let ad = if i < a.len() {
-            &a[a.len() - 1 - i]
-        } else {
-            &DimExpr::Concrete(1)
-        };
-        let bd = if i < b.len() {
-            &b[b.len() - 1 - i]
-        } else {
-            &DimExpr::Concrete(1)
-        };
-        let dim = match (ad.as_concrete(), bd.as_concrete()) {
-            (Some(1), _) => bd.clone(),
-            (_, Some(1)) => ad.clone(),
-            (Some(av), Some(bv)) if av == bv => ad.clone(),
-            _ => DimExpr::Dynamic,
-        };
-        result.push(dim);
-    }
-    result.reverse();
-    result
+    a.as_slice().broadcast_shape(b.as_slice())
 }
 
 pub(crate) fn reduce_shape(input: &Shape, axes: &[i64], keepdims: bool) -> Shape {
