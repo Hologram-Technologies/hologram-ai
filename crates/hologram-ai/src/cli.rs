@@ -7,6 +7,7 @@
 
 use anyhow::Context as _;
 use clap::Parser;
+use hologram_ai::commands::export_fixture::{execute as export_fixture_execute, ExportFixtureArgs};
 use hologram_ai::commands::run_cmd::{execute as run_execute, RunArgs};
 use hologram_ai::compiler::{ModelCompiler, ModelSource};
 #[cfg(feature = "native")]
@@ -51,6 +52,8 @@ enum Command {
     },
     /// Execute a compiled `.holo` archive.
     Run(RunArgs),
+    /// Compile a model and emit a deterministic fixture for holospaces.
+    ExportFixture(ExportFixtureArgs),
     /// Download a model.
     #[cfg(feature = "native")]
     Download(DownloadArgs),
@@ -75,6 +78,7 @@ fn main() -> anyhow::Result<()> {
             spatial_scale,
         } => compile(model, output, name, seq_len, quantize, spatial_scale),
         Command::Run(args) => run_execute(args),
+        Command::ExportFixture(args) => export_fixture_execute(args),
         #[cfg(feature = "native")]
         Command::Download(args) => download::run(args),
     }
