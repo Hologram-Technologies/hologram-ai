@@ -60,6 +60,7 @@ The boundary is enforced by V&V classes NS (portability), ZA (zero alloc), ZM
 ## 3. Crate structure
 
 ```
+hologram-ai-core     app-domain core — manifests, event reducer, inference runner abstraction
 hologram-ai-common   runtime core — AiGraph IR, optimization passes, lowering, memory plan
 hologram-ai-quant    runtime core — Q4_0/Q8_0 dequant kernels (GGML-conformant)
 hologram-ai-tokenizer runtime core (encode/decode) + host shell (train/json load)

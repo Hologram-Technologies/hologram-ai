@@ -35,6 +35,13 @@ This repository uses a Cargo workspace with multiple crates under `crates/`.
 
 ```
 crates/
+├── hologram-ai-core/         # app-domain foundations: manifests, AI events, reducer, runner trait
+│   └── src/
+│       ├── lib.rs            # flat re-exports for the app-domain surface
+│       ├── domain.rs         # KappaRef adapter, manifests, requests, outputs, AiView
+│       ├── reducer.rs        # deterministic reduce(events) -> AiView
+│       └── runner.rs         # ModelRunner trait + test-only deterministic echo runner
+│
 ├── hologram-ai/              # public facade: compile, validate, download, CLI
 │   └── src/
 │       ├── lib.rs            # re-exports public API from all crates

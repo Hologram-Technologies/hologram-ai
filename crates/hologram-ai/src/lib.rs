@@ -28,6 +28,12 @@ pub use compiler::{
 };
 pub use engine::{FixedSession, GrowableSession, SessionProvider};
 pub use hologram_ai_common::{AiGraph, AiNode, AiOp, DType, NodeId, Shape, TensorId, TensorInfo};
+pub use hologram_ai_core::{
+    reduce, AiAppManifest, AiEvent, AiView, AppEntryKind, CompletedInference, FailedInference,
+    InferenceOutput, InferenceParams, InferenceProvenance, InferenceRequest, KappaRef,
+    ModelManifest, ModelRunner, ModelRunnerError, PendingInference, PendingPhase, Prompt,
+    RunnerKind, RunnerManifest,
+};
 pub use hologram_ai_onnx::{import_onnx, import_onnx_path, OnnxImportOptions};
 pub use hologram_ai_quant::{QuantDescriptor, QuantScheme};
 pub use hologram_archive::ContentLabel;

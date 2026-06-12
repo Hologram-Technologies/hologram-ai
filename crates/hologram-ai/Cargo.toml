@@ -37,6 +37,7 @@ parallel = [
 e2e = []
 
 [dependencies]
+hologram-ai-core.workspace   = true
 hologram-ai-common.workspace = true
 hologram-ai-quant.workspace  = true
 hologram-ai-onnx.workspace   = true
