@@ -338,6 +338,207 @@ fn batched_matmul_4d_matches_ort() {
 }
 
 #[test]
+fn batched_matmul_4d_broadcast_rhs_matches_ort() {
+    let (batch, heads, m, k, n) = (8usize, 4usize, 6usize, 16usize, 5usize);
+    let model = onnx_builder::batched_matmul_4d_broadcast_rhs(batch, heads, m, k, n);
+    let a: Vec<f32> = (0..batch * heads * m * k)
+        .map(|i| ((i % 53) as f32 - 26.0) * 0.0625)
+        .collect();
+    let b: Vec<f32> = (0..heads * k * n)
+        .map(|i| ((i % 47) as f32 - 23.0) * 0.05)
+        .collect();
+
+    let archive = ModelCompiler::default()
+        .compile(ModelSource::OnnxBytes(model.clone()))
+        .expect("hologram-ai compile failed");
+    let mut runner = HoloRunner::from_bytes(archive.bytes).expect("load failed");
+    let out = runner
+        .execute(&[&f32_to_le(&a), &f32_to_le(&b)])
+        .expect("hologram-ai execute failed");
+    assert_eq!(out.len(), 1, "expected one output");
+    let holo = le_to_f32(&out[0].bytes);
+
+    let ort_out = run_onnx_typed(
+        &model,
+        vec![
+            OrtInputTyped::F32 {
+                name: "A".into(),
+                shape: vec![batch, heads, m, k],
+                data: a,
+            },
+            OrtInputTyped::F32 {
+                name: "B".into(),
+                shape: vec![1, heads, k, n],
+                data: b,
+            },
+        ],
+    )
+    .expect("ORT run failed");
+    assert_eq!(ort_out.len(), 1, "expected one ORT output");
+    let reference = &ort_out[0].data;
+
+    assert_eq!(
+        holo.len(),
+        reference.len(),
+        "output length: hologram-ai {} vs ORT {}",
+        holo.len(),
+        reference.len()
+    );
+    for (i, (h, r)) in holo.iter().zip(reference.iter()).enumerate() {
+        let diff = (h - r).abs();
+        let tol = 1e-4 + 1e-4 * r.abs();
+        assert!(
+            diff <= tol,
+            "element {i}: hologram-ai {h} vs ORT {r} (|diff| {diff} > tol {tol})"
+        );
+    }
+}
+
+#[test]
+fn where_guarded_matmul_matches_ort() {
+    let (m, k, n) = (3usize, 4usize, 5usize);
+    let model = onnx_builder::where_guarded_matmul(m, k, n);
+    let mut x: Vec<f32> = (0..m * k).map(|i| ((i % 11) as f32 - 5.0) * 0.2).collect();
+    x[2] = f32::NAN;
+    x[7] = f32::NAN;
+
+    let archive = ModelCompiler::default()
+        .compile(ModelSource::OnnxBytes(model.clone()))
+        .expect("hologram-ai compile failed");
+    let mut runner = HoloRunner::from_bytes(archive.bytes).expect("load failed");
+    let out = runner
+        .execute(&[&f32_to_le(&x)])
+        .expect("hologram-ai execute failed");
+    assert_eq!(out.len(), 1, "expected one output");
+    let holo = le_to_f32(&out[0].bytes);
+
+    let ort_out = run_onnx_typed(
+        &model,
+        vec![OrtInputTyped::F32 {
+            name: "X".into(),
+            shape: vec![m, k],
+            data: x,
+        }],
+    )
+    .expect("ORT run failed");
+    assert_eq!(ort_out.len(), 1, "expected one ORT output");
+    let reference = &ort_out[0].data;
+
+    assert_eq!(
+        holo.len(),
+        reference.len(),
+        "output length: hologram-ai {} vs ORT {}",
+        holo.len(),
+        reference.len()
+    );
+    for (i, (h, r)) in holo.iter().zip(reference.iter()).enumerate() {
+        let diff = (h - r).abs();
+        let tol = 1e-5 + 1e-5 * r.abs();
+        assert!(
+            diff <= tol,
+            "element {i}: hologram-ai {h} vs ORT {r} (|diff| {diff} > tol {tol})"
+        );
+    }
+}
+
+#[test]
+fn gather_nd_singleton_prefix_mask_matches_ort() {
+    let seq = 16usize;
+    let model = onnx_builder::gather_nd_singleton_prefix_mask(seq);
+    let attention_mask: Vec<f32> = (0..seq)
+        .map(|i| if i % 3 == 0 { 0.0 } else { 1.0 })
+        .collect();
+
+    let archive = ModelCompiler {
+        seq_len_override: Some(seq as u64),
+        ..Default::default()
+    }
+    .compile(ModelSource::OnnxBytes(model.clone()))
+    .expect("hologram-ai compile failed");
+    let mut runner = HoloRunner::from_bytes(archive.bytes).expect("load failed");
+    let out = runner
+        .execute(&[&f32_to_le(&attention_mask)])
+        .expect("hologram-ai execute failed");
+    assert_eq!(out.len(), 1, "expected one output");
+    let holo = le_to_f32(&out[0].bytes);
+
+    let ort_out = run_onnx_typed(
+        &model,
+        vec![OrtInputTyped::F32 {
+            name: "attention_mask".into(),
+            shape: vec![1, seq],
+            data: attention_mask,
+        }],
+    )
+    .expect("ORT run failed");
+    assert_eq!(ort_out.len(), 1, "expected one ORT output");
+    let reference = &ort_out[0].data;
+
+    assert_eq!(
+        holo.len(),
+        reference.len(),
+        "output length: hologram-ai {} vs ORT {}",
+        holo.len(),
+        reference.len()
+    );
+    for (i, (h, r)) in holo.iter().zip(reference.iter()).enumerate() {
+        let diff = (h - r).abs();
+        let tol = 1e-6;
+        assert!(
+            diff <= tol,
+            "element {i}: hologram-ai {h} vs ORT {r} (|diff| {diff} > tol {tol})"
+        );
+    }
+}
+
+#[test]
+fn where_scalar_branches_match_ort() {
+    let (m, n) = (16usize, 16usize);
+    let model = onnx_builder::where_scalar_branches(m, n);
+    let cond_src: Vec<f32> = (0..m * n)
+        .map(|i| if i % 5 == 0 { 0.0 } else { 1.0 })
+        .collect();
+
+    let archive = ModelCompiler::default()
+        .compile(ModelSource::OnnxBytes(model.clone()))
+        .expect("hologram-ai compile failed");
+    let mut runner = HoloRunner::from_bytes(archive.bytes).expect("load failed");
+    let out = runner
+        .execute(&[&f32_to_le(&cond_src)])
+        .expect("hologram-ai execute failed");
+    assert_eq!(out.len(), 1, "expected one output");
+    let holo = le_to_f32(&out[0].bytes);
+
+    let ort_out = run_onnx_typed(
+        &model,
+        vec![OrtInputTyped::F32 {
+            name: "cond_src".into(),
+            shape: vec![m, n],
+            data: cond_src,
+        }],
+    )
+    .expect("ORT run failed");
+    assert_eq!(ort_out.len(), 1, "expected one ORT output");
+    let reference = &ort_out[0].data;
+
+    assert_eq!(
+        holo.len(),
+        reference.len(),
+        "output length: hologram-ai {} vs ORT {}",
+        holo.len(),
+        reference.len()
+    );
+    for (i, (h, r)) in holo.iter().zip(reference.iter()).enumerate() {
+        let diff = (h - r).abs();
+        let tol = 1e-6;
+        assert!(
+            diff <= tol,
+            "element {i}: hologram-ai {h} vs ORT {r} (|diff| {diff} > tol {tol})"
+        );
+    }
+}
+
+#[test]
 fn mini_vision_classifier_matches_ort() {
     let model = onnx_builder::mini_vision_classifier(3, 8, 8, 5, 7);
     let x: Vec<f32> = (0..(3 * 8 * 8))

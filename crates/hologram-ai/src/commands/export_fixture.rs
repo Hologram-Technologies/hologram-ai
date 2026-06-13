@@ -1,8 +1,9 @@
 //! `hologram-ai export-fixture` — compile a model and emit a deterministic
-//! holospaces-friendly fixture directory.
+//! fixture witness for both archive-first and file-first consumers.
 //!
 //! The fixture packages:
 //! - the compiled `.holo` archive
+//! - the same fixture embedded in archive extension sections
 //! - deterministic typed input buffers for a known model preset
 //! - expected output buffers and their κ-labels
 //! - a manifest describing port order, dtypes, shapes, and file layout
@@ -10,11 +11,15 @@
 use anyhow::{bail, Context, Result};
 use clap::{Args, ValueEnum};
 use hologram_archive::ContentLabel;
-use serde::Serialize;
 use std::path::{Path, PathBuf};
 
 use crate::commands::{build_model_compiler, CompileCliOptions};
-use crate::compiler::ModelSource;
+use crate::compiler::{ArchiveSections, ModelSource};
+use crate::fixture::{
+    build_embedded_fixture_sections, tensor_file_stem, tensor_manifest, ArchiveManifest,
+    EmbeddedFixtureManifest, ExternalFixtureManifest, ModelMetadataManifest, TensorManifest,
+    FIXTURE_SCHEMA_VERSION,
+};
 use crate::runner::{HoloRunner, PortInfo};
 
 #[derive(Args, Debug)]
@@ -48,62 +53,23 @@ pub struct ExportFixtureArgs {
 pub enum FixturePreset {
     #[value(name = "bert-base-uncased")]
     BertBaseUncased,
+    #[value(name = "bert-base-uncased-masked")]
+    BertBaseUncasedMasked,
 }
 
 impl FixturePreset {
     fn as_str(self) -> &'static str {
         match self {
             Self::BertBaseUncased => "bert-base-uncased",
+            Self::BertBaseUncasedMasked => "bert-base-uncased-masked",
         }
     }
 
     fn build_inputs(self, ports: &[PortInfo]) -> Result<Vec<Vec<u8>>> {
         match self {
-            Self::BertBaseUncased => build_bert_inputs(ports),
+            Self::BertBaseUncased | Self::BertBaseUncasedMasked => build_bert_inputs(ports, self),
         }
     }
-}
-
-#[derive(Serialize)]
-struct FixtureManifest {
-    schema_version: u32,
-    preset: String,
-    archive: ArchiveManifest,
-    source_model: String,
-    model_metadata: ModelMetadataManifest,
-    inputs: Vec<TensorManifest>,
-    outputs: Vec<TensorManifest>,
-}
-
-#[derive(Serialize)]
-struct ArchiveManifest {
-    file: String,
-    bytes: u64,
-    node_count: usize,
-}
-
-#[derive(Serialize)]
-struct ModelMetadataManifest {
-    arch: Option<String>,
-    vocab_size: Option<u32>,
-    context_len: Option<u32>,
-    n_layers: Option<u32>,
-    n_embd: Option<u32>,
-    n_kv_heads: Option<u32>,
-    head_dim: Option<u32>,
-    kappa_label: Option<String>,
-}
-
-#[derive(Serialize)]
-struct TensorManifest {
-    index: usize,
-    name: String,
-    dtype_tag: u8,
-    dtype_name: String,
-    element_count: usize,
-    shape: Vec<usize>,
-    bytes_file: String,
-    kappa: String,
 }
 
 pub fn execute(args: ExportFixtureArgs) -> Result<()> {
@@ -117,27 +83,18 @@ pub fn execute(args: ExportFixtureArgs) -> Result<()> {
     })?;
     let stem = archive_stem(&args.model, args.name.as_deref());
     let archive_path = args.output.join(format!("{stem}.holo"));
-    let archive = compiler
-        .compile(ModelSource::OnnxPath(args.model.clone()))
-        .with_context(|| format!("compiling {:?}", args.model))?;
-    archive.save(&archive_path)?;
+    let prepared = compiler
+        .prepare(ModelSource::OnnxPath(args.model.clone()))
+        .with_context(|| format!("preparing {:?}", args.model))?;
+    let provisional_archive = prepared
+        .clone()
+        .compile_at(args.seq_len, ArchiveSections::new())
+        .with_context(|| format!("compiling provisional fixture archive for {:?}", args.model))?;
+    let provisional_model_metadata =
+        ModelMetadataManifest::from_model_metadata(&provisional_archive.metadata);
 
-    let archive_bytes = std::fs::metadata(&archive_path)
-        .with_context(|| format!("reading archive metadata {archive_path:?}"))?
-        .len();
-    let model_metadata = ModelMetadataManifest {
-        arch: archive.metadata.arch,
-        vocab_size: archive.metadata.vocab_size,
-        context_len: archive.metadata.context_len,
-        n_layers: archive.metadata.n_layers,
-        n_embd: archive.metadata.n_embd,
-        n_kv_heads: archive.metadata.n_kv_heads,
-        head_dim: archive.metadata.head_dim,
-        kappa_label: archive.metadata.kappa_label,
-    };
-    let node_count = archive.stats.node_count;
-
-    let mut runner = HoloRunner::from_path(&archive_path, None)?;
+    let mut runner = HoloRunner::from_bytes(provisional_archive.bytes)
+        .context("loading provisional fixture archive")?;
     let input_ports = runner.input_port_info();
     let output_ports = runner.output_port_info();
     let input_bytes = args.preset.build_inputs(&input_ports)?;
@@ -146,13 +103,34 @@ pub fn execute(args: ExportFixtureArgs) -> Result<()> {
     let output_labels = runner
         .execute_addressed(&input_labels)
         .context("executing fixture inputs")?;
-
-    let input_manifest = write_input_artifacts(&args.output, &input_ports, &input_bytes)?;
-    let output_manifest =
-        write_output_artifacts(&args.output, &output_ports, &output_labels, &runner)?;
-    let manifest = FixtureManifest {
-        schema_version: 1,
+    let output_bytes = resolve_output_bytes(&output_labels, &runner)?;
+    let input_manifest = build_input_manifest(&input_ports, &input_bytes);
+    let output_manifest = build_output_manifest(&output_ports, &output_bytes);
+    let embedded_manifest = EmbeddedFixtureManifest {
+        schema_version: FIXTURE_SCHEMA_VERSION,
         preset: args.preset.as_str().to_string(),
+        source_model: args.model.to_string_lossy().into_owned(),
+        model_metadata: provisional_model_metadata,
+        inputs: input_manifest.clone(),
+        outputs: output_manifest.clone(),
+    };
+    let sections =
+        build_embedded_fixture_sections(&embedded_manifest, &input_bytes, &output_bytes)?;
+    let archive = prepared
+        .compile_at(args.seq_len, sections)
+        .with_context(|| format!("compiling embedded fixture archive for {:?}", args.model))?;
+    archive.save(&archive_path)?;
+
+    let archive_bytes = std::fs::metadata(&archive_path)
+        .with_context(|| format!("reading archive metadata {archive_path:?}"))?
+        .len();
+    let node_count = archive.stats.node_count;
+
+    write_input_artifacts(&args.output, &input_manifest, &input_bytes)?;
+    write_output_artifacts(&args.output, &output_manifest, &output_bytes)?;
+    let manifest = ExternalFixtureManifest {
+        schema_version: FIXTURE_SCHEMA_VERSION,
+        preset: embedded_manifest.preset.clone(),
         archive: ArchiveManifest {
             file: archive_path
                 .file_name()
@@ -161,8 +139,8 @@ pub fn execute(args: ExportFixtureArgs) -> Result<()> {
             bytes: archive_bytes,
             node_count,
         },
-        source_model: args.model.to_string_lossy().into_owned(),
-        model_metadata,
+        source_model: embedded_manifest.source_model.clone(),
+        model_metadata: embedded_manifest.model_metadata.clone(),
         inputs: input_manifest,
         outputs: output_manifest,
     };
@@ -193,9 +171,9 @@ fn archive_stem(model: &Path, name: Option<&str>) -> String {
     })
 }
 
-fn build_bert_inputs(ports: &[PortInfo]) -> Result<Vec<Vec<u8>>> {
+fn build_bert_inputs(ports: &[PortInfo], preset: FixturePreset) -> Result<Vec<Vec<u8>>> {
     let seq_len = bert_seq_len(ports)?;
-    let tokens = bert_tokens(seq_len)?;
+    let tokens = bert_tokens(seq_len, preset)?;
     let mask = bert_attention_mask(seq_len);
     let segments = vec![0i64; seq_len];
 
@@ -232,8 +210,8 @@ fn bert_seq_len(ports: &[PortInfo]) -> Result<usize> {
     Ok(seq_len)
 }
 
-fn bert_tokens(seq_len: usize) -> Result<Vec<i64>> {
-    let prompt = [101, 2023, 2003, 1037, 3231, 102];
+fn bert_tokens(seq_len: usize, preset: FixturePreset) -> Result<Vec<i64>> {
+    let prompt = preset.bert_prompt_tokens();
     if seq_len < prompt.len() {
         bail!(
             "BERT preset needs seq_len >= {} to encode the canonical prompt, got {seq_len}",
@@ -241,8 +219,17 @@ fn bert_tokens(seq_len: usize) -> Result<Vec<i64>> {
         );
     }
     let mut out = vec![0i64; seq_len];
-    out[..prompt.len()].copy_from_slice(&prompt);
+    out[..prompt.len()].copy_from_slice(prompt);
     Ok(out)
+}
+
+impl FixturePreset {
+    fn bert_prompt_tokens(self) -> &'static [i64] {
+        match self {
+            Self::BertBaseUncased => &[101, 2023, 2003, 1037, 3231, 102],
+            Self::BertBaseUncasedMasked => &[101, 2023, 2003, 1037, 103, 102],
+        }
+    }
 }
 
 fn bert_attention_mask(seq_len: usize) -> Vec<i64> {
@@ -326,122 +313,116 @@ fn intern_inputs(runner: &mut HoloRunner, inputs: &[Vec<u8>]) -> Vec<ContentLabe
         .collect()
 }
 
+fn build_input_manifest(ports: &[PortInfo], inputs: &[Vec<u8>]) -> Vec<TensorManifest> {
+    ports
+        .iter()
+        .enumerate()
+        .map(|(index, port)| {
+            let relative = format!(
+                "inputs/{}.bin",
+                tensor_file_stem("input", index, &port.name)
+            );
+            tensor_manifest(index, port, &inputs[index], relative)
+        })
+        .collect()
+}
+
+fn build_output_manifest(ports: &[PortInfo], outputs: &[Vec<u8>]) -> Vec<TensorManifest> {
+    ports
+        .iter()
+        .enumerate()
+        .map(|(index, port)| {
+            let relative = format!(
+                "outputs/{}.bin",
+                tensor_file_stem("output", index, &port.name)
+            );
+            tensor_manifest(index, port, &outputs[index], relative)
+        })
+        .collect()
+}
+
+fn resolve_output_bytes(labels: &[ContentLabel], runner: &HoloRunner) -> Result<Vec<Vec<u8>>> {
+    labels
+        .iter()
+        .enumerate()
+        .map(|(index, label)| {
+            runner
+                .resolve(label)
+                .map(|bytes| bytes.to_vec())
+                .with_context(|| {
+                    format!(
+                        "resolving fixture output label {} at index {index}",
+                        label.as_str()
+                    )
+                })
+        })
+        .collect()
+}
+
 fn write_input_artifacts(
     output_dir: &Path,
-    ports: &[PortInfo],
+    manifests: &[TensorManifest],
     inputs: &[Vec<u8>],
-) -> Result<Vec<TensorManifest>> {
+) -> Result<()> {
     let input_dir = output_dir.join("inputs");
     std::fs::create_dir_all(&input_dir)
         .with_context(|| format!("creating input fixture directory {input_dir:?}"))?;
 
-    ports
+    manifests
         .iter()
         .enumerate()
         .map(|(index, port)| {
-            let stem = tensor_file_stem("input", index, &port.name);
-            let file_name = format!("{stem}.bin");
-            let relative = format!("inputs/{file_name}");
-            let path = input_dir.join(&file_name);
+            let file_name = Path::new(&port.bytes_file)
+                .file_name()
+                .context("input manifest path missing file name")?;
+            let path = input_dir.join(file_name);
             std::fs::write(&path, &inputs[index])
                 .with_context(|| format!("writing input fixture {path:?}"))?;
-            Ok(tensor_manifest(index, port, &inputs[index], relative))
+            Ok(())
         })
-        .collect()
+        .collect::<Result<Vec<_>>>()
+        .map(|_| ())
 }
 
 fn write_output_artifacts(
     output_dir: &Path,
-    ports: &[PortInfo],
-    labels: &[ContentLabel],
-    runner: &HoloRunner,
-) -> Result<Vec<TensorManifest>> {
+    manifests: &[TensorManifest],
+    outputs: &[Vec<u8>],
+) -> Result<()> {
     let output_dir = output_dir.join("outputs");
     std::fs::create_dir_all(&output_dir)
         .with_context(|| format!("creating output fixture directory {output_dir:?}"))?;
 
-    ports
+    manifests
         .iter()
         .enumerate()
         .map(|(index, port)| {
-            let stem = tensor_file_stem("output", index, &port.name);
-            let bytes_file = format!("{stem}.bin");
+            let bytes_file = Path::new(&port.bytes_file)
+                .file_name()
+                .context("output manifest path missing file name")?;
+            let stem = bytes_file
+                .to_string_lossy()
+                .trim_end_matches(".bin")
+                .to_string();
             let kappa_file = format!("{stem}.kappa");
-            let bytes_relative = format!("outputs/{bytes_file}");
-            let bytes_path = output_dir.join(&bytes_file);
+            let bytes_path = output_dir.join(bytes_file);
             let kappa_path = output_dir.join(&kappa_file);
-            let bytes = runner
-                .resolve(&labels[index])
-                .with_context(|| format!("resolving output label {}", labels[index].as_str()))?;
+            let bytes = &outputs[index];
             std::fs::write(&bytes_path, bytes)
                 .with_context(|| format!("writing output fixture {bytes_path:?}"))?;
-            let kappa = blake3_kappa(bytes);
+            let kappa = port.kappa.clone();
             std::fs::write(&kappa_path, &kappa)
                 .with_context(|| format!("writing output label {kappa_path:?}"))?;
-            Ok(tensor_manifest(index, port, bytes, bytes_relative))
+            Ok(())
         })
-        .collect()
-}
-
-fn tensor_manifest(
-    index: usize,
-    port: &PortInfo,
-    bytes: &[u8],
-    bytes_file: String,
-) -> TensorManifest {
-    TensorManifest {
-        index,
-        name: port.name.clone(),
-        dtype_tag: port.dtype,
-        dtype_name: dtype_name(port.dtype).to_string(),
-        element_count: port.element_count,
-        shape: port.shape.clone(),
-        bytes_file,
-        kappa: blake3_kappa(bytes),
-    }
-}
-
-fn tensor_file_stem(prefix: &str, index: usize, name: &str) -> String {
-    let stem = sanitize_file_component(name);
-    if stem.is_empty() {
-        return format!("{prefix}_{index}");
-    }
-    format!("{prefix}_{index}_{stem}")
-}
-
-fn sanitize_file_component(name: &str) -> String {
-    name.chars()
-        .map(|ch| match ch {
-            'a'..='z' | 'A'..='Z' | '0'..='9' | '-' | '_' => ch,
-            _ => '_',
-        })
-        .collect()
-}
-
-fn dtype_name(tag: u8) -> &'static str {
-    match tag {
-        0 => "bool",
-        1 => "u8",
-        2 => "i8",
-        3 => "u64",
-        4 => "i32",
-        5 => "i64",
-        6 => "f16",
-        7 => "bf16",
-        8 => "f32",
-        9 => "f64",
-        10 => "i4",
-        _ => "unknown",
-    }
-}
-
-fn blake3_kappa(bytes: &[u8]) -> String {
-    format!("blake3:{}", blake3::hash(bytes).to_hex())
+        .collect::<Result<Vec<_>>>()
+        .map(|_| ())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::fixture::sanitize_file_component;
 
     fn test_port(name: &str, dtype: u8, element_count: usize, shape: Vec<usize>) -> PortInfo {
         PortInfo {
@@ -474,6 +455,26 @@ mod tests {
         assert_eq!(
             decode_i64(&inputs[0]),
             vec![101, 2023, 2003, 1037, 3231, 102, 0, 0]
+        );
+        assert_eq!(decode_i64(&inputs[1]), vec![1, 1, 1, 1, 1, 1, 0, 0]);
+        assert_eq!(decode_i64(&inputs[2]), vec![0, 0, 0, 0, 0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn bert_masked_preset_injects_mask_token() {
+        let ports = vec![
+            test_port("input_ids", 5, 8, vec![1, 8]),
+            test_port("attention_mask", 5, 8, vec![1, 8]),
+            test_port("token_type_ids", 5, 8, vec![1, 8]),
+        ];
+
+        let inputs = FixturePreset::BertBaseUncasedMasked
+            .build_inputs(&ports)
+            .expect("build masked BERT inputs");
+
+        assert_eq!(
+            decode_i64(&inputs[0]),
+            vec![101, 2023, 2003, 1037, 103, 102, 0, 0]
         );
         assert_eq!(decode_i64(&inputs[1]), vec![1, 1, 1, 1, 1, 1, 0, 0]);
         assert_eq!(decode_i64(&inputs[2]), vec![0, 0, 0, 0, 0, 0, 0, 0]);

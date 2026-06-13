@@ -24,13 +24,16 @@
 //! error rather than guessed at — generation targets causal LMs specifically;
 //! other graphs use the raw `--input` path.
 
+use std::cmp::Ordering;
 use std::io::Write;
 
 use anyhow::{bail, Context, Result};
 use hologram_ai_tokenizer::Tokenizer;
+use std::time::Instant;
 
 use crate::engine::SessionProvider;
 use crate::runner::HoloRunner;
+use crate::stats::GenerationStats;
 
 /// Sampling / stopping configuration for one generation request.
 #[derive(Debug, Clone)]
@@ -47,6 +50,17 @@ pub struct GenConfig {
     pub eos: Option<u32>,
     /// RNG seed for temperature sampling (reproducibility). Unused when greedy.
     pub seed: u64,
+    /// If set, print the first-step top-k logits candidates before sampling.
+    pub decode_top_k: Option<usize>,
+}
+
+/// The final text plus timing facts gathered during generation.
+#[derive(Debug, Clone)]
+pub struct GenerationOutcome {
+    /// Full generated text, excluding the prompt.
+    pub text: String,
+    /// Timing summary for the request.
+    pub stats: GenerationStats,
 }
 
 impl Default for GenConfig {
@@ -58,6 +72,7 @@ impl Default for GenConfig {
             stop: Vec::new(),
             eos: None,
             seed: 0x9E3779B97F4A7C15,
+            decode_top_k: None,
         }
     }
 }
@@ -69,6 +84,17 @@ pub fn apply_template(template: Option<&str>, prompt: &str) -> String {
         Some(t) => format!("{t}{prompt}"),
         None => prompt.to_string(),
     }
+}
+
+/// Render a single-user chat prompt from a supported HuggingFace chat template.
+///
+/// Supported subset: templates that branch on `message['role']` and build the
+/// output from string literals, `message['content']`, and `eos_token`, plus an
+/// optional `add_generation_prompt` suffix. This covers TinyLlama-style
+/// `<|user|>... </s><|assistant|>` templates.
+pub fn apply_chat_template(template: &str, prompt: &str, eos_token: &str) -> Result<String> {
+    let parsed = ChatTemplate::parse(template)?;
+    parsed.render_single_user(prompt, eos_token)
 }
 
 /// A standard auxiliary LM input synthesized each step (the model carries it as
@@ -296,10 +322,28 @@ pub fn generate_stream(
     cfg: &GenConfig,
     out: &mut dyn Write,
 ) -> Result<String> {
+    Ok(generate_stream_with_stats(provider, tokenizer, prompt, cfg, out)?.text)
+}
+
+/// Run autoregressive generation and return both text and timing metrics.
+pub fn generate_stream_with_stats(
+    provider: &mut dyn SessionProvider,
+    tokenizer: &dyn Tokenizer,
+    prompt: &str,
+    cfg: &GenConfig,
+    out: &mut dyn Write,
+) -> Result<GenerationOutcome> {
+    let total_start = Instant::now();
     let eos = cfg.eos.unwrap_or_else(|| tokenizer.eos_token_id());
     let max_window = provider.max_window();
 
+    let prompt_encode_start = Instant::now();
     let prompt_tokens = tokenizer.encode(prompt);
+    let mut stats = GenerationStats {
+        prompt_tokens: prompt_tokens.len(),
+        prompt_encode: prompt_encode_start.elapsed(),
+        ..Default::default()
+    };
     if prompt_tokens.is_empty() {
         bail!("prompt encoded to zero tokens");
     }
@@ -325,7 +369,15 @@ pub fn generate_stream(
         let cur_len = sequence.len().min(max_window);
         let window = &sequence[sequence.len() - cur_len..];
 
+        let step_is_prefill = generated.is_empty();
+        let session_prepare_start = Instant::now();
         let runner = provider.session_for(cur_len)?;
+        let session_prepare = session_prepare_start.elapsed();
+        if step_is_prefill {
+            stats.prefill_session_prepare += session_prepare;
+        } else {
+            stats.decode_session_prepare += session_prepare;
+        }
         let lm = LmContract::resolve(runner)?;
         debug_assert!(
             lm.seq_len >= cur_len,
@@ -354,18 +406,46 @@ pub fn generate_stream(
             };
         }
         let refs: Vec<&[u8]> = bufs.iter().map(|b| b.as_slice()).collect();
+        let forward_start = Instant::now();
         let outputs = runner.execute(&refs).context("forward pass failed")?;
+        let forward = forward_start.elapsed();
+        if step_is_prefill {
+            stats.prefill_forward += forward;
+        } else {
+            stats.decode_forward += forward;
+        }
         let logits: &[f32] = bytemuck::cast_slice(&outputs[lm.logits_index].bytes);
 
         // Next-token distribution is the logit row at the last real position.
         let pos = cur_len - 1;
         let row = &logits[pos * lm.vocab..(pos + 1) * lm.vocab];
+        if let Some(top_k) = cfg.decode_top_k.filter(|_| step_is_prefill) {
+            let mut stderr = std::io::stderr();
+            let top_k = top_k.max(1);
+            writeln!(
+                &mut stderr,
+                "first-token top-{top_k} candidates (pos {pos}, vocab {}):",
+                lm.vocab
+            )
+            .ok();
+            for candidate in top_k_predictions(row, top_k) {
+                writeln!(
+                    &mut stderr,
+                    "  {:>5} {:>10.6}  {}",
+                    candidate.token_id,
+                    candidate.logit,
+                    render_token(tokenizer, candidate.token_id)
+                )
+                .ok();
+            }
+        }
         let next = sample(row, cfg.temperature, cfg.top_k, &mut rng);
 
         if next == eos {
             break;
         }
         generated.push(next);
+        stats.generated_tokens = generated.len();
         sequence.push(next);
 
         // Stream the newly-decoded suffix (handles multi-token characters by
@@ -389,7 +469,155 @@ pub fn generate_stream(
         }
     }
 
-    Ok(tokenizer.decode(&generated))
+    stats.total = total_start.elapsed();
+    Ok(GenerationOutcome {
+        text: tokenizer.decode(&generated),
+        stats,
+    })
+}
+
+fn render_token(tokenizer: &dyn Tokenizer, token_id: u32) -> String {
+    let decoded = tokenizer.decode(&[token_id]);
+    let raw = tokenizer.id_to_token(token_id).unwrap_or("<unknown>");
+    if decoded == raw {
+        format!("{decoded:?}")
+    } else {
+        format!("{decoded:?} raw={raw:?}")
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct TokenCandidate {
+    token_id: u32,
+    logit: f32,
+}
+
+fn top_k_predictions(row: &[f32], top_k: usize) -> Vec<TokenCandidate> {
+    let mut indices: Vec<usize> = (0..row.len()).collect();
+    indices.sort_unstable_by(|&left, &right| {
+        row[right]
+            .partial_cmp(&row[left])
+            .unwrap_or(Ordering::Equal)
+    });
+    indices
+        .into_iter()
+        .take(top_k.min(row.len()))
+        .map(|index| TokenCandidate {
+            token_id: index as u32,
+            logit: row[index],
+        })
+        .collect()
+}
+
+#[derive(Debug, Clone)]
+struct ChatTemplate {
+    user: Vec<ChatPiece>,
+    generation_prompt: Vec<ChatPiece>,
+}
+
+impl ChatTemplate {
+    fn parse(template: &str) -> Result<Self> {
+        let user = extract_role_expression(template, "user")
+            .with_context(|| "chat template does not define a user branch")?;
+        let generation_prompt = extract_generation_prompt_expression(template).unwrap_or_default();
+        Ok(Self {
+            user: parse_template_expression(&user)?,
+            generation_prompt: parse_template_expression(&generation_prompt)?,
+        })
+    }
+
+    fn render_single_user(&self, prompt: &str, eos_token: &str) -> Result<String> {
+        let mut rendered = String::new();
+        render_template_pieces(&mut rendered, &self.user, prompt, eos_token)?;
+        render_template_pieces(&mut rendered, &self.generation_prompt, prompt, eos_token)?;
+        Ok(rendered)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ChatPiece {
+    Literal(String),
+    MessageContent,
+    EosToken,
+}
+
+fn extract_role_expression(template: &str, role: &str) -> Option<String> {
+    let needle = format!("message['role'] == '{role}'");
+    let start = template.find(&needle)?;
+    extract_next_expression(&template[start..])
+}
+
+fn extract_generation_prompt_expression(template: &str) -> Option<String> {
+    let start = template.find("loop.last and add_generation_prompt")?;
+    extract_next_expression(&template[start..])
+}
+
+fn extract_next_expression(fragment: &str) -> Option<String> {
+    let start = fragment.find("{{")?;
+    let rest = &fragment[start + 2..];
+    let end = rest.find("}}")?;
+    Some(rest[..end].trim().to_string())
+}
+
+fn parse_template_expression(expr: &str) -> Result<Vec<ChatPiece>> {
+    let expr = expr.trim();
+    if expr.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut pieces = Vec::new();
+    let chars: Vec<char> = expr.chars().collect();
+    let mut index = 0usize;
+    while index < chars.len() {
+        while index < chars.len() && (chars[index].is_whitespace() || chars[index] == '+') {
+            index += 1;
+        }
+        if index >= chars.len() {
+            break;
+        }
+        if chars[index] == '\'' {
+            index += 1;
+            let mut literal = String::new();
+            while index < chars.len() && chars[index] != '\'' {
+                literal.push(chars[index]);
+                index += 1;
+            }
+            if index >= chars.len() {
+                bail!("unterminated string literal in chat template expression");
+            }
+            index += 1;
+            pieces.push(ChatPiece::Literal(literal));
+            continue;
+        }
+        let rest: String = chars[index..].iter().collect();
+        if rest.starts_with("message['content']") {
+            pieces.push(ChatPiece::MessageContent);
+            index += "message['content']".len();
+            continue;
+        }
+        if rest.starts_with("eos_token") {
+            pieces.push(ChatPiece::EosToken);
+            index += "eos_token".len();
+            continue;
+        }
+        bail!("unsupported chat template expression fragment: {rest:?}");
+    }
+    Ok(pieces)
+}
+
+fn render_template_pieces(
+    out: &mut String,
+    pieces: &[ChatPiece],
+    prompt: &str,
+    eos_token: &str,
+) -> Result<()> {
+    for piece in pieces {
+        match piece {
+            ChatPiece::Literal(literal) => out.push_str(literal),
+            ChatPiece::MessageContent => out.push_str(prompt),
+            ChatPiece::EosToken => out.push_str(eos_token),
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -410,6 +638,13 @@ mod tests {
     }
 
     #[test]
+    fn chat_template_renders_tinyllama_style_prompt() {
+        let template = "{% for message in messages %}\n{% if message['role'] == 'user' %}\n{{ '<|user|>\n' + message['content'] + eos_token }}\n{% endif %}\n{% if loop.last and add_generation_prompt %}\n{{ '<|assistant|>' }}\n{% endif %}\n{% endfor %}";
+        let rendered = apply_chat_template(template, "Tell me a joke.", "</s>").expect("render");
+        assert_eq!(rendered, "<|user|>\nTell me a joke.</s><|assistant|>");
+    }
+
+    #[test]
     fn greedy_sample_equals_argmax() {
         let mut rng = 1;
         assert_eq!(sample(&[0.1, 5.0, 0.2], 0.0, None, &mut rng), 1);
@@ -420,5 +655,28 @@ mod tests {
         let mut rng = 42;
         // Even with temperature, top_k=1 forces the highest-logit token.
         assert_eq!(sample(&[1.0, 9.0, 2.0, 3.0], 1.0, Some(1), &mut rng), 1);
+    }
+
+    #[test]
+    fn top_k_predictions_sort_descending() {
+        let row = [-1.0, 4.0, 3.0, 7.0];
+        let top = top_k_predictions(&row, 3);
+        assert_eq!(
+            top,
+            vec![
+                TokenCandidate {
+                    token_id: 3,
+                    logit: 7.0,
+                },
+                TokenCandidate {
+                    token_id: 1,
+                    logit: 4.0,
+                },
+                TokenCandidate {
+                    token_id: 2,
+                    logit: 3.0,
+                },
+            ]
+        );
     }
 }

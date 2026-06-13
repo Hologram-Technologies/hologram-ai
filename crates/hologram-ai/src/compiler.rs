@@ -81,6 +81,8 @@ pub struct HoloArchive {
 pub const TOKENIZER_EXT: &str = "tokenizer.json";
 /// Archive extension key for the tokenizer's uor-addr κ-label (integrity check).
 pub const TOKENIZER_KAPPA_EXT: &str = "tokenizer.kappa";
+/// Archive extension key for an optional HuggingFace chat template.
+pub const CHAT_TEMPLATE_EXT: &str = "chat_template.jinja";
 
 /// Open **extension sections** (key → bytes) to embed in the `.holo` during the
 /// single build pass — the runtime carries them opaquely and exposes them via
@@ -446,6 +448,12 @@ impl PreparedModel {
                         .to_string();
                     sections.add_extension(TOKENIZER_EXT, canonical);
                     sections.add_extension(TOKENIZER_KAPPA_EXT, kappa.into_bytes());
+                }
+                let chat_template = dir.join(CHAT_TEMPLATE_EXT);
+                if chat_template.exists() && !sections.contains(CHAT_TEMPLATE_EXT) {
+                    let raw = std::fs::read(&chat_template)
+                        .with_context(|| format!("reading chat template {chat_template:?}"))?;
+                    sections.add_extension(CHAT_TEMPLATE_EXT, raw);
                 }
             }
         }

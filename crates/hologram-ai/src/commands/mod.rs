@@ -1,6 +1,7 @@
 pub mod export_fixture;
 pub mod generate;
 pub mod run_cmd;
+pub mod run_fixture;
 
 use crate::compiler::ModelCompiler;
 use hologram_ai_common::lower::QuantStrategy;

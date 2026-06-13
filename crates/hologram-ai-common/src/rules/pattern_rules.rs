@@ -9,7 +9,8 @@
 //! output.
 
 use super::{OpMatcher, Pattern, Replacement, Rule, RuleSet, VarId};
-use crate::ir::{AiOp, AiParam};
+use crate::ir::{AiGraph, AiOp, AiParam};
+use std::collections::{HashMap, HashSet};
 
 /// SwiGLU fusion (direct-Silu variant).
 ///
@@ -678,6 +679,9 @@ fn position_ids_inject(
     if read_scalar_i64(step_tid, graph)? != 1 {
         return None;
     }
+    if !range_feeds_position_path(graph, range_output) {
+        return None;
+    }
     let _ = range_output; // (output is reused by the Identity below)
 
     // Reuse an existing `position_ids` input if present; otherwise
@@ -745,6 +749,48 @@ pub fn position_ids_rule() -> Rule {
 
 pub fn position_ids_rules() -> RuleSet {
     RuleSet::new().with_rule(position_ids_rule())
+}
+
+fn range_feeds_position_path(graph: &AiGraph, range_output: crate::ir::TensorId) -> bool {
+    let consumers = build_consumers(graph);
+    let mut stack = vec![range_output];
+    let mut seen = HashSet::new();
+    let mut saw_position_use = false;
+
+    while let Some(tid) = stack.pop() {
+        if !seen.insert(tid) {
+            continue;
+        }
+        let Some(next) = consumers.get(&tid) else {
+            continue;
+        };
+        for &node_idx in next {
+            let node = &graph.nodes[node_idx];
+            match &node.op {
+                AiOp::Identity
+                | AiOp::Unsqueeze { .. }
+                | AiOp::Squeeze { .. }
+                | AiOp::Reshape { .. }
+                | AiOp::Expand
+                | AiOp::Cast { .. } => stack.extend(node.outputs.iter().copied()),
+                AiOp::Gather { axis } if *axis == 0 => saw_position_use = true,
+                AiOp::RotaryEmbedding { .. } => saw_position_use = true,
+                _ => return false,
+            }
+        }
+    }
+
+    saw_position_use
+}
+
+fn build_consumers(graph: &AiGraph) -> HashMap<crate::ir::TensorId, Vec<usize>> {
+    let mut consumers: HashMap<crate::ir::TensorId, Vec<usize>> = HashMap::new();
+    for (idx, node) in graph.nodes.iter().enumerate() {
+        for &input in &node.inputs {
+            consumers.entry(input).or_default().push(idx);
+        }
+    }
+    consumers
 }
 
 // ── KvSlotInjection: per-GQA, wrap K/V with KvSlotWrite ─────────────────
@@ -894,4 +940,122 @@ pub fn kv_slot_injection_rule() -> Rule {
 
 pub fn kv_slot_injection_rules() -> RuleSet {
     RuleSet::new().with_rule(kv_slot_injection_rule())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::position_ids_rules;
+    use crate::ir::{
+        shape_from_concrete, AiGraph, AiNode, AiOp, ConstraintStore, DType, DimVarTable,
+        SemanticHint, TensorInfo,
+    };
+    use crate::{Pass, RulePass};
+    use hologram_ai_quant::QuantDescriptor;
+    use std::collections::HashMap;
+
+    fn scalar_i64_param(value: i64) -> (crate::ir::AiParam, TensorInfo) {
+        let info = TensorInfo {
+            logical_dtype: DType::INT64,
+            storage_dtype: DType::INT64,
+            shape: shape_from_concrete(&[]),
+            quant: QuantDescriptor::none(),
+            known_i64_values: Some(vec![Some(value)]),
+            semantic: SemanticHint::Unknown,
+        };
+        (
+            crate::ir::AiParam::inline(value.to_le_bytes().to_vec(), info.clone()),
+            info,
+        )
+    }
+
+    fn empty_graph(nodes: Vec<AiNode>) -> AiGraph {
+        AiGraph {
+            name: "position_ids_rule".into(),
+            nodes,
+            inputs: vec![],
+            outputs: vec![],
+            input_names: vec![],
+            output_names: vec![],
+            params: HashMap::new(),
+            tensor_info: HashMap::new(),
+            metadata: HashMap::new(),
+            warnings: vec![],
+            dim_vars: DimVarTable::default(),
+            shape_constraints: ConstraintStore::default(),
+            subgraphs: HashMap::new(),
+            tensor_names: HashMap::new(),
+            topo_cache: Default::default(),
+        }
+    }
+
+    #[test]
+    fn position_ids_rule_rewrites_range_that_feeds_gather() {
+        let mut graph = empty_graph(vec![
+            AiNode::new(0, AiOp::Range, vec![10, 11, 12], vec![1]),
+            AiNode::new(1, AiOp::Gather { axis: 0 }, vec![2, 1], vec![3]),
+        ]);
+        for (tid, value) in [(10, 0_i64), (12, 1_i64)] {
+            let (param, info) = scalar_i64_param(value);
+            graph.params.insert(tid, param);
+            graph.tensor_info.insert(tid, info);
+        }
+        graph
+            .tensor_info
+            .insert(1, TensorInfo::new(DType::INT64, shape_from_concrete(&[8])));
+        graph
+            .tensor_info
+            .insert(2, TensorInfo::new(DType::F32, shape_from_concrete(&[8, 4])));
+        graph
+            .tensor_info
+            .insert(3, TensorInfo::new(DType::F32, shape_from_concrete(&[8, 4])));
+
+        let out = RulePass::new("PositionIdsInjection", position_ids_rules())
+            .run(graph)
+            .expect("rule pass succeeds");
+
+        assert!(matches!(out.nodes[0].op, AiOp::Identity));
+        assert!(
+            out.input_names.iter().any(|name| name == "position_ids"),
+            "position_ids input should be injected"
+        );
+    }
+
+    #[test]
+    fn position_ids_rule_skips_mask_range() {
+        let mut graph = empty_graph(vec![
+            AiNode::new(0, AiOp::Range, vec![10, 11, 12], vec![1]),
+            AiNode::new(1, AiOp::Unsqueeze { axes: vec![0] }, vec![1], vec![2]),
+            AiNode::new(2, AiOp::LessOrEqual, vec![2, 3], vec![4]),
+        ]);
+        for (tid, value) in [(10, 0_i64), (12, 1_i64)] {
+            let (param, info) = scalar_i64_param(value);
+            graph.params.insert(tid, param);
+            graph.tensor_info.insert(tid, info);
+        }
+        graph
+            .tensor_info
+            .insert(1, TensorInfo::new(DType::INT64, shape_from_concrete(&[8])));
+        graph.tensor_info.insert(
+            2,
+            TensorInfo::new(DType::INT64, shape_from_concrete(&[1, 8])),
+        );
+        graph.tensor_info.insert(
+            3,
+            TensorInfo::new(DType::INT64, shape_from_concrete(&[1, 8])),
+        );
+        graph.tensor_info.insert(
+            4,
+            TensorInfo::new(DType::BOOL, shape_from_concrete(&[1, 8])),
+        );
+
+        let out = RulePass::new("PositionIdsInjection", position_ids_rules())
+            .run(graph)
+            .expect("rule pass succeeds");
+
+        assert!(matches!(out.nodes[0].op, AiOp::Range));
+        assert!(
+            out.input_names.iter().all(|name| name != "position_ids"),
+            "mask range must not be rewritten into position_ids"
+        );
+    }
 }

@@ -14,7 +14,9 @@ pub mod compiler;
 #[cfg(feature = "native")]
 pub mod download;
 pub mod engine;
+pub(crate) mod fixture;
 pub mod runner;
+pub mod stats;
 pub mod validate;
 
 // Flat re-exports.
