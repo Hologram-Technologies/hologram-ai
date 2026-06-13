@@ -1,13 +1,21 @@
 //! CLI entry point for hologram-ai — the UOR-native AI model compiler + runner.
 //!
-//! Three commands: `compile` (model → `.holo`), `run` (execute a `.holo`), and
-//! `download` (fetch a model). The compiler lowers the model to a canonical
-//! hologram graph and hands it to `hologram_compiler::compile`; the runner
-//! loads the archive into an `InferenceSession` (architecture §5, §7).
+//! Primary commands:
+//! - `compile` (model → `.holo`)
+//! - `run` (execute a `.holo`)
+//! - `run-fixture` (execute an embedded deterministic witness)
+//! - `export-fixture` (emit an archive + external fixture bundle)
+//! - `download` (fetch a model)
+//!
+//! The compiler lowers the model to a canonical hologram graph and hands it to
+//! `hologram_compiler::compile`; the runner loads the archive into an
+//! `InferenceSession` (architecture §5, §7).
 
 use anyhow::Context as _;
 use clap::Parser;
+use hologram_ai::commands::export_fixture::{execute as export_fixture_execute, ExportFixtureArgs};
 use hologram_ai::commands::run_cmd::{execute as run_execute, RunArgs};
+use hologram_ai::commands::run_fixture::{execute as run_fixture_execute, RunFixtureArgs};
 use hologram_ai::compiler::{ModelCompiler, ModelSource};
 #[cfg(feature = "native")]
 use hologram_ai::download::{self, DownloadArgs};
@@ -51,6 +59,10 @@ enum Command {
     },
     /// Execute a compiled `.holo` archive.
     Run(RunArgs),
+    /// Execute the deterministic fixture embedded in a compiled `.holo`.
+    RunFixture(RunFixtureArgs),
+    /// Compile a model and emit a deterministic fixture for holospaces.
+    ExportFixture(ExportFixtureArgs),
     /// Download a model.
     #[cfg(feature = "native")]
     Download(DownloadArgs),
@@ -75,6 +87,8 @@ fn main() -> anyhow::Result<()> {
             spatial_scale,
         } => compile(model, output, name, seq_len, quantize, spatial_scale),
         Command::Run(args) => run_execute(args),
+        Command::RunFixture(args) => run_fixture_execute(args),
+        Command::ExportFixture(args) => export_fixture_execute(args),
         #[cfg(feature = "native")]
         Command::Download(args) => download::run(args),
     }

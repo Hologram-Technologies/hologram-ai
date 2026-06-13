@@ -66,6 +66,7 @@ serde_json.workspace   = true
 toml.workspace         = true
 rkyv.workspace         = true
 parking_lot.workspace  = true
+blake3.workspace       = true
 
 # Native-only (the `native` feature): the model downloader + its toolchain.
 # These do not build on wasm32, so the browser build omits them (the wasm crate

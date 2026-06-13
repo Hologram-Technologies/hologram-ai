@@ -1,42 +1,17 @@
 //! Individual compile-time constant evaluation functions.
 
-use crate::ir::{AiOp, DType, TensorInfo};
+use crate::ir::{AiOp, ConcreteShapeExt, DType, TensorInfo};
 
 // ── N-D broadcast infrastructure ─────────────────────────────────────────────
 
 /// Compute the broadcast output shape for two input shapes (numpy rules).
 pub(crate) fn broadcast_shape(a: &[usize], b: &[usize]) -> Option<Vec<usize>> {
-    let ndims = a.len().max(b.len());
-    let mut result = vec![0usize; ndims];
-
-    for i in 0..ndims {
-        let da = if i < ndims - a.len() {
-            1
-        } else {
-            a[i - (ndims - a.len())]
-        };
-        let db = if i < ndims - b.len() {
-            1
-        } else {
-            b[i - (ndims - b.len())]
-        };
-        if da == db {
-            result[i] = da;
-        } else if da == 1 {
-            result[i] = db;
-        } else if db == 1 {
-            result[i] = da;
-        } else {
-            return None; // incompatible
-        }
-    }
-    Some(result)
+    a.broadcast_shape(b)
 }
 
 /// Broadcast three shapes (for Where: cond, x, y).
 pub(crate) fn broadcast_shape_3(a: &[usize], b: &[usize], c: &[usize]) -> Option<Vec<usize>> {
-    let ab = broadcast_shape(a, b)?;
-    broadcast_shape(&ab, c)
+    a.broadcast_shape3(b, c)
 }
 
 /// Map a flat output index to a flat input index, given the padded input shape
@@ -71,9 +46,7 @@ pub(crate) fn compute_strides(shape: &[usize]) -> Vec<usize> {
 
 /// Pad a shape with leading 1s to match the target rank.
 pub(crate) fn pad_shape(shape: &[usize], target_ndims: usize) -> Vec<usize> {
-    let mut padded = vec![1usize; target_ndims.saturating_sub(shape.len())];
-    padded.extend_from_slice(shape);
-    padded
+    shape.pad_to_rank(target_ndims)
 }
 
 // ── Value extraction ─────────────────────────────────────────────────────────

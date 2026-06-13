@@ -10,6 +10,7 @@ const COMPANION_FILES: &[&str] = &[
     "tokenizer.json",
     "config.json",
     "tokenizer_config.json",
+    "chat_template.jinja",
     "special_tokens_map.json",
 ];
 

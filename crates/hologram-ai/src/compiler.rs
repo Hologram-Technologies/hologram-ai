@@ -81,6 +81,8 @@ pub struct HoloArchive {
 pub const TOKENIZER_EXT: &str = "tokenizer.json";
 /// Archive extension key for the tokenizer's uor-addr κ-label (integrity check).
 pub const TOKENIZER_KAPPA_EXT: &str = "tokenizer.kappa";
+/// Archive extension key for an optional HuggingFace chat template.
+pub const CHAT_TEMPLATE_EXT: &str = "chat_template.jinja";
 
 /// Open **extension sections** (key → bytes) to embed in the `.holo` during the
 /// single build pass — the runtime carries them opaquely and exposes them via
@@ -447,6 +449,12 @@ impl PreparedModel {
                     sections.add_extension(TOKENIZER_EXT, canonical);
                     sections.add_extension(TOKENIZER_KAPPA_EXT, kappa.into_bytes());
                 }
+                let chat_template = dir.join(CHAT_TEMPLATE_EXT);
+                if chat_template.exists() && !sections.contains(CHAT_TEMPLATE_EXT) {
+                    let raw = std::fs::read(&chat_template)
+                        .with_context(|| format!("reading chat template {chat_template:?}"))?;
+                    sections.add_extension(CHAT_TEMPLATE_EXT, raw);
+                }
             }
         }
         for (key, bytes) in sections.into_inner() {
@@ -656,6 +664,7 @@ pub fn post_concretization_repair(mut ai_graph: AiGraph) -> anyhow::Result<AiGra
         opt::{
             const_eval::ConstantEvaluation, constant_fold::ConstantFolding,
             data_prop::DataPropagation, dead_node::DeadNodeElimination,
+            resolve_slice_params::ResolveSliceParams,
         },
         AggressiveShapePropagation, ConstantDeduplication, Dim,
     };
@@ -709,11 +718,15 @@ pub fn post_concretization_repair(mut ai_graph: AiGraph) -> anyhow::Result<AiGra
     let aggressive_pipeline = OptPipeline::new(vec![
         Box::new(AggressiveShapePropagation),
         Box::new(DataPropagation),
+        Box::new(ResolveSliceParams),
         Box::new(AggressiveShapePropagation),
         Box::new(DataPropagation),
+        Box::new(ResolveSliceParams),
         Box::new(AggressiveShapePropagation),
         Box::new(DataPropagation),
+        Box::new(ResolveSliceParams),
         Box::new(ForceConcretize),
+        Box::new(ResolveSliceParams),
         Box::new(ConstantEvaluation),
         Box::new(ConstantFolding),
         // Extra shape pass after ConstEval: newly-folded constants may
@@ -782,6 +795,12 @@ pub fn post_concretization_repair(mut ai_graph: AiGraph) -> anyhow::Result<AiGra
     let ai_graph = hologram_ai_common::ShapeHealing
         .run(ai_graph)
         .context("shape healing failed")?;
+
+    // Make late broadcast semantics explicit for the lower/compiler boundary.
+    // This is intentionally post-concretization so Expand targets are concrete.
+    let ai_graph = hologram_ai_common::ExplicitBroadcastBinary
+        .run(ai_graph)
+        .context("explicit broadcast normalization failed")?;
 
     Ok(ai_graph)
 }
@@ -937,12 +956,13 @@ fn meta_u32(graph: &AiGraph, key: &str) -> Option<u32> {
 
 /// Choose the optimization pipeline by model topology (causal LM / ViT / generic).
 fn select_pipeline(ai_graph: &AiGraph, patch_budget_ratio: Option<f32>) -> OptPipeline {
+    let arch = match ai_graph.metadata.get("arch") {
+        Some(hologram_ai_common::MetaValue::Str(s)) => Some(s.as_str()),
+        _ => None,
+    };
     let has_input_ids = ai_graph.input_names.iter().any(|n| n == "input_ids");
-    let looks_like_causal_lm = has_input_ids
-        && ai_graph
-            .output_names
-            .iter()
-            .any(|n| n == "logits" || n == "output");
+    let looks_like_causal_lm = arch.map(is_causal_arch).unwrap_or(false)
+        || (has_input_ids && ai_graph.output_names.iter().any(|n| n == "logits"));
     let looks_like_vit = !looks_like_causal_lm
         && ai_graph
             .input_names
@@ -955,6 +975,28 @@ fn select_pipeline(ai_graph: &AiGraph, patch_budget_ratio: Option<f32>) -> OptPi
     } else {
         OptPipeline::generic()
     }
+}
+
+fn is_causal_arch(arch: &str) -> bool {
+    matches!(
+        arch.to_ascii_lowercase().as_str(),
+        "llama"
+            | "mistral"
+            | "gemma"
+            | "gemma2"
+            | "qwen"
+            | "qwen2"
+            | "phi"
+            | "phi3"
+            | "gpt2"
+            | "gpt_neo"
+            | "gptj"
+            | "gpt_bigcode"
+            | "bloom"
+            | "falcon"
+            | "stablelm"
+            | "smollm"
+    )
 }
 
 /// The Witt level hologram-ai compiles at (W32 = 32-bit residue arithmetic).
