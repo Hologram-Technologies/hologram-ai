@@ -62,11 +62,17 @@ impl AiParam {
         }
     }
 
-    /// Whether this parameter has no backing data (invalid).
+    /// Whether this parameter is missing required backing data.
+    ///
+    /// Zero-sized tensors legitimately serialize as zero bytes.
     pub fn is_empty(&self) -> bool {
         match self {
-            AiParam::Inline { data, .. } => data.is_empty(),
-            AiParam::Mmap { len, .. } => *len == 0,
+            AiParam::Inline { data, info } => data.is_empty() && !tensor_is_zero_sized(info),
+            AiParam::Mmap { len, info, .. } => *len == 0 && !tensor_is_zero_sized(info),
         }
     }
+}
+
+fn tensor_is_zero_sized(info: &TensorInfo) -> bool {
+    info.shape.iter().any(|dim| dim.as_concrete() == Some(0))
 }

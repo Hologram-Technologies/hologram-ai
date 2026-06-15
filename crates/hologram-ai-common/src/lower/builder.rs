@@ -19,9 +19,12 @@ use hologram_graph::{Graph, GraphOp, InputSource, NodeId, OpKind};
 use smallvec::SmallVec;
 
 use super::dispatch::{dispatch, AttrSpec, DesugarKind, OpPlan};
-use super::dtype::{ai_dtype_to_dtype_id, default_dtype_id, DTYPE_F32, DTYPE_I32, DTYPE_I64};
+use super::dtype::{
+    ai_dtype_to_dtype_id, default_dtype_id, DTYPE_BF16, DTYPE_BOOL, DTYPE_F16, DTYPE_F32,
+    DTYPE_I32, DTYPE_I64,
+};
 use super::LowerPhase;
-use crate::ir::{AiGraph, AiNode, AiParam, DType, Dim, TensorId, TensorInfo};
+use crate::ir::{AiGraph, AiNode, AiOp, AiParam, DType, Dim, TensorId, TensorInfo};
 
 // ── Public surface ──────────────────────────────────────────────────────────
 
@@ -180,11 +183,15 @@ impl<'a> Ctx<'a> {
 
     /// Emit an `i64` 1-D constant (shape data, indices, iota).
     fn const_i64(&mut self, values: &[i64]) -> InputSource {
+        self.const_i64_nd(values, &[values.len() as u64])
+    }
+
+    fn const_i64_nd(&mut self, values: &[i64], dims: &[u64]) -> InputSource {
         let mut bytes = Vec::with_capacity(values.len() * 8);
         for v in values {
             bytes.extend_from_slice(&v.to_le_bytes());
         }
-        self.const_bytes(bytes, DTypeId(DTYPE_I64), &[values.len() as u64])
+        self.const_bytes(bytes, DTypeId(DTYPE_I64), dims)
     }
 
     /// Emit an `f32` constant with the given dims.
@@ -283,6 +290,9 @@ impl<'a> Ctx<'a> {
 
     fn emit_node(&mut self, node: &AiNode) -> Result<()> {
         let out_tid = node.outputs.first().copied();
+        if self.try_emit_predicate_cast(node)? {
+            return Ok(());
+        }
         match dispatch(&node.op) {
             OpPlan::Direct(kind) => {
                 let nid = self.emit_simple(node, kind)?;
@@ -317,6 +327,54 @@ impl<'a> Ctx<'a> {
         Ok(())
     }
 
+    /// Lower predicate ops that logically produce `BOOL` from float-domain
+    /// inputs as `numeric_mask -> Cast<bool>`.
+    ///
+    /// hologram's native comparison / `IsNaN` kernels only execute correctly in
+    /// the float fast path when the node's dtype is float, but ONNX predicate
+    /// tensors are logically `BOOL`. Emitting them directly as `BOOL` sends the
+    /// op through the byte kernel, which interprets float buffers bytewise and
+    /// cannot produce a correct mask. Lowering via a float `0/1` mask and an
+    /// explicit `Cast` preserves ONNX semantics while keeping downstream
+    /// `Where`/logical ops on real byte masks.
+    fn try_emit_predicate_cast(&mut self, node: &AiNode) -> Result<bool> {
+        let Some(kind) = predicate_op_kind(&node.op) else {
+            return Ok(false);
+        };
+        let (out_dtype, _) = self.out_dtype_shape(node)?;
+        if out_dtype != DTypeId(DTYPE_BOOL) {
+            return Ok(false);
+        }
+        let Some(mask_dtype) = predicate_mask_dtype(node, self.ai) else {
+            return Ok(false);
+        };
+        let out_dims = self.out_dims(node)?;
+        let mut inputs = if is_broadcast_binary(kind) {
+            let mut v: SmallVec<[InputSource; 4]> = SmallVec::new();
+            for &tid in &node.inputs {
+                let src = self.src(tid)?;
+                let in_dims = self.tensor_dims(tid)?;
+                let src_dtype = self.dtype_of(tid);
+                let widened = if src_dtype == mask_dtype {
+                    src
+                } else {
+                    self.op(OpKind::Cast, &[src], mask_dtype, &in_dims)
+                };
+                v.push(self.broadcast_to(widened, mask_dtype, &in_dims, &out_dims));
+            }
+            v
+        } else {
+            self.srcs(&node.inputs)?
+        };
+        for extra in self.attribute_operands(node)? {
+            inputs.push(extra);
+        }
+        let mask = self.op(kind, &inputs, mask_dtype, &out_dims);
+        let bool_mask = self.op(OpKind::Cast, &[mask], DTypeId(DTYPE_BOOL), &out_dims);
+        self.bind_out(node, bool_mask)?;
+        Ok(true)
+    }
+
     /// Emit a single canonical node. Operands are `node.inputs` plus any
     /// attribute-carried params that hologram expects as trailing operands
     /// (Transpose `perm`, Slice bounds — see the per-op operand conventions).
@@ -328,7 +386,7 @@ impl<'a> Ctx<'a> {
     /// `BroadcastBinary` kernel.
     fn emit_simple(&mut self, node: &AiNode, kind: OpKind) -> Result<NodeId> {
         let (dtype, shape) = self.out_dtype_shape(node)?;
-        let mut inputs = if is_broadcast_binary(kind) {
+        let mut inputs = if requires_output_broadcast(kind) {
             let out_dims = self.out_dims(node)?;
             let mut v: SmallVec<[InputSource; 4]> = SmallVec::new();
             for &tid in &node.inputs {
@@ -614,6 +672,34 @@ impl<'a> Ctx<'a> {
         let shape_op = self.shape_operand(dims);
         self.op(OpKind::Reshape, &[src, shape_op], dtype, dims)
     }
+}
+
+fn predicate_op_kind(op: &AiOp) -> Option<OpKind> {
+    match op {
+        AiOp::Equal => Some(OpKind::Equal),
+        AiOp::Less => Some(OpKind::Less),
+        AiOp::LessOrEqual => Some(OpKind::LessOrEqual),
+        AiOp::Greater => Some(OpKind::Greater),
+        AiOp::GreaterOrEqual => Some(OpKind::GreaterOrEqual),
+        AiOp::IsNaN => Some(OpKind::IsNaN),
+        _ => None,
+    }
+}
+
+fn predicate_mask_dtype(node: &AiNode, graph: &AiGraph) -> Option<DTypeId> {
+    node.inputs
+        .iter()
+        .filter_map(|tid| {
+            graph
+                .tensor_info
+                .get(tid)
+                .map(|info| ai_dtype_to_dtype_id(&info.logical_dtype))
+        })
+        .find(|dtype| is_float_dtype(*dtype))
+}
+
+fn is_float_dtype(dtype: DTypeId) -> bool {
+    matches!(dtype.0, DTYPE_F16 | DTYPE_BF16 | DTYPE_F32)
 }
 
 // ── desugar pipelines + control flow (canonical OpKind expansions) ───────────
@@ -1012,19 +1098,23 @@ impl<'a> Ctx<'a> {
     }
 
     fn desugar_gather_nd(&mut self, node: &AiNode, _batch_dims: i64) -> Result<()> {
-        // GatherND with a constant index set flattens to a row gather over the
-        // leading dimension; reuse the canonical Gather on flattened indices.
-        self.desugar_gather(node, 0)
+        if self.try_desugar_gather_nd_axis0(node)? {
+            return Ok(());
+        }
+        anyhow::bail!(
+            "GatherND lowering is unsupported for data {:?} and indices {:?}",
+            self.tensor_dims(node.inputs[0]).ok(),
+            self.tensor_dims(node.inputs[1]).ok()
+        )
     }
 
     /// Lower MatMul / BatchMatMul. hologram's MatMul kernel is strictly 2-D
     /// (`[M,K]·[K,N] → [M,N]`); a rank≥3 batched matmul (ONNX `A[..,M,K] ·
-    /// B[..,K,N]`) folds A's batch dims into its row dimension. This is exact
-    /// when B is a single shared matrix (all its batch dims are 1) — the
-    /// universal transformer case: weight projections `[b,s,h]·[h,h']`, and
-    /// RoPE's `inv_freq[1,d/2,1] · pos[1,1,seq]`. A genuinely per-batch B is a
-    /// pattern hologram's 2-D kernel cannot represent (it must be fused, e.g.
-    /// attention, before lowering), so we fail loud rather than fold silently.
+    /// B[..,K,N]`) either folds A's batch dims into its row dimension (when B
+    /// is one shared matrix) or is decomposed into per-batch 2-D MatMuls.
+    /// The decomposition follows ONNX row-major batch-prefix broadcasting, so
+    /// attention exports like `[batch, heads, M, K] · [1, heads, K, N]` lower
+    /// correctly instead of being rejected as a flattened-batch mismatch.
     fn desugar_matmul(&mut self, node: &AiNode) -> Result<()> {
         let a_tid = *node.inputs.first().context("MatMul needs operand A")?;
         let b_tid = *node.inputs.get(1).context("MatMul needs operand B")?;
@@ -1073,26 +1163,48 @@ impl<'a> Ctx<'a> {
 
         // Distinct-per-batch B (a genuine batched matmul, e.g. an *unfused*
         // attention QKᵀ / P·V): hologram's MatMul is 2-D, so decompose into one
-        // 2-D MatMul per batch index and concatenate. Real LLM attention is fused
-        // into OpKind::Attention and never reaches here; this keeps arbitrary
-        // models (unfused batched matmuls) correct rather than silently wrong.
-        let a_batch: u64 = a_dims[..a_rank - 2].iter().product();
-        let b_batch: u64 = b_dims[..b_rank - 2].iter().product();
-        if a_batch != b_batch {
-            anyhow::bail!(
-                "batched MatMul with broadcast batch dims (A {a_dims:?} vs B {b_dims:?}) is unsupported"
-            );
-        }
-        let a3 = self.reshape_to(a, a_dt, &[a_batch, m, k]);
-        let b3 = self.reshape_to(b, b_dt, &[b_batch, k, n]);
+        // 2-D MatMul per broadcasted batch index and concatenate. Real LLM
+        // attention is fused into OpKind::Attention and usually never reaches
+        // here; this path keeps arbitrary ONNX batched matmuls correct rather
+        // than silently wrong.
+        let batch_plan = build_matmul_broadcast_plan(&a_dims[..a_rank - 2], &b_dims[..b_rank - 2])
+            .with_context(|| {
+                format!("MatMul batch-prefix broadcast failed for A {a_dims:?} vs B {b_dims:?}")
+            })?;
+        let a3 = self.reshape_to(a, a_dt, &[batch_plan.a_batch, m, k]);
+        let b3 = self.reshape_to(b, b_dt, &[batch_plan.b_batch, k, n]);
         let mut acc: Option<InputSource> = None;
-        for bi in 0..a_batch as i64 {
-            // Axis-0 contiguous slice [bi:bi+1] as the 3-operand form hologram
-            // realizes as a zero-movement view (data, starts, ends).
-            let (s0, e0) = (self.const_i64(&[bi]), self.const_i64(&[bi + 1]));
-            let a_sl = self.op(OpKind::Slice, &[a3, s0, e0], a_dt, &[1, m, k]);
-            let (s1, e1) = (self.const_i64(&[bi]), self.const_i64(&[bi + 1]));
-            let b_sl = self.op(OpKind::Slice, &[b3, s1, e1], b_dt, &[1, k, n]);
+        for bi in 0..batch_plan.out_batch as i64 {
+            let a_batch_index = batch_plan.a_index(bi as u64) as i64;
+            let b_batch_index = batch_plan.b_index(bi as u64) as i64;
+            // Use Gather(axis=0, [bi]) for per-batch extraction. The specialized
+            // 3-input Slice view path is zero-movement, but on current hologram
+            // compiler/runtime it mis-materializes `bi > 0` batches for this
+            // reshape→slice→matmul pattern, which corrupts unfused rank-4
+            // attention score matmuls (BERT witness). Gather stays within the
+            // supported canonical surface and preserves correctness.
+            let idx = self.const_i64(&[a_batch_index]);
+            let a_shape = self.intern(&[1, m, k]);
+            let a_nid = self.add(
+                GraphOp::Op(OpKind::Gather),
+                SmallVec::from_iter([a3, idx]),
+                a_dt,
+                a_shape,
+            );
+            self.graph.set_gather_attrs(a_nid, GatherAttrs { axis: 0 });
+            let a_sl = InputSource::Node(a_nid);
+
+            let idx = self.const_i64(&[b_batch_index]);
+            let b_shape = self.intern(&[1, k, n]);
+            let b_nid = self.add(
+                GraphOp::Op(OpKind::Gather),
+                SmallVec::from_iter([b3, idx]),
+                b_dt,
+                b_shape,
+            );
+            self.graph.set_gather_attrs(b_nid, GatherAttrs { axis: 0 });
+            let b_sl = InputSource::Node(b_nid);
+
             let a2 = self.reshape_to(a_sl, a_dt, &[m, k]);
             let b2 = self.reshape_to(b_sl, b_dt, &[k, n]);
             let p = self.op(OpKind::MatMul, &[a2, b2], out_dtype, &[m, n]);
@@ -1109,6 +1221,199 @@ impl<'a> Ctx<'a> {
         let cat = acc.expect("batched matmul has ≥1 batch");
         let out = self.reshape_to(cat, out_dtype, &out_dims);
         self.bind_out(node, out)
+    }
+
+    fn try_desugar_gather_nd_axis0(&mut self, node: &AiNode) -> Result<bool> {
+        let data_tid = *node.inputs.first().context("GatherND needs data")?;
+        let indices_tid = *node.inputs.get(1).context("GatherND needs indices")?;
+        let data_dims = self.tensor_dims(data_tid)?;
+        if self.try_desugar_constant_gather_nd_axis0(node, data_tid, indices_tid, &data_dims)? {
+            return Ok(true);
+        }
+        let Some(component_tids) = self.gather_nd_index_components(indices_tid)? else {
+            return Ok(false);
+        };
+        if component_tids.is_empty() || component_tids.len() > data_dims.len() {
+            return Ok(false);
+        }
+
+        let squeeze_prefix = component_tids
+            .iter()
+            .zip(data_dims.iter().copied())
+            .take_while(|(tid, dim)| *dim == 1 && self.tensor_is_all_i64(**tid, 0))
+            .count();
+        let remaining = &component_tids[squeeze_prefix..];
+        if remaining.len() != 1 {
+            return Ok(false);
+        }
+
+        let gather_axis_dim = *data_dims
+            .get(squeeze_prefix)
+            .context("GatherND axis missing")?;
+        if gather_axis_dim == 0 {
+            return Ok(false);
+        }
+
+        let squeezed_dims = data_dims[squeeze_prefix..].to_vec();
+        let idx_tid = remaining[0];
+        let idx_dims = self.tensor_dims(idx_tid)?;
+        let Some((idx_last, idx_prefix)) = idx_dims.split_last() else {
+            return Ok(false);
+        };
+        if *idx_last != 1 {
+            return Ok(false);
+        }
+
+        let data_dtype = self.dtype_of(data_tid);
+        let data_src = self.reshape_to(self.src(data_tid)?, data_dtype, &squeezed_dims);
+        let idx_dtype = self.dtype_of(idx_tid);
+        let idx_src = self.reshape_to(self.src(idx_tid)?, idx_dtype, idx_prefix);
+        let (out_dtype, _) = self.out_dtype_shape(node)?;
+        let out_dims = self.out_dims(node)?;
+        let shape = self.intern(&out_dims);
+        let nid = self.add(
+            GraphOp::Op(OpKind::Gather),
+            SmallVec::from_iter([data_src, idx_src]),
+            out_dtype,
+            shape,
+        );
+        self.graph.set_gather_attrs(nid, GatherAttrs { axis: 0 });
+        self.bind_out(node, InputSource::Node(nid))?;
+        Ok(true)
+    }
+
+    fn try_desugar_constant_gather_nd_axis0(
+        &mut self,
+        node: &AiNode,
+        data_tid: TensorId,
+        indices_tid: TensorId,
+        data_dims: &[u64],
+    ) -> Result<bool> {
+        let Some(index_values) = self.tensor_i64_values(indices_tid) else {
+            return Ok(false);
+        };
+        let idx_dims = self.tensor_dims(indices_tid)?;
+        let Some((&index_arity, idx_prefix)) = idx_dims.split_last() else {
+            return Ok(false);
+        };
+        let index_arity = index_arity as usize;
+        if index_arity == 0
+            || index_arity > data_dims.len()
+            || index_values.len() % index_arity != 0
+        {
+            return Ok(false);
+        }
+
+        let mut components =
+            vec![Vec::with_capacity(index_values.len() / index_arity); index_arity];
+        for tuple in index_values.chunks_exact(index_arity) {
+            for (component, &value) in components.iter_mut().zip(tuple.iter()) {
+                component.push(value);
+            }
+        }
+        let squeeze_prefix = components
+            .iter()
+            .zip(data_dims.iter().copied())
+            .take_while(|(values, dim)| *dim == 1 && values.iter().all(|&value| value == 0))
+            .count();
+        let Some(remaining) = components.get(squeeze_prefix) else {
+            return Ok(false);
+        };
+        if components.len() - squeeze_prefix != 1 {
+            return Ok(false);
+        }
+
+        let squeezed_dims = data_dims[squeeze_prefix..].to_vec();
+        let data_dtype = self.dtype_of(data_tid);
+        let data_src = self.reshape_to(self.src(data_tid)?, data_dtype, &squeezed_dims);
+        let idx_src = self.const_i64_nd(remaining, idx_prefix);
+        let (out_dtype, _) = self.out_dtype_shape(node)?;
+        let out_dims = self.out_dims(node)?;
+        let shape = self.intern(&out_dims);
+        let nid = self.add(
+            GraphOp::Op(OpKind::Gather),
+            SmallVec::from_iter([data_src, idx_src]),
+            out_dtype,
+            shape,
+        );
+        self.graph.set_gather_attrs(nid, GatherAttrs { axis: 0 });
+        self.bind_out(node, InputSource::Node(nid))?;
+        Ok(true)
+    }
+
+    fn gather_nd_index_components(&self, tid: TensorId) -> Result<Option<Vec<TensorId>>> {
+        let idx_dims = self.tensor_dims(tid)?;
+        let Some(&last_dim) = idx_dims.last() else {
+            return Ok(None);
+        };
+        if last_dim == 0 {
+            return Ok(None);
+        }
+        let Some(producer) = self.producer_of(tid) else {
+            if last_dim == 1 {
+                return Ok(Some(vec![tid]));
+            }
+            return Ok(None);
+        };
+        let AiOp::Concat { axis } = producer.op else {
+            return Ok((last_dim == 1).then_some(vec![tid]));
+        };
+        let concat_axis = Self::norm_axis(axis, idx_dims.len());
+        if concat_axis + 1 != idx_dims.len() {
+            return Ok(None);
+        }
+        let mut components = Vec::new();
+        for &input_tid in &producer.inputs {
+            let Some(mut split) = self.gather_nd_index_components(input_tid)? else {
+                return Ok(None);
+            };
+            components.append(&mut split);
+        }
+        Ok((components.len() == last_dim as usize).then_some(components))
+    }
+
+    fn tensor_is_all_i64(&self, tid: TensorId, expected: i64) -> bool {
+        self.tensor_i64_values(tid)
+            .is_some_and(|values| values.iter().all(|&value| value == expected))
+    }
+
+    fn producer_of(&self, tid: TensorId) -> Option<&AiNode> {
+        self.ai
+            .nodes
+            .iter()
+            .find(|node| node.outputs.contains(&tid))
+    }
+
+    fn tensor_i64_values(&self, tid: TensorId) -> Option<Vec<i64>> {
+        if let Some(values) = self
+            .ai
+            .tensor_info
+            .get(&tid)
+            .and_then(|info| info.known_i64_values.as_ref())
+        {
+            return values.iter().copied().collect();
+        }
+        match self.ai.params.get(&tid) {
+            Some(AiParam::Inline { data, info })
+                if matches!(info.logical_dtype, DType::INT64 | DType::INT32) =>
+            {
+                let width = info.logical_dtype.byte_size()?;
+                if width == 0 || data.len() % width != 0 {
+                    return None;
+                }
+                Some(
+                    data.chunks_exact(width)
+                        .map(|chunk| match width {
+                            4 => i32::from_le_bytes(chunk.try_into().expect("4-byte int32 chunk"))
+                                as i64,
+                            8 => i64::from_le_bytes(chunk.try_into().expect("8-byte int64 chunk")),
+                            _ => unreachable!("non-int width filtered above"),
+                        })
+                        .collect(),
+                )
+            }
+            _ => None,
+        }
     }
 
     fn desugar_one_hot(&mut self, node: &AiNode, axis: i64) -> Result<()> {
@@ -2041,6 +2346,130 @@ fn is_broadcast_binary(kind: OpKind) -> bool {
     )
 }
 
+fn requires_output_broadcast(kind: OpKind) -> bool {
+    is_broadcast_binary(kind) || matches!(kind, OpKind::Where)
+}
+
+struct MatMulBroadcastPlan {
+    out_batch: u64,
+    a_batch: u64,
+    b_batch: u64,
+    out_dims: Vec<u64>,
+    a_dims: Vec<u64>,
+    b_dims: Vec<u64>,
+    out_strides: Vec<u64>,
+    a_strides: Vec<u64>,
+    b_strides: Vec<u64>,
+}
+
+impl MatMulBroadcastPlan {
+    fn a_index(&self, out_flat: u64) -> u64 {
+        operand_batch_index(
+            out_flat,
+            &self.out_dims,
+            &self.a_dims,
+            &self.out_strides,
+            &self.a_strides,
+        )
+    }
+
+    fn b_index(&self, out_flat: u64) -> u64 {
+        operand_batch_index(
+            out_flat,
+            &self.out_dims,
+            &self.b_dims,
+            &self.out_strides,
+            &self.b_strides,
+        )
+    }
+}
+
+fn build_matmul_broadcast_plan(
+    a_batch_dims: &[u64],
+    b_batch_dims: &[u64],
+) -> Result<MatMulBroadcastPlan> {
+    let rank = a_batch_dims.len().max(b_batch_dims.len());
+    let a_dims = left_pad_ones(a_batch_dims, rank);
+    let b_dims = left_pad_ones(b_batch_dims, rank);
+    let out_dims = broadcast_prefix_dims(&a_dims, &b_dims)?;
+    Ok(MatMulBroadcastPlan {
+        out_batch: element_count(&out_dims),
+        a_batch: element_count(&a_dims),
+        b_batch: element_count(&b_dims),
+        out_strides: row_major_strides(&out_dims),
+        a_strides: row_major_strides(&a_dims),
+        b_strides: row_major_strides(&b_dims),
+        out_dims,
+        a_dims,
+        b_dims,
+    })
+}
+
+fn left_pad_ones(dims: &[u64], rank: usize) -> Vec<u64> {
+    let mut padded = vec![1; rank.saturating_sub(dims.len())];
+    padded.extend_from_slice(dims);
+    padded
+}
+
+fn broadcast_prefix_dims(a_dims: &[u64], b_dims: &[u64]) -> Result<Vec<u64>> {
+    a_dims
+        .iter()
+        .copied()
+        .zip(b_dims.iter().copied())
+        .map(|(a_dim, b_dim)| match (a_dim, b_dim) {
+            (left, right) if left == right => Ok(left),
+            (1, right) => Ok(right),
+            (left, 1) => Ok(left),
+            _ => anyhow::bail!("incompatible batch dims {a_dim} and {b_dim}"),
+        })
+        .collect()
+}
+
+fn element_count(dims: &[u64]) -> u64 {
+    dims.iter().copied().product::<u64>().max(1)
+}
+
+fn row_major_strides(dims: &[u64]) -> Vec<u64> {
+    let mut strides = vec![1; dims.len()];
+    let mut stride = 1u64;
+    for index in (0..dims.len()).rev() {
+        strides[index] = stride;
+        stride *= dims[index];
+    }
+    strides
+}
+
+fn operand_batch_index(
+    out_flat: u64,
+    out_dims: &[u64],
+    operand_dims: &[u64],
+    out_strides: &[u64],
+    operand_strides: &[u64],
+) -> u64 {
+    out_dims
+        .iter()
+        .copied()
+        .zip(operand_dims.iter().copied())
+        .zip(
+            out_strides
+                .iter()
+                .copied()
+                .zip(operand_strides.iter().copied()),
+        )
+        .fold(
+            0u64,
+            |index, ((out_dim, operand_dim), (out_stride, operand_stride))| {
+                let coord = if out_dim == 0 {
+                    0
+                } else {
+                    (out_flat / out_stride) % out_dim
+                };
+                let operand_coord = if operand_dim == 1 { 0 } else { coord };
+                index + operand_coord * operand_stride
+            },
+        )
+}
+
 /// Concrete dims from a `TensorInfo`, or `None` if any dim is symbolic.
 fn dims_of(info: &TensorInfo) -> Option<Vec<u64>> {
     if info.shape.is_empty() {
@@ -2074,5 +2503,50 @@ fn param_bytes(param: &AiParam) -> Result<(Vec<u8>, TensorInfo)> {
             f.read_exact(&mut buf)?;
             Ok((buf, info.clone()))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{build_matmul_broadcast_plan, operand_batch_index, row_major_strides};
+
+    #[test]
+    fn matmul_broadcast_plan_maps_rhs_broadcast_prefix() {
+        let plan = build_matmul_broadcast_plan(&[128, 32], &[1, 32]).expect("broadcast plan");
+
+        assert_eq!(plan.out_batch, 4096);
+        assert_eq!(plan.a_batch, 4096);
+        assert_eq!(plan.b_batch, 32);
+        assert_eq!(plan.a_index(0), 0);
+        assert_eq!(plan.b_index(0), 0);
+        assert_eq!(plan.a_index(33), 33);
+        assert_eq!(plan.b_index(33), 1);
+        assert_eq!(plan.b_index(4095), 31);
+    }
+
+    #[test]
+    fn operand_batch_index_respects_row_major_broadcasting() {
+        let out_dims = vec![3, 2];
+        let operand_dims = vec![1, 2];
+        let out_strides = row_major_strides(&out_dims);
+        let operand_strides = row_major_strides(&operand_dims);
+
+        assert_eq!(
+            (0..6)
+                .map(|index| operand_batch_index(
+                    index,
+                    &out_dims,
+                    &operand_dims,
+                    &out_strides,
+                    &operand_strides
+                ))
+                .collect::<Vec<_>>(),
+            vec![0, 1, 0, 1, 0, 1]
+        );
+    }
+
+    #[test]
+    fn matmul_broadcast_plan_rejects_incompatible_prefixes() {
+        assert!(build_matmul_broadcast_plan(&[2, 3], &[4, 3]).is_err());
     }
 }

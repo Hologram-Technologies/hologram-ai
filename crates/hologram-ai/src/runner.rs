@@ -9,6 +9,7 @@
 //! re-executes the graph with the next input.
 
 use anyhow::Context;
+use hologram_ai_tokenizer::NativeTokenizer;
 use hologram_archive::ContentLabel;
 use hologram_backend::CpuBackend;
 use hologram_exec::{BufferArena, InferenceSession, InputBuffer, OutputBuffer};
@@ -116,6 +117,36 @@ impl HoloRunner {
     /// section): tokenizer, generation config, … `None` if absent.
     pub fn extension(&self, key: &str) -> Option<&[u8]> {
         self.session.extension(key)
+    }
+
+    /// Load the canonical tokenizer embedded in this archive, verifying its
+    /// stored κ-label if present.
+    pub fn embedded_tokenizer(&self) -> anyhow::Result<NativeTokenizer> {
+        let canonical = self.extension(crate::compiler::TOKENIZER_EXT).context(
+            "no tokenizer: the model has none embedded — recompile from a model directory \
+             containing tokenizer.json, or pass --tokenizer path/to/tokenizer.json",
+        )?;
+        if let Some(expected) = self.extension(crate::compiler::TOKENIZER_KAPPA_EXT) {
+            let actual = uor_addr::json::address(canonical)
+                .map_err(|e| anyhow::anyhow!("re-addressing embedded tokenizer: {e:?}"))?
+                .address
+                .as_str()
+                .to_string();
+            if actual.as_bytes() != expected {
+                anyhow::bail!(
+                    "embedded tokenizer failed its content-address check (expected {}, got {actual}) \
+                     — the archive's tokenizer is corrupt",
+                    String::from_utf8_lossy(expected)
+                );
+            }
+        }
+        NativeTokenizer::from_tokenizer_json_bytes(canonical).context("parsing embedded tokenizer")
+    }
+
+    /// Load an optional embedded chat template (`chat_template.jinja`).
+    pub fn embedded_chat_template(&self) -> Option<&str> {
+        self.extension(crate::compiler::CHAT_TEMPLATE_EXT)
+            .and_then(|bytes| std::str::from_utf8(bytes).ok())
     }
 
     /// Execute one forward pass. `inputs[i]` is the little-endian byte image of

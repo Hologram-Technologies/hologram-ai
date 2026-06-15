@@ -1,42 +1,17 @@
 //! Individual compile-time constant evaluation functions.
 
-use crate::ir::{AiOp, DType, TensorInfo};
+use crate::ir::{AiOp, ConcreteShapeExt, DType, TensorInfo};
 
 // ── N-D broadcast infrastructure ─────────────────────────────────────────────
 
 /// Compute the broadcast output shape for two input shapes (numpy rules).
 pub(crate) fn broadcast_shape(a: &[usize], b: &[usize]) -> Option<Vec<usize>> {
-    let ndims = a.len().max(b.len());
-    let mut result = vec![0usize; ndims];
-
-    for i in 0..ndims {
-        let da = if i < ndims - a.len() {
-            1
-        } else {
-            a[i - (ndims - a.len())]
-        };
-        let db = if i < ndims - b.len() {
-            1
-        } else {
-            b[i - (ndims - b.len())]
-        };
-        if da == db {
-            result[i] = da;
-        } else if da == 1 {
-            result[i] = db;
-        } else if db == 1 {
-            result[i] = da;
-        } else {
-            return None; // incompatible
-        }
-    }
-    Some(result)
+    a.broadcast_shape(b)
 }
 
 /// Broadcast three shapes (for Where: cond, x, y).
 pub(crate) fn broadcast_shape_3(a: &[usize], b: &[usize], c: &[usize]) -> Option<Vec<usize>> {
-    let ab = broadcast_shape(a, b)?;
-    broadcast_shape(&ab, c)
+    a.broadcast_shape3(b, c)
 }
 
 /// Map a flat output index to a flat input index, given the padded input shape
@@ -71,9 +46,7 @@ pub(crate) fn compute_strides(shape: &[usize]) -> Vec<usize> {
 
 /// Pad a shape with leading 1s to match the target rank.
 pub(crate) fn pad_shape(shape: &[usize], target_ndims: usize) -> Vec<usize> {
-    let mut padded = vec![1usize; target_ndims.saturating_sub(shape.len())];
-    padded.extend_from_slice(shape);
-    padded
+    shape.pad_to_rank(target_ndims)
 }
 
 // ── Value extraction ─────────────────────────────────────────────────────────
@@ -906,6 +879,90 @@ pub(crate) fn eval_concat(
     }
 
     Some((result, dtype, out_shape))
+}
+
+/// ScatterND: apply constant updates into a constant base tensor.
+pub(crate) fn eval_scatter_nd(
+    inputs: &[(&[u8], &TensorInfo)],
+    input_shapes: &[Vec<usize>],
+) -> Option<(Vec<u8>, DType, Vec<usize>)> {
+    if inputs.len() < 3 {
+        return None;
+    }
+
+    let (data_bytes, data_info) = inputs[0];
+    let data_shape = &input_shapes[0];
+    let indices_shape = &input_shapes[1];
+    let updates_shape = &input_shapes[2];
+    let dtype = data_info.logical_dtype;
+    let elem_size = dtype.byte_size()?;
+    if elem_size == 0 {
+        return None;
+    }
+
+    let rank = data_shape.len();
+    let k = *indices_shape.last()?;
+    if k > rank {
+        return None;
+    }
+
+    let index_vals = read_as_i64(inputs[1].0, inputs[1].1.logical_dtype)?;
+    let tuple_count = indices_shape[..indices_shape.len().saturating_sub(1)]
+        .iter()
+        .product::<usize>()
+        .max(1);
+    if tuple_count.checked_mul(k)? != index_vals.len() {
+        return None;
+    }
+
+    let expected_updates_shape: Vec<usize> = indices_shape[..indices_shape.len().saturating_sub(1)]
+        .iter()
+        .copied()
+        .chain(data_shape[k..].iter().copied())
+        .collect();
+    if &expected_updates_shape != updates_shape {
+        return None;
+    }
+
+    let slice_elems = data_shape[k..].iter().product::<usize>().max(1);
+    let slice_bytes = slice_elems.checked_mul(elem_size)?;
+    if tuple_count.checked_mul(slice_bytes)? != inputs[2].0.len() {
+        return None;
+    }
+
+    let data_elems: usize = data_shape.iter().product();
+    if data_elems.checked_mul(elem_size)? != data_bytes.len() {
+        return None;
+    }
+
+    let data_strides = compute_strides(data_shape);
+    let mut result = data_bytes.to_vec();
+
+    for tuple_idx in 0..tuple_count {
+        let index_base = tuple_idx.checked_mul(k)?;
+        let mut flat_elem = 0usize;
+        for dim in 0..k {
+            let dim_size = *data_shape.get(dim)? as i64;
+            let raw = *index_vals.get(index_base + dim)?;
+            let coord = if raw < 0 { dim_size + raw } else { raw };
+            if !(0..dim_size).contains(&coord) {
+                return None;
+            }
+            let stride = *data_strides.get(dim)?;
+            flat_elem = flat_elem.checked_add((coord as usize).checked_mul(stride)?)?;
+        }
+
+        let dst_start = flat_elem.checked_mul(elem_size)?;
+        let src_start = tuple_idx.checked_mul(slice_bytes)?;
+        let dst_end = dst_start.checked_add(slice_bytes)?;
+        let src_end = src_start.checked_add(slice_bytes)?;
+        if dst_end > result.len() || src_end > inputs[2].0.len() {
+            return None;
+        }
+        result[dst_start..dst_end].copy_from_slice(&inputs[2].0[src_start..src_end]);
+    }
+
+    Some((result, dtype, data_shape.clone()))
 }
 
 /// Broadcast-expand raw bytes from data_shape to target_shape.

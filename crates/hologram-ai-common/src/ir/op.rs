@@ -39,6 +39,63 @@ pub enum OpCategory {
     Custom,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BinarySemantics {
+    None,
+    Fixed,
+    Broadcast,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OpSemantics {
+    pub category: OpCategory,
+    pub binary: BinarySemantics,
+}
+
+impl OpSemantics {
+    pub const fn unary_elementwise() -> Self {
+        Self {
+            category: OpCategory::UnaryElementwise,
+            binary: BinarySemantics::None,
+        }
+    }
+
+    pub const fn binary_elementwise() -> Self {
+        Self {
+            category: OpCategory::BinaryElementwise,
+            binary: BinarySemantics::Broadcast,
+        }
+    }
+
+    pub const fn binary_comparison() -> Self {
+        Self {
+            category: OpCategory::BinaryComparison,
+            binary: BinarySemantics::Broadcast,
+        }
+    }
+
+    pub const fn shape_preserving() -> Self {
+        Self {
+            category: OpCategory::ShapePreserving,
+            binary: BinarySemantics::None,
+        }
+    }
+
+    pub const fn custom() -> Self {
+        Self {
+            category: OpCategory::Custom,
+            binary: BinarySemantics::None,
+        }
+    }
+}
+
+pub trait AiOpSemantics {
+    fn semantics(&self) -> OpSemantics;
+
+    fn is_binary(&self) -> bool;
+    fn is_broadcast_binary(&self) -> bool;
+}
+
 /// How scatter reduction is applied.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ScatterReduce {
@@ -511,9 +568,13 @@ impl AiOp {
     /// automatically gives it correct shape/dtype/value propagation for the
     /// standard categories.
     pub fn category(&self) -> OpCategory {
-        use OpCategory::*;
+        self.semantics().category
+    }
+}
+
+impl AiOpSemantics for AiOp {
+    fn semantics(&self) -> OpSemantics {
         match self {
-            // ── Unary elementwise: output = input shape/dtype ─────────────
             AiOp::Relu
             | AiOp::Gelu
             | AiOp::GeluApprox
@@ -536,9 +597,8 @@ impl AiOp {
             | AiOp::Sin
             | AiOp::Not
             | AiOp::Identity
-            | AiOp::Dequantize { .. } => UnaryElementwise,
+            | AiOp::Dequantize { .. } => OpSemantics::unary_elementwise(),
 
-            // ── Binary elementwise: broadcast shape, first-input dtype ────
             AiOp::Add
             | AiOp::Sub
             | AiOp::Mul
@@ -549,17 +609,15 @@ impl AiOp {
             | AiOp::Max
             | AiOp::And
             | AiOp::Or
-            | AiOp::Xor => BinaryElementwise,
+            | AiOp::Xor => OpSemantics::binary_elementwise(),
 
-            // ── Binary comparison: broadcast shape, BOOL dtype ────────────
             AiOp::Equal
             | AiOp::Less
             | AiOp::LessOrEqual
             | AiOp::Greater
             | AiOp::GreaterOrEqual
-            | AiOp::IsNaN => BinaryComparison,
+            | AiOp::IsNaN => OpSemantics::binary_comparison(),
 
-            // ── Shape-preserving: output shape = first input shape ────────
             AiOp::Softmax { .. }
             | AiOp::LogSoftmax { .. }
             | AiOp::RmsNorm { .. }
@@ -574,9 +632,8 @@ impl AiOp {
             | AiOp::InstanceNorm { .. }
             | AiOp::LRN { .. }
             | AiOp::CumSum { .. }
-            | AiOp::ReverseSequence { .. } => ShapePreserving,
+            | AiOp::ReverseSequence { .. } => OpSemantics::shape_preserving(),
 
-            // ── Custom: op-specific shape/dtype/value rules ───────────────
             AiOp::MatMul
             | AiOp::BatchMatMul
             | AiOp::MatMulRelu
@@ -620,7 +677,6 @@ impl AiOp {
             | AiOp::Cast { .. }
             | AiOp::Constant { .. }
             | AiOp::Opaque { .. }
-            // Phase 1: vision ops
             | AiOp::Conv { .. }
             | AiOp::ConvTranspose { .. }
             | AiOp::MaxPool { .. }
@@ -628,7 +684,6 @@ impl AiOp {
             | AiOp::GlobalAveragePool
             | AiOp::Resize { .. }
             | AiOp::Pad { .. }
-            // Phase 2: utility ops
             | AiOp::ReduceProd { .. }
             | AiOp::ReduceL1 { .. }
             | AiOp::ReduceL2 { .. }
@@ -639,14 +694,33 @@ impl AiOp {
             | AiOp::DepthToSpace { .. }
             | AiOp::SpaceToDepth { .. }
             | AiOp::Compress { .. }
-            // BatchNorm: training mode has 5 outputs
             | AiOp::BatchNorm { .. }
-            // Phase 4: control flow
             | AiOp::If { .. }
             | AiOp::Loop { .. }
             | AiOp::Scan { .. }
             | AiOp::ConstantOfShape { .. }
-            | AiOp::Trilu { .. } => Custom,
+            | AiOp::Trilu { .. } => OpSemantics::custom(),
         }
+    }
+
+    fn is_binary(&self) -> bool {
+        self.semantics().binary != BinarySemantics::None
+    }
+
+    fn is_broadcast_binary(&self) -> bool {
+        self.semantics().binary == BinarySemantics::Broadcast
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{AiOp, AiOpSemantics};
+
+    #[test]
+    fn binary_semantics_follow_op_category() {
+        assert!(AiOp::Add.is_binary());
+        assert!(AiOp::GreaterOrEqual.is_broadcast_binary());
+        assert!(!AiOp::MatMul.is_binary());
+        assert!(!AiOp::Where.is_broadcast_binary());
     }
 }

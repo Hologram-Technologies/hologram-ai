@@ -2,6 +2,8 @@
 
 use crate::bpe::BpeEncoder;
 use crate::config::{TokenizerAlgorithm, TokenizerConfig};
+#[cfg(feature = "std")]
+use crate::tokenizer_json::infer_model_type;
 use crate::unigram::UnigramEncoder;
 use crate::vocab::VocabTable;
 use crate::wordpiece::WordPieceEncoder;
@@ -102,7 +104,7 @@ impl NativeTokenizer {
             serde_json::from_slice(bytes).context("parsing tokenizer JSON")?;
 
         let model = &json["model"];
-        let model_type = model["type"].as_str().context("missing model.type")?;
+        let model_type = infer_model_type(model)?;
 
         match model_type {
             "BPE" => Self::from_bpe_json(&json),
@@ -633,5 +635,35 @@ mod tests {
         assert_eq!(tok.id_to_token(2), Some("</s>"));
         assert_eq!(tok.token_to_id("<s>"), Some(1));
         assert_eq!(tok.token_to_id("</s>"), Some(2));
+    }
+
+    #[test]
+    fn parses_wordpiece_without_explicit_model_type() {
+        let json = serde_json::json!({
+            "added_tokens": [
+                { "id": 0, "content": "[PAD]", "special": true },
+                { "id": 1, "content": "[UNK]", "special": true }
+            ],
+            "normalizer": null,
+            "pre_tokenizer": null,
+            "model": {
+                "vocab": {
+                    "[PAD]": 0,
+                    "[UNK]": 1,
+                    "hello": 2,
+                    "##s": 3
+                },
+                "continuing_subword_prefix": "##",
+                "max_input_chars_per_word": 100,
+                "unk_token": "[UNK]"
+            }
+        });
+        let bytes = serde_json::to_vec(&json).unwrap();
+
+        let tok = NativeTokenizer::from_tokenizer_json_bytes(&bytes).unwrap();
+
+        assert_eq!(tok.vocab_size(), 4);
+        assert_eq!(tok.token_to_id("hello"), Some(2));
+        assert_eq!(tok.id_to_token(3), Some("##s"));
     }
 }

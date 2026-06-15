@@ -386,6 +386,36 @@ pub mod onnx_builder {
         )
     }
 
+    /// Build a single-op ONNX BatchNormalization model in inference mode.
+    ///
+    /// This exercises ONNX's channel-axis semantics directly: the 1-D
+    /// scale/bias/mean/var tensors of length `c` must be applied along axis 1
+    /// of the NCHW input.
+    pub fn batch_norm_nchw(n: usize, c: usize, h: usize, w: usize, epsilon: f32) -> Vec<u8> {
+        let scale: Vec<f32> = (0..c).map(|i| 1.0 + (i as f32) * 0.25).collect();
+        let bias: Vec<f32> = (0..c).map(|i| -0.3 + (i as f32) * 0.2).collect();
+        let mean: Vec<f32> = (0..c).map(|i| -0.2 + (i as f32) * 0.15).collect();
+        let var: Vec<f32> = (0..c).map(|i| 0.5 + (i as f32) * 0.1).collect();
+        let nodes = vec![Node::with_attrs(
+            "BatchNormalization",
+            &["X", "scale", "bias", "mean", "var"],
+            &["Y"],
+            &[("epsilon", AttrVal::Float(epsilon))],
+        )];
+        let initializers = vec![
+            Initializer::float_nd("scale", scale, vec![c]),
+            Initializer::float_nd("bias", bias, vec![c]),
+            Initializer::float_nd("mean", mean, vec![c]),
+            Initializer::float_nd("var", var, vec![c]),
+        ];
+        build_multi_node_model(
+            &nodes,
+            &[("X", &[n, c, h, w])],
+            &[("Y", &[n, c, h, w])],
+            &initializers,
+        )
+    }
+
     /// Build a multi-node ONNX model where ALL intermediate tensors are
     /// exposed as graph outputs, enabling node-by-node comparison with ORT.
     ///
@@ -415,6 +445,132 @@ pub mod onnx_builder {
             &[("A", &[batch, heads, m, k]), ("B", &[batch, heads, k, n])],
             &[("Y", &[batch, heads, m, n])],
             &[],
+        )
+    }
+
+    /// Build a 4D batched MatMul ONNX model with broadcastable RHS batch dims.
+    /// A [batch, heads, m, k] × B [1, heads, k, n] → Y [batch, heads, m, n]
+    /// Models attention-style ONNX exports where one batch prefix is broadcast.
+    pub fn batched_matmul_4d_broadcast_rhs(
+        batch: usize,
+        heads: usize,
+        m: usize,
+        k: usize,
+        n: usize,
+    ) -> Vec<u8> {
+        build_model(
+            "MatMul",
+            &[("A", &[batch, heads, m, k]), ("B", &[1, heads, k, n])],
+            &[("Y", &[batch, heads, m, n])],
+            &[],
+        )
+    }
+
+    /// Build a small ONNX graph exercising `IsNaN -> Where -> MatMul`.
+    /// The `Where` output must keep the data-branch dtype (f32), not the
+    /// condition dtype (bool), or the downstream MatMul becomes ill-typed.
+    pub fn where_guarded_matmul(m: usize, k: usize, n: usize) -> Vec<u8> {
+        let nodes = vec![
+            Node::new("IsNaN", &["X"], &["mask"]),
+            Node::new("Where", &["mask", "zeros", "X"], &["clean"]),
+            Node::new("MatMul", &["clean", "W"], &["Y"]),
+        ];
+        let initializers = vec![
+            Initializer::float_nd("zeros", vec![0.0; m * k], vec![m, k]),
+            Initializer::float_nd(
+                "W",
+                (0..k * n)
+                    .map(|i| ((i % 19) as f32 - 9.0) * 0.125)
+                    .collect(),
+                vec![k, n],
+            ),
+        ];
+        build_multi_node_model(&nodes, &[("X", &[m, k])], &[("Y", &[m, n])], &initializers)
+    }
+
+    /// Build a TinyLlama-style `GatherND` mask model.
+    ///
+    /// Graph:
+    ///   attention_mask [1, seq] (f32)
+    ///     → Cast(to=BOOL)                         = mask_bool [1, seq]
+    ///   Range(0, seq, 1)                          = positions [seq] (i64)
+    ///     → Unsqueeze([0,1,2,4])                  = pos_idx [1,1,1,seq,1]
+    ///   zero_idx initializer                      = zeros   [1,1,1,seq,1]
+    ///   Concat([zeros, pos_idx], axis=-1)         = gather_idx [1,1,1,seq,2]
+    ///   GatherND(mask_bool, gather_idx)           = gathered [1,1,1,seq] (bool)
+    ///     → Cast(to=FLOAT)                        = Y [1,1,1,seq]
+    ///
+    /// This reproduces the ONNX pattern TinyLlama uses when expanding the
+    /// 1-D attention mask into a higher-rank mask tensor by tuple-indexing a
+    /// leading singleton batch axis.
+    pub fn gather_nd_singleton_prefix_mask(seq: usize) -> Vec<u8> {
+        let nodes = vec![
+            Node::with_attrs(
+                "Cast",
+                &["attention_mask"],
+                &["mask_bool"],
+                &[("to", AttrVal::Int(9))],
+            ),
+            Node::new(
+                "Range",
+                &["range_start", "range_limit", "range_delta"],
+                &["positions"],
+            ),
+            Node::new("Reshape", &["positions", "pos_shape"], &["pos_idx"]),
+            Node::with_attrs(
+                "Concat",
+                &["zero_idx", "pos_idx"],
+                &["gather_idx"],
+                &[("axis", AttrVal::Int(-1))],
+            ),
+            Node::with_attrs(
+                "GatherND",
+                &["mask_bool", "gather_idx"],
+                &["gathered"],
+                &[("batch_dims", AttrVal::Int(0))],
+            ),
+            Node::with_attrs("Cast", &["gathered"], &["Y"], &[("to", AttrVal::Int(1))]),
+        ];
+        let initializers = vec![
+            Initializer::int64_scalar("range_start", 0),
+            Initializer::int64_scalar("range_limit", seq as i64),
+            Initializer::int64_scalar("range_delta", 1),
+            Initializer::int64_1d("pos_shape", vec![1, 1, 1, seq as i64, 1]),
+            Initializer {
+                name: "zero_idx",
+                data: InitData::Int64(vec![0; seq]),
+                shape: vec![1, 1, 1, seq, 1],
+            },
+        ];
+        build_multi_node_model(
+            &nodes,
+            &[("attention_mask", &[1, seq])],
+            &[("Y", &[1, 1, 1, seq])],
+            &initializers,
+        )
+    }
+
+    /// Build an ONNX `Where` model with scalar branches.
+    ///
+    /// Graph:
+    ///   cond_src [m, n] (f32) → Cast(to=BOOL) = cond [m, n]
+    ///   Where(cond, a_scalar, b_scalar)       = Y [m, n]
+    ///
+    /// ONNX broadcasts the scalar branches across the condition/output shape.
+    pub fn where_scalar_branches(m: usize, n: usize) -> Vec<u8> {
+        let nodes = vec![
+            Node::with_attrs("Cast", &["cond_src"], &["cond"], &[("to", AttrVal::Int(9))]),
+            Node::new("Where", &["cond", "a_scalar", "b_scalar"], &["Y"]),
+        ];
+        let initializers = vec![
+            Initializer::scalar("a_scalar", 1.5),
+            Initializer::scalar("b_scalar", -2.0),
+        ];
+        build_multi_node_model(
+            &nodes,
+            &[("cond_src", &[m, n])],
+            &[("Y", &[m, n])],
+            &initializers,
         )
     }
 
@@ -1804,6 +1960,44 @@ pub mod onnx_builder {
             &[("X", &[1, ic, h, w])],
             &[("Y", &[1, oc, 1, 1])],
             &initializers,
+        )
+    }
+
+    /// Build a Relu + MaxPool ONNX model with configurable kernel/stride/pad.
+    pub fn relu_max_pool(
+        ic: usize,
+        h: usize,
+        w: usize,
+        kernel: usize,
+        stride: usize,
+        pad: usize,
+    ) -> Vec<u8> {
+        let h_out = (h + 2 * pad - kernel) / stride + 1;
+        let w_out = (w + 2 * pad - kernel) / stride + 1;
+        let nodes = vec![
+            Node::new("Relu", &["X"], &["relu_out"]),
+            Node::with_attrs(
+                "MaxPool",
+                &["relu_out"],
+                &["Y"],
+                &[
+                    (
+                        "kernel_shape",
+                        AttrVal::Ints(vec![kernel as i64, kernel as i64]),
+                    ),
+                    ("strides", AttrVal::Ints(vec![stride as i64, stride as i64])),
+                    (
+                        "pads",
+                        AttrVal::Ints(vec![pad as i64, pad as i64, pad as i64, pad as i64]),
+                    ),
+                ],
+            ),
+        ];
+        build_multi_node_model(
+            &nodes,
+            &[("X", &[1, ic, h, w])],
+            &[("Y", &[1, ic, h_out, w_out])],
+            &[],
         )
     }
 

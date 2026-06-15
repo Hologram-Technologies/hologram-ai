@@ -10,11 +10,13 @@ use anyhow::{bail, Context as _, Result};
 use clap::Args;
 use std::io::Write;
 use std::path::PathBuf;
+use std::time::Instant;
 
 use crate::commands::generate::{self, GenConfig};
 use crate::engine::{FixedSession, GrowableSession, SessionProvider};
 use crate::runner::HoloRunner;
-use hologram_ai_tokenizer::NativeTokenizer;
+use crate::stats::ForwardStats;
+use hologram_ai_tokenizer::{NativeTokenizer, Tokenizer};
 
 /// Arguments for the `run` subcommand.
 #[derive(Args, Debug)]
@@ -35,6 +37,10 @@ pub struct RunArgs {
     /// every dtype), `ones`, or a numeric constant (e.g. `--fill 1.5`).
     #[arg(long, value_name = "zeros|ones|N")]
     pub fill: Option<String>,
+    /// Print timing stats to stderr. In generation mode this reports prompt
+    /// encode, prefill latency, and decode throughput.
+    #[arg(long)]
+    pub stats: bool,
 
     // ── Text generation (causal LM) ──────────────────────────────────────────
     // When `--prompt` is given, `run` performs autoregressive generation instead
@@ -56,6 +62,10 @@ pub struct RunArgs {
     /// Prompt template with a `{prompt}` placeholder (e.g. a chat template).
     #[arg(long, value_name = "TEMPLATE")]
     pub prompt_template: Option<String>,
+    /// Path to a HuggingFace `chat_template.jinja` override. When omitted,
+    /// `run --prompt` auto-discovers an embedded or companion chat template.
+    #[arg(long, value_name = "FILE")]
+    pub chat_template: Option<PathBuf>,
     /// Maximum number of new tokens to generate.
     #[arg(long, default_value_t = 64)]
     pub max_tokens: usize,
@@ -65,6 +75,10 @@ pub struct RunArgs {
     /// Restrict sampling to the `k` most-likely tokens.
     #[arg(long, value_name = "K")]
     pub top_k: Option<usize>,
+    /// Print the first-step top-k token candidates from the logits row before
+    /// sampling. Useful for debugging prompt formatting and output sanity.
+    #[arg(long, value_name = "K")]
+    pub decode_top_k: Option<usize>,
     /// Stop string(s); generation halts when the decoded suffix contains one.
     #[arg(long)]
     pub stop: Vec<String>,
@@ -82,8 +96,11 @@ pub fn execute(args: RunArgs) -> Result<()> {
         return generate_cmd(args);
     }
 
+    let total_start = Instant::now();
+    let load_start = Instant::now();
     let mut runner = HoloRunner::from_path(&args.file, None)
         .with_context(|| format!("loading model {:?}", args.file))?;
+    let load = load_start.elapsed();
 
     let n_inputs = runner.input_count();
     let in_ports = runner.input_port_info();
@@ -159,7 +176,9 @@ pub fn execute(args: RunArgs) -> Result<()> {
     let owned: Vec<Vec<u8>> = slots.into_iter().map(|s| s.unwrap()).collect();
     let refs: Vec<&[u8]> = owned.iter().map(|v| v.as_slice()).collect();
 
+    let execute_start = Instant::now();
     let outputs = runner.execute(&refs).context("inference failed")?;
+    let execute = execute_start.elapsed();
 
     let out_ports = runner.output_port_info();
     for (i, out) in outputs.iter().enumerate() {
@@ -173,6 +192,16 @@ pub fn execute(args: RunArgs) -> Result<()> {
         if args.verbose {
             println!("  {}", preview(&out.bytes, dt));
         }
+    }
+    if args.stats {
+        let mut stderr = std::io::stderr();
+        ForwardStats {
+            load,
+            execute,
+            total: total_start.elapsed(),
+        }
+        .display(&mut stderr)
+        .ok();
     }
     Ok(())
 }
@@ -304,59 +333,92 @@ fn generate_cmd(args: RunArgs) -> Result<()> {
     // session provider. `--tokenizer` always overrides; otherwise a `.holo`
     // self-describes (baked tokenizer) and a source uses the `tokenizer.json`
     // beside it.
-    let (mut provider, tokenizer): (Box<dyn SessionProvider>, NativeTokenizer) =
-        match resolve_model_arg(&args.file)? {
-            ModelArg::Holo(path) => {
-                let runner = HoloRunner::from_path(&path, None)
-                    .with_context(|| format!("loading model {path:?}"))?;
-                let tokenizer = match args.tokenizer.as_ref() {
-                    Some(p) => NativeTokenizer::from_tokenizer_json(p)
-                        .with_context(|| format!("loading tokenizer {p:?}"))?,
-                    None => load_archived_tokenizer(&runner)?,
-                };
-                (Box::new(FixedSession::new(runner)), tokenizer)
-            }
-            ModelArg::Source {
-                onnx,
-                tokenizer_json,
-            } => {
-                let tok_path = args.tokenizer.clone().unwrap_or(tokenizer_json);
-                let tokenizer =
-                    NativeTokenizer::from_tokenizer_json(&tok_path).with_context(|| {
-                        format!(
-                        "loading tokenizer {tok_path:?} (a model source needs a tokenizer.json \
+    let (mut provider, tokenizer, auto_chat_template): (
+        Box<dyn SessionProvider>,
+        NativeTokenizer,
+        Option<String>,
+    ) = match resolve_model_arg(&args.file)? {
+        ModelArg::Holo(path) => {
+            let runner = HoloRunner::from_path(&path, None)
+                .with_context(|| format!("loading model {path:?}"))?;
+            let tokenizer = match args.tokenizer.as_ref() {
+                Some(p) => NativeTokenizer::from_tokenizer_json(p)
+                    .with_context(|| format!("loading tokenizer {p:?}"))?,
+                None => load_archived_tokenizer(&runner)?,
+            };
+            let chat_template = load_holo_chat_template(&path, &runner)?;
+            (
+                Box::new(FixedSession::new(runner)),
+                tokenizer,
+                chat_template,
+            )
+        }
+        ModelArg::Source {
+            onnx,
+            tokenizer_json,
+            chat_template,
+        } => {
+            let tok_path = args.tokenizer.clone().unwrap_or(tokenizer_json);
+            let tokenizer = NativeTokenizer::from_tokenizer_json(&tok_path).with_context(|| {
+                format!(
+                    "loading tokenizer {tok_path:?} (a model source needs a tokenizer.json \
                          beside it, or pass --tokenizer)"
-                    )
-                    })?;
-                let compiler = crate::compiler::ModelCompiler {
-                    quant_strategy: parse_quant(args.quantize.as_deref())?,
-                    ..Default::default()
-                };
-                let prepared = compiler
-                    .prepare(crate::compiler::ModelSource::OnnxPath(onnx.clone()))
-                    .with_context(|| format!("importing model {onnx:?}"))?;
-                (Box::new(GrowableSession::new(prepared)), tokenizer)
-            }
-        };
+                )
+            })?;
+            let compiler = crate::compiler::ModelCompiler {
+                quant_strategy: parse_quant(args.quantize.as_deref())?,
+                ..Default::default()
+            };
+            let prepared = compiler
+                .prepare(crate::compiler::ModelSource::OnnxPath(onnx.clone()))
+                .with_context(|| format!("importing model {onnx:?}"))?;
+            let chat_template =
+                load_model_chat_template(chat_template.as_deref(), args.chat_template.as_deref())?;
+            (
+                Box::new(GrowableSession::new(prepared)),
+                tokenizer,
+                chat_template,
+            )
+        }
+    };
 
     let cfg = GenConfig {
         max_tokens: args.max_tokens,
         temperature: args.temperature,
         top_k: args.top_k,
+        decode_top_k: args.decode_top_k,
         stop: args.stop.clone(),
         eos: args.eos,
         seed: args.seed,
     };
 
-    let templated = generate::apply_template(args.prompt_template.as_deref(), prompt);
+    let explicit_chat_template = load_explicit_chat_template(args.chat_template.as_deref())?;
+    let templated = render_generation_prompt(
+        &tokenizer,
+        prompt,
+        args.prompt_template.as_deref(),
+        explicit_chat_template
+            .as_deref()
+            .or(auto_chat_template.as_deref()),
+    )?;
 
     let mut stdout = std::io::stdout();
     // Echo the prompt so a streamed transcript reads coherently, then stream
     // the generated continuation token-by-token from inside generate_stream.
     print!("{prompt}");
     stdout.flush().ok();
-    generate::generate_stream(provider.as_mut(), &tokenizer, &templated, &cfg, &mut stdout)?;
+    let outcome = generate::generate_stream_with_stats(
+        provider.as_mut(),
+        &tokenizer,
+        &templated,
+        &cfg,
+        &mut stdout,
+    )?;
     println!();
+    if args.stats {
+        let mut stderr = std::io::stderr();
+        outcome.stats.display(&mut stderr).ok();
+    }
     Ok(())
 }
 
@@ -368,6 +430,7 @@ enum ModelArg {
     Source {
         onnx: PathBuf,
         tokenizer_json: PathBuf,
+        chat_template: Option<PathBuf>,
     },
 }
 
@@ -388,9 +451,11 @@ fn resolve_model_arg(path: &std::path::Path) -> Result<ModelArg> {
                 format!("no model.onnx (or onnx/model.onnx) found in directory {path:?}")
             })?;
         let tokenizer_json = path.join("tokenizer.json");
+        let chat_template = find_chat_template(path);
         return Ok(ModelArg::Source {
             onnx,
             tokenizer_json,
+            chat_template,
         });
     }
     match path.extension().and_then(|e| e.to_str()) {
@@ -400,6 +465,7 @@ fn resolve_model_arg(path: &std::path::Path) -> Result<ModelArg> {
             Ok(ModelArg::Source {
                 onnx: path.to_path_buf(),
                 tokenizer_json: dir.join("tokenizer.json"),
+                chat_template: find_chat_template(dir),
             })
         }
         _ => bail!(
@@ -407,6 +473,72 @@ fn resolve_model_arg(path: &std::path::Path) -> Result<ModelArg> {
              directory containing model.onnx + tokenizer.json"
         ),
     }
+}
+
+fn render_generation_prompt(
+    tokenizer: &NativeTokenizer,
+    prompt: &str,
+    prompt_template: Option<&str>,
+    chat_template: Option<&str>,
+) -> Result<String> {
+    if let Some(template) = prompt_template {
+        return Ok(generate::apply_template(Some(template), prompt));
+    }
+    let eos_token = tokenizer
+        .id_to_token(tokenizer.eos_token_id())
+        .unwrap_or("</s>");
+    if let Some(template) = chat_template {
+        return generate::apply_chat_template(template, prompt, eos_token)
+            .context("rendering chat template");
+    }
+    Ok(generate::apply_template(None, prompt))
+}
+
+fn load_explicit_chat_template(path: Option<&std::path::Path>) -> Result<Option<String>> {
+    path.map(read_chat_template).transpose()
+}
+
+fn load_holo_chat_template(path: &std::path::Path, runner: &HoloRunner) -> Result<Option<String>> {
+    if let Some(template) = load_explicit_chat_template(
+        find_chat_template(path.parent().unwrap_or_else(|| std::path::Path::new("."))).as_deref(),
+    )? {
+        return Ok(Some(template));
+    }
+    Ok(runner.embedded_chat_template().map(ToOwned::to_owned))
+}
+
+fn load_model_chat_template(
+    auto_path: Option<&std::path::Path>,
+    explicit_path: Option<&std::path::Path>,
+) -> Result<Option<String>> {
+    if let Some(template) = load_explicit_chat_template(explicit_path)? {
+        return Ok(Some(template));
+    }
+    auto_path.map(read_chat_template).transpose()
+}
+
+fn find_chat_template(dir: &std::path::Path) -> Option<PathBuf> {
+    let jinja = dir.join("chat_template.jinja");
+    if jinja.exists() {
+        return Some(jinja);
+    }
+    let config = dir.join("tokenizer_config.json");
+    config.exists().then_some(config)
+}
+
+fn read_chat_template(path: &std::path::Path) -> Result<String> {
+    if path.file_name().and_then(|name| name.to_str()) == Some("chat_template.jinja") {
+        return std::fs::read_to_string(path)
+            .with_context(|| format!("reading chat template {path:?}"));
+    }
+    let raw = std::fs::read(path).with_context(|| format!("reading tokenizer config {path:?}"))?;
+    let json: serde_json::Value = serde_json::from_slice(&raw)
+        .with_context(|| format!("parsing tokenizer config {path:?}"))?;
+    json.get("chat_template")
+        .or_else(|| json.get("default_chat_template"))
+        .and_then(|value| value.as_str())
+        .map(ToOwned::to_owned)
+        .with_context(|| format!("no chat_template found in {path:?}"))
 }
 
 /// Parse a quantization scheme name (matches the `compile` subcommand's flag).
@@ -426,25 +558,7 @@ fn parse_quant(s: Option<&str>) -> Result<hologram_ai_common::lower::QuantStrate
 /// extension), verifying its content address against the stored κ-label so a
 /// corrupted tokenizer is caught rather than silently producing wrong tokens.
 fn load_archived_tokenizer(runner: &HoloRunner) -> Result<NativeTokenizer> {
-    let canonical = runner.extension(crate::compiler::TOKENIZER_EXT).context(
-        "no tokenizer: the model has none embedded — recompile from a model directory \
-         containing tokenizer.json, or pass --tokenizer path/to/tokenizer.json",
-    )?;
-    if let Some(expected) = runner.extension(crate::compiler::TOKENIZER_KAPPA_EXT) {
-        let actual = uor_addr::json::address(canonical)
-            .map_err(|e| anyhow::anyhow!("re-addressing embedded tokenizer: {e:?}"))?
-            .address
-            .as_str()
-            .to_string();
-        if actual.as_bytes() != expected {
-            anyhow::bail!(
-                "embedded tokenizer failed its content-address check (expected {}, got {actual}) \
-                 — the archive's tokenizer is corrupt",
-                String::from_utf8_lossy(expected)
-            );
-        }
-    }
-    NativeTokenizer::from_tokenizer_json_bytes(canonical).context("parsing embedded tokenizer")
+    runner.embedded_tokenizer()
 }
 
 // ── input parsing ─────────────────────────────────────────────────────────────

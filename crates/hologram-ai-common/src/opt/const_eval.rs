@@ -1,6 +1,6 @@
 //! Compile-time constant evaluation pass.
 //!
-//! Evaluates any node whose inputs are ALL materialized constants (AiParam::Inline),
+//! Evaluates any node whose inputs are ALL materialized constants,
 //! with proper N-D broadcasting support. This eliminates entire constant subgraphs
 //! (causal masks, position embeddings, comparison matrices) that the runtime cannot
 //! handle due to lack of N-D broadcast support.
@@ -11,10 +11,17 @@
 use super::const_eval_ops::*;
 use super::pipeline::Pass;
 use crate::ir::{shape_from_concrete, AiGraph, AiOp, AiParam, DType, TensorInfo};
+use std::borrow::Cow;
 use std::collections::HashMap;
 
 /// Evaluate constant subgraphs at compile time.
 pub struct ConstantEvaluation;
+
+/// Safety limit for mmap-backed params loaded into compile-time constant
+/// evaluation. Real model weights stay mmap-backed and should not be copied
+/// into this pass; small helper tensors (mask templates, indices, updates)
+/// are safe to materialize.
+const MAX_CONST_EVAL_PARAM_BYTES: u64 = 4 * 1024 * 1024;
 
 impl Pass for ConstantEvaluation {
     fn name(&self) -> &str {
@@ -38,7 +45,7 @@ impl Pass for ConstantEvaluation {
                 None => continue,
             };
 
-            let node = &graph.nodes[idx];
+            let node = graph.nodes[idx].clone();
             if node.outputs.is_empty() {
                 continue;
             }
@@ -64,33 +71,43 @@ impl Pass for ConstantEvaluation {
                 continue;
             }
 
-            // Check if ALL inputs are inline constants.
-            let inputs: Vec<(&[u8], &TensorInfo)> = node
-                .inputs
-                .iter()
-                .filter_map(|tid| {
-                    graph.params.get(tid).and_then(|p| match p {
-                        AiParam::Inline { data, info } => Some((data.as_slice(), info)),
-                        _ => None,
-                    })
-                })
-                .collect();
-
-            if inputs.len() != node.inputs.len() {
-                continue; // not all inputs are constants
+            if materialize_zero_sized_outputs(&mut graph, &node) {
+                materialized += node.outputs.len() as u32;
+                continue;
             }
 
-            // Get input shapes from tensor_info (prefer) or param info.
+            // Check if ALL inputs are materialized constants.
+            let Some(materialized_inputs) = node
+                .inputs
+                .iter()
+                .map(|tid| graph.params.get(tid).and_then(load_const_eval_param))
+                .collect::<Option<Vec<_>>>()
+            else {
+                continue; // not all inputs are constants
+            };
+
+            let inputs: Vec<(&[u8], &TensorInfo)> = materialized_inputs
+                .iter()
+                .map(|(data, info)| (data.as_ref(), info))
+                .collect();
+
+            // Get input shapes from the inline param metadata first: once a
+            // value has been materialized as an inline constant, its param
+            // shape is the authoritative shape of the bytes. `tensor_info`
+            // can lag behind for intermediate constant subgraphs that were
+            // folded before a later shape pass would have corrected them.
             let input_shapes: Vec<Vec<usize>> = node
                 .inputs
                 .iter()
                 .zip(inputs.iter())
                 .map(|(tid, (_data, param_info))| {
-                    graph
-                        .tensor_info
-                        .get(tid)
-                        .and_then(|ti| concrete_shape(&ti.shape))
-                        .or_else(|| concrete_shape(&param_info.shape))
+                    concrete_shape(&param_info.shape)
+                        .or_else(|| {
+                            graph
+                                .tensor_info
+                                .get(tid)
+                                .and_then(|ti| concrete_shape(&ti.shape))
+                        })
                         .unwrap_or_else(|| {
                             let elem_sz = param_info.logical_dtype.byte_size().unwrap_or(1);
                             match _data.len().checked_div(elem_sz) {
@@ -105,10 +122,7 @@ impl Pass for ConstantEvaluation {
             if let Some((result_bytes, result_dtype, result_shape)) =
                 eval_node(&node.op, &inputs, &input_shapes)
             {
-                // Skip empty results: a 0-element tensor means a dynamic dim
-                // was substituted with 0 (e.g. seq_len sentinel). Materializing
-                // it as an empty constant would fail validation.
-                if result_shape.contains(&0) || result_bytes.is_empty() {
+                if result_bytes.is_empty() && !result_shape.contains(&0) {
                     continue;
                 }
 
@@ -134,6 +148,52 @@ impl Pass for ConstantEvaluation {
 
         Ok(graph)
     }
+}
+
+fn load_const_eval_param(param: &AiParam) -> Option<(Cow<'_, [u8]>, TensorInfo)> {
+    match param {
+        AiParam::Inline { data, info } => Some((Cow::Borrowed(data.as_slice()), info.clone())),
+        AiParam::Mmap {
+            path,
+            offset,
+            len,
+            info,
+        } if *len <= MAX_CONST_EVAL_PARAM_BYTES => {
+            use std::io::{Read, Seek, SeekFrom};
+
+            let mut file = std::fs::File::open(path).ok()?;
+            file.seek(SeekFrom::Start(*offset)).ok()?;
+            let mut buf = vec![0u8; *len as usize];
+            file.read_exact(&mut buf).ok()?;
+            Some((Cow::Owned(buf), info.clone()))
+        }
+        AiParam::Mmap { .. } => None,
+    }
+}
+
+fn materialize_zero_sized_outputs(graph: &mut AiGraph, node: &crate::ir::AiNode) -> bool {
+    if node.outputs.is_empty() {
+        return false;
+    }
+    let Some(output_infos) = node
+        .outputs
+        .iter()
+        .map(|tid| graph.tensor_info.get(tid).cloned())
+        .collect::<Option<Vec<_>>>()
+    else {
+        return false;
+    };
+    if !output_infos.iter().all(tensor_is_zero_sized) {
+        return false;
+    }
+    for (tid, info) in node.outputs.iter().copied().zip(output_infos) {
+        graph.params.insert(tid, AiParam::inline(Vec::new(), info));
+    }
+    true
+}
+
+fn tensor_is_zero_sized(info: &TensorInfo) -> bool {
+    info.shape.iter().any(|dim| dim.as_concrete() == Some(0))
 }
 
 /// Evaluate an `AiOp::Shape` node when the input has a fully-concrete shape.
@@ -264,6 +324,9 @@ fn eval_node(
             steps,
         } => eval_slice(inputs, input_shapes, axes, starts, ends, steps),
         AiOp::Concat { axis } => eval_concat(inputs, input_shapes, *axis),
+        AiOp::ScatterND {
+            reduce: crate::ir::op::ScatterReduce::None,
+        } => eval_scatter_nd(inputs, input_shapes),
         AiOp::Identity => eval_identity(inputs, input_shapes),
 
         _ => None,
@@ -461,5 +524,278 @@ mod tests {
             .collect();
         // col <= row: [0<=0, 0<=1, 0<=2, 1<=0, 1<=1, 1<=2, 2<=0, 2<=1, 2<=2]
         assert_eq!(vals, vec![1.0, 1.0, 1.0, 0.0, 1.0, 1.0, 0.0, 0.0, 1.0]);
+    }
+
+    #[test]
+    fn test_const_eval_gather_prefers_inline_param_shape_over_stale_tensor_info() {
+        let data: Vec<f32> = (0..64).map(|v| v as f32).collect();
+        let data_bytes: Vec<u8> = data.iter().flat_map(|v| v.to_le_bytes()).collect();
+        let index_bytes: Vec<u8> = [0i64, 1].iter().flat_map(|v| v.to_le_bytes()).collect();
+
+        let mut params = HashMap::new();
+        params.insert(
+            10u32,
+            AiParam::inline(data_bytes, make_ti(DType::F32, &[16, 4])),
+        );
+        params.insert(
+            11u32,
+            AiParam::inline(index_bytes, make_ti(DType::INT64, &[1, 2])),
+        );
+
+        let mut ti = HashMap::new();
+        ti.insert(10u32, make_ti(DType::F32, &[16, 4]));
+        // Simulate a stale upstream shape on a folded Slice(position_ids).
+        ti.insert(11u32, make_ti(DType::INT64, &[1, 16]));
+        ti.insert(12u32, make_ti(DType::F32, &[1, 16, 4]));
+
+        let g = make_graph_with_params(
+            vec![AiNode::new(
+                0,
+                AiOp::Gather { axis: 0 },
+                vec![10, 11],
+                vec![12],
+            )],
+            params,
+            ti,
+            vec![12],
+        );
+
+        let g2 = ConstantEvaluation.run(g).expect("const-eval succeeds");
+        let info = g2.tensor_info.get(&12).expect("output tensor info");
+        let out_shape = concrete_shape(&info.shape).expect("concrete output shape");
+        assert_eq!(out_shape, vec![1, 2, 4]);
+
+        let bytes = match g2.params.get(&12).expect("materialized output") {
+            AiParam::Inline { data, .. } => data,
+            _ => panic!("expected inline gather output"),
+        };
+        assert_eq!(bytes.len(), 8 * 4);
+    }
+
+    #[test]
+    fn test_eval_scatter_nd_updates_scalar_elements() {
+        let data_bytes: Vec<u8> = [10i64, 20, 30, 40]
+            .iter()
+            .flat_map(|v| v.to_le_bytes())
+            .collect();
+        let indices_bytes: Vec<u8> = [0i64, 1, 1, 0]
+            .iter()
+            .flat_map(|v| v.to_le_bytes())
+            .collect();
+        let updates_bytes: Vec<u8> = [99i64, 77].iter().flat_map(|v| v.to_le_bytes()).collect();
+
+        let data_info = make_ti(DType::INT64, &[2, 2]);
+        let indices_info = make_ti(DType::INT64, &[2, 2]);
+        let updates_info = make_ti(DType::INT64, &[2]);
+        let inputs = vec![
+            (data_bytes.as_slice(), &data_info),
+            (indices_bytes.as_slice(), &indices_info),
+            (updates_bytes.as_slice(), &updates_info),
+        ];
+        let shapes = vec![vec![2, 2], vec![2, 2], vec![2]];
+
+        let (result, dtype, shape) = eval_scatter_nd(&inputs, &shapes).expect("scatternd eval");
+        assert_eq!(dtype, DType::INT64);
+        assert_eq!(shape, vec![2, 2]);
+
+        let vals: Vec<i64> = result
+            .chunks_exact(8)
+            .map(|c| i64::from_le_bytes(c.try_into().expect("8-byte i64 chunk")))
+            .collect();
+        assert_eq!(vals, vec![10, 99, 77, 40]);
+    }
+
+    #[test]
+    fn test_const_eval_pass_materializes_scatter_nd() {
+        let data_bytes: Vec<u8> = [1i64, 2, 3, 4]
+            .iter()
+            .flat_map(|v| v.to_le_bytes())
+            .collect();
+        let indices_bytes: Vec<u8> = [0i64, 1, 1, 0]
+            .iter()
+            .flat_map(|v| v.to_le_bytes())
+            .collect();
+        let updates_bytes: Vec<u8> = [11i64, 22].iter().flat_map(|v| v.to_le_bytes()).collect();
+
+        let mut params = HashMap::new();
+        params.insert(
+            10u32,
+            AiParam::inline(data_bytes, make_ti(DType::INT64, &[2, 2])),
+        );
+        params.insert(
+            11u32,
+            AiParam::inline(indices_bytes, make_ti(DType::INT64, &[2, 2])),
+        );
+        params.insert(
+            12u32,
+            AiParam::inline(updates_bytes, make_ti(DType::INT64, &[2])),
+        );
+
+        let mut ti = HashMap::new();
+        ti.insert(10u32, make_ti(DType::INT64, &[2, 2]));
+        ti.insert(11u32, make_ti(DType::INT64, &[2, 2]));
+        ti.insert(12u32, make_ti(DType::INT64, &[2]));
+        ti.insert(13u32, make_ti(DType::INT64, &[2, 2]));
+
+        let g = make_graph_with_params(
+            vec![AiNode::new(
+                0,
+                AiOp::ScatterND {
+                    reduce: crate::ir::op::ScatterReduce::None,
+                },
+                vec![10, 11, 12],
+                vec![13],
+            )],
+            params,
+            ti,
+            vec![13],
+        );
+
+        let g2 = ConstantEvaluation.run(g).expect("const-eval succeeds");
+        let bytes = match g2
+            .params
+            .get(&13u32)
+            .expect("materialized scatternd output")
+        {
+            AiParam::Inline { data, .. } => data,
+            _ => panic!("expected inline scatternd output"),
+        };
+        let vals: Vec<i64> = bytes
+            .chunks_exact(8)
+            .map(|c| i64::from_le_bytes(c.try_into().expect("8-byte i64 chunk")))
+            .collect();
+        assert_eq!(vals, vec![1, 11, 22, 4]);
+    }
+
+    #[test]
+    fn test_const_eval_pass_materializes_scatter_nd_from_mmap_inputs() {
+        use std::fs;
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time")
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("hologram-ai-scatternd-{unique}.bin"));
+
+        let data_bytes: Vec<u8> = [1i64, 2, 3, 4]
+            .iter()
+            .flat_map(|v| v.to_le_bytes())
+            .collect();
+        let indices_bytes: Vec<u8> = [0i64, 1, 1, 0]
+            .iter()
+            .flat_map(|v| v.to_le_bytes())
+            .collect();
+        let updates_bytes: Vec<u8> = [11i64, 22].iter().flat_map(|v| v.to_le_bytes()).collect();
+
+        let mut file_bytes = Vec::new();
+        file_bytes.extend_from_slice(&data_bytes);
+        let indices_offset = file_bytes.len() as u64;
+        file_bytes.extend_from_slice(&indices_bytes);
+        let updates_offset = file_bytes.len() as u64;
+        file_bytes.extend_from_slice(&updates_bytes);
+        fs::write(&path, &file_bytes).expect("write mmap fixture");
+
+        let mut params = HashMap::new();
+        params.insert(
+            10u32,
+            AiParam::mmap(
+                path.clone(),
+                0,
+                data_bytes.len() as u64,
+                make_ti(DType::INT64, &[2, 2]),
+            ),
+        );
+        params.insert(
+            11u32,
+            AiParam::mmap(
+                path.clone(),
+                indices_offset,
+                indices_bytes.len() as u64,
+                make_ti(DType::INT64, &[2, 2]),
+            ),
+        );
+        params.insert(
+            12u32,
+            AiParam::mmap(
+                path.clone(),
+                updates_offset,
+                updates_bytes.len() as u64,
+                make_ti(DType::INT64, &[2]),
+            ),
+        );
+
+        let mut ti = HashMap::new();
+        ti.insert(10u32, make_ti(DType::INT64, &[2, 2]));
+        ti.insert(11u32, make_ti(DType::INT64, &[2, 2]));
+        ti.insert(12u32, make_ti(DType::INT64, &[2]));
+        ti.insert(13u32, make_ti(DType::INT64, &[2, 2]));
+
+        let g = make_graph_with_params(
+            vec![AiNode::new(
+                0,
+                AiOp::ScatterND {
+                    reduce: crate::ir::op::ScatterReduce::None,
+                },
+                vec![10, 11, 12],
+                vec![13],
+            )],
+            params,
+            ti,
+            vec![13],
+        );
+
+        let g2 = ConstantEvaluation.run(g).expect("const-eval succeeds");
+        let bytes = match g2
+            .params
+            .get(&13u32)
+            .expect("materialized scatternd output")
+        {
+            AiParam::Inline { data, .. } => data,
+            _ => panic!("expected inline scatternd output"),
+        };
+        let vals: Vec<i64> = bytes
+            .chunks_exact(8)
+            .map(|c| i64::from_le_bytes(c.try_into().expect("8-byte i64 chunk")))
+            .collect();
+        assert_eq!(vals, vec![1, 11, 22, 4]);
+
+        fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn test_const_eval_materializes_zero_sized_dynamic_scatter_nd() {
+        let mut ti = HashMap::new();
+        ti.insert(10u32, make_ti(DType::INT64, &[1, 1, 64, 0]));
+        ti.insert(11u32, make_ti(DType::INT64, &[1, 1, 64, 0, 4]));
+        ti.insert(12u32, make_ti(DType::F32, &[1, 1, 64, 0]));
+        ti.insert(13u32, make_ti(DType::INT64, &[1, 1, 64, 0]));
+
+        let g = make_graph_with_params(
+            vec![AiNode::new(
+                0,
+                AiOp::ScatterND {
+                    reduce: crate::ir::op::ScatterReduce::None,
+                },
+                vec![10, 11, 12],
+                vec![13],
+            )],
+            HashMap::new(),
+            ti,
+            vec![13],
+        );
+
+        let g2 = ConstantEvaluation.run(g).expect("const-eval succeeds");
+        match g2
+            .params
+            .get(&13u32)
+            .expect("zero-sized output materialized")
+        {
+            AiParam::Inline { data, info } => {
+                assert!(data.is_empty());
+                assert_eq!(concrete_shape(&info.shape), Some(vec![1, 1, 64, 0]));
+            }
+            _ => panic!("expected inline zero-sized output"),
+        }
     }
 }
