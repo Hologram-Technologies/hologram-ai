@@ -11,10 +11,17 @@
 use super::const_eval_ops::*;
 use super::pipeline::Pass;
 use crate::ir::{shape_from_concrete, AiGraph, AiOp, AiParam, DType, TensorInfo};
+use std::borrow::Cow;
 use std::collections::HashMap;
 
 /// Evaluate constant subgraphs at compile time.
 pub struct ConstantEvaluation;
+
+/// Safety limit for mmap-backed params loaded into compile-time constant
+/// evaluation. Real model weights stay mmap-backed and should not be copied
+/// into this pass; small helper tensors (mask templates, indices, updates)
+/// are safe to materialize.
+const MAX_CONST_EVAL_PARAM_BYTES: u64 = 4 * 1024 * 1024;
 
 impl Pass for ConstantEvaluation {
     fn name(&self) -> &str {
@@ -65,20 +72,19 @@ impl Pass for ConstantEvaluation {
             }
 
             // Check if ALL inputs are inline constants.
-            let inputs: Vec<(&[u8], &TensorInfo)> = node
+            let Some(materialized_inputs) = node
                 .inputs
                 .iter()
-                .filter_map(|tid| {
-                    graph.params.get(tid).and_then(|p| match p {
-                        AiParam::Inline { data, info } => Some((data.as_slice(), info)),
-                        _ => None,
-                    })
-                })
-                .collect();
-
-            if inputs.len() != node.inputs.len() {
+                .map(|tid| graph.params.get(tid).and_then(load_const_eval_param))
+                .collect::<Option<Vec<_>>>()
+            else {
                 continue; // not all inputs are constants
-            }
+            };
+
+            let inputs: Vec<(&[u8], &TensorInfo)> = materialized_inputs
+                .iter()
+                .map(|(data, info)| (data.as_ref(), info))
+                .collect();
 
             // Get input shapes from the inline param metadata first: once a
             // value has been materialized as an inline constant, its param
@@ -139,6 +145,27 @@ impl Pass for ConstantEvaluation {
         }
 
         Ok(graph)
+    }
+}
+
+fn load_const_eval_param(param: &AiParam) -> Option<(Cow<'_, [u8]>, TensorInfo)> {
+    match param {
+        AiParam::Inline { data, info } => Some((Cow::Borrowed(data.as_slice()), info.clone())),
+        AiParam::Mmap {
+            path,
+            offset,
+            len,
+            info,
+        } if *len <= MAX_CONST_EVAL_PARAM_BYTES => {
+            use std::io::{Read, Seek, SeekFrom};
+
+            let mut file = std::fs::File::open(path).ok()?;
+            file.seek(SeekFrom::Start(*offset)).ok()?;
+            let mut buf = vec![0u8; *len as usize];
+            file.read_exact(&mut buf).ok()?;
+            Some((Cow::Owned(buf), info.clone()))
+        }
+        AiParam::Mmap { .. } => None,
     }
 }
 
@@ -611,5 +638,101 @@ mod tests {
             .map(|c| i64::from_le_bytes(c.try_into().expect("8-byte i64 chunk")))
             .collect();
         assert_eq!(vals, vec![1, 11, 22, 4]);
+    }
+
+    #[test]
+    fn test_const_eval_pass_materializes_scatter_nd_from_mmap_inputs() {
+        use std::fs;
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time")
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("hologram-ai-scatternd-{unique}.bin"));
+
+        let data_bytes: Vec<u8> = [1i64, 2, 3, 4]
+            .iter()
+            .flat_map(|v| v.to_le_bytes())
+            .collect();
+        let indices_bytes: Vec<u8> = [0i64, 1, 1, 0]
+            .iter()
+            .flat_map(|v| v.to_le_bytes())
+            .collect();
+        let updates_bytes: Vec<u8> = [11i64, 22].iter().flat_map(|v| v.to_le_bytes()).collect();
+
+        let mut file_bytes = Vec::new();
+        file_bytes.extend_from_slice(&data_bytes);
+        let indices_offset = file_bytes.len() as u64;
+        file_bytes.extend_from_slice(&indices_bytes);
+        let updates_offset = file_bytes.len() as u64;
+        file_bytes.extend_from_slice(&updates_bytes);
+        fs::write(&path, &file_bytes).expect("write mmap fixture");
+
+        let mut params = HashMap::new();
+        params.insert(
+            10u32,
+            AiParam::mmap(
+                path.clone(),
+                0,
+                data_bytes.len() as u64,
+                make_ti(DType::INT64, &[2, 2]),
+            ),
+        );
+        params.insert(
+            11u32,
+            AiParam::mmap(
+                path.clone(),
+                indices_offset,
+                indices_bytes.len() as u64,
+                make_ti(DType::INT64, &[2, 2]),
+            ),
+        );
+        params.insert(
+            12u32,
+            AiParam::mmap(
+                path.clone(),
+                updates_offset,
+                updates_bytes.len() as u64,
+                make_ti(DType::INT64, &[2]),
+            ),
+        );
+
+        let mut ti = HashMap::new();
+        ti.insert(10u32, make_ti(DType::INT64, &[2, 2]));
+        ti.insert(11u32, make_ti(DType::INT64, &[2, 2]));
+        ti.insert(12u32, make_ti(DType::INT64, &[2]));
+        ti.insert(13u32, make_ti(DType::INT64, &[2, 2]));
+
+        let g = make_graph_with_params(
+            vec![AiNode::new(
+                0,
+                AiOp::ScatterND {
+                    reduce: crate::ir::op::ScatterReduce::None,
+                },
+                vec![10, 11, 12],
+                vec![13],
+            )],
+            params,
+            ti,
+            vec![13],
+        );
+
+        let g2 = ConstantEvaluation.run(g).expect("const-eval succeeds");
+        let bytes = match g2
+            .params
+            .get(&13u32)
+            .expect("materialized scatternd output")
+        {
+            AiParam::Inline { data, .. } => data,
+            _ => panic!("expected inline scatternd output"),
+        };
+        let vals: Vec<i64> = bytes
+            .chunks_exact(8)
+            .map(|c| i64::from_le_bytes(c.try_into().expect("8-byte i64 chunk")))
+            .collect();
+        assert_eq!(vals, vec![1, 11, 22, 4]);
+
+        fs::remove_file(&path).ok();
     }
 }
