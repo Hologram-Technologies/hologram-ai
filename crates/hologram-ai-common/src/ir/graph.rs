@@ -369,7 +369,7 @@ impl AiGraph {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ir::{node::AiNode, op::AiOp, shape::shape_from_concrete};
+    use crate::ir::{node::AiNode, op::AiOp, shape::shape_from_concrete, AiParam};
 
     fn minimal_graph() -> AiGraph {
         let mut ti = HashMap::new();
@@ -420,5 +420,30 @@ mod tests {
         let errs = g.validate();
         assert!(!errs.is_empty());
         assert!(errs[0].message.contains("99"));
+    }
+
+    #[test]
+    fn validate_allows_zero_sized_inline_param() {
+        let mut g = minimal_graph();
+        g.outputs = vec![2];
+        g.tensor_info.insert(
+            2,
+            TensorInfo::new(DType::F32, shape_from_concrete(&[1, 0, 4])),
+        );
+        g.params
+            .insert(2, AiParam::inline(Vec::new(), g.tensor_info[&2].clone()));
+        assert!(g.validate().is_empty());
+    }
+
+    #[test]
+    fn validate_rejects_empty_nonzero_param() {
+        let mut g = minimal_graph();
+        g.outputs = vec![2];
+        g.tensor_info
+            .insert(2, TensorInfo::new(DType::F32, shape_from_concrete(&[4])));
+        g.params
+            .insert(2, AiParam::inline(Vec::new(), g.tensor_info[&2].clone()));
+        let errs = g.validate();
+        assert!(errs.iter().any(|err| err.message.contains("empty data")));
     }
 }

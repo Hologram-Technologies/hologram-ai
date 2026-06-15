@@ -1,6 +1,6 @@
 //! Compile-time constant evaluation pass.
 //!
-//! Evaluates any node whose inputs are ALL materialized constants (AiParam::Inline),
+//! Evaluates any node whose inputs are ALL materialized constants,
 //! with proper N-D broadcasting support. This eliminates entire constant subgraphs
 //! (causal masks, position embeddings, comparison matrices) that the runtime cannot
 //! handle due to lack of N-D broadcast support.
@@ -45,7 +45,7 @@ impl Pass for ConstantEvaluation {
                 None => continue,
             };
 
-            let node = &graph.nodes[idx];
+            let node = graph.nodes[idx].clone();
             if node.outputs.is_empty() {
                 continue;
             }
@@ -71,7 +71,12 @@ impl Pass for ConstantEvaluation {
                 continue;
             }
 
-            // Check if ALL inputs are inline constants.
+            if materialize_zero_sized_outputs(&mut graph, &node) {
+                materialized += node.outputs.len() as u32;
+                continue;
+            }
+
+            // Check if ALL inputs are materialized constants.
             let Some(materialized_inputs) = node
                 .inputs
                 .iter()
@@ -117,10 +122,7 @@ impl Pass for ConstantEvaluation {
             if let Some((result_bytes, result_dtype, result_shape)) =
                 eval_node(&node.op, &inputs, &input_shapes)
             {
-                // Skip empty results: a 0-element tensor means a dynamic dim
-                // was substituted with 0 (e.g. seq_len sentinel). Materializing
-                // it as an empty constant would fail validation.
-                if result_shape.contains(&0) || result_bytes.is_empty() {
+                if result_bytes.is_empty() && !result_shape.contains(&0) {
                     continue;
                 }
 
@@ -167,6 +169,31 @@ fn load_const_eval_param(param: &AiParam) -> Option<(Cow<'_, [u8]>, TensorInfo)>
         }
         AiParam::Mmap { .. } => None,
     }
+}
+
+fn materialize_zero_sized_outputs(graph: &mut AiGraph, node: &crate::ir::AiNode) -> bool {
+    if node.outputs.is_empty() {
+        return false;
+    }
+    let Some(output_infos) = node
+        .outputs
+        .iter()
+        .map(|tid| graph.tensor_info.get(tid).cloned())
+        .collect::<Option<Vec<_>>>()
+    else {
+        return false;
+    };
+    if !output_infos.iter().all(tensor_is_zero_sized) {
+        return false;
+    }
+    for (tid, info) in node.outputs.iter().copied().zip(output_infos) {
+        graph.params.insert(tid, AiParam::inline(Vec::new(), info));
+    }
+    true
+}
+
+fn tensor_is_zero_sized(info: &TensorInfo) -> bool {
+    info.shape.iter().any(|dim| dim.as_concrete() == Some(0))
 }
 
 /// Evaluate an `AiOp::Shape` node when the input has a fully-concrete shape.
@@ -734,5 +761,41 @@ mod tests {
         assert_eq!(vals, vec![1, 11, 22, 4]);
 
         fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn test_const_eval_materializes_zero_sized_dynamic_scatter_nd() {
+        let mut ti = HashMap::new();
+        ti.insert(10u32, make_ti(DType::INT64, &[1, 1, 64, 0]));
+        ti.insert(11u32, make_ti(DType::INT64, &[1, 1, 64, 0, 4]));
+        ti.insert(12u32, make_ti(DType::F32, &[1, 1, 64, 0]));
+        ti.insert(13u32, make_ti(DType::INT64, &[1, 1, 64, 0]));
+
+        let g = make_graph_with_params(
+            vec![AiNode::new(
+                0,
+                AiOp::ScatterND {
+                    reduce: crate::ir::op::ScatterReduce::None,
+                },
+                vec![10, 11, 12],
+                vec![13],
+            )],
+            HashMap::new(),
+            ti,
+            vec![13],
+        );
+
+        let g2 = ConstantEvaluation.run(g).expect("const-eval succeeds");
+        match g2
+            .params
+            .get(&13u32)
+            .expect("zero-sized output materialized")
+        {
+            AiParam::Inline { data, info } => {
+                assert!(data.is_empty());
+                assert_eq!(concrete_shape(&info.shape), Some(vec![1, 1, 64, 0]));
+            }
+            _ => panic!("expected inline zero-sized output"),
+        }
     }
 }
