@@ -26,6 +26,8 @@ pub mod archive;
 mod bpe;
 mod config;
 mod native;
+#[cfg(feature = "std")]
+mod tokenizer_json;
 mod unigram;
 mod vocab;
 mod wordpiece;

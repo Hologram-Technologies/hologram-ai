@@ -306,6 +306,10 @@ pub(crate) fn infer_output_dtypes(
                 Some(vec![DType::INT64; num_outputs])
             }
             AiOp::Cast { to, .. } => Some(vec![*to; num_outputs]),
+            AiOp::Where => {
+                let dt = inputs.get(1).or_else(|| inputs.get(2)).copied()?;
+                Some(vec![dt; num_outputs])
+            }
             // TopK: output[0]=values (input dtype), output[1]=indices (INT64).
             AiOp::TopK { .. } => {
                 let dt = *inputs.first()?;

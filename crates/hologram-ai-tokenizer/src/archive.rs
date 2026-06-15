@@ -3,6 +3,7 @@
 //! Packs vocabulary, merge rules, and scores into an rkyv-serialized
 //! section for zero-copy access from memory-mapped archives.
 
+use crate::tokenizer_json::infer_model_type;
 use anyhow::Context;
 use hologram_ai_common::exec_context::{Section, SECTION_CUSTOM_BASE};
 use std::collections::HashMap;
@@ -58,7 +59,7 @@ impl TokenizerSectionData {
             serde_json::from_str(&data).context("parsing tokenizer JSON")?;
 
         let model = &json["model"];
-        let model_type = model["type"].as_str().unwrap_or("BPE");
+        let model_type = infer_model_type(model)?;
 
         // Extract vocab as ordered Vec<String> indexed by token ID.
         let vocab: Vec<String> = match model_type {

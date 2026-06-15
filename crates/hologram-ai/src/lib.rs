@@ -15,6 +15,7 @@ pub mod compiler;
 pub mod download;
 pub mod engine;
 pub mod runner;
+pub mod stats;
 pub mod validate;
 
 // Flat re-exports.
