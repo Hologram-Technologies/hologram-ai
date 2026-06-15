@@ -268,6 +268,7 @@ pub fn generate(
         max_tokens: opts.max_tokens.unwrap_or(64),
         temperature: opts.temperature.unwrap_or(0.0),
         top_k: opts.top_k,
+        decode_top_k: None,
         stop: opts.stop,
         eos: opts.eos,
         seed: opts.seed.unwrap_or(0x9E3779B97F4A7C15),

@@ -270,6 +270,9 @@ fn eval_node(
             steps,
         } => eval_slice(inputs, input_shapes, axes, starts, ends, steps),
         AiOp::Concat { axis } => eval_concat(inputs, input_shapes, *axis),
+        AiOp::ScatterND {
+            reduce: crate::ir::op::ScatterReduce::None,
+        } => eval_scatter_nd(inputs, input_shapes),
         AiOp::Identity => eval_identity(inputs, input_shapes),
 
         _ => None,
@@ -513,5 +516,100 @@ mod tests {
             _ => panic!("expected inline gather output"),
         };
         assert_eq!(bytes.len(), 8 * 4);
+    }
+
+    #[test]
+    fn test_eval_scatter_nd_updates_scalar_elements() {
+        let data_bytes: Vec<u8> = [10i64, 20, 30, 40]
+            .iter()
+            .flat_map(|v| v.to_le_bytes())
+            .collect();
+        let indices_bytes: Vec<u8> = [0i64, 1, 1, 0]
+            .iter()
+            .flat_map(|v| v.to_le_bytes())
+            .collect();
+        let updates_bytes: Vec<u8> = [99i64, 77].iter().flat_map(|v| v.to_le_bytes()).collect();
+
+        let data_info = make_ti(DType::INT64, &[2, 2]);
+        let indices_info = make_ti(DType::INT64, &[2, 2]);
+        let updates_info = make_ti(DType::INT64, &[2]);
+        let inputs = vec![
+            (data_bytes.as_slice(), &data_info),
+            (indices_bytes.as_slice(), &indices_info),
+            (updates_bytes.as_slice(), &updates_info),
+        ];
+        let shapes = vec![vec![2, 2], vec![2, 2], vec![2]];
+
+        let (result, dtype, shape) = eval_scatter_nd(&inputs, &shapes).expect("scatternd eval");
+        assert_eq!(dtype, DType::INT64);
+        assert_eq!(shape, vec![2, 2]);
+
+        let vals: Vec<i64> = result
+            .chunks_exact(8)
+            .map(|c| i64::from_le_bytes(c.try_into().expect("8-byte i64 chunk")))
+            .collect();
+        assert_eq!(vals, vec![10, 99, 77, 40]);
+    }
+
+    #[test]
+    fn test_const_eval_pass_materializes_scatter_nd() {
+        let data_bytes: Vec<u8> = [1i64, 2, 3, 4]
+            .iter()
+            .flat_map(|v| v.to_le_bytes())
+            .collect();
+        let indices_bytes: Vec<u8> = [0i64, 1, 1, 0]
+            .iter()
+            .flat_map(|v| v.to_le_bytes())
+            .collect();
+        let updates_bytes: Vec<u8> = [11i64, 22].iter().flat_map(|v| v.to_le_bytes()).collect();
+
+        let mut params = HashMap::new();
+        params.insert(
+            10u32,
+            AiParam::inline(data_bytes, make_ti(DType::INT64, &[2, 2])),
+        );
+        params.insert(
+            11u32,
+            AiParam::inline(indices_bytes, make_ti(DType::INT64, &[2, 2])),
+        );
+        params.insert(
+            12u32,
+            AiParam::inline(updates_bytes, make_ti(DType::INT64, &[2])),
+        );
+
+        let mut ti = HashMap::new();
+        ti.insert(10u32, make_ti(DType::INT64, &[2, 2]));
+        ti.insert(11u32, make_ti(DType::INT64, &[2, 2]));
+        ti.insert(12u32, make_ti(DType::INT64, &[2]));
+        ti.insert(13u32, make_ti(DType::INT64, &[2, 2]));
+
+        let g = make_graph_with_params(
+            vec![AiNode::new(
+                0,
+                AiOp::ScatterND {
+                    reduce: crate::ir::op::ScatterReduce::None,
+                },
+                vec![10, 11, 12],
+                vec![13],
+            )],
+            params,
+            ti,
+            vec![13],
+        );
+
+        let g2 = ConstantEvaluation.run(g).expect("const-eval succeeds");
+        let bytes = match g2
+            .params
+            .get(&13u32)
+            .expect("materialized scatternd output")
+        {
+            AiParam::Inline { data, .. } => data,
+            _ => panic!("expected inline scatternd output"),
+        };
+        let vals: Vec<i64> = bytes
+            .chunks_exact(8)
+            .map(|c| i64::from_le_bytes(c.try_into().expect("8-byte i64 chunk")))
+            .collect();
+        assert_eq!(vals, vec![1, 11, 22, 4]);
     }
 }
