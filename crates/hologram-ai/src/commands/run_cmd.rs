@@ -74,6 +74,10 @@ pub struct RunArgs {
     /// RNG seed for temperature sampling (reproducibility).
     #[arg(long, default_value_t = 0x9E3779B97F4A7C15)]
     pub seed: u64,
+    /// Suppress the prompt echo on stdout (useful when the caller displays
+    /// the user message separately, e.g. a desktop UI).
+    #[arg(long)]
+    pub no_echo: bool,
 }
 
 /// Execute the `run` subcommand.
@@ -353,8 +357,10 @@ fn generate_cmd(args: RunArgs) -> Result<()> {
     let mut stdout = std::io::stdout();
     // Echo the prompt so a streamed transcript reads coherently, then stream
     // the generated continuation token-by-token from inside generate_stream.
-    print!("{prompt}");
-    stdout.flush().ok();
+    if !args.no_echo {
+        print!("{prompt}");
+        stdout.flush().ok();
+    }
     generate::generate_stream(provider.as_mut(), &tokenizer, &templated, &cfg, &mut stdout)?;
     println!();
     Ok(())

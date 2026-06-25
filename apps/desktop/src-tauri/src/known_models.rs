@@ -66,6 +66,23 @@ pub const CATALOGUE: &[KnownModel] = &[
         chat_turn_separator: Some("</s>\n<|assistant|>\n{response}</s>\n<|user|>\n"),
     },
     KnownModel {
+        id: "smollm2-135m-instruct",
+        hf_id: "onnx-community/SmolLM2-135M-Instruct",
+        display_name: "SmolLM2 135M Instruct",
+        description: "Tiny chat model — fastest inference, good for quick testing.",
+        modality: Modality::TextChat,
+        size: "135M",
+        approx_archive_mb: 200,
+        quantize: "none",
+        prompt_template: Some(
+            "<|im_start|>system\nYou are a helpful AI assistant named SmolLM, trained by Hugging Face<|im_end|>\n<|im_start|>user\n{prompt}<|im_end|>\n<|im_start|>assistant\n",
+        ),
+        stop: &["<|im_end|>"],
+        chat_turn_separator: Some(
+            "<|im_end|>\n<|im_start|>assistant\n{response}<|im_end|>\n<|im_start|>user\n",
+        ),
+    },
+    KnownModel {
         id: "qwen2.5-0.5b-instruct",
         // onnx-community publishes the ONNX export; the official Qwen
         // org repo ships PyTorch/safetensors only. Qwen2 was removed
