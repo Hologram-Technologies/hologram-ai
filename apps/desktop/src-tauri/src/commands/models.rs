@@ -215,6 +215,11 @@ pub async fn compile_known_model(
 }
 
 async fn find_first_onnx(dir: &std::path::Path) -> Option<PathBuf> {
+    // Prefer `model.onnx` (the canonical full-precision export) over
+    // pre-quantized variants like `model_q4.onnx` or `model_int8.onnx` which
+    // use HuggingFace-specific quantized ops that the hologram backend may not
+    // support.
+    let mut fallback: Option<PathBuf> = None;
     let mut stack = vec![dir.to_path_buf()];
     while let Some(d) = stack.pop() {
         let mut rd = match tokio::fs::read_dir(&d).await {
@@ -226,11 +231,17 @@ async fn find_first_onnx(dir: &std::path::Path) -> Option<PathBuf> {
             if p.is_dir() {
                 stack.push(p);
             } else if p.extension().and_then(|e| e.to_str()) == Some("onnx") {
-                return Some(p);
+                let stem = p.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+                if stem == "model" {
+                    return Some(p);
+                }
+                if fallback.is_none() {
+                    fallback = Some(p);
+                }
             }
         }
     }
-    None
+    fallback
 }
 
 #[cfg(test)]

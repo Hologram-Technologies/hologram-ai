@@ -42,19 +42,25 @@ pub async fn generate(
     let bin = paths::hologram_ai_bin().map_err(|e| e.to_string())?;
     let cwd = paths::workspace_root();
 
-    // The tokenizer is baked into the compiled archive (self-describing), so
-    // `run --prompt` needs no tokenizer file; only pass `--tokenizer` when the
-    // request explicitly overrides it.
+    // Pass the model *directory* (parent of the `.holo`) instead of the
+    // archive itself. When the CLI sees a directory it uses the growable
+    // session (window starts at 64 and grows as needed) rather than a fixed
+    // 2048-token window, which is dramatically faster for short prompts.
+    // The directory contains `tokenizer.json` and the ONNX source, so the
+    // CLI auto-discovers everything it needs.
+    let model_path = req
+        .archive
+        .parent()
+        .filter(|p| p.join("tokenizer.json").exists())
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| req.archive.clone());
     let mut args = vec![
         "run".to_string(),
-        req.archive.to_string_lossy().into_owned(),
+        model_path.to_string_lossy().into_owned(),
+        "--no-echo".into(),
         "--prompt".into(),
         req.prompt,
     ];
-    if let Some(tok) = &req.tokenizer {
-        args.push("--tokenizer".into());
-        args.push(tok.to_string_lossy().into_owned());
-    }
     if let Some(t) = &req.prompt_template {
         args.push("--prompt-template".into());
         args.push(t.clone());
