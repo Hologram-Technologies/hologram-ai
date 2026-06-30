@@ -26,3 +26,4 @@ crates/hologram-ai-conformance/fixtures/tinyllama_*.onnx
 apps/*/vite.config.d.ts
 apps/*/vite.config.js
 tests/fixtures/onnx-node/
+.worktrees/
