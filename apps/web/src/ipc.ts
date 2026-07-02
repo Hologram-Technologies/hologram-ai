@@ -224,56 +224,50 @@ export async function downloadKnownModel(id: string): Promise<number> {
   const modelsDir = await root.getDirectoryHandle("models", { create: true });
   const localDir = await modelsDir.getDirectoryHandle(localName, { create: true });
   
-  const candidates = ["onnx/model.onnx", "model.onnx"];
-  let onnxPath = null;
-  for (const c of candidates) {
-    const url = `https://huggingface.co/${model.hfId}/resolve/main/${c}`;
-    emitLine("models://download-line", { stream: "stdout", line: `Checking ${url}...` });
-    try {
-      const res = await fetch(url, { method: 'HEAD' });
-      if (res.ok || res.status === 302) {
-        onnxPath = c;
-        break;
-      }
-    } catch (e) {
-      // ignore
-    }
-  }
-
-  if (!onnxPath) {
+  const infoRes = await fetch(`https://huggingface.co/api/models/${model.hfId}`);
+  if (!infoRes.ok) throw new Error(`Failed to fetch model info: ${infoRes.statusText}`);
+  const info = await infoRes.json();
+  const siblings = info.siblings || [];
+  
+  const onnxFiles = siblings.filter((f: any) => f.rfilename.endsWith('.onnx') || f.rfilename.endsWith('.onnx_data') || f.rfilename.endsWith('.onnx.data'));
+  if (onnxFiles.length === 0) {
     throw new Error(`No ONNX export found in repository. The web version requires pre-exported models.`);
   }
 
-  const files = [
-    { remote: onnxPath, local: "model.onnx", optional: false },
-    { remote: "tokenizer.json", local: "tokenizer.json", optional: true }
-  ];
+  const companionNames = ["tokenizer.json", "config.json", "tokenizer_config.json", "special_tokens_map.json"];
+  const companions = siblings.filter((f: any) => companionNames.includes(f.rfilename.split('/').pop()!));
+
+  const filesToDownload = [...onnxFiles, ...companions];
   
-  for (const file of files) {
-    const url = `https://huggingface.co/${model.hfId}/resolve/main/${file.remote}`;
+  for (const file of filesToDownload) {
+    const url = `https://huggingface.co/${model.hfId}/resolve/main/${file.rfilename}`;
     emitLine("models://download-line", { stream: "stdout", line: `Fetching ${url}...` });
     
     const res = await fetch(url);
     if (!res.ok) {
-      if (file.optional) {
-        emitLine("models://download-line", { stream: "stderr", line: `${file.local} not found, continuing without it.` });
-        continue;
-      }
-      throw new Error(`Failed to fetch ${file.local}: ${res.statusText}`);
+      throw new Error(`Failed to fetch ${file.rfilename}: ${res.statusText}`);
     }
     
-    const fileHandle = await localDir.getFileHandle(file.local, { create: true });
+    // Create subdirectories if necessary (OPFS requires creating directories one by one)
+    const parts = file.rfilename.split('/');
+    const fileName = parts.pop()!;
+    let currentDir = localDir;
+    for (const part of parts) {
+      currentDir = await currentDir.getDirectoryHandle(part, { create: true });
+    }
+
+    const fileHandle = await currentDir.getFileHandle(fileName, { create: true });
     const writable = await fileHandle.createWritable();
     await res.body!.pipeTo(writable);
     
-    emitLine("models://download-line", { stream: "stdout", line: `Saved ${file.local}.` });
+    emitLine("models://download-line", { stream: "stdout", line: `Saved ${file.rfilename}.` });
   }
   
   emitLine("models://download-line", { stream: "stdout", line: `Download complete.` });
   return 0;
 }
 
-export async function compileKnownModel(id: string): Promise<number> {
+export async function compileKnownModel(id: string, specificOnnx?: string): Promise<number> {
   const catalogue = getCatalogue();
   const model = catalogue.find(m => m.id === id);
   if (!model) throw new Error("Unknown model");
@@ -285,7 +279,34 @@ export async function compileKnownModel(id: string): Promise<number> {
   const modelsDir = await root.getDirectoryHandle("models", { create: true });
   const localDir = await modelsDir.getDirectoryHandle(localName);
   
-  const onnxHandle = await localDir.getFileHandle("model.onnx");
+  // Find the .onnx file recursively in localDir
+  async function findOnnx(dir: FileSystemDirectoryHandle): Promise<FileSystemFileHandle | null> {
+    for await (const [name, handle] of (dir as any).entries()) {
+      if (handle.kind === 'file' && name.endsWith('.onnx')) {
+        return handle as FileSystemFileHandle;
+      }
+      if (handle.kind === 'directory') {
+        const found = await findOnnx(handle as FileSystemDirectoryHandle);
+        if (found) return found;
+      }
+    }
+    return null;
+  }
+
+  // Get a specific file handle by path relative to localDir
+  async function getSpecificFile(dir: FileSystemDirectoryHandle, path: string): Promise<FileSystemFileHandle> {
+    const parts = path.split('/');
+    const fileName = parts.pop()!;
+    let currentDir = dir;
+    for (const part of parts) {
+      currentDir = await currentDir.getDirectoryHandle(part);
+    }
+    return await currentDir.getFileHandle(fileName);
+  }
+  
+  const onnxHandle = specificOnnx ? await getSpecificFile(localDir, specificOnnx) : await findOnnx(localDir);
+  if (!onnxHandle) throw new Error(`Could not find .onnx file in downloaded model (${specificOnnx || "any"})`);
+  
   const onnxFile = await onnxHandle.getFile();
   const onnxBytes = new Uint8Array(await onnxFile.arrayBuffer());
   
