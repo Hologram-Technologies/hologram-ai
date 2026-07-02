@@ -23,11 +23,8 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  deploy:
+  build:
     runs-on: ubuntu-latest
-    environment:
-      name: github-pages
-      url: https://hologram-technologies.github.io/hologram-ai/
     steps:
       - uses: actions/checkout@v4
 
@@ -46,10 +43,20 @@ jobs:
           app-token: ${{ steps.app-token.outputs.token }}
           out-dir: _site
 
-      - name: Deploy to the gh-pages root (production)
-        uses: JamesIves/github-pages-deploy-action@v4
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
         with:
-          folder: _site
-          branch: gh-pages
-          clean: true
-          commit-message: "deploy: web GUI → gh-pages root (${{ github.sha }})"
+          path: './_site'
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
