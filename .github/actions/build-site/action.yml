@@ -17,9 +17,7 @@ runs:
       run: |
         git config --global url."https://x-access-token:${{ inputs.app-token }}@github.com/Hologram-Technologies/".insteadOf "https://github.com/Hologram-Technologies/"
     - name: Install protoc
-      uses: arduino/setup-protoc@v3
-      with:
-        repo-token: ${{ github.token }}
+      run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
     - name: Rust toolchain + wasm target
       shell: bash
       run: |
