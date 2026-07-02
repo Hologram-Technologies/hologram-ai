@@ -17,6 +17,7 @@ runs:
       run: |
         git config --global url."https://x-access-token:${{ inputs.app-token }}@github.com/Hologram-Technologies/".insteadOf "https://github.com/Hologram-Technologies/"
     - name: Install protoc
+      shell: bash
       run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
     - name: Rust toolchain + wasm target
       shell: bash
@@ -41,7 +42,6 @@ runs:
         npm_config_verify_deps_before_run: "false"
       run: |
         pnpm install --no-frozen-lockfile
-        pnpm rebuild esbuild
         pnpm exec tsc -b
         pnpm exec vite build
     - name: Move artifacts
