@@ -1079,7 +1079,10 @@ fn norm_projection_fusion_rewrite(
     }
 
     let all_f32 = matmul_consumers.iter().all(|&(_, weight_tid, _)| {
-        graph.tensor_info.get(&weight_tid).is_some_and(|info| info.storage_dtype == DType::F32)
+        graph
+            .tensor_info
+            .get(&weight_tid)
+            .is_some_and(|info| info.storage_dtype == DType::F32)
     });
     if !all_f32 {
         return None;
@@ -1118,13 +1121,23 @@ pub fn norm_projection_rule() -> RuleSet {
     let rule_rms = Rule {
         name: "norm_projection_rms",
         witness: "real_model_generation::smollm2 (EE-3 ORT logit parity, ADR-0018)",
-        pattern: Pattern::op(OpMatcher::Exact(crate::rules::AiOpDiscriminant::RmsNorm), vec![Pattern::Var(super::VarId(1)), Pattern::Var(super::VarId(2))]),
+        pattern: Pattern::op(
+            OpMatcher::Exact(crate::rules::AiOpDiscriminant::RmsNorm),
+            vec![Pattern::Var(super::VarId(1)), Pattern::Var(super::VarId(2))],
+        ),
         replacement: Replacement::custom(norm_projection_fusion_rewrite),
     };
     let rule_fused = Rule {
         name: "norm_projection_fused",
         witness: "real_model_generation::smollm2 (EE-3 ORT logit parity, ADR-0018)",
-        pattern: Pattern::op(OpMatcher::Exact(crate::rules::AiOpDiscriminant::FusedLayerNormResidual), vec![Pattern::Var(super::VarId(1)), Pattern::Var(super::VarId(2)), Pattern::Var(super::VarId(3))]),
+        pattern: Pattern::op(
+            OpMatcher::Exact(crate::rules::AiOpDiscriminant::FusedLayerNormResidual),
+            vec![
+                Pattern::Var(super::VarId(1)),
+                Pattern::Var(super::VarId(2)),
+                Pattern::Var(super::VarId(3)),
+            ],
+        ),
         replacement: Replacement::custom(norm_projection_fusion_rewrite),
     };
     RuleSet::new().with_rule(rule_rms).with_rule(rule_fused)

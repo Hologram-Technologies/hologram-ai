@@ -30,15 +30,15 @@ impl OptPipeline {
             const_dedup::ConstantDeduplication, const_eval::ConstantEvaluation,
             constant_fold::ConstantFolding, data_prop::DataPropagation,
             dead_node::DeadNodeElimination, decompose::OpDecomposition,
-            resolve_slice_params::ResolveSliceParams,
-            semantic_prop::SemanticPropagation, shape_prop::ShapePropagation,
+            resolve_slice_params::ResolveSliceParams, semantic_prop::SemanticPropagation,
+            shape_prop::ShapePropagation,
         };
         use crate::rules::{
             pattern_rules::{
                 add_rmsnorm_rules, attention_fusion_rules, kv_slot_injection_rules,
-                layernorm_rules, matmul_activation_rules, norm_projection_rule, position_ids_rules, rmsnorm_rules,
-                scalar_absorption_rules, slice_to_gather_rules, swiglu_projection_rules,
-                swiglu_rules,
+                layernorm_rules, matmul_activation_rules, norm_projection_rule, position_ids_rules,
+                rmsnorm_rules, scalar_absorption_rules, slice_to_gather_rules,
+                swiglu_projection_rules, swiglu_rules,
             },
             RulePass,
         };
