@@ -13,7 +13,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
   pages: write
   id-token: write
 
@@ -23,14 +23,14 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  build:
+  deploy:
     runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: https://hologram-technologies.github.io/hologram-ai/
     steps:
       - uses: actions/checkout@v4
 
-      # hologram-* crates are git deps on a private repo. CI generates an
-      # App token scoped to that repo and configures git's `insteadOf` so
-      # cargo's `git-fetch-with-cli` picks it up. No sibling clone.
       - name: Generate GitHub App token (hologram read access)
         id: app-token
         uses: actions/create-github-app-token@v1
@@ -46,16 +46,10 @@ jobs:
           app-token: ${{ steps.app-token.outputs.token }}
           out-dir: _site
 
-      - uses: actions/configure-pages@v5
-      - uses: actions/upload-pages-artifact@v3
-        with: { path: _site }
-
-  deploy:
-    needs: build
-    runs-on: ubuntu-latest
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
-    steps:
-      - id: deployment
-        uses: actions/deploy-pages@v4
+      - name: Deploy to the gh-pages root (production)
+        uses: JamesIves/github-pages-deploy-action@v4
+        with:
+          folder: _site
+          branch: gh-pages
+          clean: true
+          commit-message: "deploy: web GUI → gh-pages root (${{ github.sha }})"
