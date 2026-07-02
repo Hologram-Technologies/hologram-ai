@@ -17,7 +17,7 @@ export function Models() {
   const [models, setModels] = useState<KnownModelStatus[]>([]);
   const [busy, setBusy] = useState<Busy>(null);
   const [tail, setTail] = useState<string[]>([]);
-  const [customRepo, setCustomRepo] = useState("");
+
 
 
   async function refresh() {
@@ -67,12 +67,35 @@ export function Models() {
     }
   }
 
-  async function onAddCustom() {
-    if (!customRepo.trim()) return;
+  const [searchQuery, setSearchQuery] = useState("");
+  const [searchResults, setSearchResults] = useState<any[]>([]);
+  const [isSearching, setIsSearching] = useState(false);
+
+  async function onSearch() {
+    if (!searchQuery.trim()) return;
+    setIsSearching(true);
+    setTail([]);
     try {
-      await addCustomModel(customRepo.trim());
-      setCustomRepo("");
+      // Query HuggingFace catalog for ONNX models matching the query
+      const url = `https://huggingface.co/api/models?search=${encodeURIComponent(searchQuery.trim())}&sort=downloads&direction=-1&limit=10`;
+      const res = await fetch(url);
+      if (!res.ok) throw new Error(`Search failed: ${res.statusText}`);
+      const data = await res.json();
+      setSearchResults(data);
+    } catch (e) {
+      setTail((t) => [...t, `error: ${String(e)}`]);
+    } finally {
+      setIsSearching(false);
+    }
+  }
+
+  async function onAddAndDownload(hfId: string) {
+    try {
+      await addCustomModel(hfId);
       await refresh();
+      // Use the local ID (which is the trailing part of hfId) to download
+      const id = hfId.split("/").pop()?.toLowerCase() || hfId.toLowerCase();
+      await onDownload(id);
     } catch (e) {
       setTail((t) => [...t, `error: ${String(e)}`]);
     }
@@ -118,23 +141,45 @@ export function Models() {
       </div>
       <div className="page-body">
         <p style={{ color: "var(--fg-dim)", marginTop: 0, fontSize: 13 }}>
-          Curated list of models verified to work end-to-end. Each entry
-          downloads from HuggingFace into{" "}
-          <code>{paths?.modelsDir ?? "models/"}</code> and compiles to a{" "}
-          <code>.holo</code> archive.
+          Discover and download models via the HuggingFace Catalog API.
+          Models are stored in <code>{paths?.modelsDir ?? "models/"}</code> and compiled to a{" "}
+          <code>.holo</code> archive for WebAssembly execution.
         </p>
 
         <div style={{ marginBottom: 16, display: "flex", gap: 8 }}>
           <input
             type="text"
-            placeholder="Custom HF repo (e.g. org/model)"
-            value={customRepo}
-            onChange={(e) => setCustomRepo(e.target.value)}
+            placeholder="Search HuggingFace (e.g. llama, qwen, phi)"
+            value={searchQuery}
+            onChange={(e) => setSearchQuery(e.target.value)}
+            onKeyDown={(e) => e.key === "Enter" && onSearch()}
             style={{ flex: 1, padding: "6px 8px" }}
           />
-          <button onClick={onAddCustom} disabled={!customRepo.trim()}>Add Custom</button>
+          <button onClick={onSearch} disabled={!searchQuery.trim() || isSearching}>
+            {isSearching ? "Searching..." : "Search Catalog"}
+          </button>
         </div>
 
+        {searchResults.length > 0 && (
+          <div className="list" style={{ marginBottom: 32, border: "1px dashed var(--border)", background: "rgba(0,0,0,0.1)" }}>
+            <div style={{ padding: "8px 12px", borderBottom: "1px solid var(--border)", fontSize: 12, fontWeight: "bold", color: "var(--fg-dim)" }}>
+              Search Results (Top 10)
+            </div>
+            {searchResults.map((r) => (
+              <div className="list-item" key={r.id} style={{ alignItems: "center" }}>
+                <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                  <strong>{r.id}</strong>
+                  <div className="meta">Downloads: {r.downloads} · Tags: {(r.tags || []).slice(0, 5).join(", ")}</div>
+                </div>
+                <button onClick={() => onAddAndDownload(r.id)} disabled={busy !== null}>
+                  Add & Download
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
+
+        <h2 style={{ fontSize: 16, marginTop: 32, marginBottom: 16 }}>My Models</h2>
         <div className="list">
           {models.map((m) => (
             <div
