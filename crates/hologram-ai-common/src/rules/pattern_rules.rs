@@ -998,3 +998,134 @@ pub fn attention_fusion_rule() -> Rule {
 pub fn attention_fusion_rules() -> RuleSet {
     RuleSet::new().with_rule(attention_fusion_rule())
 }
+
+// ── NormProjectionFusion: [Add +] RmsNorm → 2+ MatMul (multi-way projection)
+
+fn get_2d_shape(graph: &crate::ir::AiGraph, tid: crate::ir::TensorId) -> Option<(usize, usize)> {
+    use crate::ir::Dim;
+    let info = graph.tensor_info.get(&tid)?;
+    let dims: Vec<usize> = info
+        .shape
+        .iter()
+        .filter_map(|d| match d {
+            Dim::Concrete(n) => Some(*n as usize),
+            _ => None,
+        })
+        .collect();
+    if dims.len() == 2 {
+        Some((dims[0], dims[1]))
+    } else {
+        None
+    }
+}
+
+fn norm_projection_fusion_rewrite(
+    graph: &mut crate::ir::AiGraph,
+    _binds: &std::collections::HashMap<super::VarId, crate::ir::TensorId>,
+    root_idx: usize,
+) -> Option<crate::ir::AiNode> {
+    use crate::ir::{AiNode, AiOp, DType, TensorId};
+    use crate::opt::graph_utils::build_consumer_map;
+
+    let (epsilon, has_residual_add) = match &graph.nodes.get(root_idx)?.op {
+        AiOp::RmsNorm { epsilon } => (*epsilon as f64, false),
+        AiOp::FusedLayerNormResidual { epsilon } => (*epsilon as f64, true),
+        _ => return None,
+    };
+
+    let norm_out = *graph.nodes.get(root_idx)?.outputs.first()?;
+    let root_inputs = graph.nodes.get(root_idx)?.inputs.clone();
+    let root_id = graph.nodes.get(root_idx)?.id;
+    let consumers = build_consumer_map(graph);
+    let norm_consumers = consumers.get(&norm_out)?;
+
+    let mut matmul_consumers: Vec<(usize, TensorId, TensorId)> = Vec::new();
+    for &(c_idx, input_pos) in norm_consumers {
+        if input_pos != 0 {
+            return None;
+        }
+        let cnode = &graph.nodes[c_idx];
+        if !matches!(cnode.op, AiOp::MatMul) || cnode.inputs.len() < 2 {
+            return None;
+        }
+        let weight_tid = cnode.inputs[1];
+        let out_tid = *cnode.outputs.first()?;
+        matmul_consumers.push((c_idx, weight_tid, out_tid));
+    }
+
+    if matmul_consumers.len() < 2 {
+        return None;
+    }
+    if norm_consumers.len() != matmul_consumers.len() {
+        return None;
+    }
+
+    let mut weight_infos: Vec<(TensorId, usize, usize)> = Vec::new();
+    for &(_, weight_tid, _) in &matmul_consumers {
+        if !graph.params.contains_key(&weight_tid) {
+            return None;
+        }
+        match get_2d_shape(graph, weight_tid) {
+            Some((k, n)) if k >= 256 && n >= 64 => {
+                weight_infos.push((weight_tid, k, n));
+            }
+            _ => return None,
+        }
+    }
+
+    let k = weight_infos[0].1;
+    if !weight_infos.iter().all(|w| w.1 == k) {
+        return None;
+    }
+
+    let all_f32 = matmul_consumers.iter().all(|&(_, weight_tid, _)| {
+        graph.tensor_info.get(&weight_tid).is_some_and(|info| info.storage_dtype == DType::F32)
+    });
+    if !all_f32 {
+        return None;
+    }
+
+    let split_sizes: Vec<usize> = weight_infos.iter().map(|w| w.2).collect();
+
+    let mut fused_inputs = if has_residual_add {
+        vec![root_inputs[0], root_inputs[1], root_inputs[2]]
+    } else {
+        vec![root_inputs[0], root_inputs[1]]
+    };
+    for &(_, weight_tid, _) in &matmul_consumers {
+        fused_inputs.push(weight_tid);
+    }
+
+    let fused_outputs: Vec<TensorId> = matmul_consumers.iter().map(|&(_, _, out)| out).collect();
+
+    for &(mm_idx, _, _) in &matmul_consumers {
+        graph.nodes[mm_idx].outputs.clear();
+    }
+
+    Some(AiNode::new(
+        root_id,
+        AiOp::FusedNormProjection {
+            epsilon,
+            split_sizes,
+            has_residual_add,
+        },
+        fused_inputs,
+        fused_outputs,
+    ))
+}
+
+pub fn norm_projection_rule() -> RuleSet {
+    let rule_rms = Rule {
+        name: "norm_projection_rms",
+        witness: "real_model_generation::smollm2 (EE-3 ORT logit parity, ADR-0018)",
+        pattern: Pattern::op(OpMatcher::Exact(crate::rules::AiOpDiscriminant::RmsNorm), vec![Pattern::Var(super::VarId(1)), Pattern::Var(super::VarId(2))]),
+        replacement: Replacement::custom(norm_projection_fusion_rewrite),
+    };
+    let rule_fused = Rule {
+        name: "norm_projection_fused",
+        witness: "real_model_generation::smollm2 (EE-3 ORT logit parity, ADR-0018)",
+        pattern: Pattern::op(OpMatcher::Exact(crate::rules::AiOpDiscriminant::FusedLayerNormResidual), vec![Pattern::Var(super::VarId(1)), Pattern::Var(super::VarId(2)), Pattern::Var(super::VarId(3))]),
+        replacement: Replacement::custom(norm_projection_fusion_rewrite),
+    };
+    RuleSet::new().with_rule(rule_rms).with_rule(rule_fused)
+}

@@ -30,14 +30,13 @@ impl OptPipeline {
             const_dedup::ConstantDeduplication, const_eval::ConstantEvaluation,
             constant_fold::ConstantFolding, data_prop::DataPropagation,
             dead_node::DeadNodeElimination, decompose::OpDecomposition,
-            norm_projection_fusion::NormProjectionFusion, resolve_slice_params::ResolveSliceParams,
+            resolve_slice_params::ResolveSliceParams,
             semantic_prop::SemanticPropagation, shape_prop::ShapePropagation,
-            shared_input_projection_fusion::SharedInputProjectionFusion,
         };
         use crate::rules::{
             pattern_rules::{
                 add_rmsnorm_rules, attention_fusion_rules, kv_slot_injection_rules,
-                layernorm_rules, matmul_activation_rules, position_ids_rules, rmsnorm_rules,
+                layernorm_rules, matmul_activation_rules, norm_projection_rule, position_ids_rules, rmsnorm_rules,
                 scalar_absorption_rules, slice_to_gather_rules, swiglu_projection_rules,
                 swiglu_rules,
             },
@@ -121,7 +120,10 @@ impl OptPipeline {
             // Fuse [Add+]RmsNorm → multi-way MatMul projection.
             // Lowered as MultiOutput: 1 norm node + N MatMul nodes sharing
             // the norm output. No weight concatenation — original params reused.
-            Box::new(NormProjectionFusion),
+            Box::new(RulePass::new(
+                "NormProjectionFusion",
+                norm_projection_rule(),
+            )),
             // Fuse FusedSwiGLU → MatMul (down projection) → FusedSwiGluProjection.
             // ADR-0018 declarative rule.
             Box::new(RulePass::new(
@@ -131,7 +133,8 @@ impl OptPipeline {
             // Fuse shared-input MatMul projections:
             // QKV: 3 MatMuls → 1 MatMul + 3 Slices (saves 44 BLAS calls)
             // Gate+Up: 2 MatMuls → 1 MatMul + 2 Slices (saves 22 BLAS calls)
-            Box::new(SharedInputProjectionFusion),
+            // Currently disabled via returning Ok(graph) in the original pass,
+            // so we omit it here in the declarative rewrite.
             // Replace Range(0, seq, 1) position generators with a position_ids
             // input. ADR-0018 declarative rule via `Replacement::custom`:
             // the rewrite verifies start==0 + step==1, allocates (or reuses)

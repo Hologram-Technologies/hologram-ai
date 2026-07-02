@@ -309,10 +309,10 @@ fn ffn_block_swiglu_projection_fusion() {
     // SwiGluFusion is the ADR-0018 declarative rule set (RulePass over
     // `pattern_rules::swiglu_rules()`); the others are still imperative
     // passes pending their own rule-set port.
-    use hologram_ai_common::opt::{norm_projection_fusion::NormProjectionFusion, pipeline::Pass};
+    use hologram_ai_common::opt::pipeline::Pass;
+    use hologram_ai_common::rules::{pattern_rules::norm_projection_rule, RulePass};
     use hologram_ai_common::rules::{
         pattern_rules::{rmsnorm_rules, swiglu_projection_rules, swiglu_rules},
-        RulePass,
     };
 
     let g = RulePass::new("RmsNormFusion", rmsnorm_rules())
@@ -321,10 +321,13 @@ fn ffn_block_swiglu_projection_fusion() {
     let g = RulePass::new("SwiGluFusion", swiglu_rules())
         .run(g)
         .expect("SwiGluFusion");
-    let g = NormProjectionFusion.run(g).expect("NormProjectionFusion");
+    let g = RulePass::new("NormProjectionFusion", norm_projection_rule()).run(g).expect("NormProjectionFusion");
     let g = RulePass::new("SwiGluProjectionFusion", swiglu_projection_rules())
         .run(g)
         .expect("SwiGluProjectionFusion");
+    
+    use hologram_ai_common::opt::dead_node::DeadNodeElimination;
+    let g = DeadNodeElimination.run(g).expect("DeadNodeElimination");
 
     let after_nodes = g.nodes.len();
     let after_counts = op_counts(&g);
@@ -469,10 +472,10 @@ fn multi_layer_ffn_fusion_scaling() {
     g.outputs = vec![current_hidden];
     let before_nodes = g.nodes.len();
 
-    use hologram_ai_common::opt::{norm_projection_fusion::NormProjectionFusion, pipeline::Pass};
+    use hologram_ai_common::opt::pipeline::Pass;
+    use hologram_ai_common::rules::{pattern_rules::norm_projection_rule, RulePass};
     use hologram_ai_common::rules::{
         pattern_rules::{rmsnorm_rules, swiglu_projection_rules, swiglu_rules},
-        RulePass,
     };
 
     let g = RulePass::new("RmsNormFusion", rmsnorm_rules())
@@ -481,10 +484,11 @@ fn multi_layer_ffn_fusion_scaling() {
     let g = RulePass::new("SwiGluFusion", swiglu_rules())
         .run(g)
         .expect("SwiGluFusion");
-    let g = NormProjectionFusion.run(g).expect("NormProjectionFusion");
+    let g = RulePass::new("NormProjectionFusion", norm_projection_rule()).run(g).expect("NormProjectionFusion");
     let g = RulePass::new("SwiGluProjectionFusion", swiglu_projection_rules())
         .run(g)
         .expect("SwiGluProjectionFusion");
+    let g = hologram_ai_common::opt::dead_node::DeadNodeElimination.run(g).expect("DeadNodeElimination");
 
     let after_nodes = g.nodes.len();
     let after_counts = op_counts(&g);
