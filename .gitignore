@@ -29,3 +29,4 @@ tests/fixtures/onnx-node/
 .worktrees/
 node_modules/
 dist/
+apps/web/src/wasm/
