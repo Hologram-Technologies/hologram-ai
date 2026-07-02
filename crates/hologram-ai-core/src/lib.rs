@@ -73,7 +73,7 @@ mod tests {
     fn prompt_submitted_event() -> AiEvent {
         AiEvent::PromptSubmitted {
             event_kappa: kappa("blake3:event-prompt"),
-            request: request(),
+            request: Box::new(request()),
         }
     }
 
@@ -141,7 +141,7 @@ mod tests {
             prompt_submitted_event(),
             AiEvent::InferenceCompleted {
                 event_kappa: kappa("blake3:event-complete"),
-                output: completed_output(),
+                output: Box::new(completed_output()),
             },
         ];
         let view = reduce(&events);
@@ -194,7 +194,7 @@ mod tests {
             },
             AiEvent::InferenceCompleted {
                 event_kappa: kappa("blake3:event-complete"),
-                output: completed_output(),
+                output: Box::new(completed_output()),
             },
         ];
         let view = reduce(&events);

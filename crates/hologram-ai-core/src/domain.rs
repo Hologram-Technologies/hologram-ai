@@ -9,7 +9,7 @@ pub struct Kappa(pub holospaces::Kappa);
 
 impl Serialize for Kappa {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        serializer.serialize_str(&self.0.to_string())
+        serializer.serialize_str(self.0.as_ref())
     }
 }
 
@@ -171,7 +171,7 @@ pub enum AiEvent {
         /// Event κ-label.
         event_kappa: Kappa,
         /// Request to enqueue.
-        request: InferenceRequest,
+        request: Box<InferenceRequest>,
     },
     /// Records that a worker has started executing a request.
     InferenceStarted {
@@ -191,7 +191,7 @@ pub enum AiEvent {
         /// Event κ-label.
         event_kappa: Kappa,
         /// Completed output payload.
-        output: InferenceOutput,
+        output: Box<InferenceOutput>,
     },
     /// Records a failed inference attempt.
     InferenceFailed {
