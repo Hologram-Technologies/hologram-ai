@@ -121,18 +121,18 @@ mod fetch_helper;
 #[cfg(feature = "conformance")]
 #[when(expr = "the safetensors metadata is fetched and streamed to the holographic compiler")]
 async fn when_safetensors_fetched_and_streamed(w: &mut HologramWorld) {
-    let (config_json, keys, kappas, shapes, dtypes) = fetch_helper::fetch_authoritative_metadata(&w.model_name).await;
+    let (config_json, keys, kappas, shapes, dtypes) =
+        fetch_helper::fetch_authoritative_metadata(&w.model_name).await;
 
     let compiler = hologram_ai::compiler::ModelCompiler::default();
-    let archive = compiler
-        .compile(hologram_ai::compiler::ModelSource::SafetensorsStreamed {
-            config_json,
-            keys,
-            kappas,
-            shapes,
-            dtypes,
-        });
-        
+    let archive = compiler.compile(hologram_ai::compiler::ModelSource::SafetensorsStreamed {
+        config_json,
+        keys,
+        kappas,
+        shapes,
+        dtypes,
+    });
+
     let archive = match archive {
         Ok(a) => a,
         Err(e) => panic!("compile failed: {:?}", e),

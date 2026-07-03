@@ -71,7 +71,6 @@ pub fn build_parametric_graph(config: &Value, safetensors_shards: &[&[u8]]) -> R
     Ok(graph)
 }
 
-
 fn add_linear_layer(
     builder: &mut GraphBuilder,
     input: hologram_ai_common::ir::node::TensorId,
@@ -253,25 +252,52 @@ pub fn build_parametric_graph_from_keys(config: &Value, keys: &[String]) -> Resu
                 vec![total_out.clone(), hidden.clone()],
             );
 
-            let q_weight = builder.add_tensor(&format!("q_weight_{l}"), DType::F32, vec![q_out_var.clone(), hidden.clone()]);
-            let k_weight = builder.add_tensor(&format!("k_weight_{l}"), DType::F32, vec![k_out_var.clone(), hidden.clone()]);
-            let v_weight = builder.add_tensor(&format!("v_weight_{l}"), DType::F32, vec![v_out_var.clone(), hidden.clone()]);
+            let q_weight = builder.add_tensor(
+                &format!("q_weight_{l}"),
+                DType::F32,
+                vec![q_out_var.clone(), hidden.clone()],
+            );
+            let k_weight = builder.add_tensor(
+                &format!("k_weight_{l}"),
+                DType::F32,
+                vec![k_out_var.clone(), hidden.clone()],
+            );
+            let v_weight = builder.add_tensor(
+                &format!("v_weight_{l}"),
+                DType::F32,
+                vec![v_out_var.clone(), hidden.clone()],
+            );
 
             let q_dim = (num_heads * _head_dim) as u64;
             let kv_dim = (_num_kv_heads * _head_dim) as u64;
 
             builder.add_node(
-                hologram_ai_common::ir::op::AiOp::Slice { axes: vec![0], starts: vec![0], ends: vec![q_dim as i64], steps: vec![1] },
+                hologram_ai_common::ir::op::AiOp::Slice {
+                    axes: vec![0],
+                    starts: vec![0],
+                    ends: vec![q_dim as i64],
+                    steps: vec![1],
+                },
                 vec![qkv_weight],
                 vec![q_weight],
             );
             builder.add_node(
-                hologram_ai_common::ir::op::AiOp::Slice { axes: vec![0], starts: vec![q_dim as i64], ends: vec![(q_dim + kv_dim) as i64], steps: vec![1] },
+                hologram_ai_common::ir::op::AiOp::Slice {
+                    axes: vec![0],
+                    starts: vec![q_dim as i64],
+                    ends: vec![(q_dim + kv_dim) as i64],
+                    steps: vec![1],
+                },
                 vec![qkv_weight],
                 vec![k_weight],
             );
             builder.add_node(
-                hologram_ai_common::ir::op::AiOp::Slice { axes: vec![0], starts: vec![(q_dim + kv_dim) as i64], ends: vec![(q_dim + 2 * kv_dim) as i64], steps: vec![1] },
+                hologram_ai_common::ir::op::AiOp::Slice {
+                    axes: vec![0],
+                    starts: vec![(q_dim + kv_dim) as i64],
+                    ends: vec![(q_dim + 2 * kv_dim) as i64],
+                    steps: vec![1],
+                },
                 vec![qkv_weight],
                 vec![v_weight],
             );
@@ -342,20 +368,64 @@ pub fn build_parametric_graph_from_keys(config: &Value, keys: &[String]) -> Resu
             );
         }
 
-        let q_out = builder.add_tensor(&format!("q_{}", l), DType::F32, vec![batch.clone(), seq.clone(), n_heads_expr.clone(), head_dim_expr.clone()]);
-        let k_out = builder.add_tensor(&format!("k_{}", l), DType::F32, vec![batch.clone(), seq.clone(), n_kv_heads_expr.clone(), head_dim_expr.clone()]);
-        let v_out = builder.add_tensor(&format!("v_{}", l), DType::F32, vec![batch.clone(), seq.clone(), n_kv_heads_expr.clone(), head_dim_expr.clone()]);
+        let q_out = builder.add_tensor(
+            &format!("q_{}", l),
+            DType::F32,
+            vec![
+                batch.clone(),
+                seq.clone(),
+                n_heads_expr.clone(),
+                head_dim_expr.clone(),
+            ],
+        );
+        let k_out = builder.add_tensor(
+            &format!("k_{}", l),
+            DType::F32,
+            vec![
+                batch.clone(),
+                seq.clone(),
+                n_kv_heads_expr.clone(),
+                head_dim_expr.clone(),
+            ],
+        );
+        let v_out = builder.add_tensor(
+            &format!("v_{}", l),
+            DType::F32,
+            vec![
+                batch.clone(),
+                seq.clone(),
+                n_kv_heads_expr.clone(),
+                head_dim_expr.clone(),
+            ],
+        );
 
         // Reshape flat QKV to 4D for GQA
-        builder.add_node(hologram_ai_common::ir::op::AiOp::Reshape { allow_zero: false }, vec![q_flat], vec![q_out]);
-        builder.add_node(hologram_ai_common::ir::op::AiOp::Reshape { allow_zero: false }, vec![k_flat], vec![k_out]);
-        builder.add_node(hologram_ai_common::ir::op::AiOp::Reshape { allow_zero: false }, vec![v_flat], vec![v_out]);
+        builder.add_node(
+            hologram_ai_common::ir::op::AiOp::Reshape { allow_zero: false },
+            vec![q_flat],
+            vec![q_out],
+        );
+        builder.add_node(
+            hologram_ai_common::ir::op::AiOp::Reshape { allow_zero: false },
+            vec![k_flat],
+            vec![k_out],
+        );
+        builder.add_node(
+            hologram_ai_common::ir::op::AiOp::Reshape { allow_zero: false },
+            vec![v_flat],
+            vec![v_out],
+        );
 
         // GQA
         let attn_out = builder.add_tensor(
             &format!("attn_out_{l}"),
             DType::F32,
-            vec![batch.clone(), seq.clone(), n_heads_expr.clone(), head_dim_expr.clone()],
+            vec![
+                batch.clone(),
+                seq.clone(),
+                n_heads_expr.clone(),
+                head_dim_expr.clone(),
+            ],
         );
         builder.add_node(
             hologram_ai_common::ir::op::AiOp::GroupedQueryAttention {
@@ -430,10 +500,10 @@ pub fn build_parametric_graph_from_keys(config: &Value, keys: &[String]) -> Resu
             .and_then(|v| v.as_u64())
             .unwrap_or(hidden_size as u64 * 4);
         let ffn_hidden = hologram_ai_common::ir::shape::DimExpr::Concrete(intermediate_size);
-        
+
         let gate_out;
         let up_out;
-        
+
         if keys.contains(&format!("model.layers.{}.mlp.gate_up_proj.weight", l)) {
             let total_ffn = hologram_ai_common::ir::shape::DimExpr::Concrete(intermediate_size * 2);
             let gate_up_weight = builder.add_tensor(
@@ -442,16 +512,34 @@ pub fn build_parametric_graph_from_keys(config: &Value, keys: &[String]) -> Resu
                 vec![total_ffn.clone(), hidden.clone()],
             );
 
-            let gate_weight = builder.add_tensor(&format!("gate_weight_{l}"), DType::F32, vec![ffn_hidden.clone(), hidden.clone()]);
-            let up_weight = builder.add_tensor(&format!("up_weight_{l}"), DType::F32, vec![ffn_hidden.clone(), hidden.clone()]);
+            let gate_weight = builder.add_tensor(
+                &format!("gate_weight_{l}"),
+                DType::F32,
+                vec![ffn_hidden.clone(), hidden.clone()],
+            );
+            let up_weight = builder.add_tensor(
+                &format!("up_weight_{l}"),
+                DType::F32,
+                vec![ffn_hidden.clone(), hidden.clone()],
+            );
 
             builder.add_node(
-                hologram_ai_common::ir::op::AiOp::Slice { axes: vec![0], starts: vec![0], ends: vec![intermediate_size as i64], steps: vec![1] },
+                hologram_ai_common::ir::op::AiOp::Slice {
+                    axes: vec![0],
+                    starts: vec![0],
+                    ends: vec![intermediate_size as i64],
+                    steps: vec![1],
+                },
                 vec![gate_up_weight],
                 vec![gate_weight],
             );
             builder.add_node(
-                hologram_ai_common::ir::op::AiOp::Slice { axes: vec![0], starts: vec![intermediate_size as i64], ends: vec![(intermediate_size * 2) as i64], steps: vec![1] },
+                hologram_ai_common::ir::op::AiOp::Slice {
+                    axes: vec![0],
+                    starts: vec![intermediate_size as i64],
+                    ends: vec![(intermediate_size * 2) as i64],
+                    steps: vec![1],
+                },
                 vec![gate_up_weight],
                 vec![up_weight],
             );
