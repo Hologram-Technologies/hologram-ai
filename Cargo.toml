@@ -38,7 +38,6 @@ hologram-ai-common = { path = "crates/hologram-ai-common" }
 hologram-ai-onnx   = { path = "crates/hologram-ai-onnx" }
 hologram-ai-tokenizer = { path = "crates/hologram-ai-tokenizer" }
 hologram-ai-core   = { path = "crates/hologram-ai-core" }
-hologram-ai-safetensors = { path = "crates/hologram-ai-safetensors" }
 
 criterion     = { version = "0.5", features = ["html_reports"] }
 
@@ -59,7 +58,6 @@ futures       = "0.3"
 approx        = "0.5"
 clap          = { version = "4", features = ["derive"] }
 prost         = "0.13"
-prost-build   = "0.13"
 reqwest       = { version = "0.12", features = ["json", "stream", "rustls-tls"], default-features = false }
 indicatif     = "0.17"
 tokio         = { version = "1", features = ["rt-multi-thread", "fs", "io-util", "time"] }

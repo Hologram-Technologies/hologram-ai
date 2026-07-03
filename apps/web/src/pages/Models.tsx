@@ -79,21 +79,17 @@ export function Models() {
     try {
       const q = encodeURIComponent(searchQuery.trim());
       // Parametric search for models
-      const [res1, res2] = await Promise.all([
-        fetch(`https://huggingface.co/api/models?search=${q}&sort=downloads&direction=-1&limit=10`),
-        fetch(`https://huggingface.co/api/models?search=${q}%20safetensors&sort=downloads&direction=-1&limit=10`)
+      const [res1] = await Promise.all([
+        fetch(`https://huggingface.co/api/models?search=${q}&tags=onnx&sort=downloads&direction=-1&limit=20`)
       ]);
-      if (!res1.ok || !res2.ok) throw new Error(`Search failed`);
+      if (!res1.ok) throw new Error(`Search failed`);
       
       const data1 = await res1.json();
-      const data2 = await res2.json();
+      // Deduplicate
+      const unique = Array.from(new Map(data1.map((item: any) => [item.id, item])).values());
+      (unique as any[]).sort((a, b) => b.downloads - a.downloads);
       
-      // Merge and deduplicate
-      const merged = [...data1, ...data2];
-      const unique = Array.from(new Map(merged.map(item => [item.id, item])).values());
-      unique.sort((a, b) => b.downloads - a.downloads);
-      
-      setSearchResults(unique.slice(0, 10));
+      setSearchResults(unique.slice(0, 15));
     } catch (e) {
       setTail((t) => [...t, `search error: ${String(e)}`]);
     } finally {

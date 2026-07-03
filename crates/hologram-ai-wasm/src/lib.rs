@@ -40,6 +40,17 @@ pub fn compile(onnx: &[u8]) -> Result<Vec<u8>, JsValue> {
 }
 
 #[wasm_bindgen]
+pub fn compile_safetensors(config_json: &str, safetensors_bytes: &[u8]) -> Result<Vec<u8>, JsValue> {
+    let archive = ModelCompiler::default()
+        .compile(ModelSource::Safetensors {
+            config_json: config_json.to_string(),
+            safetensors_bytes: safetensors_bytes.to_vec(),
+        })
+        .map_err(|e| err(format!("compile_safetensors: {e:#}")))?;
+    Ok(archive.bytes)
+}
+
+#[wasm_bindgen]
 pub fn compute_kappa(bytes: &[u8]) -> String {
     holospaces::address(bytes).as_str().to_string()
 }
