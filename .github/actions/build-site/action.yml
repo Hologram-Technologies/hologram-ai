@@ -48,4 +48,4 @@ runs:
       shell: bash
       run: |
         mkdir -p ${{ inputs.out-dir }}
-        cp -r apps/web/dist/* ${{ inputs.out-dir }}/
+        cp -a apps/web/dist/. ${{ inputs.out-dir }}/
