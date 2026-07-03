@@ -42,12 +42,19 @@ pub fn compile(onnx: &[u8]) -> Result<Vec<u8>, JsValue> {
 #[wasm_bindgen]
 pub fn compile_safetensors(
     config_json: &str,
-    safetensors_bytes: &[u8],
+    safetensors_shards_js: &js_sys::Array,
 ) -> Result<Vec<u8>, JsValue> {
+    let mut safetensors_shards = Vec::new();
+    for i in 0..safetensors_shards_js.length() {
+        let val = safetensors_shards_js.get(i);
+        let u8_array = js_sys::Uint8Array::new(&val);
+        safetensors_shards.push(u8_array.to_vec());
+    }
+
     let archive = ModelCompiler::default()
         .compile(ModelSource::Safetensors {
             config_json: config_json.to_string(),
-            safetensors_bytes: safetensors_bytes.to_vec(),
+            safetensors_shards,
         })
         .map_err(|e| err(format!("compile_safetensors: {e:#}")))?;
     Ok(archive.bytes)

@@ -147,6 +147,18 @@ export function Models() {
           <code>.holo</code> archive for WebAssembly execution.
         </p>
 
+        {!(window as any).__HOLOSPACES_EXTENSION_INSTALLED__ && (
+          <div style={{ padding: "8px 12px", background: "var(--bg-hover)", borderLeft: "4px solid var(--accent)", marginBottom: 16, fontSize: 13, borderRadius: 4 }}>
+            <strong>Extension Missing:</strong> To download gated models or bypass CORS issues, please install the <a href="/extension.zip" download>Holospaces Egress Extension</a>. Load it unpacked in your browser (chrome://extensions).
+          </div>
+        )}
+        
+        {(window as any).__HOLOSPACES_EXTENSION_INSTALLED__ && (
+          <div style={{ padding: "8px 12px", background: "rgba(0, 200, 100, 0.1)", borderLeft: "4px solid rgb(0, 200, 100)", marginBottom: 16, fontSize: 13, borderRadius: 4 }}>
+            <strong>Extension Active:</strong> Holospaces Egress Extension is loaded. You can download gated models.
+          </div>
+        )}
+
 
 
         <div style={{ marginBottom: 16, display: "flex", gap: 8 }}>

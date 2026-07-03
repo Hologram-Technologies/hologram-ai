@@ -21,6 +21,7 @@ serde = { workspace = true, features = ["derive"] }
 serde-wasm-bindgen = "0.6"
 console_error_panic_hook = "0.1"
 holospaces.workspace = true
+js-sys = "0.3.103"
 
 [dev-dependencies]
 wasm-bindgen-test = "0.3"

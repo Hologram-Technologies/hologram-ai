@@ -63,9 +63,9 @@ export async function compile(onnx: Uint8Array): Promise<Uint8Array> {
   return wasmCompile(onnx);
 }
 
-export async function compileSafetensors(configJson: string, safetensors: Uint8Array): Promise<Uint8Array> {
+export async function compileSafetensors(configJson: string, safetensorsShards: Uint8Array[]): Promise<Uint8Array> {
   await ensureReady();
-  return wasmCompileSafetensors(configJson, safetensors);
+  return wasmCompileSafetensors(configJson, safetensorsShards);
 }
 
 /** Compute the holospaces Kappa label for a byte array. */

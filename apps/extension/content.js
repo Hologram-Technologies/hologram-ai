@@ -1,0 +1,1 @@
+window.__HOLOSPACES_EXTENSION_INSTALLED__ = true;

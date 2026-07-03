@@ -234,12 +234,22 @@ export async function downloadKnownModel(id: string): Promise<number> {
   const localDir = await modelsDir.getDirectoryHandle(localName, { create: true });
   
   let info: any;
-  try {
-    const response = await fetch(`https://huggingface.co/api/models/${model.hfId}`);
-    if (!response.ok) throw new Error(`HTTP ${response.status}`);
-    info = await response.json();
-  } catch (err) {
-    throw new Error(`Failed to fetch model info: ${err}`);
+  let infoAttempts = 0;
+  while (infoAttempts < 3) {
+    infoAttempts++;
+    try {
+      const fetchOptions = (window as any).__HOLOSPACES_EXTENSION_INSTALLED__ ? { credentials: "include" as RequestCredentials } : undefined;
+      const response = await fetch(`https://huggingface.co/api/models/${model.hfId}`, fetchOptions);
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      info = await response.json();
+      break;
+    } catch (err) {
+      if (infoAttempts >= 3) {
+        throw new Error(`Failed to fetch model info after 3 attempts: ${err}`);
+      }
+      emitLine("models://download-line", { stream: "stdout", line: `Failed to fetch model info (attempt ${infoAttempts}/3). Retrying in ${1 << infoAttempts}s...` });
+      await new Promise(r => setTimeout(r, (1 << infoAttempts) * 1000));
+    }
   }
   const siblings = info.siblings || [];
   
@@ -259,13 +269,24 @@ export async function downloadKnownModel(id: string): Promise<number> {
     const url = `https://huggingface.co/${model.hfId}/resolve/main/${file.rfilename}`;
     emitLine("models://download-line", { stream: "stdout", line: `Fetching ${url}...` });
     
-    let response: Response;
-    try {
-      response = await fetch(url);
-      if (!response.ok) throw new Error(`HTTP ${response.status}`);
-    } catch (err) {
-      throw new Error(`Failed to fetch ${file.rfilename}: ${err}`);
+    let response: Response | null = null;
+    let attempts = 0;
+    while (attempts < 3) {
+      attempts++;
+      try {
+        const fetchOptions = (window as any).__HOLOSPACES_EXTENSION_INSTALLED__ ? { credentials: "include" as RequestCredentials } : undefined;
+        response = await fetch(url, fetchOptions);
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        break; // Success
+      } catch (err) {
+        if (attempts >= 3) {
+          throw new Error(`Failed to fetch ${file.rfilename} after 3 attempts: ${err}`);
+        }
+        emitLine("models://download-line", { stream: "stdout", line: `Download failed (attempt ${attempts}/3). Retrying in ${1 << attempts}s...` });
+        await new Promise(r => setTimeout(r, (1 << attempts) * 1000));
+      }
     }
+    if (!response) throw new Error(`Failed to fetch ${file.rfilename}`);
     
     // Write to OPFS
     const parts = file.rfilename.split('/');
@@ -328,7 +349,7 @@ export async function compileKnownModel(id: string, specificOnnx?: string): Prom
   // Find the .onnx file recursively in localDir
   async function findOnnx(dir: FileSystemDirectoryHandle): Promise<FileSystemFileHandle | null> {
     for await (const [name, handle] of (dir as any).entries()) {
-      if (handle.kind === 'file' && (name.endsWith('.onnx') || name.endsWith('.safetensors'))) {
+      if (handle.kind === 'file' && name.endsWith('.onnx')) {
         return handle as FileSystemFileHandle;
       }
       if (handle.kind === 'directory') {
@@ -337,6 +358,20 @@ export async function compileKnownModel(id: string, specificOnnx?: string): Prom
       }
     }
     return null;
+  }
+
+  // Find all .safetensors files recursively in localDir
+  async function findAllSafetensors(dir: FileSystemDirectoryHandle): Promise<FileSystemFileHandle[]> {
+    let handles: FileSystemFileHandle[] = [];
+    for await (const [name, handle] of (dir as any).entries()) {
+      if (handle.kind === 'file' && name.endsWith('.safetensors')) {
+        handles.push(handle as FileSystemFileHandle);
+      }
+      if (handle.kind === 'directory') {
+        handles.push(...await findAllSafetensors(handle as FileSystemDirectoryHandle));
+      }
+    }
+    return handles.sort((a, b) => a.name.localeCompare(b.name));
   }
 
   // Get a specific file handle by path relative to localDir
@@ -351,21 +386,31 @@ export async function compileKnownModel(id: string, specificOnnx?: string): Prom
   }
   
   const onnxHandle = specificOnnx ? await getSpecificFile(localDir, specificOnnx) : await findOnnx(localDir);
-  if (!onnxHandle) throw new Error(`Could not find .onnx file in downloaded model (${specificOnnx || "any"})`);
-  
-  const onnxFile = await onnxHandle.getFile();
-  const onnxBytes = new Uint8Array(await onnxFile.arrayBuffer());
-  
   let holoBytes: Uint8Array;
-  if (onnxHandle.name.endsWith('.safetensors')) {
-    emitLine("models://compile-line", { stream: "stdout", line: `Loaded Safetensors (${onnxBytes.length} bytes). Reading config.json...` });
+
+  if (onnxHandle && onnxHandle.name.endsWith('.onnx')) {
+    const onnxFile = await onnxHandle.getFile();
+    const onnxBytes = new Uint8Array(await onnxFile.arrayBuffer());
+    emitLine("models://compile-line", { stream: "stdout", line: `Loaded ONNX (${onnxBytes.length} bytes). Compiling via wasm...` });
+    holoBytes = await compile(onnxBytes);
+  } else {
+    const safetensorsHandles = await findAllSafetensors(localDir);
+    if (safetensorsHandles.length === 0) {
+      throw new Error(`Could not find .onnx or .safetensors files in downloaded model`);
+    }
+    
+    emitLine("models://compile-line", { stream: "stdout", line: `Loaded ${safetensorsHandles.length} Safetensors shards. Reading config.json...` });
     const configHandle = await getSpecificFile(localDir, "config.json");
     const configFile = await configHandle.getFile();
     const configText = await configFile.text();
-    holoBytes = await compileSafetensors(configText, onnxBytes);
-  } else {
-    emitLine("models://compile-line", { stream: "stdout", line: `Loaded ONNX (${onnxBytes.length} bytes). Compiling via wasm...` });
-    holoBytes = await compile(onnxBytes);
+    
+    const shards: Uint8Array[] = [];
+    for (const stHandle of safetensorsHandles) {
+      const stFile = await stHandle.getFile();
+      shards.push(new Uint8Array(await stFile.arrayBuffer()));
+    }
+    
+    holoBytes = await compileSafetensors(configText, shards);
   }
   
   const kappa = await computeKappa(holoBytes);

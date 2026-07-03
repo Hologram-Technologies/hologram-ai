@@ -20,10 +20,10 @@ pub enum ModelSource {
     OnnxBytes(Vec<u8>),
     /// Pre-built `AiGraph` (bypass importer).
     AiGraph(AiGraph),
-    /// Raw Safetensors config.json bytes and safetensors file bytes.
+    /// Raw Safetensors config.json bytes and safetensors file shards.
     Safetensors {
         config_json: String,
-        safetensors_bytes: Vec<u8>,
+        safetensors_shards: Vec<Vec<u8>>,
     },
 }
 
@@ -319,12 +319,15 @@ impl ModelCompiler {
             ModelSource::AiGraph(g) => Ok(g),
             ModelSource::Safetensors {
                 config_json,
-                safetensors_bytes,
-            } => hologram_ai_safetensors::build_graph_from_safetensors(
-                &config_json,
-                &safetensors_bytes,
-            )
-            .context("importing from safetensors"),
+                safetensors_shards,
+            } => {
+                let shards_refs: Vec<&[u8]> = safetensors_shards.iter().map(|s| s.as_slice()).collect();
+                hologram_ai_safetensors::build_graph_from_safetensors(
+                    &config_json,
+                    &shards_refs,
+                )
+                .context("importing from safetensors")
+            }
         }
     }
 }
@@ -516,8 +519,12 @@ fn source_kappa_label(source: &ModelSource) -> Option<String> {
         }
         ModelSource::AiGraph(_) => return None,
         ModelSource::Safetensors {
-            safetensors_bytes, ..
-        } => crate::address::model_kappa_label(safetensors_bytes),
+            safetensors_shards, ..
+        } => if let Some(first) = safetensors_shards.first() {
+            crate::address::model_kappa_label(first)
+        } else {
+            Err(anyhow::anyhow!("No safetensors shards"))
+        },
     };
     match label {
         Ok(l) => Some(l),

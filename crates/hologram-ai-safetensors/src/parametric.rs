@@ -15,12 +15,22 @@ fn map_dtype(d: SafeDtype) -> Result<DType> {
     }
 }
 
-pub fn build_parametric_graph(config: &Value, safetensors_bytes: &[u8]) -> Result<AiGraph> {
+pub fn build_parametric_graph(config: &Value, safetensors_shards: &[&[u8]]) -> Result<AiGraph> {
     let mut builder = GraphBuilder::new("parametric_model".to_string());
 
-    let st = SafeTensors::deserialize(safetensors_bytes)?;
-    let tensors = st.tensors();
-    let keys: Vec<&String> = tensors.iter().map(|(k, _)| k).collect();
+    let mut st_instances = Vec::new();
+    for shard in safetensors_shards {
+        let st = SafeTensors::deserialize(shard)?;
+        st_instances.push(st);
+    }
+    
+    // We just need the keys to infer layers.
+    let mut keys = Vec::new();
+    for st in &st_instances {
+        for (k, _) in st.tensors() {
+            keys.push(k.clone());
+        }
+    }
 
     let mut num_layers = 0;
     for key in &keys {
