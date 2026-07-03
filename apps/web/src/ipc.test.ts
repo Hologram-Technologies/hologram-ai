@@ -23,12 +23,15 @@ describe('fetchViaExtension', () => {
     (window as any).chrome.runtime = {
       connect: vi.fn().mockReturnValue(mockPort),
     } as any;
+    
+    document.documentElement.setAttribute("data-holospaces-egress", "mock-extension-id");
   });
   
   afterEach(() => {
     if ((window as any).chrome) {
       delete (window as any).chrome.runtime;
     }
+    document.documentElement.removeAttribute("data-holospaces-egress");
     vi.restoreAllMocks();
   });
   
@@ -47,7 +50,7 @@ describe('fetchViaExtension', () => {
     
     // @ts-ignore
     expect(globalThis.chrome.runtime.connect).toHaveBeenCalledWith(
-      "dpglhmgmgahapmncpldmchmllfnkkcjf",
+      "mock-extension-id",
       { name: "holospaces-content" }
     );
   });

@@ -225,8 +225,12 @@ export async function fetchViaExtension(url: string): Promise<Uint8Array> {
     if (typeof chrome === "undefined" || !chrome.runtime) {
       return reject(new Error("Chrome extension not available. Please install the holospaces egress extension."));
     }
+    const extId = document.documentElement.getAttribute("data-holospaces-egress");
+    if (!extId) {
+      return reject(new Error("Chrome extension not available. Please install the holospaces egress extension."));
+    }
     // @ts-ignore
-    const port = chrome.runtime.connect("dpglhmgmgahapmncpldmchmllfnkkcjf", { name: "holospaces-content" });
+    const port = chrome.runtime.connect(extId, { name: "holospaces-content" });
     const id = Math.floor(Math.random() * 1000000);
     const chunks: Uint8Array[] = [];
     let totalLen = 0;
