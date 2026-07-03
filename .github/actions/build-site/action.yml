@@ -50,5 +50,7 @@ runs:
         mkdir -p ${{ inputs.out-dir }}
         cd apps/web/dist/extension
         zip -r ../extension.zip .
-        cd ../../../..
+        cd ..
+        rm -rf extension
+        cd ../../..
         cp -a apps/web/dist/. ${{ inputs.out-dir }}/
