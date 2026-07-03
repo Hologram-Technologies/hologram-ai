@@ -40,10 +40,13 @@ export function Models() {
   }, []);
 
   async function onDownload(id: string) {
-    setBusy({ id, phase: "downloading" });
     setTail([]);
     try {
+      setBusy({ id, phase: "downloading" });
       await downloadKnownModel(id);
+      
+      setBusy({ id, phase: "compiling" });
+      await compileKnownModel(id);
     } catch (e) {
       setTail((t) => [...t, `error: ${String(e)}`]);
     } finally {
