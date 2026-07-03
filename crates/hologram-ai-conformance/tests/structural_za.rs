@@ -49,14 +49,12 @@ fn small_runner() -> HoloRunner {
     HoloRunner::from_bytes(archive.bytes).expect("load")
 }
 
-#[test]
 fn za_allocator_is_installed() {
     // Without this guard, every ZA assertion below would pass vacuously
     // because the counters never advance.
     assert_allocator_installed();
 }
 
-#[test]
 fn za_1_addressed_decode_step_is_bounded() {
     // ZA-1: after warm-up, each `execute_addressed` call must allocate a
     // bounded, input-independent amount. The scratch in `InferenceSession`
@@ -90,7 +88,6 @@ fn za_1_addressed_decode_step_is_bounded() {
     }
 }
 
-#[test]
 fn za_1_addressed_steps_do_not_grow() {
     // The "no per-token growth" rail: across N successive identical calls,
     // total allocations grow at most O(N) (i.e. bounded per call). A leak in
@@ -128,7 +125,6 @@ fn za_1_addressed_steps_do_not_grow() {
     );
 }
 
-#[test]
 fn za_2_relower_same_graph_is_bounded() {
     // ZA-2: lowering / compile is bounded — re-lowering the *same* graph
     // (identical bytes) must not grow allocations across iterations. We
@@ -166,4 +162,15 @@ fn za_2_relower_same_graph_is_bounded() {
         first.allocations,
         bound
     );
+}
+
+#[test]
+fn run_all_sequentially_to_avoid_allocator_races() {
+    // Tests must run sequentially because the `CountingAllocator` uses a global atomic counter.
+    // Parallel `#[test]` execution would interleave allocations from multiple tests, causing
+    // unpredictable delta measurements and flaky failures on multi-core CI runners.
+    za_allocator_is_installed();
+    za_2_relower_same_graph_is_bounded();
+    za_1_addressed_decode_step_is_bounded();
+    za_1_addressed_steps_do_not_grow();
 }
