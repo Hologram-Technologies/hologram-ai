@@ -206,7 +206,10 @@ zero runtime code. All kernels belong in hologram base crate.
   universal (1 or N components). Removes ~400+ lines of dual-model code
   and eliminates the entire class of layout mismatch bugs.
 
-### P7: LUT-GEMM Wiring + Compile-Time Quantization (Plan 030)
+### P7: Web & WASM Integration
+- [ ] **WASM Generation Abort** — `cancelGeneration` in `apps/web/src/ipc.ts` currently returns true without aborting the underlying WASM generation loop. Plumb cancellation token/flag down to `hologram-ai-wasm` to cleanly interrupt generation if user cancels.
+
+### P8: LUT-GEMM Wiring + Compile-Time Quantization (Plan 030)
 - [x] `--quantize q4_0` CLI flag on compile command (`cli.rs`)
 - [x] `QuantStrategy` enum (`None`, `Auto`, `Q4_0`, `Q8_0`) threaded through
   `ModelCompiler.quant_strategy` → `LoweringOptions` → `lower()`

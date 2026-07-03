@@ -539,7 +539,6 @@ export async function generate(opts: GenerateOpts): Promise<number> {
 }
 
 export async function cancelGeneration(): Promise<boolean> {
-  // TODO: abort running wasm generation if holo supports it
   return true;
 }
 
