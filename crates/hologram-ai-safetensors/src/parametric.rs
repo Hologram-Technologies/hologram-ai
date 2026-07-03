@@ -71,6 +71,81 @@ pub fn build_parametric_graph(config: &Value, safetensors_shards: &[&[u8]]) -> R
     Ok(graph)
 }
 
+
+fn add_linear_layer(
+    builder: &mut GraphBuilder,
+    input: hologram_ai_common::ir::node::TensorId,
+    weight_name: &str,
+    in_features: hologram_ai_common::ir::shape::DimExpr,
+    out_features: hologram_ai_common::ir::shape::DimExpr,
+    output_name: &str,
+    output_shape: Vec<hologram_ai_common::ir::shape::DimExpr>,
+) -> hologram_ai_common::ir::node::TensorId {
+    let weight = builder.add_tensor(
+        weight_name,
+        hologram_ai_common::ir::dtype::DType::F32,
+        vec![out_features.clone(), in_features.clone()],
+    );
+    let transposed_weight = builder.add_tensor(
+        &format!("{}_transposed", weight_name),
+        hologram_ai_common::ir::dtype::DType::F32,
+        vec![in_features, out_features],
+    );
+    builder.add_node(
+        hologram_ai_common::ir::op::AiOp::Transpose { perm: vec![1, 0] },
+        vec![weight],
+        vec![transposed_weight],
+    );
+    let output = builder.add_tensor(
+        output_name,
+        hologram_ai_common::ir::dtype::DType::F32,
+        output_shape,
+    );
+    builder.add_node(
+        hologram_ai_common::ir::op::AiOp::MatMul,
+        vec![input, transposed_weight],
+        vec![output],
+    );
+    output
+}
+
+struct LinearLayerParams<'a> {
+    weight_name: &'a str,
+    in_features: hologram_ai_common::ir::shape::DimExpr,
+    out_features: hologram_ai_common::ir::shape::DimExpr,
+    output_name: &'a str,
+    output_shape: Vec<hologram_ai_common::ir::shape::DimExpr>,
+}
+
+fn add_linear_layer_from_tensor(
+    builder: &mut GraphBuilder,
+    input: hologram_ai_common::ir::node::TensorId,
+    weight: hologram_ai_common::ir::node::TensorId,
+    params: LinearLayerParams<'_>,
+) -> hologram_ai_common::ir::node::TensorId {
+    let transposed_weight = builder.add_tensor(
+        &format!("{}_transposed", params.weight_name),
+        hologram_ai_common::ir::dtype::DType::F32,
+        vec![params.in_features, params.out_features],
+    );
+    builder.add_node(
+        hologram_ai_common::ir::op::AiOp::Transpose { perm: vec![1, 0] },
+        vec![weight],
+        vec![transposed_weight],
+    );
+    let output = builder.add_tensor(
+        params.output_name,
+        hologram_ai_common::ir::dtype::DType::F32,
+        params.output_shape,
+    );
+    builder.add_node(
+        hologram_ai_common::ir::op::AiOp::MatMul,
+        vec![input, transposed_weight],
+        vec![output],
+    );
+    output
+}
+
 pub fn build_parametric_graph_from_keys(config: &Value, keys: &[String]) -> Result<AiGraph> {
     let mut builder = GraphBuilder::new("parametric_model".to_string());
 
@@ -164,74 +239,123 @@ pub fn build_parametric_graph_from_keys(config: &Value, keys: &[String]) -> Resu
         let v_out_var =
             hologram_ai_common::ir::shape::DimExpr::Concrete((_num_kv_heads * _head_dim) as u64);
 
-        let q_proj = builder.add_tensor(
-            &format!("model.layers.{l}.self_attn.q_proj.weight"),
-            DType::F32,
-            vec![hidden.clone(), q_out_var.clone()],
-        );
-        let k_proj = builder.add_tensor(
-            &format!("model.layers.{l}.self_attn.k_proj.weight"),
-            DType::F32,
-            vec![hidden.clone(), k_out_var.clone()],
-        );
-        let v_proj = builder.add_tensor(
-            &format!("model.layers.{l}.self_attn.v_proj.weight"),
-            DType::F32,
-            vec![hidden.clone(), v_out_var.clone()],
-        );
+        let q_flat;
+        let k_flat;
+        let v_flat;
 
-        let q_out = builder.add_tensor(
-            &format!("q_{l}"),
-            DType::F32,
-            vec![
-                batch.clone(),
-                seq.clone(),
-                n_heads_expr.clone(),
-                head_dim_expr.clone(),
-            ],
-        );
-        let k_out = builder.add_tensor(
-            &format!("k_{l}"),
-            DType::F32,
-            vec![
-                batch.clone(),
-                seq.clone(),
-                n_kv_heads_expr.clone(),
-                head_dim_expr.clone(),
-            ],
-        );
-        let v_out = builder.add_tensor(
-            &format!("v_{l}"),
-            DType::F32,
-            vec![
-                batch.clone(),
-                seq.clone(),
-                n_kv_heads_expr.clone(),
-                head_dim_expr.clone(),
-            ],
-        );
+        if keys.contains(&format!("model.layers.{}.self_attn.qkv_proj.weight", l)) {
+            let total_out = hologram_ai_common::ir::shape::DimExpr::Concrete(
+                (num_heads * _head_dim + 2 * _num_kv_heads * _head_dim) as u64,
+            );
+            let qkv_weight = builder.add_tensor(
+                &format!("model.layers.{}.self_attn.qkv_proj.weight", l),
+                DType::F32,
+                vec![total_out.clone(), hidden.clone()],
+            );
 
-        builder.add_node(
-            hologram_ai_common::ir::op::AiOp::MatMul,
-            vec![attn_norm_out, q_proj],
-            vec![q_out],
-        );
-        builder.add_node(
-            hologram_ai_common::ir::op::AiOp::MatMul,
-            vec![attn_norm_out, k_proj],
-            vec![k_out],
-        );
-        builder.add_node(
-            hologram_ai_common::ir::op::AiOp::MatMul,
-            vec![attn_norm_out, v_proj],
-            vec![v_out],
-        );
+            let q_weight = builder.add_tensor(&format!("q_weight_{l}"), DType::F32, vec![q_out_var.clone(), hidden.clone()]);
+            let k_weight = builder.add_tensor(&format!("k_weight_{l}"), DType::F32, vec![k_out_var.clone(), hidden.clone()]);
+            let v_weight = builder.add_tensor(&format!("v_weight_{l}"), DType::F32, vec![v_out_var.clone(), hidden.clone()]);
+
+            let q_dim = (num_heads * _head_dim) as u64;
+            let kv_dim = (_num_kv_heads * _head_dim) as u64;
+
+            builder.add_node(
+                hologram_ai_common::ir::op::AiOp::Slice { axes: vec![0], starts: vec![0], ends: vec![q_dim as i64], steps: vec![1] },
+                vec![qkv_weight],
+                vec![q_weight],
+            );
+            builder.add_node(
+                hologram_ai_common::ir::op::AiOp::Slice { axes: vec![0], starts: vec![q_dim as i64], ends: vec![(q_dim + kv_dim) as i64], steps: vec![1] },
+                vec![qkv_weight],
+                vec![k_weight],
+            );
+            builder.add_node(
+                hologram_ai_common::ir::op::AiOp::Slice { axes: vec![0], starts: vec![(q_dim + kv_dim) as i64], ends: vec![(q_dim + 2 * kv_dim) as i64], steps: vec![1] },
+                vec![qkv_weight],
+                vec![v_weight],
+            );
+
+            q_flat = add_linear_layer_from_tensor(
+                &mut builder,
+                attn_norm_out,
+                q_weight,
+                LinearLayerParams {
+                    weight_name: &format!("q_proj_{l}"),
+                    in_features: hidden.clone(),
+                    out_features: q_out_var.clone(),
+                    output_name: &format!("q_flat_{l}"),
+                    output_shape: vec![batch.clone(), seq.clone(), q_out_var.clone()],
+                },
+            );
+            k_flat = add_linear_layer_from_tensor(
+                &mut builder,
+                attn_norm_out,
+                k_weight,
+                LinearLayerParams {
+                    weight_name: &format!("k_proj_{l}"),
+                    in_features: hidden.clone(),
+                    out_features: k_out_var.clone(),
+                    output_name: &format!("k_flat_{l}"),
+                    output_shape: vec![batch.clone(), seq.clone(), k_out_var.clone()],
+                },
+            );
+            v_flat = add_linear_layer_from_tensor(
+                &mut builder,
+                attn_norm_out,
+                v_weight,
+                LinearLayerParams {
+                    weight_name: &format!("v_proj_{l}"),
+                    in_features: hidden.clone(),
+                    out_features: v_out_var.clone(),
+                    output_name: &format!("v_flat_{l}"),
+                    output_shape: vec![batch.clone(), seq.clone(), v_out_var.clone()],
+                },
+            );
+        } else {
+            q_flat = add_linear_layer(
+                &mut builder,
+                attn_norm_out,
+                &format!("model.layers.{}.self_attn.q_proj.weight", l),
+                hidden.clone(),
+                q_out_var.clone(),
+                &format!("q_flat_{}", l),
+                vec![batch.clone(), seq.clone(), q_out_var.clone()],
+            );
+            k_flat = add_linear_layer(
+                &mut builder,
+                attn_norm_out,
+                &format!("model.layers.{}.self_attn.k_proj.weight", l),
+                hidden.clone(),
+                k_out_var.clone(),
+                &format!("k_flat_{}", l),
+                vec![batch.clone(), seq.clone(), k_out_var.clone()],
+            );
+            v_flat = add_linear_layer(
+                &mut builder,
+                attn_norm_out,
+                &format!("model.layers.{}.self_attn.v_proj.weight", l),
+                hidden.clone(),
+                v_out_var.clone(),
+                &format!("v_flat_{}", l),
+                vec![batch.clone(), seq.clone(), v_out_var.clone()],
+            );
+        }
+
+        let q_out = builder.add_tensor(&format!("q_{}", l), DType::F32, vec![batch.clone(), seq.clone(), n_heads_expr.clone(), head_dim_expr.clone()]);
+        let k_out = builder.add_tensor(&format!("k_{}", l), DType::F32, vec![batch.clone(), seq.clone(), n_kv_heads_expr.clone(), head_dim_expr.clone()]);
+        let v_out = builder.add_tensor(&format!("v_{}", l), DType::F32, vec![batch.clone(), seq.clone(), n_kv_heads_expr.clone(), head_dim_expr.clone()]);
+
+        // Reshape flat QKV to 4D for GQA
+        builder.add_node(hologram_ai_common::ir::op::AiOp::Reshape { allow_zero: false }, vec![q_flat], vec![q_out]);
+        builder.add_node(hologram_ai_common::ir::op::AiOp::Reshape { allow_zero: false }, vec![k_flat], vec![k_out]);
+        builder.add_node(hologram_ai_common::ir::op::AiOp::Reshape { allow_zero: false }, vec![v_flat], vec![v_out]);
 
         // GQA
         let attn_out = builder.add_tensor(
             &format!("attn_out_{l}"),
             DType::F32,
-            vec![batch.clone(), seq.clone(), hidden.clone()],
+            vec![batch.clone(), seq.clone(), n_heads_expr.clone(), head_dim_expr.clone()],
         );
         builder.add_node(
             hologram_ai_common::ir::op::AiOp::GroupedQueryAttention {
@@ -249,21 +373,26 @@ pub fn build_parametric_graph_from_keys(config: &Value, keys: &[String]) -> Resu
             vec![attn_out],
         );
 
-        // O Projection
-        let o_proj = builder.add_tensor(
-            &format!("model.layers.{l}.self_attn.o_proj.weight"),
-            DType::F32,
-            vec![q_out_var.clone(), hidden.clone()],
-        );
-        let o_out = builder.add_tensor(
-            &format!("o_out_{l}"),
+        let attn_out_flat = builder.add_tensor(
+            &format!("attn_out_flat_{l}"),
             DType::F32,
             vec![batch.clone(), seq.clone(), hidden.clone()],
         );
         builder.add_node(
-            hologram_ai_common::ir::op::AiOp::MatMul,
-            vec![attn_out, o_proj],
-            vec![o_out],
+            hologram_ai_common::ir::op::AiOp::Reshape { allow_zero: false },
+            vec![attn_out],
+            vec![attn_out_flat],
+        );
+
+        // O Projection
+        let o_out = add_linear_layer(
+            &mut builder,
+            attn_out_flat,
+            &format!("model.layers.{}.self_attn.o_proj.weight", l),
+            q_out_var.clone(),
+            hidden.clone(),
+            &format!("o_out_{}", l),
+            vec![batch.clone(), seq.clone(), hidden.clone()],
         );
 
         // Add (residual 1)
@@ -301,41 +430,79 @@ pub fn build_parametric_graph_from_keys(config: &Value, keys: &[String]) -> Resu
             .and_then(|v| v.as_u64())
             .unwrap_or(hidden_size as u64 * 4);
         let ffn_hidden = hologram_ai_common::ir::shape::DimExpr::Concrete(intermediate_size);
-        let gate_proj = builder.add_tensor(
-            &format!("model.layers.{l}.mlp.gate_proj.weight"),
-            DType::F32,
-            vec![hidden.clone(), ffn_hidden.clone()],
-        );
-        let up_proj = builder.add_tensor(
-            &format!("model.layers.{l}.mlp.up_proj.weight"),
-            DType::F32,
-            vec![hidden.clone(), ffn_hidden.clone()],
-        );
+        
+        let gate_out;
+        let up_out;
+        
+        if keys.contains(&format!("model.layers.{}.mlp.gate_up_proj.weight", l)) {
+            let total_ffn = hologram_ai_common::ir::shape::DimExpr::Concrete(intermediate_size * 2);
+            let gate_up_weight = builder.add_tensor(
+                &format!("model.layers.{}.mlp.gate_up_proj.weight", l),
+                DType::F32,
+                vec![total_ffn.clone(), hidden.clone()],
+            );
 
-        let gate_out = builder.add_tensor(
-            &format!("gate_out_{l}"),
-            DType::F32,
-            vec![batch.clone(), seq.clone(), ffn_hidden.clone()],
-        );
-        let up_out = builder.add_tensor(
-            &format!("up_out_{l}"),
-            DType::F32,
-            vec![batch.clone(), seq.clone(), ffn_hidden.clone()],
-        );
+            let gate_weight = builder.add_tensor(&format!("gate_weight_{l}"), DType::F32, vec![ffn_hidden.clone(), hidden.clone()]);
+            let up_weight = builder.add_tensor(&format!("up_weight_{l}"), DType::F32, vec![ffn_hidden.clone(), hidden.clone()]);
 
-        builder.add_node(
-            hologram_ai_common::ir::op::AiOp::MatMul,
-            vec![mlp_norm_out, gate_proj],
-            vec![gate_out],
-        );
-        builder.add_node(
-            hologram_ai_common::ir::op::AiOp::MatMul,
-            vec![mlp_norm_out, up_proj],
-            vec![up_out],
-        );
+            builder.add_node(
+                hologram_ai_common::ir::op::AiOp::Slice { axes: vec![0], starts: vec![0], ends: vec![intermediate_size as i64], steps: vec![1] },
+                vec![gate_up_weight],
+                vec![gate_weight],
+            );
+            builder.add_node(
+                hologram_ai_common::ir::op::AiOp::Slice { axes: vec![0], starts: vec![intermediate_size as i64], ends: vec![(intermediate_size * 2) as i64], steps: vec![1] },
+                vec![gate_up_weight],
+                vec![up_weight],
+            );
+
+            gate_out = add_linear_layer_from_tensor(
+                &mut builder,
+                mlp_norm_out,
+                gate_weight,
+                LinearLayerParams {
+                    weight_name: &format!("gate_proj_{l}"),
+                    in_features: hidden.clone(),
+                    out_features: ffn_hidden.clone(),
+                    output_name: &format!("gate_out_{l}"),
+                    output_shape: vec![batch.clone(), seq.clone(), ffn_hidden.clone()],
+                },
+            );
+            up_out = add_linear_layer_from_tensor(
+                &mut builder,
+                mlp_norm_out,
+                up_weight,
+                LinearLayerParams {
+                    weight_name: &format!("up_proj_{l}"),
+                    in_features: hidden.clone(),
+                    out_features: ffn_hidden.clone(),
+                    output_name: &format!("up_out_{l}"),
+                    output_shape: vec![batch.clone(), seq.clone(), ffn_hidden.clone()],
+                },
+            );
+        } else {
+            gate_out = add_linear_layer(
+                &mut builder,
+                mlp_norm_out,
+                &format!("model.layers.{}.mlp.gate_proj.weight", l),
+                hidden.clone(),
+                ffn_hidden.clone(),
+                &format!("gate_out_{}", l),
+                vec![batch.clone(), seq.clone(), ffn_hidden.clone()],
+            );
+            up_out = add_linear_layer(
+                &mut builder,
+                mlp_norm_out,
+                &format!("model.layers.{}.mlp.up_proj.weight", l),
+                hidden.clone(),
+                ffn_hidden.clone(),
+                &format!("up_out_{}", l),
+                vec![batch.clone(), seq.clone(), ffn_hidden.clone()],
+            );
+        }
 
         let silu_out = builder.add_tensor(
-            &format!("silu_out_{l}"),
+            &format!("silu_out_{}", l),
             DType::F32,
             vec![batch.clone(), seq.clone(), ffn_hidden.clone()],
         );
@@ -346,7 +513,7 @@ pub fn build_parametric_graph_from_keys(config: &Value, keys: &[String]) -> Resu
         );
 
         let mul_out = builder.add_tensor(
-            &format!("mul_out_{l}"),
+            &format!("mul_out_{}", l),
             DType::F32,
             vec![batch.clone(), seq.clone(), ffn_hidden.clone()],
         );
@@ -357,20 +524,14 @@ pub fn build_parametric_graph_from_keys(config: &Value, keys: &[String]) -> Resu
         );
 
         // MLP Down
-        let down_proj = builder.add_tensor(
-            &format!("model.layers.{l}.mlp.down_proj.weight"),
-            DType::F32,
-            vec![ffn_hidden.clone(), hidden.clone()],
-        );
-        let down_out = builder.add_tensor(
-            &format!("down_out_{l}"),
-            DType::F32,
+        let down_out = add_linear_layer(
+            &mut builder,
+            mul_out,
+            &format!("model.layers.{}.mlp.down_proj.weight", l),
+            ffn_hidden.clone(),
+            hidden.clone(),
+            &format!("down_out_{}", l),
             vec![batch.clone(), seq.clone(), hidden.clone()],
-        );
-        builder.add_node(
-            hologram_ai_common::ir::op::AiOp::MatMul,
-            vec![mul_out, down_proj],
-            vec![down_out],
         );
 
         // Add (residual 2)
@@ -388,10 +549,10 @@ pub fn build_parametric_graph_from_keys(config: &Value, keys: &[String]) -> Resu
         current = res2_out;
     }
 
-    // 3. Final Norm
+    // Final Norm
     let norm_weight = builder.add_tensor("model.norm.weight", DType::F32, vec![hidden.clone()]);
     let norm_out = builder.add_tensor(
-        "final_norm",
+        "norm_out",
         DType::F32,
         vec![batch.clone(), seq.clone(), hidden.clone()],
     );
@@ -401,25 +562,19 @@ pub fn build_parametric_graph_from_keys(config: &Value, keys: &[String]) -> Resu
         vec![norm_out],
     );
 
-    // 4. LM Head
-    let lm_head_weight = builder.add_tensor(
+    // LM Head
+    let _logits = add_linear_layer(
+        &mut builder,
+        norm_out,
         "lm_head.weight",
-        DType::F32,
-        vec![hidden.clone(), vocab.clone()],
-    );
-    let logits = builder.add_tensor(
+        hidden.clone(),
+        vocab.clone(),
         "logits",
-        DType::F32,
         vec![batch.clone(), seq.clone(), vocab.clone()],
-    );
-    builder.add_node(
-        hologram_ai_common::ir::op::AiOp::MatMul,
-        vec![norm_out, lm_head_weight],
-        vec![logits],
     );
 
     // Output
-    builder.add_output(logits, "logits");
+    builder.add_output(_logits, "logits");
 
     let mut graph = builder.build();
 

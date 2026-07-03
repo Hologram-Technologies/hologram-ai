@@ -13,7 +13,12 @@ Feature: Arbitrary Models
     When the fixture is compiled and executed via the holographic compiler
     Then the outputs must exactly match the ONNX Runtime authoritative execution
 
-  Scenario: Streamed safetensors compilation
-    Given an arbitrary model name "test_safetensors"
-    When the safetensors metadata is streamed to the holographic compiler
+  Scenario Outline: Streamed safetensors compilation for authoritative models
+    Given an authoritative model name "<model_name>"
+    When the safetensors metadata is fetched and streamed to the holographic compiler
     Then the compiled holographic archive must contain external parameter mappings
+
+    Examples:
+      | model_name                         |
+      | TinyLlama/TinyLlama-1.1B-Chat-v1.0 |
+      | microsoft/phi-4                    |

@@ -1098,6 +1098,7 @@ dependencies = [
  "ndarray 0.16.1",
  "ort",
  "rand 0.8.5",
+ "reqwest",
  "safetensors",
  "serde",
  "serde_json",

@@ -53,6 +53,7 @@ holospaces = { workspace = true }
 # Loads `tokenizer.json` and validates encode/decode against the published
 # tokenizer the model was trained with — never against our own output.
 tokenizers = { version = "0.20", default-features = false, features = ["onig"] }
+reqwest = { workspace = true, features = ["json"] }
 
 [[test]]
 name = "bdd"

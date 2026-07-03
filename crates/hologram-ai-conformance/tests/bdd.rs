@@ -41,6 +41,11 @@ async fn given_model_name(w: &mut HologramWorld, name: String) {
     w.model_name = name;
 }
 
+#[given(expr = "an authoritative model name {string}")]
+async fn given_authoritative_model_name(w: &mut HologramWorld, name: String) {
+    w.model_name = name;
+}
+
 #[when(expr = "the model manifest is instantiated with a holospaces::Kappa for {string}")]
 async fn when_kappa_manifest(w: &mut HologramWorld, id: String) {
     let kappa = hologram_ai_core::domain::Kappa(address(id.as_bytes()));
@@ -109,61 +114,14 @@ async fn when_holo_execute(w: &mut HologramWorld) {
 async fn when_holo_execute_skip(_w: &mut HologramWorld) {}
 
 #[cfg(feature = "conformance")]
-#[when(expr = "the safetensors metadata is streamed to the holographic compiler")]
-async fn when_safetensors_streamed(w: &mut HologramWorld) {
-    let config_json =
-        r#"{"architectures":["ParametricModel"],"hidden_size":32,"num_attention_heads":2}"#
-            .to_string();
-    let keys = vec![
-        "model.embed_tokens.weight".to_string(),
-        "model.layers.0.input_layernorm.weight".to_string(),
-        "model.layers.0.self_attn.q_proj.weight".to_string(),
-        "model.layers.0.self_attn.k_proj.weight".to_string(),
-        "model.layers.0.self_attn.v_proj.weight".to_string(),
-        "model.layers.0.self_attn.o_proj.weight".to_string(),
-        "model.layers.0.post_attention_layernorm.weight".to_string(),
-        "model.layers.0.mlp.gate_proj.weight".to_string(),
-        "model.layers.0.mlp.up_proj.weight".to_string(),
-        "model.layers.0.mlp.down_proj.weight".to_string(),
-        "model.norm.weight".to_string(),
-        "lm_head.weight".to_string(),
-    ];
-    let mut kappas = Vec::new();
-    let mut shapes = Vec::new();
-    let mut dtypes = Vec::new();
+#[cfg(feature = "conformance")]
+#[path = "fetch_helper.rs"]
+mod fetch_helper;
 
-    for key in &keys {
-        kappas.push(format!("blake3:{}", key));
-        dtypes.push(hologram_ai_common::DType::F32);
-
-        if key.contains("embed_tokens") {
-            shapes.push(vec![32000, 32]);
-        } else if key.contains("input_layernorm") {
-            shapes.push(vec![32]);
-        } else if key.contains("post_attention_layernorm") {
-            shapes.push(vec![32]);
-        } else if key.contains("norm.weight") {
-            shapes.push(vec![32]);
-        } else if key.contains("q_proj") {
-            shapes.push(vec![32, 64]);
-        } else if key.contains("k_proj") {
-            shapes.push(vec![32, 64]);
-        } else if key.contains("v_proj") {
-            shapes.push(vec![32, 64]);
-        } else if key.contains("o_proj") {
-            shapes.push(vec![64, 32]);
-        } else if key.contains("gate_proj") {
-            shapes.push(vec![32, 128]);
-        } else if key.contains("up_proj") {
-            shapes.push(vec![32, 128]);
-        } else if key.contains("down_proj") {
-            shapes.push(vec![128, 32]);
-        } else if key.contains("lm_head") {
-            shapes.push(vec![32, 32000]);
-        } else {
-            shapes.push(vec![32, 32]);
-        }
-    }
+#[cfg(feature = "conformance")]
+#[when(expr = "the safetensors metadata is fetched and streamed to the holographic compiler")]
+async fn when_safetensors_fetched_and_streamed(w: &mut HologramWorld) {
+    let (config_json, keys, kappas, shapes, dtypes) = fetch_helper::fetch_authoritative_metadata(&w.model_name).await;
 
     let compiler = hologram_ai::compiler::ModelCompiler::default();
     let archive = compiler
@@ -173,8 +131,12 @@ async fn when_safetensors_streamed(w: &mut HologramWorld) {
             kappas,
             shapes,
             dtypes,
-        })
-        .expect("compile failed");
+        });
+        
+    let archive = match archive {
+        Ok(a) => a,
+        Err(e) => panic!("compile failed: {:?}", e),
+    };
 
     w.compiled_node_count = archive.stats.node_count;
     w.holo_archive = Some(archive.bytes);
