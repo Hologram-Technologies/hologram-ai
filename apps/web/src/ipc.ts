@@ -1,4 +1,4 @@
-import { compileOnnxWithData, computeKappa, compileSafetensorsStreamed, KappaHasher } from "./holo";
+import { compileOnnxWithData, computeKappa, compileSafetensorsStreamed, KappaHasher, ensureReady } from "./holo";
 import { type GenOpts } from "./holo";
 import GenerateWorker from "./generate.worker?worker";
 
@@ -223,6 +223,7 @@ function emitLine(event: string, line: ProcessLine) {
 
 
 export async function streamSafetensorsForCompile(url: string, fileName: string) {
+  await ensureReady();
   let response: Response | null = null;
   let attempts = 0;
   while (attempts < 3) {
