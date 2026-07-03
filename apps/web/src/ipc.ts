@@ -95,7 +95,7 @@ export async function workspacePaths(): Promise<WorkspacePaths> {
   };
 }
 
-async function getOpfsDir() {
+export async function getOpfsDir() {
   return await navigator.storage.getDirectory();
 }
 
@@ -279,11 +279,28 @@ export async function downloadKnownModel(id: string): Promise<number> {
     const writable = await handle.createWritable();
     
     if (response.body) {
+      const contentLength = response.headers.get("content-length");
+      const total = contentLength ? parseInt(contentLength, 10) : 0;
+      let loaded = 0;
+      let lastEmit = 0;
+      
       const reader = response.body.getReader();
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
         await writable.write(value);
+        loaded += value.length;
+        
+        const now = Date.now();
+        if (now - lastEmit > 500) {
+          lastEmit = now;
+          if (total > 0) {
+            const percent = Math.round((loaded / total) * 100);
+            emitLine("models://download-progress", { stream: "stdout", line: `Downloading ${file.rfilename}: ${percent}% (${(loaded / 1024 / 1024).toFixed(1)}MB / ${(total / 1024 / 1024).toFixed(1)}MB)` });
+          } else {
+            emitLine("models://download-progress", { stream: "stdout", line: `Downloading ${file.rfilename}: ${(loaded / 1024 / 1024).toFixed(1)}MB` });
+          }
+        }
       }
     }
     await writable.close();

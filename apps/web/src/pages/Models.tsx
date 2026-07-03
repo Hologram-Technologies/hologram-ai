@@ -30,6 +30,17 @@ export function Models() {
       onProcessLine("models://download-line", (l) =>
         setTail((t) => [...t.slice(-200), l.line]),
       ),
+      onProcessLine("models://download-progress", (l) =>
+        setTail((t) => {
+          const newTail = [...t];
+          if (newTail.length > 0 && newTail[newTail.length - 1].startsWith("Downloading ")) {
+            newTail[newTail.length - 1] = l.line;
+          } else {
+            newTail.push(l.line);
+          }
+          return newTail.slice(-200);
+        }),
+      ),
       onProcessLine("models://compile-line", (l) =>
         setTail((t) => [...t.slice(-200), l.line]),
       ),
@@ -55,18 +66,7 @@ export function Models() {
     }
   }
 
-  async function onCompile(id: string) {
-    setBusy({ id, phase: "compiling" });
-    setTail([]);
-    try {
-      await compileKnownModel(id);
-    } catch (e) {
-      setTail((t) => [...t, `error: ${String(e)}`]);
-    } finally {
-      setBusy(null);
-      refresh().catch(console.error);
-    }
-  }
+
 
   const [searchQuery, setSearchQuery] = useState("");
   const [searchResults, setSearchResults] = useState<any[]>([]);
@@ -120,21 +120,14 @@ export function Models() {
     const meBusy = busy?.id === m.id;
     if (m.compiledArchive) {
       return (
-        <button onClick={() => onCompile(m.id)} disabled={isBusy}>
-          {meBusy && busy?.phase === "compiling" ? "Recompiling…" : "Recompile"}
-        </button>
-      );
-    }
-    if (m.downloaded) {
-      return (
-        <button onClick={() => onCompile(m.id)} disabled={isBusy}>
-          {meBusy && busy?.phase === "compiling" ? "Compiling…" : `Compile (${m.quantize})`}
+        <button disabled={true}>
+          Ready
         </button>
       );
     }
     return (
       <button onClick={() => onDownload(m.id)} disabled={isBusy}>
-        {meBusy && busy?.phase === "downloading" ? "Downloading…" : "Download"}
+        {meBusy ? (busy?.phase === "compiling" ? "Compiling…" : "Downloading…") : "Download"}
       </button>
     );
   }
