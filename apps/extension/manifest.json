@@ -2,30 +2,22 @@
   "manifest_version": 3,
   "name": "Holospaces Egress Extension",
   "version": "1.0.0",
-  "description": "Bypasses CORS and injects auth for Hugging Face downloads.",
+  "description": "Injects Hugging Face auth for model downloads.",
   "permissions": [
     "declarativeNetRequest",
-    "declarativeNetRequestWithHostAccess"
+    "cookies"
   ],
   "host_permissions": [
     "*://huggingface.co/*",
+    "*://*.github.io/*",
     "*://localhost/*"
   ],
   "background": {
     "service_worker": "background.js"
   },
-  "declarative_net_request": {
-    "rule_resources": [
-      {
-        "id": "cors",
-        "enabled": true,
-        "path": "rules.json"
-      }
-    ]
-  },
   "content_scripts": [
     {
-      "matches": ["*://localhost/*"],
+      "matches": ["*://*.github.io/*", "*://localhost/*"],
       "js": ["content.js"],
       "run_at": "document_start",
       "world": "MAIN"
