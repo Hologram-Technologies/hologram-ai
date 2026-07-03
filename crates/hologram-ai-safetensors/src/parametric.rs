@@ -15,15 +15,13 @@ fn map_dtype(d: SafeDtype) -> Result<DType> {
     }
 }
 
-pub fn build_parametric_graph(_config: &Value, safetensors_bytes: &[u8]) -> Result<AiGraph> {
-    let builder = GraphBuilder::new("parametric_model".to_string());
+pub fn build_parametric_graph(config: &Value, safetensors_bytes: &[u8]) -> Result<AiGraph> {
+    let mut builder = GraphBuilder::new("parametric_model".to_string());
 
-    // 1. Identify tensors from safetensors keys
     let st = SafeTensors::deserialize(safetensors_bytes)?;
     let tensors = st.tensors();
     let keys: Vec<&String> = tensors.iter().map(|(k, _)| k).collect();
 
-    // Determine number of layers by looking for the max layer index in keys
     let mut num_layers = 0;
     for key in &keys {
         if let Some(idx) = extract_layer_idx(key) {
@@ -34,23 +32,61 @@ pub fn build_parametric_graph(_config: &Value, safetensors_bytes: &[u8]) -> Resu
     }
 
     if num_layers == 0 {
-        return Err(anyhow!("Could not infer any layers from tensor keys"));
+        return Err(anyhow!(
+            "Could not infer any layers from tensor keys. Is this a transformer?"
+        ));
     }
 
-    // Find embedding tensor (usually contains "embed" or "wte")
-    let _embed_key = keys
-        .iter()
-        .find(|k| k.contains("embed") || k.contains("wte"))
-        .ok_or_else(|| anyhow!("Could not find embedding tensor"))?;
+    // Config defaults
+    let hidden_size = config
+        .get("hidden_size")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(4096) as u32;
+    let num_heads = config
+        .get("num_attention_heads")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(32) as u32;
+    let _num_kv_heads = config
+        .get("num_key_value_heads")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(num_heads as u64) as u32;
+    let _head_dim = hidden_size / num_heads;
 
-    // (Here we would dynamically construct the generic transformer graph...)
-    // This removes the hardcoded `match config.model_type` logic.
+    // Inputs
+    let batch = builder.register_var("batch");
+    let seq = builder.register_var("seq");
+    let _input_ids = builder.add_input("input_ids", DType::INT64, vec![batch.clone(), seq.clone()]);
 
-    Ok(builder.build())
+    // Output (logits)
+    let vocab_size = config
+        .get("vocab_size")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(32000) as u32;
+
+    let vocab = builder.register_var("vocab");
+    // We add a dummy output for now so the graph has something, in reality we'd string together the full nodes
+    let logits = builder.add_tensor("logits", DType::F32, vec![batch, seq, vocab]);
+    builder.add_output(logits, "logits");
+
+    let mut graph = builder.build();
+
+    graph.metadata.insert(
+        "vocab_size".to_string(),
+        hologram_ai_common::MetaValue::Int(vocab_size as i64),
+    );
+    graph.metadata.insert(
+        "arch".to_string(),
+        hologram_ai_common::MetaValue::Str("parametric_transformer".to_string()),
+    );
+    graph.metadata.insert(
+        "n_layers".to_string(),
+        hologram_ai_common::MetaValue::Int(num_layers as i64),
+    );
+
+    Ok(graph)
 }
 
 fn extract_layer_idx(key: &str) -> Option<usize> {
-    // Looks for patterns like "layers.0." or "h.0."
     let parts: Vec<&str> = key.split('.').collect();
     for (i, part) in parts.iter().enumerate() {
         if (*part == "layers" || *part == "h" || *part == "blocks") && i + 1 < parts.len() {

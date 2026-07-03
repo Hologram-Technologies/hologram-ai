@@ -156,7 +156,7 @@ export function Models() {
 
         <div style={{ background: "var(--bg-accent)", padding: 12, borderRadius: 6, marginBottom: 16 }}>
           <strong style={{ display: "block", marginBottom: 4 }}>Notice: Egress Extension Required</strong>
-          <span style={{ fontSize: 13 }}>To download arbitrary models directly from HuggingFace in the browser, you must install the <a href="https://github.com/Hologram-Technologies/holospaces" target="_blank" style={{ color: "var(--fg)" }}>Holospaces Egress Extension</a> for Chrome.</span>
+          <span style={{ fontSize: 13 }}>To download arbitrary models directly from HuggingFace in the browser, you must install the <a href={`${import.meta.env.BASE_URL}extension.zip`} download style={{ color: "var(--fg)", textDecoration: "underline" }}>Holospaces Egress Extension</a> for Chrome (download and load unpacked).</span>
         </div>
 
         <div style={{ marginBottom: 16, display: "flex", gap: 8 }}>
