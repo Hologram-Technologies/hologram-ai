@@ -157,6 +157,17 @@ export function Models() {
         <div style={{ background: "var(--bg-accent)", padding: 12, borderRadius: 6, marginBottom: 16 }}>
           <strong style={{ display: "block", marginBottom: 4 }}>Notice: Egress Extension Required</strong>
           <span style={{ fontSize: 13 }}>To download arbitrary models directly from HuggingFace in the browser, you must install the <a href={`${import.meta.env.BASE_URL}extension.zip`} download style={{ color: "var(--fg)", textDecoration: "underline" }}>Holospaces Egress Extension</a> for Chrome (download and load unpacked).</span>
+          <div style={{ marginTop: 12 }}>
+            <label style={{ display: "block", fontSize: 12, fontWeight: "bold", marginBottom: 4 }}>Hugging Face Access Token (For Gated Models)</label>
+            <input
+              type="password"
+              placeholder="hf_..."
+              defaultValue={localStorage.getItem("huggingface_token") || ""}
+              onChange={(e) => localStorage.setItem("huggingface_token", e.target.value)}
+              style={{ width: "300px", padding: "6px 8px" }}
+            />
+            <span style={{ marginLeft: 8, fontSize: 11, color: "var(--fg-dim)" }}>Saved locally in your browser.</span>
+          </div>
         </div>
 
         <div style={{ marginBottom: 16, display: "flex", gap: 8 }}>
