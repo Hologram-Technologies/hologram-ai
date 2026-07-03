@@ -55,15 +55,14 @@ describe('fetchViaExtension', () => {
     );
   });
   
-  it('should post a fetch message on the port with headers', () => {
-    fetchViaExtension('https://example.com', { "Authorization": "Bearer token" }).catch(() => {});
+  it('should post a fetch message on the port', () => {
+    fetchViaExtension('https://example.com').catch(() => {});
     
     expect(mockPort.postMessage).toHaveBeenCalledWith(
       expect.objectContaining({
         type: 'fetch',
         url: 'https://example.com',
-        method: 'GET',
-        headers: { "Authorization": "Bearer token" }
+        method: 'GET'
       })
     );
   });

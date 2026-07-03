@@ -52,9 +52,23 @@ function serveContent(port) {
   port.onMessage.addListener(async (msg) => {
     if (!msg || msg.type !== "fetch" || typeof msg.url !== "string") return;
     try {
+      const fetchHeaders = { ...msg.headers };
+      if (msg.url.includes("huggingface.co")) {
+        try {
+          const cookie = await new Promise((resolve) => {
+            chrome.cookies.get({ url: "https://huggingface.co", name: "token" }, resolve);
+          });
+          if (cookie && cookie.value) {
+            fetchHeaders["Authorization"] = `Bearer ${cookie.value}`;
+          }
+        } catch (e) {
+          // ignore cookie errors
+        }
+      }
+
       const resp = await fetch(msg.url, {
         method: msg.method || "GET",
-        headers: msg.headers || {},
+        headers: fetchHeaders,
         redirect: "follow",
         credentials: "include",
       });

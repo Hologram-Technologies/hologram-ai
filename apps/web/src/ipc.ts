@@ -219,7 +219,7 @@ function emitLine(event: string, line: ProcessLine) {
   addLog(line.stream === "stderr" ? "error" : "info", event, line.line);
 }
 
-export async function fetchViaExtension(url: string, headers?: Record<string, string>): Promise<Uint8Array> {
+export async function fetchViaExtension(url: string): Promise<Uint8Array> {
   return new Promise((resolve, reject) => {
     // @ts-ignore
     if (typeof chrome === "undefined" || !chrome.runtime) {
@@ -265,7 +265,7 @@ export async function fetchViaExtension(url: string, headers?: Record<string, st
       }
     });
     
-    port.postMessage({ type: "fetch", id, url, method: "GET", headers });
+    port.postMessage({ type: "fetch", id, url, method: "GET" });
   });
 }
 
@@ -273,12 +273,6 @@ export async function downloadKnownModel(id: string): Promise<number> {
   const catalogue = getCatalogue();
   const model = catalogue.find(m => m.id === id);
   if (!model) throw new Error("Unknown model");
-  
-  const token = localStorage.getItem("huggingface_token");
-  const fetchHeaders: Record<string, string> = {};
-  if (token) {
-    fetchHeaders["Authorization"] = `Bearer ${token}`;
-  }
   
   emitLine("models://download-line", { stream: "stdout", line: `Downloading ${model.hfId} from HuggingFace via holospaces extension...` });
   
@@ -289,7 +283,7 @@ export async function downloadKnownModel(id: string): Promise<number> {
   
   let info: any;
   try {
-    const infoBytes = await fetchViaExtension(`https://huggingface.co/api/models/${model.hfId}`, fetchHeaders);
+    const infoBytes = await fetchViaExtension(`https://huggingface.co/api/models/${model.hfId}`);
     const infoText = new TextDecoder().decode(infoBytes);
     info = JSON.parse(infoText);
   } catch (err) {
@@ -315,7 +309,7 @@ export async function downloadKnownModel(id: string): Promise<number> {
     
     let buffer: Uint8Array;
     try {
-      buffer = await fetchViaExtension(url, fetchHeaders);
+      buffer = await fetchViaExtension(url);
     } catch (err) {
       throw new Error(`Failed to fetch ${file.rfilename}: ${err}`);
     }

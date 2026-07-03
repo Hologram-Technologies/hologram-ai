@@ -18,6 +18,8 @@
 
   "host_permissions": ["*://*/*"],
 
+  "permissions": ["cookies"],
+
   "content_scripts": [
     {
       "matches": ["https://hologram-technologies.github.io/*"],
