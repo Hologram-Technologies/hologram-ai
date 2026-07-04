@@ -16,6 +16,7 @@ hologram-ai-quant = { workspace = true }
 anyhow = { workspace = true }
 bytemuck = { workspace = true }
 half = { workspace = true }
+serde_json = { workspace = true }
 
 # ORT + model validation deps — behind `conformance` feature.
 ort = { version = "2.0.0-rc.12", optional = true }
@@ -42,7 +43,7 @@ perf = []
 
 [dev-dependencies]
 cucumber = "0.21"
-tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "process", "sync", "time"] }
 approx = { workspace = true }
 rand = "0.8"
 serde = { version = "1", features = ["derive"] }
@@ -55,7 +56,17 @@ holospaces = { workspace = true }
 tokenizers = { version = "0.20", default-features = false, features = ["onig"] }
 reqwest = { workspace = true, features = ["json"] }
 hologram-ai = { path = "../hologram-ai" }
+hologram-ai-tokenizer = { workspace = true }
+hologram-ai-model = { workspace = true }
+blake3 = { workspace = true }
 
+# The model-driven Gherkin runner (see model/dictionary.toml). No
+# `required-features`: the default lane must build and run with a bare
+# `cargo test -p hologram-ai-conformance --test bdd` (dev-dependencies are
+# unconditional). ORT-backed step bodies live behind the `conformance`
+# feature; their registrations stay unconditional and fail loud — never
+# skip — when invoked from a build without the feature. The ort/model lanes
+# are built with `--features conformance` (see the Justfile).
 [[test]]
 name = "bdd"
 harness = false

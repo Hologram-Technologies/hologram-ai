@@ -7,7 +7,7 @@
 //! (serialized `TensorProto`s). For each case the test:
 //!
 //! 1. downloads the authoritative artifacts (model + inputs + expected output),
-//!    caching them under `tests/fixtures/onnx-node/` (git-ignored);
+//!    caching them under `target/onnx-node-cache/` (git-ignored);
 //! 2. imports + compiles the model through hologram-ai onto the canonical
 //!    `OpKind` model and runs it with the spec's inputs; and
 //! 3. asserts the output equals the spec's `output_0.pb` within tolerance.
@@ -96,13 +96,15 @@ const CASES: &[NodeTest] = &[
     },
 ];
 
-const BASE: &str = "https://raw.githubusercontent.com/onnx/onnx/main/onnx/backend/test/data/node";
+// Pinned to the immutable v1.17.0 release tag (registered in model/oracles.toml
+// as `onnx-node-corpus`; the pin is checked live by `xtask pin-check`).
+const BASE: &str = "https://raw.githubusercontent.com/onnx/onnx/v1.17.0/onnx/backend/test/data/node";
 
 fn cache_dir() -> PathBuf {
     let mut p = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     p.pop();
     p.pop();
-    p.push("tests/fixtures/onnx-node");
+    p.push("target/onnx-node-cache");
     p
 }
 

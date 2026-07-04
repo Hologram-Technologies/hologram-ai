@@ -335,7 +335,12 @@ mod tests {
         let model = Model::load().expect("model");
         for row in &model.rows {
             if row.status == "open" {
-                assert_eq!(row.tier, Tier::Target, "open row `{}` must be target", row.id);
+                assert_eq!(
+                    row.tier,
+                    Tier::Target,
+                    "open row `{}` must be target",
+                    row.id
+                );
             }
         }
     }
