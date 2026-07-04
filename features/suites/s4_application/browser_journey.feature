@@ -16,3 +16,11 @@ Feature: The hermetic browser journey
     When the fixture model is downloaded
     And a single-turn prompt is sent
     Then a non-empty completion streams back
+
+  Scenario: windowed execution over k reproduces the reference
+    Given a forced single-layer execution window
+    When the fixture model is downloaded
+    Then the model directory holds a staged k-form bundle
+    When the user sends handshake message 1
+    Then assistant turn 1 streams a non-empty completion
+    And the staged completion matches reference turn 1

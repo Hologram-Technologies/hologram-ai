@@ -17,6 +17,7 @@ use hologram_ai_common::MetaValue;
 use safetensors::{Dtype as SafeDtype, SafeTensors};
 use serde_json::Value;
 use std::collections::HashMap;
+use std::num::NonZeroU64;
 
 fn map_dtype(d: SafeDtype) -> Result<DType> {
     match d {
@@ -636,68 +637,159 @@ fn resolve_context_length(
     Ok(n)
 }
 
-/// Build the decoder graph from `config.json` plus the tensor manifest
-/// (parallel `keys`/`dtypes` slices).
-///
-/// `context_length`: `Some(n)` bakes `n` (validated against the model's
-/// `max_position_embeddings`); `None` uses the model's own trained context.
-pub fn build_parametric_graph_from_manifest(
-    config: &Value,
-    keys: &[String],
-    dtypes: &[DType],
-    context_length: Option<u64>,
-) -> Result<AiGraph> {
-    let family = select_family(config)?;
-    reject_unsupported_knobs(family, config)?;
-    let cfg = ModelConfig::from_json(config)?;
-    let manifest = TensorManifest::new(keys, dtypes)?;
-    validate_layer_count(&cfg, keys)?;
-    let context_length = resolve_context_length(family, &cfg, context_length)?;
+/// Per-builder dimension expressions — all functions of the config. `batch`
+/// and `seq` are registered on the builder's own dim-var table, so every
+/// graph (monolithic or stage slice) concretizes identically at compile.
+struct DecoderDims {
+    batch: DimExpr,
+    seq: DimExpr,
+    vocab: DimExpr,
+    hidden: DimExpr,
+    ffn_hidden: DimExpr,
+    n_heads: DimExpr,
+    n_kv_heads: DimExpr,
+    head_dim: DimExpr,
+    q_out: DimExpr,
+    kv_out: DimExpr,
+}
 
-    let mut builder = GraphBuilder::new("parametric_model".to_string());
+impl DecoderDims {
+    fn register(builder: &mut GraphBuilder, cfg: &ModelConfig) -> Self {
+        Self {
+            batch: builder.register_var("batch"),
+            seq: builder.register_var("seq"),
+            vocab: DimExpr::Concrete(cfg.vocab_size),
+            hidden: DimExpr::Concrete(cfg.hidden_size),
+            ffn_hidden: DimExpr::Concrete(cfg.intermediate_size),
+            n_heads: DimExpr::Concrete(cfg.num_attention_heads),
+            n_kv_heads: DimExpr::Concrete(cfg.num_key_value_heads),
+            head_dim: DimExpr::Concrete(cfg.head_dim),
+            q_out: DimExpr::Concrete(cfg.num_attention_heads * cfg.head_dim),
+            kv_out: DimExpr::Concrete(cfg.num_key_value_heads * cfg.head_dim),
+        }
+    }
 
-    // Dimension expressions — all functions of the config.
-    let batch = builder.register_var("batch");
-    let seq = builder.register_var("seq");
-    let vocab = DimExpr::Concrete(cfg.vocab_size);
-    let hidden = DimExpr::Concrete(cfg.hidden_size);
-    let ffn_hidden = DimExpr::Concrete(cfg.intermediate_size);
-    let n_heads_expr = DimExpr::Concrete(cfg.num_attention_heads);
-    let n_kv_heads_expr = DimExpr::Concrete(cfg.num_key_value_heads);
-    let head_dim_expr = DimExpr::Concrete(cfg.head_dim);
-    let q_out_dim = DimExpr::Concrete(cfg.num_attention_heads * cfg.head_dim);
-    let kv_out_dim = DimExpr::Concrete(cfg.num_key_value_heads * cfg.head_dim);
+    /// The `[batch, seq, hidden]` activation shape flowing between layers —
+    /// and between stage archives in the staged partition.
+    fn hidden_state(&self) -> Vec<DimExpr> {
+        vec![self.batch.clone(), self.seq.clone(), self.hidden.clone()]
+    }
+}
 
-    // Bias expectations: family structure (Qwen2 Q/K/V) or Llama-style flags.
-    let qkv_bias_expected = family.attention_qkv_bias || cfg.attention_bias;
+/// The two dangling operands of a decoder layer whose closing residual add
+/// has not been emitted yet: `attn_residual` is the post-attention residual
+/// stream (`res1_l`) and `mlp_down` is the MLP down-projection output. The
+/// layer is completed by [`DecoderRecipe::seal_layer`], which emits
+/// `res2_l = attn_residual + mlp_down`.
+struct LayerTail {
+    attn_residual: TensorId,
+    mlp_down: TensorId,
+}
 
-    // Inputs
-    let input_ids = builder.add_input("input_ids", DType::INT64, vec![batch.clone(), seq.clone()]);
+/// The validated decoder recipe: family + config + manifest + resolved
+/// context. **The single owner of layer emission** — the monolithic builder
+/// ([`build_parametric_graph_from_manifest`]) and the staged builder
+/// ([`build_parametric_stage_graphs`]) both assemble their graphs from these
+/// emitters, so a stage slice contains exactly the nodes the monolithic
+/// graph contains for the same layers.
+struct DecoderRecipe<'a> {
+    family: &'static FamilySpec,
+    cfg: ModelConfig,
+    manifest: TensorManifest<'a>,
+    context_length: u64,
+}
 
-    // 1. Embedding — declared at its manifest dtype, widened to F32 for compute.
-    let embed_weight = add_weight_f32(
-        &mut builder,
-        &manifest,
-        "model.embed_tokens.weight",
-        vec![vocab.clone(), hidden.clone()],
-    );
-    let mut current = builder.add_tensor(
-        "hidden_states",
-        DType::F32,
-        vec![batch.clone(), seq.clone(), hidden.clone()],
-    );
-    builder.add_node(
-        AiOp::Gather { axis: 0 },
-        vec![embed_weight, input_ids],
-        vec![current],
-    );
+impl<'a> DecoderRecipe<'a> {
+    /// Shared validation front door: family selection, knob rejection,
+    /// config extraction, manifest/layer cross-checks, context resolution.
+    fn prepare(
+        config: &Value,
+        keys: &'a [String],
+        dtypes: &[DType],
+        context_length: Option<u64>,
+    ) -> Result<Self> {
+        let family = select_family(config)?;
+        reject_unsupported_knobs(family, config)?;
+        let cfg = ModelConfig::from_json(config)?;
+        let manifest = TensorManifest::new(keys, dtypes)?;
+        validate_layer_count(&cfg, keys)?;
+        let context_length = resolve_context_length(family, &cfg, context_length)?;
+        Ok(Self {
+            family,
+            cfg,
+            manifest,
+            context_length,
+        })
+    }
 
-    // 2. Transformer blocks
-    for l in 0..cfg.num_hidden_layers {
+    /// The embedding front: the `input_ids` graph input, the embedding weight
+    /// (declared at its manifest dtype, widened to F32), and the token gather
+    /// producing `hidden_states`. Returns `(embedding_f32_view, hidden_states)`
+    /// — the monolithic tied head reuses the view; a stage graph outputs the
+    /// hidden states.
+    fn emit_embedding(
+        &self,
+        builder: &mut GraphBuilder,
+        dims: &DecoderDims,
+    ) -> (TensorId, TensorId) {
+        let input_ids = builder.add_input(
+            "input_ids",
+            DType::INT64,
+            vec![dims.batch.clone(), dims.seq.clone()],
+        );
+        let embed_weight = add_weight_f32(
+            builder,
+            &self.manifest,
+            "model.embed_tokens.weight",
+            vec![dims.vocab.clone(), dims.hidden.clone()],
+        );
+        let hidden = builder.add_tensor("hidden_states", DType::F32, dims.hidden_state());
+        builder.add_node(
+            AiOp::Gather { axis: 0 },
+            vec![embed_weight, input_ids],
+            vec![hidden],
+        );
+        (embed_weight, hidden)
+    }
+
+    /// One decoder layer up to (but excluding) its closing residual add:
+    /// attention norm → Q/K/V (per the family registry) → RoPE-fused causal
+    /// GQA → O projection → residual 1 → MLP norm → gate/up (per the family
+    /// registry) → SwiGLU → down projection. Returns the [`LayerTail`] whose
+    /// residual add [`Self::seal_layer`] emits — split out so the staged
+    /// builder can defer the *final* layer's add into the head stage, where
+    /// the compiler fuses it into the final norm exactly as the monolithic
+    /// compile does.
+    fn emit_layer_core(
+        &self,
+        builder: &mut GraphBuilder,
+        dims: &DecoderDims,
+        l: u64,
+        current: TensorId,
+    ) -> Result<LayerTail> {
+        let family = self.family;
+        let cfg = &self.cfg;
+        let manifest = &self.manifest;
+        let DecoderDims {
+            batch,
+            seq,
+            hidden,
+            ffn_hidden,
+            n_heads: n_heads_expr,
+            n_kv_heads: n_kv_heads_expr,
+            head_dim: head_dim_expr,
+            q_out: q_out_dim,
+            kv_out: kv_out_dim,
+            ..
+        } = dims;
+
+        // Bias expectations: family structure (Qwen2 Q/K/V) or Llama-style flags.
+        let qkv_bias_expected = family.attention_qkv_bias || cfg.attention_bias;
+
         // Attention Norm — ε from the model's own `rms_norm_eps`.
         let attn_norm_weight = add_weight_f32(
-            &mut builder,
-            &manifest,
+            builder,
+            manifest,
             &format!("model.layers.{l}.input_layernorm.weight"),
             vec![hidden.clone()],
         );
@@ -728,14 +820,14 @@ pub fn build_parametric_graph_from_manifest(
             let kv_rows = cfg.num_key_value_heads * cfg.head_dim;
             // Fused row layout: [q (heads·head_dim); k (kv_dim); v (kv_dim)].
             let fused = add_fused_weight_f32(
-                &mut builder,
-                &manifest,
+                builder,
+                manifest,
                 family,
                 &format!("model.layers.{l}.self_attn.qkv_proj.weight"),
                 vec![DimExpr::Concrete(q_rows + 2 * kv_rows), hidden.clone()],
             )?;
             let q_weight = add_row_slice(
-                &mut builder,
+                builder,
                 fused,
                 &format!("q_weight_{l}"),
                 0,
@@ -743,7 +835,7 @@ pub fn build_parametric_graph_from_manifest(
                 hidden.clone(),
             );
             let k_weight = add_row_slice(
-                &mut builder,
+                builder,
                 fused,
                 &format!("k_weight_{l}"),
                 q_rows,
@@ -751,7 +843,7 @@ pub fn build_parametric_graph_from_manifest(
                 hidden.clone(),
             );
             let v_weight = add_row_slice(
-                &mut builder,
+                builder,
                 fused,
                 &format!("v_weight_{l}"),
                 q_rows + kv_rows,
@@ -759,7 +851,7 @@ pub fn build_parametric_graph_from_manifest(
                 hidden.clone(),
             );
             let q_flat = add_linear_layer_from_tensor(
-                &mut builder,
+                builder,
                 attn_norm_out,
                 q_weight,
                 LinearLayerParams {
@@ -771,7 +863,7 @@ pub fn build_parametric_graph_from_manifest(
                 },
             );
             let k_flat = add_linear_layer_from_tensor(
-                &mut builder,
+                builder,
                 attn_norm_out,
                 k_weight,
                 LinearLayerParams {
@@ -783,7 +875,7 @@ pub fn build_parametric_graph_from_manifest(
                 },
             );
             let v_flat = add_linear_layer_from_tensor(
-                &mut builder,
+                builder,
                 attn_norm_out,
                 v_weight,
                 LinearLayerParams {
@@ -797,8 +889,8 @@ pub fn build_parametric_graph_from_manifest(
             (q_flat, k_flat, v_flat)
         } else {
             let q_flat = add_projection(
-                &mut builder,
-                &manifest,
+                builder,
+                manifest,
                 attn_norm_out,
                 ProjectionParams {
                     weight_name: &format!("model.layers.{l}.self_attn.q_proj.weight"),
@@ -811,8 +903,8 @@ pub fn build_parametric_graph_from_manifest(
                 },
             )?;
             let k_flat = add_projection(
-                &mut builder,
-                &manifest,
+                builder,
+                manifest,
                 attn_norm_out,
                 ProjectionParams {
                     weight_name: &format!("model.layers.{l}.self_attn.k_proj.weight"),
@@ -825,8 +917,8 @@ pub fn build_parametric_graph_from_manifest(
                 },
             )?;
             let v_flat = add_projection(
-                &mut builder,
-                &manifest,
+                builder,
+                manifest,
                 attn_norm_out,
                 ProjectionParams {
                     weight_name: &format!("model.layers.{l}.self_attn.v_proj.weight"),
@@ -929,8 +1021,8 @@ pub fn build_parametric_graph_from_manifest(
 
         // O Projection — bias only per Llama-style `attention_bias`.
         let o_out = add_projection(
-            &mut builder,
-            &manifest,
+            builder,
+            manifest,
             attn_out_flat,
             ProjectionParams {
                 weight_name: &format!("model.layers.{l}.self_attn.o_proj.weight"),
@@ -953,8 +1045,8 @@ pub fn build_parametric_graph_from_manifest(
 
         // MLP Norm — ε from the model's own `rms_norm_eps`.
         let mlp_norm_weight = add_weight_f32(
-            &mut builder,
-            &manifest,
+            builder,
+            manifest,
             &format!("model.layers.{l}.post_attention_layernorm.weight"),
             vec![hidden.clone()],
         );
@@ -983,14 +1075,14 @@ pub fn build_parametric_graph_from_manifest(
             );
             // Fused row layout: [gate (intermediate); up (intermediate)].
             let fused = add_fused_weight_f32(
-                &mut builder,
-                &manifest,
+                builder,
+                manifest,
                 family,
                 &format!("model.layers.{l}.mlp.gate_up_proj.weight"),
                 vec![DimExpr::Concrete(2 * cfg.intermediate_size), hidden.clone()],
             )?;
             let gate_weight = add_row_slice(
-                &mut builder,
+                builder,
                 fused,
                 &format!("gate_weight_{l}"),
                 0,
@@ -998,7 +1090,7 @@ pub fn build_parametric_graph_from_manifest(
                 hidden.clone(),
             );
             let up_weight = add_row_slice(
-                &mut builder,
+                builder,
                 fused,
                 &format!("up_weight_{l}"),
                 cfg.intermediate_size,
@@ -1006,7 +1098,7 @@ pub fn build_parametric_graph_from_manifest(
                 hidden.clone(),
             );
             let gate_out = add_linear_layer_from_tensor(
-                &mut builder,
+                builder,
                 mlp_norm_out,
                 gate_weight,
                 LinearLayerParams {
@@ -1018,7 +1110,7 @@ pub fn build_parametric_graph_from_manifest(
                 },
             );
             let up_out = add_linear_layer_from_tensor(
-                &mut builder,
+                builder,
                 mlp_norm_out,
                 up_weight,
                 LinearLayerParams {
@@ -1032,8 +1124,8 @@ pub fn build_parametric_graph_from_manifest(
             (gate_out, up_out)
         } else {
             let gate_out = add_projection(
-                &mut builder,
-                &manifest,
+                builder,
+                manifest,
                 mlp_norm_out,
                 ProjectionParams {
                     weight_name: &format!("model.layers.{l}.mlp.gate_proj.weight"),
@@ -1046,8 +1138,8 @@ pub fn build_parametric_graph_from_manifest(
                 },
             )?;
             let up_out = add_projection(
-                &mut builder,
-                &manifest,
+                builder,
+                manifest,
                 mlp_norm_out,
                 ProjectionParams {
                     weight_name: &format!("model.layers.{l}.mlp.up_proj.weight"),
@@ -1078,8 +1170,8 @@ pub fn build_parametric_graph_from_manifest(
 
         // MLP Down — bias per Llama-style `mlp_bias`.
         let down_out = add_projection(
-            &mut builder,
-            &manifest,
+            builder,
+            manifest,
             mul_out,
             ProjectionParams {
                 weight_name: &format!("model.layers.{l}.mlp.down_proj.weight"),
@@ -1092,96 +1184,300 @@ pub fn build_parametric_graph_from_manifest(
             },
         )?;
 
-        // Add (residual 2)
-        let res2_out = builder.add_tensor(
-            &format!("res2_{l}"),
-            DType::F32,
-            vec![batch.clone(), seq.clone(), hidden.clone()],
-        );
-        builder.add_node(AiOp::Add, vec![res1_out, down_out], vec![res2_out]);
-
-        current = res2_out;
+        Ok(LayerTail {
+            attn_residual: res1_out,
+            mlp_down: down_out,
+        })
     }
 
-    // Final Norm — ε from the model's own `rms_norm_eps`.
-    let norm_weight = add_weight_f32(
-        &mut builder,
-        &manifest,
-        "model.norm.weight",
-        vec![hidden.clone()],
-    );
-    let norm_out = builder.add_tensor(
-        "norm_out",
-        DType::F32,
-        vec![batch.clone(), seq.clone(), hidden.clone()],
-    );
-    builder.add_node(
-        AiOp::RmsNorm {
-            epsilon: cfg.rms_norm_eps,
-        },
-        vec![current, norm_weight],
-        vec![norm_out],
-    );
-
-    // LM Head — tied when the config says so or when the manifest carries no
-    // separate `lm_head.weight` (the transformers convention for tied models).
-    // The tied head reuses the embedding weight tensor — the same tensor id,
-    // hence the same κ param — transposed by the shared linear-layer wiring
-    // ([vocab, hidden] → [hidden, vocab]) for the matmul orientation.
-    let tied = cfg.tie_word_embeddings || !manifest.contains("lm_head.weight");
-    let (head_weight, head_weight_name) = if tied {
-        (embed_weight, "lm_head.tied")
-    } else {
-        let weight = add_weight_f32(
-            &mut builder,
-            &manifest,
-            "lm_head.weight",
-            vec![vocab.clone(), hidden.clone()],
+    /// The closing residual add of layer `l`:
+    /// `res2_l = attn_residual + mlp_down`. Kept separate from
+    /// [`Self::emit_layer_core`] so the staged builder can emit the model's
+    /// final add inside the head stage (see [`build_parametric_stage_graphs`]).
+    fn seal_layer(
+        &self,
+        builder: &mut GraphBuilder,
+        dims: &DecoderDims,
+        l: u64,
+        tail: LayerTail,
+    ) -> TensorId {
+        let res2_out = builder.add_tensor(&format!("res2_{l}"), DType::F32, dims.hidden_state());
+        builder.add_node(
+            AiOp::Add,
+            vec![tail.attn_residual, tail.mlp_down],
+            vec![res2_out],
         );
-        (weight, "lm_head.weight")
-    };
-    let logits = add_linear_layer_from_tensor(
-        &mut builder,
-        norm_out,
-        head_weight,
-        LinearLayerParams {
-            weight_name: head_weight_name,
-            in_features: hidden.clone(),
-            out_features: vocab.clone(),
-            output_name: "logits",
-            output_shape: vec![batch.clone(), seq.clone(), vocab.clone()],
-        },
-    );
+        res2_out
+    }
 
-    // Output
+    /// Final norm + LM head over `current`, returning the `logits` tensor.
+    ///
+    /// The head is tied when the config says so or when the manifest carries
+    /// no separate `lm_head.weight` (the transformers convention for tied
+    /// models). A tied monolithic graph reuses the embedding weight's F32 view
+    /// (`embed_f32 = Some(..)` — the same tensor id, hence the same κ param);
+    /// a tied *head stage* declares `model.embed_tokens.weight` itself
+    /// (`embed_f32 = None`), so its κ-map binds the same κ the embedding stage
+    /// binds — one κ-store blob shared by two stage archives, which is exactly
+    /// the k-form sharing the staged partition witnesses.
+    fn emit_head(
+        &self,
+        builder: &mut GraphBuilder,
+        dims: &DecoderDims,
+        current: TensorId,
+        embed_f32: Option<TensorId>,
+    ) -> TensorId {
+        let manifest = &self.manifest;
+
+        // Final Norm — ε from the model's own `rms_norm_eps`.
+        let norm_weight = add_weight_f32(
+            builder,
+            manifest,
+            "model.norm.weight",
+            vec![dims.hidden.clone()],
+        );
+        let norm_out = builder.add_tensor("norm_out", DType::F32, dims.hidden_state());
+        builder.add_node(
+            AiOp::RmsNorm {
+                epsilon: self.cfg.rms_norm_eps,
+            },
+            vec![current, norm_weight],
+            vec![norm_out],
+        );
+
+        // The tied head is transposed by the shared linear-layer wiring
+        // ([vocab, hidden] → [hidden, vocab]) for the matmul orientation.
+        let tied = self.cfg.tie_word_embeddings || !manifest.contains("lm_head.weight");
+        let (head_weight, head_weight_name) = if tied {
+            let embed = match embed_f32 {
+                Some(id) => id,
+                None => add_weight_f32(
+                    builder,
+                    manifest,
+                    "model.embed_tokens.weight",
+                    vec![dims.vocab.clone(), dims.hidden.clone()],
+                ),
+            };
+            (embed, "lm_head.tied")
+        } else {
+            let weight = add_weight_f32(
+                builder,
+                manifest,
+                "lm_head.weight",
+                vec![dims.vocab.clone(), dims.hidden.clone()],
+            );
+            (weight, "lm_head.weight")
+        };
+        add_linear_layer_from_tensor(
+            builder,
+            norm_out,
+            head_weight,
+            LinearLayerParams {
+                weight_name: head_weight_name,
+                in_features: dims.hidden.clone(),
+                out_features: dims.vocab.clone(),
+                output_name: "logits",
+                output_shape: vec![dims.batch.clone(), dims.seq.clone(), dims.vocab.clone()],
+            },
+        )
+    }
+
+    /// Stamp the standard parametric metadata (all functions of the config)
+    /// onto a built graph.
+    fn apply_metadata(&self, graph: &mut AiGraph) {
+        let cfg = &self.cfg;
+        let metadata = [
+            ("arch", MetaValue::Str("parametric_transformer".to_string())),
+            ("family", MetaValue::Str(self.family.name.to_string())),
+            ("vocab_size", MetaValue::Int(cfg.vocab_size as i64)),
+            ("n_layers", MetaValue::Int(cfg.num_hidden_layers as i64)),
+            ("n_embd", MetaValue::Int(cfg.hidden_size as i64)),
+            ("n_kv_heads", MetaValue::Int(cfg.num_key_value_heads as i64)),
+            ("head_dim", MetaValue::Int(cfg.head_dim as i64)),
+            ("context_length", MetaValue::Int(self.context_length as i64)),
+        ];
+        for (key, value) in metadata {
+            graph.metadata.insert(key.to_string(), value);
+        }
+        // Surface the sliding-window clamp next to the context it clamped: the
+        // `context_length` above already carries the clamped ceiling, and this
+        // names its cause so no consumer mistakes the clamp for the trained
+        // `max_position_embeddings`.
+        if let (true, Some(window)) = (self.family.sliding_window_clamp, cfg.sliding_window) {
+            graph
+                .metadata
+                .insert("sliding_window".to_string(), MetaValue::Int(window as i64));
+        }
+    }
+}
+
+/// Build the decoder graph from `config.json` plus the tensor manifest
+/// (parallel `keys`/`dtypes` slices).
+///
+/// `context_length`: `Some(n)` bakes `n` (validated against the model's
+/// `max_position_embeddings`); `None` uses the model's own trained context.
+pub fn build_parametric_graph_from_manifest(
+    config: &Value,
+    keys: &[String],
+    dtypes: &[DType],
+    context_length: Option<u64>,
+) -> Result<AiGraph> {
+    let recipe = DecoderRecipe::prepare(config, keys, dtypes, context_length)?;
+    let mut builder = GraphBuilder::new("parametric_model".to_string());
+    let dims = DecoderDims::register(&mut builder, &recipe.cfg);
+
+    let (embed_f32, mut current) = recipe.emit_embedding(&mut builder, &dims);
+    for l in 0..recipe.cfg.num_hidden_layers {
+        let tail = recipe.emit_layer_core(&mut builder, &dims, l, current)?;
+        current = recipe.seal_layer(&mut builder, &dims, l, tail);
+    }
+    let logits = recipe.emit_head(&mut builder, &dims, current, Some(embed_f32));
     builder.add_output(logits, "logits");
 
     let mut graph = builder.build();
+    recipe.apply_metadata(&mut graph);
+    Ok(graph)
+}
 
-    let metadata = [
-        ("arch", MetaValue::Str("parametric_transformer".to_string())),
-        ("family", MetaValue::Str(family.name.to_string())),
-        ("vocab_size", MetaValue::Int(cfg.vocab_size as i64)),
-        ("n_layers", MetaValue::Int(cfg.num_hidden_layers as i64)),
-        ("n_embd", MetaValue::Int(cfg.hidden_size as i64)),
-        ("n_kv_heads", MetaValue::Int(cfg.num_key_value_heads as i64)),
-        ("head_dim", MetaValue::Int(cfg.head_dim as i64)),
-        ("context_length", MetaValue::Int(context_length as i64)),
-    ];
-    for (key, value) in metadata {
-        graph.metadata.insert(key.to_string(), value);
-    }
-    // Surface the sliding-window clamp next to the context it clamped: the
-    // `context_length` above already carries the clamped ceiling, and this
-    // names its cause so no consumer mistakes the clamp for the trained
-    // `max_position_embeddings`.
-    if let (true, Some(window)) = (family.sliding_window_clamp, cfg.sliding_window) {
+/// `stage_role` metadata value of the embedding stage (`input_ids → hidden_states`).
+pub const STAGE_ROLE_EMBEDDING: &str = "embedding";
+/// `stage_role` metadata value of a decoder-layer stage.
+pub const STAGE_ROLE_LAYERS: &str = "layers";
+/// `stage_role` metadata value of the head stage (final residual + norm + lm_head).
+pub const STAGE_ROLE_HEAD: &str = "head";
+
+/// Partition the parametric decoder into **stage graphs** for windowed
+/// execution over k (dictionary row `staged-execution`):
+///
+/// * stage `0` — embedding: `input_ids → hidden_states`;
+/// * stages `1..=ceil(L / layers_per_stage)` — consecutive decoder layers:
+///   `hidden_states → hidden_states`;
+/// * final stage — the model's closing residual add + final norm + LM head:
+///   `(hidden_states, hidden_residual) → logits`.
+///
+/// Every stage is an ordinary [`AiGraph`] over the same family registry,
+/// emitted by the same layer-emission recipe the monolithic builder uses — a
+/// stage contains exactly the monolithic graph's nodes for its layers, with
+/// absolute layer indices, the same compile-time context length (positions
+/// are absolute, so RoPE angles and the causal mask are identical in every
+/// stage), and the same per-tensor manifest declarations for the κ-map.
+///
+/// **The head-stage boundary carries two activations.** In the monolithic
+/// compile, the final layer's residual add is the final norm's only consumer,
+/// so the optimizer fuses `Add + RmsNorm` into one `FusedLayerNormResidual`
+/// kernel (ε-preconditioning is applied to each operand before the in-kernel
+/// sum). Cutting *after* that add would execute a different kernel sequence
+/// (`Add`, then a norm preconditioned on the sum) whose f32 rounding differs
+/// in the last bits — silently breaking the staged-equals-monolithic logits
+/// equality this partition must witness. The cut therefore lands on the fused
+/// kernel's own operands: the last layer stage outputs the post-attention
+/// residual stream (`hidden_states`) and the MLP down-projection
+/// (`hidden_residual`), and the head stage emits the closing add itself,
+/// where the optimizer fuses it exactly as the monolithic compile does. Every
+/// other layer boundary is a genuine two-consumer residual in the monolithic
+/// graph (never fused there), so those stages exchange one `hidden_states`
+/// activation and execute the identical `Add`/`RmsNorm` kernels.
+///
+/// Tied embeddings: the head stage declares `model.embed_tokens.weight`
+/// itself, so the embedding tensor's κ appears in **both** stage 0's and the
+/// final stage's κ-map — correct k-form sharing (one κ-store blob), which the
+/// partition witness documents rather than double-counts.
+pub fn build_parametric_stage_graphs(
+    config: &Value,
+    keys: &[String],
+    dtypes: &[DType],
+    context_length: Option<u64>,
+    layers_per_stage: NonZeroU64,
+) -> Result<Vec<AiGraph>> {
+    let recipe = DecoderRecipe::prepare(config, keys, dtypes, context_length)?;
+    let layers = recipe.cfg.num_hidden_layers;
+    let block = layers_per_stage.get();
+    let layer_stages = layers.div_ceil(block);
+    let stage_count = layer_stages + 2;
+    let mut graphs: Vec<AiGraph> = Vec::with_capacity(stage_count as usize);
+
+    let stage_metadata =
+        |recipe: &DecoderRecipe<'_>, graph: &mut AiGraph, index: u64, role: &str| {
+            recipe.apply_metadata(graph);
+            graph
+                .metadata
+                .insert("stage_index".to_string(), MetaValue::Int(index as i64));
+            graph.metadata.insert(
+                "stage_count".to_string(),
+                MetaValue::Int(stage_count as i64),
+            );
+            graph
+                .metadata
+                .insert("stage_role".to_string(), MetaValue::Str(role.to_string()));
+        };
+
+    // Stage 0 — embedding.
+    let mut builder = GraphBuilder::new("parametric_stage_embedding".to_string());
+    let dims = DecoderDims::register(&mut builder, &recipe.cfg);
+    let (_embed_f32, hidden) = recipe.emit_embedding(&mut builder, &dims);
+    builder.add_output(hidden, "hidden_states");
+    let mut graph = builder.build();
+    stage_metadata(&recipe, &mut graph, 0, STAGE_ROLE_EMBEDDING);
+    graphs.push(graph);
+
+    // Decoder-layer stages.
+    for s in 0..layer_stages {
+        let start = s * block;
+        let end = (start + block).min(layers);
+        let mut builder = GraphBuilder::new(format!("parametric_stage_layers_{start}_{end}"));
+        let dims = DecoderDims::register(&mut builder, &recipe.cfg);
+        let mut current = builder.add_input("hidden_states", DType::F32, dims.hidden_state());
+        let mut deferred: Option<LayerTail> = None;
+        for l in start..end {
+            let tail = recipe.emit_layer_core(&mut builder, &dims, l, current)?;
+            if l + 1 == layers {
+                // The model's last layer: its closing residual add belongs to
+                // the head stage (see the partition contract above).
+                deferred = Some(tail);
+            } else {
+                current = recipe.seal_layer(&mut builder, &dims, l, tail);
+            }
+        }
+        match deferred {
+            Some(tail) => {
+                builder.add_output(tail.attn_residual, "hidden_states");
+                builder.add_output(tail.mlp_down, "hidden_residual");
+            }
+            None => builder.add_output(current, "hidden_states"),
+        }
+        let mut graph = builder.build();
+        stage_metadata(&recipe, &mut graph, 1 + s, STAGE_ROLE_LAYERS);
+        graph.metadata.insert(
+            "stage_layer_start".to_string(),
+            MetaValue::Int(start as i64),
+        );
         graph
             .metadata
-            .insert("sliding_window".to_string(), MetaValue::Int(window as i64));
+            .insert("stage_layer_end".to_string(), MetaValue::Int(end as i64));
+        graphs.push(graph);
     }
 
-    Ok(graph)
+    // Head stage — the final layer's residual add + final norm + LM head.
+    let mut builder = GraphBuilder::new("parametric_stage_head".to_string());
+    let dims = DecoderDims::register(&mut builder, &recipe.cfg);
+    let attn_residual = builder.add_input("hidden_states", DType::F32, dims.hidden_state());
+    let mlp_down = builder.add_input("hidden_residual", DType::F32, dims.hidden_state());
+    let current = recipe.seal_layer(
+        &mut builder,
+        &dims,
+        layers - 1,
+        LayerTail {
+            attn_residual,
+            mlp_down,
+        },
+    );
+    let logits = recipe.emit_head(&mut builder, &dims, current, None);
+    builder.add_output(logits, "logits");
+    let mut graph = builder.build();
+    stage_metadata(&recipe, &mut graph, stage_count - 1, STAGE_ROLE_HEAD);
+    graphs.push(graph);
+
+    Ok(graphs)
 }
 
 fn extract_layer_idx(key: &str) -> Option<usize> {
@@ -1701,5 +1997,177 @@ mod tests {
             err.to_string().contains("max_position_embeddings"),
             "error should name the ceiling: {err}"
         );
+    }
+
+    // ───────────────── staged partition (row `staged-execution`) ─────────────
+
+    fn meta_str<'g>(graph: &'g AiGraph, key: &str) -> Option<&'g str> {
+        match graph.metadata.get(key) {
+            Some(MetaValue::Str(s)) => Some(s.as_str()),
+            _ => None,
+        }
+    }
+
+    /// Manifest names declared by a graph (the names a κ binding can attach to).
+    fn declared_manifest_names(graph: &AiGraph, keys: &[String]) -> Vec<String> {
+        let declared: std::collections::HashSet<&str> =
+            graph.tensor_names.values().map(String::as_str).collect();
+        keys.iter()
+            .filter(|k| declared.contains(k.as_str()))
+            .cloned()
+            .collect()
+    }
+
+    #[test]
+    fn staged_partition_has_embedding_layer_blocks_and_head() {
+        let config = tiny_llama_config();
+        let keys = decoder_keys(2, false, false);
+        let dtypes = vec![DType::F32; keys.len()];
+        let stages = build_parametric_stage_graphs(
+            &config,
+            &keys,
+            &dtypes,
+            Some(128),
+            NonZeroU64::new(1).expect("non-zero"),
+        )
+        .expect("the staged build succeeds");
+
+        // 2 layers at 1 layer/stage → embedding + 2 layer stages + head.
+        assert_eq!(stages.len(), 4);
+        for (i, g) in stages.iter().enumerate() {
+            assert_eq!(meta_int(g, "stage_index"), Some(i as i64));
+            assert_eq!(meta_int(g, "stage_count"), Some(4));
+            assert_eq!(meta_int(g, "context_length"), Some(128));
+            assert_eq!(meta_str(g, "arch"), Some("parametric_transformer"));
+        }
+
+        // Stage 0: input_ids → hidden_states.
+        assert_eq!(
+            meta_str(&stages[0], "stage_role"),
+            Some(STAGE_ROLE_EMBEDDING)
+        );
+        assert_eq!(stages[0].input_names, vec!["input_ids"]);
+        assert_eq!(stages[0].output_names, vec!["hidden_states"]);
+
+        // Middle layer stage: hidden_states → hidden_states.
+        assert_eq!(meta_str(&stages[1], "stage_role"), Some(STAGE_ROLE_LAYERS));
+        assert_eq!(meta_int(&stages[1], "stage_layer_start"), Some(0));
+        assert_eq!(meta_int(&stages[1], "stage_layer_end"), Some(1));
+        assert_eq!(stages[1].input_names, vec!["hidden_states"]);
+        assert_eq!(stages[1].output_names, vec!["hidden_states"]);
+
+        // The last layer stage defers its closing residual add to the head
+        // stage (the monolithic compile fuses that add into the final norm),
+        // so it carries the fused kernel's two operands.
+        assert_eq!(meta_str(&stages[2], "stage_role"), Some(STAGE_ROLE_LAYERS));
+        assert_eq!(stages[2].input_names, vec!["hidden_states"]);
+        assert_eq!(
+            stages[2].output_names,
+            vec!["hidden_states", "hidden_residual"]
+        );
+
+        // Head stage: (hidden_states, hidden_residual) → logits.
+        assert_eq!(meta_str(&stages[3], "stage_role"), Some(STAGE_ROLE_HEAD));
+        assert_eq!(
+            stages[3].input_names,
+            vec!["hidden_states", "hidden_residual"]
+        );
+        assert_eq!(stages[3].output_names, vec!["logits"]);
+    }
+
+    #[test]
+    fn staged_partition_declares_every_manifest_tensor_exactly_once_per_consumer() {
+        let config = tiny_llama_config();
+        let keys = decoder_keys(2, false, false);
+        let dtypes = vec![DType::F32; keys.len()];
+        let stages = build_parametric_stage_graphs(
+            &config,
+            &keys,
+            &dtypes,
+            None,
+            NonZeroU64::new(1).expect("non-zero"),
+        )
+        .expect("the staged build succeeds");
+
+        // Union over stages = the whole manifest; each name in exactly the
+        // stage that consumes it (untied → all singletons).
+        let mut seen: HashMap<String, Vec<usize>> = HashMap::new();
+        for (i, g) in stages.iter().enumerate() {
+            for name in declared_manifest_names(g, &keys) {
+                seen.entry(name).or_default().push(i);
+            }
+        }
+        assert_eq!(seen.len(), keys.len(), "every manifest tensor is declared");
+        for (name, in_stages) in &seen {
+            let expected = if name == "model.embed_tokens.weight" {
+                vec![0]
+            } else if name == "model.norm.weight" || name == "lm_head.weight" {
+                vec![3]
+            } else {
+                let l = extract_layer_idx(name).expect("layer tensors name their layer");
+                vec![1 + l]
+            };
+            assert_eq!(
+                in_stages, &expected,
+                "`{name}` must be declared by exactly its consuming stage"
+            );
+        }
+    }
+
+    #[test]
+    fn staged_tied_head_declares_the_embedding_tensor_in_both_stages() {
+        // Tied embeddings: the head stage declares `model.embed_tokens.weight`
+        // itself — the κ-map of stage 0 and the head stage bind the SAME κ,
+        // one κ-store blob shared by two stage archives.
+        let config = tiny_qwen2_config();
+        let keys = decoder_keys(2, true, true);
+        let dtypes = vec![DType::F32; keys.len()];
+        let stages = build_parametric_stage_graphs(
+            &config,
+            &keys,
+            &dtypes,
+            Some(256),
+            NonZeroU64::new(1).expect("non-zero"),
+        )
+        .expect("the staged build succeeds");
+        let head = stages.last().expect("a head stage");
+        assert!(head
+            .tensor_names
+            .values()
+            .any(|n| n == "model.embed_tokens.weight"));
+        assert!(!head.tensor_names.values().any(|n| n == "lm_head.weight"));
+        assert!(stages[0]
+            .tensor_names
+            .values()
+            .any(|n| n == "model.embed_tokens.weight"));
+    }
+
+    #[test]
+    fn staged_blocks_group_consecutive_layers() {
+        // 2 layers at 2 layers/stage → embedding + ONE layer stage + head,
+        // and the single layer stage ends unsealed (its last layer is the
+        // model's last layer).
+        let config = tiny_llama_config();
+        let keys = decoder_keys(2, false, false);
+        let dtypes = vec![DType::F32; keys.len()];
+        let stages = build_parametric_stage_graphs(
+            &config,
+            &keys,
+            &dtypes,
+            None,
+            NonZeroU64::new(2).expect("non-zero"),
+        )
+        .expect("the staged build succeeds");
+        assert_eq!(stages.len(), 3);
+        assert_eq!(meta_int(&stages[1], "stage_layer_start"), Some(0));
+        assert_eq!(meta_int(&stages[1], "stage_layer_end"), Some(2));
+        assert_eq!(
+            stages[1].output_names,
+            vec!["hidden_states", "hidden_residual"]
+        );
+        // Both layers' weights live in the one layer stage.
+        let declared = declared_manifest_names(&stages[1], &keys);
+        assert!(declared.iter().any(|n| n.contains("layers.0")));
+        assert!(declared.iter().any(|n| n.contains("layers.1")));
     }
 }

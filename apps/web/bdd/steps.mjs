@@ -237,16 +237,18 @@ Then("the preflight validated the model before the first shard byte", async func
 
 // ── S1 — memory guard ───────────────────────────────────────────────────────
 
-Then("the journey proceeds past the memory guard", async function () {
+Then("the journey proceeds past the resource guard with figures surfaced", async function () {
   const body = await this.page.locator("body").innerText();
   assert.ok(
-    body.includes("Memory guard:") && body.includes("within budget"),
-    `the guard line must be visible:\n${body}`,
+    body.includes("Resource guard:") &&
+      body.includes("within measured headroom") &&
+      body.includes("execution window"),
+    `the guard figures must be surfaced:\n${body}`,
   );
 });
 
 When(
-  "downloading a model whose config-derived estimate exceeds the environment budget",
+  "downloading a model whose κ-store requirement exceeds the measured storage quota",
   async function () {
     await installCustomEntry(this, {
       id: "too-large",
@@ -264,15 +266,17 @@ When(
     await this.gotoModels();
     const row = this.page.locator(".list-item", { hasText: "too large model" });
     await row.locator("button", { hasText: "Download" }).click();
-    await this.page.getByText(/Memory guard:/).first().waitFor({ timeout: 60_000 });
+    await this.page.getByText(/Resource guard:/).first().waitFor({ timeout: 60_000 });
   },
 );
 
-Then("the journey is rejected at the memory guard with the estimate", async function () {
+Then("the journey is rejected naming the requirement and the quota", async function () {
   const body = await this.page.locator("body").innerText();
   assert.ok(
-    body.includes("Memory guard:") && body.includes("Rejecting before transfer"),
-    `the guard rejection (with figures) must be visible:\n${body}`,
+    body.includes("Resource guard:") &&
+      body.includes("storage quota headroom") &&
+      body.includes("genuine storage shortfall"),
+    `the rejection must name both figures:\n${body}`,
   );
 });
 
@@ -347,6 +351,54 @@ Then("a non-empty completion streams back", async function () {
   assert.ok(
     cleanCompletion(completions[0].text).length > 0,
     `the assistant turn must stream non-empty text (raw: ${JSON.stringify(completions)})`,
+  );
+});
+
+// ── S4 — windowed execution over k ──────────────────────────────────────────
+
+Given("a forced single-layer execution window", async function () {
+  // The stage-granularity knob forces finer staging without shrinking the
+  // context; a stale monolithic compile of the fixture is removed so the
+  // download recompiles staged (the κ-store keeps the tensors — dedup).
+  await this.page.evaluate(async () => {
+    localStorage.setItem("hologram_stage_window", "200000");
+    const root = await navigator.storage.getDirectory();
+    try {
+      const models = await root.getDirectoryHandle("models");
+      await models.removeEntry("handshake-tiny", { recursive: true });
+    } catch {
+      // No prior compile in this storage partition — nothing to remove.
+    }
+  });
+});
+
+Then("the model directory holds a staged k-form bundle", async function () {
+  const meta = await this.opfsModelFile("handshake-tiny", "stages.json");
+  assert.ok(meta, "stages.json missing — the download did not compile staged");
+  const parsed = JSON.parse(Buffer.from(meta).toString("utf8"));
+  assert.ok(parsed.stageCount > 1, `expected a multi-stage bundle, got ${parsed.stageCount}`);
+  const stages = await this.page.evaluate(async () => {
+    const root = await navigator.storage.getDirectory();
+    const models = await root.getDirectoryHandle("models");
+    const dir = await models.getDirectoryHandle("handshake-tiny");
+    const stagesDir = await dir.getDirectoryHandle("stages");
+    const names = [];
+    for await (const [name] of stagesDir.entries()) names.push(name);
+    return names;
+  });
+  assert.equal(stages.length, parsed.stageCount, "stage archive count must match stages.json");
+});
+
+Then("the staged completion matches reference turn 1", async function () {
+  const reference = referenceTranscript();
+  const completions = await this.page.evaluate(
+    () => globalThis.__hologram_completions ?? [],
+  );
+  assert.ok(completions.length >= 1, "turn 1 did not complete");
+  assert.equal(
+    cleanCompletion(completions[0].text),
+    reference.turns[0].completion,
+    "windowed execution must reproduce the committed reference exactly",
   );
 });
 

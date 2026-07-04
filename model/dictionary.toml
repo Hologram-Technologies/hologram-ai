@@ -100,7 +100,7 @@ feature = "features/suites/s1_acquisition/model_preflight.feature"
 
 [[row]]
 id = "memory-guard"
-statement = "Before transfer, a config-derived resource estimate gates the journey; exceeding the environment budget rejects gracefully with the estimate."
+statement = "The guard rejects only genuine resource shortfall — the model's κ-store bytes versus the MEASURED storage quota — naming both figures; model size is never a rejection criterion, and window/storage projections are surfaced as information."
 stage = "S1"
 status = "build"
 oracles = ["journey-reference"]
@@ -191,6 +191,16 @@ executor = "rust"
 feature = "features/suites/s2_compilation/arbitrary_architecture_coverage.feature"
 
 # ───────────────────────────── S3 — execution ─────────────────────────────
+
+[[row]]
+id = "staged-execution"
+statement = "Windowed execution over k equals monolithic execution: the stage archives' κ-maps partition the model's tensors exactly, the staged pipeline reproduces the monolithic logits, and peak weight residency is bounded by the window, never the model."
+stage = "S3"
+status = "build"
+oracles = ["journey-reference"]
+tier = "suite"
+executor = "rust"
+feature = "features/suites/s3_execution/staged_execution.feature"
 
 [[row]]
 id = "kappa-materialization"

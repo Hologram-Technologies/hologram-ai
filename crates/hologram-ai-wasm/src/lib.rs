@@ -181,6 +181,20 @@ pub fn validate_streamed_manifest(
     Ok(())
 }
 
+/// Parse the parallel κ array of a streamed manifest — fail loud on a
+/// missing or non-string κ, naming the tensor.
+fn parse_kappas(keys: &[String], kappas_js: &js_sys::Array) -> Result<Vec<String>, JsValue> {
+    let mut kappas = Vec::with_capacity(keys.len());
+    for (i, key) in keys.iter().enumerate() {
+        let kappa = kappas_js
+            .get(i as u32)
+            .as_string()
+            .ok_or_else(|| err(format!("κ for `{key}` is not a string")))?;
+        kappas.push(kappa);
+    }
+    Ok(kappas)
+}
+
 #[wasm_bindgen]
 pub fn compile_safetensors_streamed(
     config_json: &str,
@@ -191,14 +205,7 @@ pub fn compile_safetensors_streamed(
     context_length: Option<u32>,
 ) -> Result<Vec<u8>, JsValue> {
     let rows = parse_manifest(keys_js, tensor_shapes_js, tensor_dtypes_js)?;
-    let mut kappas = Vec::new();
-    for (i, key) in rows.keys.iter().enumerate() {
-        let kappa = kappas_js
-            .get(i as u32)
-            .as_string()
-            .ok_or_else(|| err(format!("κ for `{key}` is not a string")))?;
-        kappas.push(kappa);
-    }
+    let kappas = parse_kappas(&rows.keys, kappas_js)?;
     let (keys, shapes, dtypes) = (rows.keys, rows.shapes, rows.dtypes);
 
     let config: serde_json::Value =
@@ -248,6 +255,50 @@ pub fn compile_safetensors_streamed(
         .map_err(|e| err(format!("compile_safetensors_streamed: {e:#}")))?;
 
     Ok(archive.bytes)
+}
+
+/// Staged (windowed) compilation — dictionary row `staged-execution`.
+///
+/// Partitions the parametric decoder into stage graphs (embedding,
+/// `layers_per_stage`-layer blocks, head) and compiles each into its own
+/// k-form archive with `AiParam::External` κ-bindings, exactly like the
+/// monolithic streamed compile. Returns the stage archives in execution
+/// order as a JS `Array` of `Uint8Array`. The model's weights stay in the
+/// κ-store; execution materializes one stage at a time
+/// ([`generate_staged`]), so peak weight residency is the largest stage —
+/// the window — never the model.
+#[wasm_bindgen]
+#[allow(clippy::too_many_arguments)]
+pub fn compile_safetensors_staged(
+    config_json: &str,
+    keys_js: &js_sys::Array,
+    kappas_js: &js_sys::Array,
+    tensor_shapes_js: &js_sys::Array,
+    tensor_dtypes_js: &js_sys::Array,
+    context_length: Option<u32>,
+    layers_per_stage: u32,
+) -> Result<js_sys::Array, JsValue> {
+    let rows = parse_manifest(keys_js, tensor_shapes_js, tensor_dtypes_js)?;
+    let kappas = parse_kappas(&rows.keys, kappas_js)?;
+    let layers_per_stage = std::num::NonZeroU64::new(u64::from(layers_per_stage))
+        .ok_or_else(|| err("layers_per_stage must be at least 1"))?;
+
+    let stages = hologram_ai::staged::compile_stages(
+        config_json,
+        &rows.keys,
+        &kappas,
+        &rows.shapes,
+        &rows.dtypes,
+        context_length.map(u64::from),
+        layers_per_stage,
+    )
+    .map_err(|e| err(format!("compile_safetensors_staged: {e:#}")))?;
+
+    let out = js_sys::Array::new();
+    for stage in stages {
+        out.push(&js_sys::Uint8Array::from(stage.as_slice()).into());
+    }
+    Ok(out)
 }
 
 // ── κ-materialization (journey stage S3) ────────────────────────────────────
@@ -520,6 +571,51 @@ pub struct GenOpts {
     pub seed: Option<u64>,
 }
 
+impl GenOpts {
+    /// Parse a JS options object (`undefined`/`null` ⇒ defaults).
+    fn from_js(opts: JsValue) -> Result<Self, JsValue> {
+        if opts.is_undefined() || opts.is_null() {
+            return Ok(Self::default());
+        }
+        serde_wasm_bindgen::from_value(opts).map_err(err)
+    }
+
+    /// The [`GenConfig`] these options select (defaults applied).
+    fn config(&self) -> GenConfig {
+        GenConfig {
+            max_tokens: self.max_tokens.unwrap_or(64),
+            temperature: self.temperature.unwrap_or(0.0),
+            top_k: self.top_k,
+            stop: self.stop.clone(),
+            eos: self.eos,
+            seed: self.seed.unwrap_or(0x9E3779B97F4A7C15),
+        }
+    }
+}
+
+/// A `Write` sink that accumulates the generated text and streams the running
+/// string to an optional JS callback — shared by [`generate`] and
+/// [`generate_staged`].
+struct CallbackSink<'a> {
+    buffer: Vec<u8>,
+    callback: Option<&'a js_sys::Function>,
+}
+
+impl std::io::Write for CallbackSink<'_> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.buffer.extend_from_slice(buf);
+        if let Some(cb) = self.callback {
+            if let Ok(s) = String::from_utf8(self.buffer.clone()) {
+                let _ = cb.call1(&JsValue::NULL, &JsValue::from_str(&s));
+            }
+        }
+        Ok(buf.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
 /// Autoregressive text generation over a compiled causal LM — the real loop
 /// (`generate_stream`). The tokenizer comes from `tokenizer_json` (bytes) when
 /// given, else from the archive's baked-in extension. Returns the generated text.
@@ -531,11 +627,7 @@ pub fn generate(
     opts: JsValue,
     callback: Option<js_sys::Function>,
 ) -> Result<String, JsValue> {
-    let opts: GenOpts = if opts.is_undefined() || opts.is_null() {
-        GenOpts::default()
-    } else {
-        serde_wasm_bindgen::from_value(opts).map_err(err)?
-    };
+    let opts = GenOpts::from_js(opts)?;
     let runner = HoloRunner::from_bytes(holo.to_vec()).map_err(err)?;
 
     let tokenizer = match tokenizer_json {
@@ -548,35 +640,8 @@ pub fn generate(
         }
     };
 
-    let cfg = GenConfig {
-        max_tokens: opts.max_tokens.unwrap_or(64),
-        temperature: opts.temperature.unwrap_or(0.0),
-        top_k: opts.top_k,
-        stop: opts.stop,
-        eos: opts.eos,
-        seed: opts.seed.unwrap_or(0x9E3779B97F4A7C15),
-    };
+    let cfg = opts.config();
     let templated = apply_template(opts.prompt_template.as_deref(), prompt);
-
-    struct CallbackSink<'a> {
-        buffer: Vec<u8>,
-        callback: Option<&'a js_sys::Function>,
-    }
-
-    impl<'a> std::io::Write for CallbackSink<'a> {
-        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-            self.buffer.extend_from_slice(buf);
-            if let Some(cb) = self.callback {
-                if let Ok(s) = String::from_utf8(self.buffer.clone()) {
-                    let _ = cb.call1(&JsValue::NULL, &JsValue::from_str(&s));
-                }
-            }
-            Ok(buf.len())
-        }
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
-        }
-    }
 
     // A precompiled `.holo` is a fixed-window session.
     let mut session = FixedSession::new(runner);
@@ -586,6 +651,72 @@ pub fn generate(
     };
     generate_stream(&mut session, &tokenizer, &templated, &cfg, &mut sink)
         .map_err(|e| err(format!("generate: {e:#}")))?;
+    String::from_utf8(sink.buffer).map_err(err)
+}
+
+/// Autoregressive generation over the **staged** pipeline — the same
+/// `generate_stream` loop driven by a [`StagedRunner`](hologram_ai::staged::StagedRunner)
+/// (dictionary row `staged-execution`).
+///
+/// Each forward pass resolves the stage archives ON DEMAND through
+/// `resolve_stage` (`(i: number) => Uint8Array` — the stage's k-form archive
+/// bytes, e.g. an OPFS read), materializes each stage's κs through
+/// `resolve_kappa` (`(κ: string) => Uint8Array`, content-verified), executes
+/// the stage, and drops its session before the next stage materializes —
+/// never holding more than one stage's weights. Stage archives embed no
+/// tokenizer, so `tokenizer_json` is required. Returns the generated text.
+#[wasm_bindgen]
+#[allow(clippy::too_many_arguments)]
+pub fn generate_staged(
+    stage_count: u32,
+    resolve_stage: &js_sys::Function,
+    resolve_kappa: &js_sys::Function,
+    tokenizer_json: Option<Vec<u8>>,
+    prompt: &str,
+    opts: JsValue,
+    callback: Option<js_sys::Function>,
+) -> Result<String, JsValue> {
+    let opts = GenOpts::from_js(opts)?;
+    let tokenizer = match tokenizer_json {
+        Some(bytes) => NativeTokenizer::from_tokenizer_json_bytes(&bytes).map_err(err)?,
+        None => {
+            return Err(err(
+                "no tokenizer: stage archives embed none — supply tokenizer_json",
+            ))
+        }
+    };
+
+    let stage_resolver = Box::new(move |i: usize| -> anyhow::Result<Vec<u8>> {
+        let value = resolve_stage
+            .call1(&JsValue::NULL, &JsValue::from_f64(i as f64))
+            .map_err(|e| anyhow::anyhow!("stage resolver threw for stage {i}: {e:?}"))?;
+        if value.is_null() || value.is_undefined() {
+            anyhow::bail!("stage {i} archive not provided by the resolver");
+        }
+        Ok(js_sys::Uint8Array::new(&value).to_vec())
+    });
+    let store = Box::new(move |kappa: &str| -> anyhow::Result<Vec<u8>> {
+        let value = resolve_kappa
+            .call1(&JsValue::NULL, &JsValue::from_str(kappa))
+            .map_err(|e| anyhow::anyhow!("κ resolver threw for `{kappa}`: {e:?}"))?;
+        if value.is_null() || value.is_undefined() {
+            anyhow::bail!("κ `{kappa}` not present in store");
+        }
+        Ok(js_sys::Uint8Array::new(&value).to_vec())
+    });
+
+    let mut session =
+        hologram_ai::staged::StagedRunner::new(stage_count as usize, stage_resolver, store)
+            .map_err(|e| err(format!("generate_staged: {e:#}")))?;
+
+    let cfg = opts.config();
+    let templated = apply_template(opts.prompt_template.as_deref(), prompt);
+    let mut sink = CallbackSink {
+        buffer: Vec::new(),
+        callback: callback.as_ref(),
+    };
+    generate_stream(&mut session, &tokenizer, &templated, &cfg, &mut sink)
+        .map_err(|e| err(format!("generate_staged: {e:#}")))?;
     String::from_utf8(sink.buffer).map_err(err)
 }
 

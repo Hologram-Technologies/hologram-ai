@@ -1,7 +1,7 @@
 import { computeKappa, validateModelConfig } from "./holo";
 import { type GenOpts } from "./holo";
 import GenerateWorker from "./generate.worker?worker";
-import { environmentBudgetBytes, estimateResources, formatBytes } from "./resources";
+import { environmentBudgetBytes, estimateResources, formatBytes, measuredStorageHeadroomBytes } from "./resources";
 
 export interface WorkspacePaths {
   root: string;
@@ -176,10 +176,11 @@ export async function listKnownModels(): Promise<KnownModelStatus[]> {
       }
       downloaded = await hasOnnx(localDir);
       
-      // Find the compiled archive by looking for any .holo file (kappa cache collapse)
+      // The compiled artifact is either a monolithic .holo or a staged bundle
+      // (stages.json + stages/N.holo — windowed execution over k).
       // @ts-ignore
       for await (const [childName, childHandle] of localDir.entries()) {
-        if (childHandle.kind === 'file' && childName.endsWith('.holo')) {
+        if (childHandle.kind === 'file' && (childName.endsWith('.holo') || childName === 'stages.json')) {
           compiledArchive = `models/${localName}/${childName}`;
           break;
         }
@@ -208,10 +209,10 @@ export async function listCompiledArchives(): Promise<CompiledArchive[]> {
       const dirHandle = handle as FileSystemDirectoryHandle;
       // @ts-ignore
       for await (const [childName, childHandle] of dirHandle.entries()) {
-        if (childHandle.kind === "file" && childName.endsWith(".holo")) {
+        if (childHandle.kind === "file" && (childName.endsWith(".holo") || childName === "stages.json")) {
           const file = await childHandle.getFile();
           archives.push({
-            name: `${name}/${childName.replace(".holo", "")}`,
+            name: childName === "stages.json" ? `${name} (staged)` : `${name}/${childName.replace(".holo", "")}`,
             path: `models/${name}/${childName}`,
             sizeBytes: file.size,
           });
@@ -334,61 +335,85 @@ export async function downloadKnownModel(id: string): Promise<number> {
     emitLine("models://download-line", { stream: "stdout", line: `Preflight: validating ${model.hfId} config against the family registry...` });
     await validateModelConfig(configText);
 
-    // The memory guard (S1 preflight step c): a config-derived estimate gates
-    // the journey BEFORE any shard bytes move. Parametric — a function of the
-    // model's own config + manifest, never a per-model constant.
+    // The resource guard (S1 preflight step c): the ONLY rejection is genuine
+    // storage shortfall — the κ-store bytes the model needs versus the
+    // MEASURED OPFS quota. Model size never rejects: execution is windowed
+    // over k, and the window/storage figures are surfaced as information.
     const config = JSON.parse(configText);
     const shardBytes = safetensorsFiles.reduce(
       (sum: number, f: { size?: number; lfs?: { size?: number } }) =>
         sum + (f.size ?? f.lfs?.size ?? 0),
       0,
     );
-    const budget = environmentBudgetBytes((navigator as { deviceMemory?: number }).deviceMemory);
-    const estimate = estimateResources(config, shardBytes, budget);
-    if (estimate.runtimeBytes > budget) {
+    const windowBudget = environmentBudgetBytes((navigator as { deviceMemory?: number }).deviceMemory);
+    // The stage-granularity knob: a smaller stage-plan budget forces finer
+    // staging (more, smaller stages) without shrinking the context window.
+    const stageKnob = Number(localStorage.getItem("hologram_stage_window") ?? "");
+    const stagePlanBudget = Number.isFinite(stageKnob) && stageKnob > 0 ? stageKnob : windowBudget;
+    const estimate = estimateResources(config, shardBytes, windowBudget, stagePlanBudget);
+    const headroom = await measuredStorageHeadroomBytes();
+    if (shardBytes > headroom) {
       const msg =
-        `Memory guard: ${model.hfId} needs ~${formatBytes(estimate.runtimeBytes)} at run time ` +
-        `(weights ${formatBytes(shardBytes)} + activations at context ${estimate.contextLength}), ` +
-        `but the environment budget is ${formatBytes(budget)}. Rejecting before transfer.`;
+        `Resource guard: ${model.hfId} needs ${formatBytes(shardBytes)} of κ-store, ` +
+        `but the measured storage quota headroom is ${formatBytes(headroom)}. ` +
+        `Rejecting before transfer (genuine storage shortfall).`;
       emitLine("models://download-progress", { stream: "stderr", line: msg });
       throw new Error(msg);
     }
     emitLine("models://download-line", {
       stream: "stdout",
-      line: `Memory guard: ~${formatBytes(estimate.runtimeBytes)} within budget ${formatBytes(budget)}; context length ${estimate.contextLength}.`,
+      line:
+        `Resource guard: κ-store ${formatBytes(shardBytes)} within measured headroom ${formatBytes(headroom)}; ` +
+        `execution window ~${formatBytes(estimate.windowBytes)} ` +
+        `(${estimate.stageCount === 1 ? "monolithic" : `${estimate.stageCount} stages, ${estimate.layersPerStage} layer(s) each`}), ` +
+        `context ${estimate.contextLength}.`,
     });
 
     const worker = getDownloadWorker();
-    const holoBytes = await new Promise<Uint8Array>((resolve, reject) => {
-      worker.onmessage = (e) => {
-        if (e.data.type === "progress") {
-          emitLine("models://download-progress", { stream: "stdout", line: e.data.line });
-        } else if (e.data.type === "done") {
-          resolve(e.data.holoBytes);
-        } else if (e.data.type === "error") {
-          reject(new Error(e.data.error));
-        }
-      };
-      worker.postMessage({
-        type: "download_safetensors",
-        payload: {
-          modelId: model.hfId,
-          configText,
-          files: safetensorsFiles,
-          contextLength: estimate.contextLength,
-          hfBase: hfBase()
-        }
+    const outcome = await new Promise<{ holoBytes?: Uint8Array; stageCount?: number }>(
+      (resolve, reject) => {
+        worker.onmessage = (e) => {
+          if (e.data.type === "progress") {
+            emitLine("models://download-progress", { stream: "stdout", line: e.data.line });
+          } else if (e.data.type === "done") {
+            resolve({ holoBytes: e.data.holoBytes });
+          } else if (e.data.type === "done_staged") {
+            resolve({ stageCount: e.data.stageCount });
+          } else if (e.data.type === "error") {
+            reject(new Error(e.data.error));
+          }
+        };
+        worker.postMessage({
+          type: "download_safetensors",
+          payload: {
+            modelId: model.hfId,
+            configText,
+            files: safetensorsFiles,
+            contextLength: estimate.contextLength,
+            layersPerStage: estimate.layersPerStage,
+            stageCount: estimate.stageCount,
+            localName,
+            hfBase: hfBase()
+          }
+        });
+      },
+    );
+
+    if (outcome.stageCount) {
+      emitLine("models://compile-line", {
+        stream: "stdout",
+        line: `Compiled ${outcome.stageCount} stage archives (windowed execution over k).`,
       });
-    });
-    
-    const kappa = await computeKappa(holoBytes);
-    const holoName = `${kappa}.holo`;
-    const holoHandle = await localDir.getFileHandle(holoName, { create: true });
-    const writable = await holoHandle.createWritable();
-    await writable.write(holoBytes as any);
-    await writable.close();
-    
-    emitLine("models://compile-line", { stream: "stdout", line: `Compiled and saved to ${holoName} (${holoBytes.length} bytes).` });
+    } else {
+      const holoBytes = outcome.holoBytes!;
+      const kappa = await computeKappa(holoBytes);
+      const holoName = `${kappa}.holo`;
+      const holoHandle = await localDir.getFileHandle(holoName, { create: true });
+      const writable = await holoHandle.createWritable();
+      await writable.write(holoBytes as any);
+      await writable.close();
+      emitLine("models://compile-line", { stream: "stdout", line: `Compiled and saved to ${holoName} (${holoBytes.length} bytes).` });
+    }
   } else {
     // ONNX flow - unsupported because it cannot be streamed over k
     emitLine("models://download-progress", { stream: "stderr", line: "Error: ONNX models are not supported in the web IDE because they cannot be streamed over the holospaces/k-representation." });
@@ -425,9 +450,18 @@ export async function generate(opts: GenerateOpts): Promise<number> {
   const root = await getOpfsDir();
   const modelsDir = await root.getDirectoryHandle("models");
   const localDir = await modelsDir.getDirectoryHandle(archiveParts[1]);
-  const holoHandle = await localDir.getFileHandle(archiveParts[2]);
-  const holoFile = await holoHandle.getFile();
-  const holoBytes = new Uint8Array(await holoFile.arrayBuffer());
+  const staged = archiveParts[2] === "stages.json";
+  let holoBytes: Uint8Array | undefined;
+  let stageCount = 0;
+  if (staged) {
+    const metaHandle = await localDir.getFileHandle("stages.json");
+    const meta = JSON.parse(await (await metaHandle.getFile()).text());
+    stageCount = meta.stageCount;
+  } else {
+    const holoHandle = await localDir.getFileHandle(archiveParts[2]);
+    const holoFile = await holoHandle.getFile();
+    holoBytes = new Uint8Array(await holoFile.arrayBuffer());
+  }
   
   async function findFileRecursive(dir: FileSystemDirectoryHandle, targetName: string): Promise<FileSystemFileHandle | null> {
     for await (const [name, handle] of (dir as any).entries()) {
@@ -496,6 +530,7 @@ export async function generate(opts: GenerateOpts): Promise<number> {
     
     activeWorker.postMessage({
       holoBytes,
+      staged: staged ? { modelDir: archiveParts[1], stageCount } : undefined,
       prompt: opts.prompt,
       genOpts,
       tokenizerBytes,

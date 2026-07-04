@@ -27,13 +27,65 @@
 //! UOR-native replacement for a mutable KV-cache (architecture §5.3, class CE).
 
 use anyhow::{bail, Context, Result};
+use hologram_exec::OutputBuffer;
 
 use crate::compiler::PreparedModel;
-use crate::runner::HoloRunner;
+use crate::runner::{HoloRunner, PortInfo};
 
 /// Smallest window a [`GrowableSession`] compiles — avoids tiny graphs and gives
 /// short prompts room to generate a few tokens before the first regrow.
 const MIN_WINDOW: usize = 64;
+
+/// One executable LM surface — the named ports plus the forward pass the
+/// generation loop drives. Two realizations:
+///
+/// * [`HoloRunner`] — a single loaded archive (the monolithic session);
+/// * [`StagedRunner`](crate::staged::StagedRunner) — the windowed pipeline of
+///   stage archives (dictionary row `staged-execution`), whose `execute` runs
+///   the stages in sequence and returns the final stage's outputs.
+///
+/// Generation resolves its LM contract (input_ids / logits, by name) against
+/// this trait, so it is oblivious to whether the model is resident
+/// monolithically or one stage window at a time.
+pub trait LmSession {
+    /// Per-input port facts (name, dtype, element count, shape), in graph-input order.
+    fn input_port_info(&self) -> Vec<PortInfo>;
+
+    /// Per-output port facts, in graph-output order.
+    fn output_port_info(&self) -> Vec<PortInfo>;
+
+    /// Index of the input port named `name` (e.g. `"input_ids"`), or `None`.
+    fn input_index_by_name(&self, name: &str) -> Option<usize>;
+
+    /// Index of the output port named `name` (e.g. `"logits"`), or `None`.
+    fn output_index_by_name(&self, name: &str) -> Option<usize>;
+
+    /// Execute one forward pass. `inputs[i]` is the little-endian byte image
+    /// of graph input `i`; returns the output buffers in graph-output order.
+    fn execute(&mut self, inputs: &[&[u8]]) -> Result<Vec<OutputBuffer>>;
+}
+
+impl LmSession for HoloRunner {
+    fn input_port_info(&self) -> Vec<PortInfo> {
+        HoloRunner::input_port_info(self)
+    }
+
+    fn output_port_info(&self) -> Vec<PortInfo> {
+        HoloRunner::output_port_info(self)
+    }
+
+    fn input_index_by_name(&self, name: &str) -> Option<usize> {
+        HoloRunner::input_index_by_name(self, name)
+    }
+
+    fn output_index_by_name(&self, name: &str) -> Option<usize> {
+        HoloRunner::output_index_by_name(self, name)
+    }
+
+    fn execute(&mut self, inputs: &[&[u8]]) -> Result<Vec<OutputBuffer>> {
+        HoloRunner::execute(self, inputs)
+    }
+}
 
 /// Yields an inference session whose token window is at least `want` long.
 ///
@@ -44,7 +96,7 @@ const MIN_WINDOW: usize = 64;
 /// fixed one — beyond which the caller slides the window.
 pub trait SessionProvider {
     /// A session whose `input_ids` length (the compiled window) is ≥ `want`.
-    fn session_for(&mut self, want: usize) -> Result<&mut HoloRunner>;
+    fn session_for(&mut self, want: usize) -> Result<&mut dyn LmSession>;
 
     /// The largest window this provider can serve. Generation never requests
     /// more than this; longer sequences slide within it.
@@ -81,7 +133,7 @@ impl FixedSession {
 }
 
 impl SessionProvider for FixedSession {
-    fn session_for(&mut self, want: usize) -> Result<&mut HoloRunner> {
+    fn session_for(&mut self, want: usize) -> Result<&mut dyn LmSession> {
         if want > self.seq_len {
             bail!(
                 "the sequence needs a window of {want} tokens but this archive was compiled at a \
@@ -145,7 +197,7 @@ impl GrowableSession {
 }
 
 impl SessionProvider for GrowableSession {
-    fn session_for(&mut self, want: usize) -> Result<&mut HoloRunner> {
+    fn session_for(&mut self, want: usize) -> Result<&mut dyn LmSession> {
         // Reuse the resident window if it still fits; generation only grows, so
         // once we regrow the smaller window is gone for good (bounds memory).
         let fits = matches!(&self.current, Some((cur, _)) if *cur >= want);

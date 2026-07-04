@@ -29,8 +29,7 @@ use std::io::Write;
 use anyhow::{bail, Context, Result};
 use hologram_ai_tokenizer::Tokenizer;
 
-use crate::engine::SessionProvider;
-use crate::runner::HoloRunner;
+use crate::engine::{LmSession, SessionProvider};
 
 /// Sampling / stopping configuration for one generation request.
 #[derive(Debug, Clone)]
@@ -110,7 +109,7 @@ struct LmContract {
 }
 
 impl LmContract {
-    fn resolve(runner: &HoloRunner) -> Result<Self> {
+    fn resolve(runner: &dyn LmSession) -> Result<Self> {
         let ins = runner.input_port_info();
         let outs = runner.output_port_info();
 

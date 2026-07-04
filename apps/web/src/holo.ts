@@ -5,6 +5,8 @@
 import init, {
   describe as wasmDescribe,
   supported_families as wasmSupportedFamilies,
+  compile_safetensors_staged as wasmCompileSafetensorsStaged,
+  generate_staged as wasmGenerateStaged,
   validate_model_config as wasmValidateModelConfig,
   validate_streamed_manifest as wasmValidateStreamedManifest,
   run as wasmRun,
@@ -115,6 +117,38 @@ export async function validateStreamedManifest(
 ): Promise<void> {
   await ensureReady();
   wasmValidateStreamedManifest(configJson, keys, shapes, dtypes, contextLength);
+}
+
+/** Staged compile (windowed execution over k): one k-form archive per stage
+ * (embedding, layer blocks, head). */
+export async function compileSafetensorsStaged(
+  configJson: string,
+  keys: string[],
+  kappas: string[],
+  shapes: string[],
+  dtypes: string[],
+  contextLength: number | undefined,
+  layersPerStage: number,
+): Promise<Uint8Array[]> {
+  await ensureReady();
+  return Array.from(
+    wasmCompileSafetensorsStaged(configJson, keys, kappas, shapes, dtypes, contextLength, layersPerStage),
+  ) as Uint8Array[];
+}
+
+/** Staged generation: stage archives and κs resolve ON DEMAND (synchronous
+ * callbacks over OPFS handles); one stage's weights resident at a time. */
+export async function generateStaged(
+  stageCount: number,
+  resolveStage: (i: number) => Uint8Array,
+  resolveKappa: (kappa: string) => Uint8Array | undefined,
+  prompt: string,
+  opts: GenOpts,
+  tokenizer?: Uint8Array,
+  callback?: (text: string) => void,
+): Promise<string> {
+  await ensureReady();
+  return wasmGenerateStaged(stageCount, resolveStage, resolveKappa, tokenizer ?? undefined, prompt, opts, callback);
 }
 
 /** The κ-labels a k-form archive requires (empty for a material archive). */

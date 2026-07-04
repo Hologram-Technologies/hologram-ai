@@ -14,6 +14,7 @@
 //    bind the streamed κs into the already-validated graph and emit the
 //    k-form archive — it cannot fail on model validity.
 import {
+  compileSafetensorsStaged,
   compileSafetensorsStreamed,
   validateModelConfig,
   validateStreamedManifest,
@@ -36,6 +37,10 @@ function emitProgress(msg: string) {
 
 function emitDone(holoBytes: Uint8Array) {
   self.postMessage({ type: "done", holoBytes });
+}
+
+function emitDoneStaged(stageCount: number) {
+  self.postMessage({ type: "done_staged", stageCount });
 }
 
 function emitError(err: string) {
@@ -114,16 +119,23 @@ export async function handleSafetensorsDownload(
     configText,
     files,
     contextLength,
+    layersPerStage,
+    stageCount,
+    localName,
     hfBase,
   }: {
     modelId: string;
     configText: string;
     files: { rfilename: string }[];
     contextLength?: number;
+    layersPerStage?: number;
+    stageCount?: number;
+    localName?: string;
     hfBase?: string;
   },
   emitProgressFn = emitProgress,
   emitDoneFn = emitDone,
+  emitDoneStagedFn = emitDoneStaged,
   emitErrorFn = emitError,
 ) {
   try {
@@ -255,7 +267,40 @@ export async function handleSafetensorsDownload(
     }
 
     // Mechanical: the graph was validated in preflight; this binds the
-    // streamed κs and emits the k-form archive.
+    // streamed κs and emits the k-form archive(s). Models beyond the
+    // execution window compile as stage archives (windowed execution over k).
+    if (stageCount && stageCount > 1 && layersPerStage && localName) {
+      emitProgressFn(
+        `Binding streamed κs into ${stageCount} stage archives (windowed execution over k)...`,
+      );
+      const stages = await compileSafetensorsStaged(
+        configText,
+        allKeys,
+        allKappas,
+        allShapes,
+        allDtypes,
+        contextLength,
+        layersPerStage,
+      );
+      const modelsDir = await root.getDirectoryHandle("models", { create: true });
+      const localDir = await modelsDir.getDirectoryHandle(localName, { create: true });
+      const stagesDir = await localDir.getDirectoryHandle("stages", { create: true });
+      for (let i = 0; i < stages.length; i++) {
+        const handle = await stagesDir.getFileHandle(`${i}.holo`, { create: true });
+        const writable = await handle.createWritable();
+        await writable.write(stages[i] as unknown as ArrayBufferView<ArrayBuffer>);
+        await writable.close();
+      }
+      const metaHandle = await localDir.getFileHandle("stages.json", { create: true });
+      const writable = await metaHandle.createWritable();
+      await writable.write(
+        JSON.stringify({ stageCount: stages.length, layersPerStage, contextLength }),
+      );
+      await writable.close();
+      emitDoneStagedFn(stages.length);
+      return;
+    }
+
     emitProgressFn("Binding streamed κs into the k-form archive...");
     const holoBytes = await compileSafetensorsStreamed(
       configText,

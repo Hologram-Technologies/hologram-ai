@@ -1029,12 +1029,23 @@ fn meta_u32(graph: &AiGraph, key: &str) -> Option<u32> {
 
 /// Choose the optimization pipeline by model topology (causal LM / ViT / generic).
 fn select_pipeline(ai_graph: &AiGraph, patch_budget_ratio: Option<f32>) -> OptPipeline {
+    // The parametric decoder builder marks its graphs. A *stage* slice of the
+    // staged partition (`hidden_states → hidden_states`) carries neither an
+    // `input_ids` input nor a `logits` output, but its body is the same
+    // causal-LM compute — it must run the same fusion pipeline as the
+    // monolithic compile for staged execution to reproduce the monolithic
+    // kernels exactly (dictionary row `staged-execution`).
+    let is_parametric_decoder = matches!(
+        ai_graph.metadata.get("arch"),
+        Some(hologram_ai_common::MetaValue::Str(arch)) if arch == "parametric_transformer"
+    );
     let has_input_ids = ai_graph.input_names.iter().any(|n| n == "input_ids");
-    let looks_like_causal_lm = has_input_ids
-        && ai_graph
-            .output_names
-            .iter()
-            .any(|n| n == "logits" || n == "output");
+    let looks_like_causal_lm = is_parametric_decoder
+        || (has_input_ids
+            && ai_graph
+                .output_names
+                .iter()
+                .any(|n| n == "logits" || n == "output"));
     let looks_like_vit = !looks_like_causal_lm
         && ai_graph
             .input_names

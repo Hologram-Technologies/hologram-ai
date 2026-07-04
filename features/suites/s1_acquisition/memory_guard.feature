@@ -1,18 +1,19 @@
 @row:memory-guard @stage:S1 @status:build @executor:browser
-Feature: Parametric memory guard
-  Before any transfer, a resource estimate derived from the model's own
-  config.json and manifest sizes gates the journey against the environment
-  budget. The estimate is a function of the model's parameters — never a
-  hard-coded per-model constant.
+Feature: The resource guard — quota, never size
+  The guard rejects only genuine resource shortfall: the κ-store bytes the
+  model actually needs versus the MEASURED OPFS quota
+  (navigator.storage.estimate()). Model size is never a rejection criterion —
+  execution is windowed over k — and the projected window/storage figures are
+  surfaced as information before transfer.
 
   Background:
     Given the app is open in the browser against the hermetic model server
 
-  Scenario: a model within budget proceeds
+  Scenario: a model within the storage quota proceeds with figures surfaced
     When the fixture model is downloaded
-    Then the journey proceeds past the memory guard
+    Then the journey proceeds past the resource guard with figures surfaced
 
-  Scenario: a model exceeding the environment budget is rejected before transfer
-    When downloading a model whose config-derived estimate exceeds the environment budget
-    Then the journey is rejected at the memory guard with the estimate
+  Scenario: genuine storage shortfall is rejected before transfer naming both figures
+    When downloading a model whose κ-store requirement exceeds the measured storage quota
+    Then the journey is rejected naming the requirement and the quota
     And no shard bytes were transferred

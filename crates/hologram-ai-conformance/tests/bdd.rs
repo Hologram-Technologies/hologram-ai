@@ -31,7 +31,8 @@ use hologram_ai::materialize::{
     kappa_of, kappa_requirements, materialize_archive, DirKappaStore, KappaStore,
 };
 use hologram_ai::runner::HoloRunner;
-use hologram_ai::{ModelCompiler, ModelSource};
+use hologram_ai::staged::StagedRunner;
+use hologram_ai::{LmSession, ModelCompiler, ModelSource};
 use hologram_ai_common::{shape_from_concrete, AiGraph, AiNode, AiOp, AiParam, DType, TensorInfo};
 use hologram_ai_conformance::witness::{parse_streamed_header, split_safetensors};
 use hologram_ai_core::domain::Kappa;
@@ -786,6 +787,11 @@ struct BddWorld {
     parity_logits: Option<(Vec<f32>, Vec<f32>)>, // hologram, ORT (last position)
     parity_next: Option<(usize, usize)>,
     continuations: Option<(String, String)>,
+    // S3 — staged (windowed) execution
+    staged_store: Option<StoreDir>,
+    staged_partition: Option<(BTreeSet<String>, Vec<BTreeSet<String>>)>,
+    staged_exec: Option<StagedExec>,
+    staged_completions: Option<(String, String)>,
     // S3 — tokenizer parity
     tok_path: Option<PathBuf>,
     tok_encoded: Vec<(String, Vec<u32>, Vec<u32>)>, // text, ours, reference
@@ -1863,6 +1869,517 @@ async fn then_missing_kappa_named(w: &mut BddWorld) {
         .as_ref()
         .expect_err("an empty store cannot materialize");
     assert!(err.contains(&mat.kappa), "the error must name the κ: {err}");
+}
+
+// ───────────────── S3 — staged (windowed) execution over k ──────────────────
+
+/// Quantities of the deterministic tiny decoder fixture — the
+/// `hologram-ai/tests/parametric_reference.rs` weights pattern (norm weights
+/// 1.0, everything else cycling `((k % 13) - 6) · 0.01`).
+const STG_HIDDEN: u64 = 64;
+const STG_LAYERS: u64 = 2;
+const STG_KV_DIM: u64 = 32; // 2 KV heads × head_dim 16
+const STG_VOCAB: u64 = 512;
+const STG_INTER: u64 = 128;
+const STG_WINDOW: u64 = 128;
+const STG_TOKENS: [i64; 6] = [3, 141, 59, 26, 5, 35];
+
+fn staged_config(tied: bool) -> serde_json::Value {
+    serde_json::json!({
+        "architectures": ["LlamaForCausalLM"],
+        "hidden_size": STG_HIDDEN, "intermediate_size": STG_INTER,
+        "num_hidden_layers": STG_LAYERS, "num_attention_heads": 4,
+        "num_key_value_heads": 2, "vocab_size": STG_VOCAB,
+        "rms_norm_eps": 1e-6, "rope_theta": 10000.0,
+        "max_position_embeddings": STG_WINDOW,
+        "tie_word_embeddings": tied,
+    })
+}
+
+fn staged_manifest(tied: bool) -> Vec<(String, Vec<u64>)> {
+    let (h, i, v, kv) = (STG_HIDDEN, STG_INTER, STG_VOCAB, STG_KV_DIM);
+    let mut m: Vec<(String, Vec<u64>)> = vec![("model.embed_tokens.weight".into(), vec![v, h])];
+    for l in 0..STG_LAYERS {
+        let p = format!("model.layers.{l}");
+        m.push((format!("{p}.input_layernorm.weight"), vec![h]));
+        m.push((format!("{p}.self_attn.q_proj.weight"), vec![h, h]));
+        m.push((format!("{p}.self_attn.k_proj.weight"), vec![kv, h]));
+        m.push((format!("{p}.self_attn.v_proj.weight"), vec![kv, h]));
+        m.push((format!("{p}.self_attn.o_proj.weight"), vec![h, h]));
+        m.push((format!("{p}.post_attention_layernorm.weight"), vec![h]));
+        m.push((format!("{p}.mlp.gate_proj.weight"), vec![i, h]));
+        m.push((format!("{p}.mlp.up_proj.weight"), vec![i, h]));
+        m.push((format!("{p}.mlp.down_proj.weight"), vec![h, i]));
+    }
+    m.push(("model.norm.weight".into(), vec![h]));
+    if !tied {
+        m.push(("lm_head.weight".into(), vec![v, h]));
+    }
+    m
+}
+
+fn staged_tensor_bytes(name: &str, dims: &[u64]) -> Vec<u8> {
+    let n: u64 = dims.iter().product();
+    let norm = name.contains("layernorm") || name.ends_with(".norm.weight");
+    (0..n)
+        .flat_map(|k| {
+            let v: f32 = if norm {
+                1.0
+            } else {
+                ((k % 13) as f32 - 6.0) * 0.01
+            };
+            v.to_le_bytes()
+        })
+        .collect()
+}
+
+/// The compiled staged-execution kit: the fixture manifest with its κs, the
+/// monolithic k-form archive, and the one-layer-per-stage k-form archives.
+/// Deterministic (κs are content addresses of deterministic bytes), so it is
+/// compiled once and shared across scenarios.
+struct StagedKit {
+    keys: Vec<String>,
+    kappas: Vec<String>,
+    monolithic: Vec<u8>,
+    stages: Vec<Vec<u8>>,
+    total_weight_bytes: u64,
+}
+
+fn build_staged_kit(tied: bool) -> StagedKit {
+    let manifest = staged_manifest(tied);
+    let (keys, shapes): (Vec<String>, Vec<Vec<u64>>) = manifest.into_iter().unzip();
+    let kappas: Vec<String> = keys
+        .iter()
+        .zip(&shapes)
+        .map(|(name, dims)| kappa_of(&staged_tensor_bytes(name, dims)))
+        .collect();
+    let dtypes = vec![DType::F32; keys.len()];
+    let config = staged_config(tied);
+    let total_weight_bytes = keys
+        .iter()
+        .zip(&shapes)
+        .map(|(name, dims)| staged_tensor_bytes(name, dims).len() as u64)
+        .sum();
+
+    // Monolithic k-form: the parametric graph with External κ params — the
+    // same binding the streamed compile performs.
+    let mut graph = build_parametric_graph_from_manifest(&config, &keys, &dtypes, None)
+        .expect("the monolithic fixture graph builds");
+    let name_to_id: HashMap<String, u32> = graph
+        .tensor_names
+        .iter()
+        .map(|(id, name)| (name.clone(), *id))
+        .collect();
+    for (i, key) in keys.iter().enumerate() {
+        let id = *name_to_id.get(key).expect("manifest tensor in the graph");
+        let info = ti(DType::F32, &shapes[i]);
+        graph.tensor_info.insert(id, info.clone());
+        graph.params.insert(
+            id,
+            AiParam::External {
+                kappa: kappas[i].clone(),
+                info,
+            },
+        );
+    }
+    let monolithic = compile_graph(graph);
+
+    let stages = hologram_ai::staged::compile_stages(
+        &config.to_string(),
+        &keys,
+        &kappas,
+        &shapes,
+        &dtypes,
+        None,
+        std::num::NonZeroU64::new(1).expect("1 is non-zero"),
+    )
+    .expect("the staged fixture compiles");
+
+    StagedKit {
+        keys,
+        kappas,
+        monolithic,
+        stages,
+        total_weight_bytes,
+    }
+}
+
+fn staged_kit() -> &'static StagedKit {
+    static KIT: OnceLock<StagedKit> = OnceLock::new();
+    KIT.get_or_init(|| build_staged_kit(false))
+}
+
+fn staged_tied_kit() -> &'static StagedKit {
+    static KIT: OnceLock<StagedKit> = OnceLock::new();
+    KIT.get_or_init(|| build_staged_kit(true))
+}
+
+/// The κ set a k-form archive requires.
+fn kappa_set(archive: &[u8]) -> BTreeSet<String> {
+    kappa_requirements(archive)
+        .expect("the κ-map parses")
+        .into_iter()
+        .map(|r| r.kappa)
+        .collect()
+}
+
+/// The stage indices expected to consume a fixture tensor, by name, in the
+/// one-layer-per-stage partition: embedding → stage 0; layer `l` → stage
+/// `1 + l`; final norm and head → the head stage. A tied embedding is
+/// consumed by BOTH stage 0 and the head stage — one κ-store blob bound by
+/// two stage κ-maps (k-form sharing, not duplication).
+fn expected_stages_for(name: &str, tied: bool, stage_count: usize) -> BTreeSet<usize> {
+    let head = stage_count - 1;
+    if name == "model.embed_tokens.weight" {
+        if tied {
+            return BTreeSet::from([0, head]);
+        }
+        return BTreeSet::from([0]);
+    }
+    if name == "model.norm.weight" || name == "lm_head.weight" {
+        return BTreeSet::from([head]);
+    }
+    let l = extract_layer_idx(name).expect("a layer tensor names its layer");
+    BTreeSet::from([1 + l])
+}
+
+fn extract_layer_idx(key: &str) -> Option<usize> {
+    let mut parts = key.split('.');
+    parts
+        .by_ref()
+        .find(|p| *p == "layers")
+        .and_then(|_| parts.next())
+        .and_then(|p| p.parse().ok())
+}
+
+/// The (monolithic logits, staged logits, per-stage weight bytes, peak) of
+/// one token-window execution.
+struct StagedExec {
+    mono_logits: Vec<u8>,
+    staged_logits: Vec<u8>,
+    stage_weight_bytes: Vec<u64>,
+    peak_weight_bytes: u64,
+}
+
+/// A fresh κ-store directory holding the fixture weights.
+fn staged_store(tag: &str) -> StoreDir {
+    let store = StoreDir::new(tag);
+    let dir = DirKappaStore::new(&store.path);
+    for (name, dims) in staged_manifest(false) {
+        dir.insert(&staged_tensor_bytes(&name, &dims))
+            .expect("persisting a fixture weight");
+    }
+    store
+}
+
+/// The fixed-window `input_ids` buffer: the fixture tokens left-aligned,
+/// zero-padded to the compiled window (causal attention makes the padding
+/// irrelevant at real positions).
+fn staged_window_ids() -> Vec<u8> {
+    let mut ids = vec![0i64; STG_WINDOW as usize];
+    ids[..STG_TOKENS.len()].copy_from_slice(&STG_TOKENS);
+    i64s_le(&ids)
+}
+
+/// Base-10 integer tokenizer over the fixture vocabulary — lets the
+/// generation scenario drive `generate_stream` deterministically with no
+/// tokenizer files (the `generation_synthetic` pattern).
+struct DecimalTok;
+
+impl Tokenizer for DecimalTok {
+    fn encode(&self, text: &str) -> Vec<u32> {
+        text.split_whitespace()
+            .filter_map(|w| w.parse().ok())
+            .collect()
+    }
+    fn decode(&self, tokens: &[u32]) -> String {
+        tokens
+            .iter()
+            .map(|t| t.to_string())
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+    fn eos_token_id(&self) -> u32 {
+        STG_VOCAB as u32 + 1 // out of vocabulary — never sampled
+    }
+    fn bos_token_id(&self) -> Option<u32> {
+        None
+    }
+    fn vocab_size(&self) -> usize {
+        STG_VOCAB as usize
+    }
+    fn id_to_token(&self, _id: u32) -> Option<&str> {
+        None
+    }
+    fn token_to_id(&self, _token: &str) -> Option<u32> {
+        None
+    }
+}
+
+#[given("the deterministic tiny decoder fixture with its weights in a κ-store")]
+async fn given_staged_fixture(w: &mut BddWorld) {
+    w.staged_store = Some(staged_store("staged"));
+}
+
+#[when("the fixture is compiled monolithically and as one-layer stages")]
+async fn when_staged_compiled(w: &mut BddWorld) {
+    let kit = staged_kit();
+    w.staged_partition = Some((
+        kappa_set(&kit.monolithic),
+        kit.stages.iter().map(|s| kappa_set(s)).collect(),
+    ));
+}
+
+#[then("the union of the stage κ-maps equals the monolithic κ-map's tensor set")]
+async fn then_staged_partition_covers(w: &mut BddWorld) {
+    let (mono, stages) = w.staged_partition.as_ref().expect("the compiled partition");
+    let union: BTreeSet<String> = stages.iter().flatten().cloned().collect();
+    assert_eq!(
+        &union, mono,
+        "the stage κ-maps must cover exactly the monolithic κ-map's tensor set"
+    );
+    assert!(
+        stages.iter().all(|s| !s.is_empty()),
+        "every stage binds at least one weight"
+    );
+    println!(
+        "[staged-execution] partition: {} stages, {} κs total (monolithic {})",
+        stages.len(),
+        union.len(),
+        mono.len()
+    );
+}
+
+#[then("each weight κ appears in exactly the stages that consume it")]
+async fn then_staged_partition_exact(w: &mut BddWorld) {
+    let (_, stages) = w.staged_partition.as_ref().expect("the compiled partition");
+    let kit = staged_kit();
+    assert_stage_bindings_exact(&kit.keys, &kit.kappas, stages, false);
+}
+
+/// Assert that every fixture κ is bound by exactly the stages that consume
+/// it. Expectations aggregate **per κ**, not per name: κ is a CONTENT
+/// address, so distinct tensors with identical bytes (the fixture's
+/// embedding and lm_head share the deterministic pattern) collapse to one
+/// κ-store blob bound by every stage consuming any of those tensors — the
+/// same k-form sharing the tied-embedding assertion documents.
+fn assert_stage_bindings_exact(
+    keys: &[String],
+    kappas: &[String],
+    stages: &[BTreeSet<String>],
+    tied: bool,
+) {
+    let mut expected: HashMap<&str, (Vec<&str>, BTreeSet<usize>)> = HashMap::new();
+    for (name, kappa) in keys.iter().zip(kappas) {
+        let entry = expected.entry(kappa).or_default();
+        entry.0.push(name);
+        entry
+            .1
+            .extend(expected_stages_for(name, tied, stages.len()));
+    }
+    for (kappa, (names, want)) in &expected {
+        let got: BTreeSet<usize> = stages
+            .iter()
+            .enumerate()
+            .filter(|(_, set)| set.contains(*kappa))
+            .map(|(i, _)| i)
+            .collect();
+        assert_eq!(
+            &got, want,
+            "{names:?} must be bound by exactly the stages that consume them"
+        );
+        if names.len() > 1 {
+            println!(
+                "[staged-execution] {names:?} share one κ (content dedup) bound by stages {got:?}"
+            );
+        }
+    }
+}
+
+#[then("a tied fixture shares the embedding κ between the embedding and head stages")]
+async fn then_staged_tied_shares_embedding(_w: &mut BddWorld) {
+    let kit = staged_tied_kit();
+    let stages: Vec<BTreeSet<String>> = kit.stages.iter().map(|s| kappa_set(s)).collect();
+    let union: BTreeSet<String> = stages.iter().flatten().cloned().collect();
+    assert_eq!(
+        union,
+        kappa_set(&kit.monolithic),
+        "the tied partition must still cover the monolithic κ-map exactly"
+    );
+    assert_stage_bindings_exact(&kit.keys, &kit.kappas, &stages, true);
+    let embed_kappa = &kit.kappas[0];
+    assert!(
+        stages[0].contains(embed_kappa) && stages[stages.len() - 1].contains(embed_kappa),
+        "the tied embedding κ must be bound by both the embedding and head stages"
+    );
+    println!(
+        "[staged-execution] tied embedding κ shared by stages 0 and {}: one κ-store blob, two bindings",
+        stages.len() - 1
+    );
+}
+
+#[when("the same token window is executed monolithically and through the staged runner")]
+async fn when_staged_executed(w: &mut BddWorld) {
+    let kit = staged_kit();
+    let store = w.staged_store.as_ref().expect("the fixture κ-store");
+    let ids = staged_window_ids();
+
+    let mut dir = DirKappaStore::new(&store.path);
+    let mono = materialize_archive(&kit.monolithic, &mut dir)
+        .expect("the monolithic archive materializes");
+    let mut runner = HoloRunner::from_bytes(mono).expect("the monolithic archive loads");
+    let mono_out = runner
+        .execute(&[&ids])
+        .expect("the monolithic pass executes");
+    let mono_logits = mono_out
+        .into_iter()
+        .next()
+        .expect("the monolithic pass produces logits")
+        .bytes;
+
+    let mut staged = StagedRunner::from_archives(
+        kit.stages.clone(),
+        Box::new(DirKappaStore::new(&store.path)),
+    )
+    .expect("the staged runner builds");
+    let staged_out = LmSession::execute(&mut staged, &[&ids]).expect("the staged pass executes");
+    let staged_logits = staged_out
+        .into_iter()
+        .next()
+        .expect("the staged pass produces logits")
+        .bytes;
+
+    w.staged_exec = Some(StagedExec {
+        mono_logits,
+        staged_logits,
+        stage_weight_bytes: staged.stage_weight_bytes().to_vec(),
+        peak_weight_bytes: staged.peak_resident_weight_bytes(),
+    });
+}
+
+#[then("the staged logits are byte-identical to the monolithic logits")]
+async fn then_staged_logits_equal(w: &mut BddWorld) {
+    let exec = w.staged_exec.as_ref().expect("both executions ran");
+    assert_eq!(
+        exec.mono_logits.len(),
+        exec.staged_logits.len(),
+        "logits sizes must agree"
+    );
+    assert_eq!(
+        exec.mono_logits, exec.staged_logits,
+        "staged execution must reproduce the monolithic logits byte-for-byte"
+    );
+    let logits = le_f32(&exec.staged_logits);
+    assert!(
+        logits.iter().all(|v| v.is_finite()) && logits.iter().any(|v| v.abs() > 1e-6),
+        "the logits must be finite and non-trivial"
+    );
+    println!(
+        "[staged-execution] byte-identical logits: {} bytes ({} f32 elements)",
+        exec.staged_logits.len(),
+        logits.len()
+    );
+}
+
+#[then("the peak resident weight bytes are at most the largest stage's weight bytes")]
+async fn then_staged_peak_bounded(w: &mut BddWorld) {
+    let exec = w.staged_exec.as_ref().expect("the staged execution ran");
+    assert!(
+        exec.stage_weight_bytes.iter().all(|&b| b > 0),
+        "every stage materialized real weights: {:?}",
+        exec.stage_weight_bytes
+    );
+    let largest = exec
+        .stage_weight_bytes
+        .iter()
+        .copied()
+        .max()
+        .expect("at least one stage");
+    assert!(
+        exec.peak_weight_bytes <= largest,
+        "peak resident weight bytes {} must not exceed the largest stage's {largest}",
+        exec.peak_weight_bytes
+    );
+    println!(
+        "[staged-execution] stage weight bytes {:?}, peak {} ≤ largest stage {largest}",
+        exec.stage_weight_bytes, exec.peak_weight_bytes
+    );
+}
+
+#[then("the largest stage's weight bytes are strictly less than the model's total weight bytes")]
+async fn then_staged_window_below_model(w: &mut BddWorld) {
+    let exec = w.staged_exec.as_ref().expect("the staged execution ran");
+    let kit = staged_kit();
+    assert!(
+        exec.stage_weight_bytes.len() > 1,
+        "the bound is meaningful only for a multi-stage split"
+    );
+    let largest = exec
+        .stage_weight_bytes
+        .iter()
+        .copied()
+        .max()
+        .expect("at least one stage");
+    assert!(
+        largest < kit.total_weight_bytes,
+        "the window ({largest} bytes) must be strictly below the model ({} bytes)",
+        kit.total_weight_bytes
+    );
+    println!(
+        "[staged-execution] window {largest} bytes < model {} bytes ({} stages)",
+        kit.total_weight_bytes,
+        exec.stage_weight_bytes.len()
+    );
+}
+
+#[when(
+    "the same greedy completion is generated through the staged runner and the monolithic session"
+)]
+async fn when_staged_generated(w: &mut BddWorld) {
+    use hologram_ai::commands::generate::{generate_stream, GenConfig};
+
+    let kit = staged_kit();
+    let store = w.staged_store.as_ref().expect("the fixture κ-store");
+    let prompt = "3 141 59 26 5";
+    let cfg = GenConfig {
+        max_tokens: 8,
+        temperature: 0.0,
+        ..Default::default()
+    };
+
+    let mut dir = DirKappaStore::new(&store.path);
+    let mono = materialize_archive(&kit.monolithic, &mut dir)
+        .expect("the monolithic archive materializes");
+    let mut fixed =
+        hologram_ai::FixedSession::new(HoloRunner::from_bytes(mono).expect("the archive loads"));
+    let mut sink = Vec::new();
+    let mono_text = generate_stream(&mut fixed, &DecimalTok, prompt, &cfg, &mut sink)
+        .expect("monolithic generation completes");
+
+    let mut staged = StagedRunner::from_archives(
+        kit.stages.clone(),
+        Box::new(DirKappaStore::new(&store.path)),
+    )
+    .expect("the staged runner builds");
+    let mut sink = Vec::new();
+    let staged_text = generate_stream(&mut staged, &DecimalTok, prompt, &cfg, &mut sink)
+        .expect("staged generation completes");
+
+    w.staged_completions = Some((mono_text, staged_text));
+}
+
+#[then("both completions are identical and non-empty")]
+async fn then_staged_completions_equal(w: &mut BddWorld) {
+    let (mono, staged) = w.staged_completions.as_ref().expect("both generations ran");
+    assert!(
+        !mono.is_empty(),
+        "the monolithic completion must be non-empty"
+    );
+    assert_eq!(
+        mono, staged,
+        "the staged completion must equal the monolithic completion"
+    );
+    println!("[staged-execution] greedy completion (both engines): {mono:?}");
 }
 
 // ───────────────────────── S3 — execution parity ────────────────────────────

@@ -30,10 +30,13 @@ Given any HuggingFace repository id:
    b. The tensor manifest is read from the shards' safetensors *headers alone*
       (ranged requests — kilobytes, not weights), and the parametric graph is built
       from config + manifest. A manifest the family cannot realize rejects here.
-   c. The resource estimate is derived from the validated config and manifest sizes;
-      exceeding the environment budget (a parametric function of the environment,
-      never a per-model constant) rejects with the estimate. A config that cannot
-      produce an estimate is a preflight failure, never a silent pass.
+   c. The κ-store requirement (the manifest's shard bytes) is checked against the
+      **measured** OPFS quota (`navigator.storage.estimate()`); genuine shortfall
+      rejects naming both figures. Model SIZE is never a rejection criterion: the
+      execution working set is a window (stage size × context, chosen from the
+      environment), and projected window/storage/throughput figures are surfaced as
+      information. A config that cannot produce an estimate is a preflight failure,
+      never a silent pass.
 4. Stream each shard through the persistent download worker: walk the tensor byte
    ranges from the already-parsed header, hash each tensor incrementally, persist it to
    OPFS as `tensors/{κ}.bin`, and **discard the content as it is retrieved** — the
@@ -58,10 +61,15 @@ stage after the transfer.
 
 ## Stage S3 — Run
 
-1. Materialize: resolve every κ-map entry against the OPFS κ-store; verify each buffer
+1. Materialize: resolve κ-map entries against the OPFS κ-store; verify each buffer
    re-hashes to its κ; patch the archive's constants into an executable form. A missing
    or corrupt κ aborts with the label.
-2. Load the materialized archive into an inference session and execute the forward pass.
+2. Execution is **windowed over k**: when the model's weight set exceeds the environment
+   window, the compiled stage archives (embedding, layer blocks, head) are materialized,
+   executed, and released in sequence — activations flow between stages; peak weight
+   residency is the window, never the model. A model within the window executes as a
+   single archive. Staged and monolithic execution are the same computation
+   (`staged-execution` witnesses equality).
 3. Correctness authority: natively, the same materialized pipeline must reproduce ONNX
    Runtime logits for the same model within tolerance; in the browser, the hermetic
    fixture must reproduce its committed reference outputs exactly.

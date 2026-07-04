@@ -6,11 +6,15 @@
 export interface ResourceEstimate {
   /** Bytes persisted to the OPFS κ-store (the shard bytes themselves). */
   storageBytes: number;
-  /** Peak runtime working set: F32-inflated weights + activations at the
-   * chosen context length. */
-  runtimeBytes: number;
-  /** The context length the archive will be compiled at. */
+  /** The execution WINDOW: peak resident weight bytes (largest stage, F32)
+   * plus activations — a function of the stage plan, never the model. */
+  windowBytes: number;
+  /** The context length the archives will be compiled at. */
   contextLength: number;
+  /** Decoder layers per stage (windowed execution over k). */
+  layersPerStage: number;
+  /** Total stage archives (embedding + layer blocks + head), 1 = monolithic. */
+  stageCount: number;
 }
 
 /** Bytes per element of a safetensors/torch dtype tag. */
@@ -82,28 +86,79 @@ function requireNumeric(config: Record<string, unknown>, keys: string[]): void {
   }
 }
 
+/**
+ * The stage plan: the largest number of decoder layers per stage whose
+ * F32-inflated weights fit half the window budget (materialization holds a
+ * transient archive copy). The window bounds the STAGE, never the model —
+ * the k-representation carries the rest in the OPFS κ-store.
+ */
+export function planStages(
+  config: {
+    hidden_size: number;
+    num_hidden_layers: number;
+    vocab_size?: number;
+    tie_word_embeddings?: boolean;
+    torch_dtype?: string;
+  },
+  shardBytes: number,
+  windowBudgetBytes: number,
+): { layersPerStage: number; stageCount: number; stageWeightBytes: number } {
+  requireNumeric(config as Record<string, unknown>, ["hidden_size", "num_hidden_layers"]);
+  const paramsTotal = shardBytes / dtypeBytes(config.torch_dtype ?? "F32");
+  const embedParams = (config.vocab_size ?? 0) * config.hidden_size;
+  const headParams = config.tie_word_embeddings ? 0 : embedParams;
+  const layerParams = Math.max(
+    1,
+    (paramsTotal - embedParams - headParams) / config.num_hidden_layers,
+  );
+  const layerBytesF32 = layerParams * 4;
+  const half = windowBudgetBytes / 2;
+  let layersPerStage = Math.max(1, Math.floor(half / layerBytesF32));
+  layersPerStage = Math.min(layersPerStage, config.num_hidden_layers);
+  const layerStages = Math.ceil(config.num_hidden_layers / layersPerStage);
+  const monolithic = layersPerStage >= config.num_hidden_layers && layerBytesF32 * config.num_hidden_layers + (embedParams + headParams) * 4 <= half;
+  const stageCount = monolithic ? 1 : layerStages + 2; // embedding + blocks + head
+  const stageWeightBytes = Math.round(
+    Math.max(layersPerStage * layerBytesF32, embedParams * 4, headParams * 4),
+  );
+  return { layersPerStage, stageCount, stageWeightBytes };
+}
+
 export function estimateResources(
   config: {
     max_position_embeddings?: number;
     hidden_size: number;
     num_hidden_layers: number;
+    vocab_size?: number;
+    tie_word_embeddings?: boolean;
     torch_dtype?: string;
   },
   shardBytes: number,
-  budgetBytes: number,
+  windowBudgetBytes: number,
+  stagePlanBudgetBytes: number = windowBudgetBytes,
 ): ResourceEstimate {
   requireNumeric(config as Record<string, unknown>, ["hidden_size", "num_hidden_layers"]);
-  const contextLength = chooseContextLength(config, budgetBytes);
-  const inflation = 4 / dtypeBytes(config.torch_dtype ?? "F32");
-  const weightsF32 = shardBytes * inflation;
-  const activations = contextLength * config.hidden_size * config.num_hidden_layers * 8 * 4;
+  const plan = planStages(config, shardBytes, stagePlanBudgetBytes);
+  // Windowed over k: only a stage is ever resident, so the activation term
+  // scales with the RESIDENT depth (layers per stage), never the model depth.
+  const residentDepth = { ...config, num_hidden_layers: plan.layersPerStage };
+  const contextLength = chooseContextLength(residentDepth, windowBudgetBytes);
+  const activations = contextLength * config.hidden_size * plan.layersPerStage * 8 * 4;
   return {
     storageBytes: shardBytes,
-    // Weights resident in the session pool + one transient archive copy
-    // during materialization, plus activations.
-    runtimeBytes: Math.round(weightsF32 * 2 + activations),
+    windowBytes: Math.round(plan.stageWeightBytes * 2 + activations),
     contextLength,
+    layersPerStage: plan.layersPerStage,
+    stageCount: plan.stageCount,
   };
+}
+
+/** The measured OPFS headroom — the only genuine storage bound. */
+export async function measuredStorageHeadroomBytes(): Promise<number> {
+  const estimate = await navigator.storage.estimate();
+  const quota = estimate.quota ?? 0;
+  const usage = estimate.usage ?? 0;
+  return Math.max(0, quota - usage);
 }
 
 /** Human-readable byte figure for guard messages. */
