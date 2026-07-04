@@ -140,4 +140,24 @@ source = "xtask gen-fixture (seeded, reproducible)"
 pin = ""
 license = "MIT OR Apache-2.0"
 kind = "deterministic-reference"
-note = "The handshake-tiny model (safetensors/config/tokenizer) and its reference logits + chat transcript, generated with a recorded seed; artifacts registered below once generated."
+note = "The handshake-tiny model (safetensors/config/tokenizer) and its reference chat transcript, generated through the real k-form pipeline with a recorded seed."
+
+[[oracle.artifacts]]
+path = "oracles/fixture/config.json"
+sha256 = "322ba078452e279301cc26b0736a5eef898e9491efa56fb204ea6c532cff8369"
+
+[[oracle.artifacts]]
+path = "oracles/fixture/model.safetensors"
+sha256 = "9ac14ef4819abbb8ffb6d0edba7d17c70940f0f621adeae43c429178ca8405c2"
+
+[[oracle.artifacts]]
+path = "oracles/fixture/tokenizer.json"
+sha256 = "92f9feca48214e06f613255a47c69166b1e2011ee321e31a2141192c02cb2182"
+
+[[oracle.artifacts]]
+path = "oracles/fixture/generation_config.json"
+sha256 = "bc121ce8eef5dad6154908de469b66973a111c315d25f278a4d939dd1c537176"
+
+[[oracle.artifacts]]
+path = "oracles/fixture/reference-transcript.json"
+sha256 = "e12ba7a6015702422f8ad074966512c575d70c9396a14831b5090c481443ea6a"

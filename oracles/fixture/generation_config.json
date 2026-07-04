@@ -1,0 +1,5 @@
+{
+  "bos_token_id": 1,
+  "chat_template": "User:\n{prompt}\nAssistant:\n",
+  "eos_token_id": 2
+}

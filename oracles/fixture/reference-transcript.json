@@ -1,0 +1,25 @@
+{
+  "eos_token_id": 2,
+  "max_tokens": 8,
+  "seed": 44,
+  "separator": "\nAssistant: {response}\nUser: ",
+  "temperature": 0.0,
+  "template": "User:\n{prompt}\nAssistant:\n",
+  "turns": [
+    {
+      "completion": "00000p",
+      "prompt": "User:\nHello there!\nAssistant:\n",
+      "user": "Hello there!"
+    },
+    {
+      "completion": "Cppppp",
+      "prompt": "User:\nHello there!\nAssistant: 00000p\nUser: How are you today?\nAssistant:\n",
+      "user": "How are you today?"
+    },
+    {
+      "completion": "p",
+      "prompt": "User:\nHello there!\nAssistant: 00000p\nUser: How are you today?\nAssistant: Cppppp\nUser: Say goodbye.\nAssistant:\n",
+      "user": "Say goodbye."
+    }
+  ]
+}

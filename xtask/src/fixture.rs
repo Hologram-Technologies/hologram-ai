@@ -17,8 +17,13 @@ use hologram_ai_tokenizer::NativeTokenizer;
 use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 
-/// The recorded seed — regeneration reproduces the artifacts bit-for-bit.
-const SEED: u64 = 42;
+/// The base of the recorded seed search — regeneration reproduces the
+/// artifacts bit-for-bit. Weights are pure noise, so some seeds greedily emit
+/// eos immediately (an empty handshake turn); `gen_fixture` deterministically
+/// takes the first seed from this base whose three turns are all non-empty,
+/// and records it in the transcript.
+const SEED_BASE: u64 = 42;
+const SEED_ATTEMPTS: u64 = 64;
 /// The handshake user messages (docs/conceptual-model/02-user-journey.md S4).
 const HANDSHAKE: [&str; 3] = ["Hello there!", "How are you today?", "Say goodbye."];
 /// The plain `{prompt}`-substitution chat template (not Jinja; the same
@@ -71,14 +76,14 @@ impl Rng {
     }
 }
 
-fn tensor_seed(name: &str) -> u64 {
+fn tensor_seed(name: &str, seed: u64) -> u64 {
     // FNV-1a over the name, mixed with the recorded seed.
     let mut h = 0xcbf29ce484222325u64;
     for b in name.bytes() {
         h ^= u64::from(b);
         h = h.wrapping_mul(0x100000001b3);
     }
-    h ^ SEED
+    h ^ seed
 }
 
 /// The full LlamaForCausalLM tensor manifest for the tiny config (untied head).
@@ -104,9 +109,9 @@ fn manifest() -> Vec<(String, Vec<u64>)> {
 }
 
 /// Synthesize a tensor's F32 bytes: norms near 1.0, projections small-uniform.
-fn tensor_bytes(name: &str, dims: &[u64]) -> Vec<u8> {
+fn tensor_bytes(name: &str, dims: &[u64], seed: u64) -> Vec<u8> {
     let n: u64 = dims.iter().product();
-    let mut rng = Rng(tensor_seed(name));
+    let mut rng = Rng(tensor_seed(name, seed));
     let is_norm = name.contains("layernorm") || name.ends_with(".norm.weight");
     let mut out = Vec::with_capacity((n * 4) as usize);
     for _ in 0..n {
@@ -219,6 +224,7 @@ fn handshake(
     holo_kform: &[u8],
     tensors: &[(String, Vec<u64>, Vec<u8>)],
     tokenizer: &NativeTokenizer,
+    seed: u64,
 ) -> Result<Vec<serde_json::Value>> {
     let dir = std::env::temp_dir().join(format!("hai-gen-fixture-{}", std::process::id()));
     let store = DirKappaStore::new(&dir);
@@ -240,7 +246,7 @@ fn handshake(
         top_k: None,
         stop: vec!["\nUser:".to_string()],
         eos: None,
-        seed: SEED,
+        seed,
     };
 
     // Mirror the browser exactly (Chat.tsx): the outer template wraps a
@@ -293,21 +299,38 @@ pub fn gen_fixture() -> Result<()> {
     let tok_bytes = serde_json::to_vec_pretty(&tok_json)?;
     let gen_bytes = serde_json::to_vec_pretty(&generation_config_json())?;
 
-    let tensors: Vec<(String, Vec<u64>, Vec<u8>)> = manifest()
-        .into_iter()
-        .map(|(name, dims)| {
-            let bytes = tensor_bytes(&name, &dims);
-            (name, dims, bytes)
-        })
-        .collect();
-    let st_bytes = safetensors_bytes(&tensors)?;
-
     let tokenizer = NativeTokenizer::from_tokenizer_json_bytes(&tok_bytes)
         .context("the fixture tokenizer must load")?;
-    let holo = compile_kform(&config, &tensors)?;
-    let turns = handshake(&holo, &tensors, &tokenizer)?;
+
+    // Deterministic seed search: the first seed whose three greedy turns are
+    // all non-empty becomes the recorded fixture.
+    let mut chosen = None;
+    for seed in SEED_BASE..SEED_BASE + SEED_ATTEMPTS {
+        let tensors: Vec<(String, Vec<u64>, Vec<u8>)> = manifest()
+            .into_iter()
+            .map(|(name, dims)| {
+                let bytes = tensor_bytes(&name, &dims, seed);
+                (name, dims, bytes)
+            })
+            .collect();
+        let holo = compile_kform(&config, &tensors)?;
+        let turns = handshake(&holo, &tensors, &tokenizer, seed)?;
+        let all_nonempty = turns
+            .iter()
+            .all(|t| !t["completion"].as_str().unwrap_or("").trim().is_empty());
+        if all_nonempty {
+            chosen = Some((seed, tensors, turns));
+            break;
+        }
+        println!("seed {seed}: a turn was empty; continuing the search");
+    }
+    let (seed, tensors, turns) = chosen.context(format!(
+        "no seed in {SEED_BASE}..{} yields three non-empty handshake turns",
+        SEED_BASE + SEED_ATTEMPTS
+    ))?;
+    let st_bytes = safetensors_bytes(&tensors)?;
     let transcript = serde_json::json!({
-        "seed": SEED,
+        "seed": seed,
         "temperature": 0.0,
         "max_tokens": MAX_TOKENS,
         "template": TEMPLATE,
