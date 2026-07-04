@@ -29,10 +29,15 @@ export function referenceTranscript() {
 
 function waitForOutput(child, pattern) {
   return new Promise((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error(`preview server did not start`)), 60_000);
+    let seen = "";
+    const timer = setTimeout(
+      () => reject(new Error(`preview server did not start; output so far:\n${seen}`)),
+      90_000,
+    );
     const onData = (chunk) => {
       const text = chunk.toString();
-      const match = text.match(pattern);
+      seen += text;
+      const match = seen.match(pattern);
       if (match) {
         clearTimeout(timer);
         resolve(match);
@@ -40,7 +45,8 @@ function waitForOutput(child, pattern) {
     };
     child.stdout.on("data", onData);
     child.stderr.on("data", onData);
-    child.on("exit", (code) => reject(new Error(`preview exited early (${code})`)));
+    child.on("error", (err) => reject(new Error(`preview failed to spawn: ${err}`)));
+    child.on("exit", (code) => reject(new Error(`preview exited early (${code}); output:\n${seen}`)));
   });
 }
 
@@ -48,11 +54,11 @@ BeforeAll(async () => {
   fixture = await startFixtureServer();
   // `pnpm build` must have run first (the `bdd` script does); preview serves
   // the exact bundle the deployment would publish.
-  preview = spawn("pnpm", ["exec", "vite", "preview", "--port", "0", "--strictPort", "false"], {
+  preview = spawn("pnpm", ["exec", "vite", "preview", "--host", "127.0.0.1", "--port", "4173", "--strictPort"], {
     cwd: WEB_DIR,
     stdio: ["ignore", "pipe", "pipe"],
   });
-  const match = await waitForOutput(preview, /localhost:(\d+)/);
+  const match = await waitForOutput(preview, /(?:localhost|127\.0\.0\.1):(\d+)/);
   previewPort = Number(match[1]);
   browser = await chromium.launch();
 });

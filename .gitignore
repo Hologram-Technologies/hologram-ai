@@ -2,7 +2,7 @@
 .holoarch/
 **/*.onnx
 **/*.gguf
-!tests/fixtures/**/*.onnx
+!oracles/**/*.onnx
 models/
 .mypy_cache
 .claude/
@@ -25,7 +25,6 @@ crates/hologram-ai-conformance/fixtures/tinyllama_*.onnx
 # The source is the .ts file; the .d.ts/.js next to it are generated.
 apps/*/vite.config.d.ts
 apps/*/vite.config.js
-tests/fixtures/onnx-node/
 .worktrees/
 node_modules/
 dist/
