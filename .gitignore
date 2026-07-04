@@ -30,3 +30,4 @@ tests/fixtures/onnx-node/
 node_modules/
 dist/
 apps/web/src/wasm/
+apps/web/public/extension.zip
