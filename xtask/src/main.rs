@@ -44,7 +44,9 @@ fn main() -> Result<()> {
         "report" => report(),
         "gen-fixture" => fixture::gen_fixture(),
         other => {
-            bail!("unknown command `{other}`; use: oracle-verify | pin-check | report | gen-fixture")
+            bail!(
+                "unknown command `{other}`; use: oracle-verify | pin-check | report | gen-fixture"
+            )
         }
     }
 }
@@ -93,7 +95,11 @@ fn pin_check() -> Result<()> {
             "live-authority" if oracle.source.contains("huggingface.co") => {
                 hf_revision_exists(&oracle.source, &oracle.pin)
                     .with_context(|| format!("oracle `{}`", oracle.id))?;
-                println!("ok   {:<22} HF revision {} live", oracle.id, &oracle.pin[..12]);
+                println!(
+                    "ok   {:<22} HF revision {} live",
+                    oracle.id,
+                    &oracle.pin[..12]
+                );
                 checked += 1;
             }
             "live-authority" if oracle.source.contains("github.com") => {

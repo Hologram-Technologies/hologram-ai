@@ -278,7 +278,7 @@ impl AiGraph {
 
     /// Returns nodes in topological order (Kahn's algorithm on NodeIds).
     ///
-    /// The result is cached internally. Call [`invalidate_topo_cache`] after
+    /// The result is cached internally. Call [`Self::invalidate_topo_cache`] after
     /// any structural graph mutation (add/remove nodes, rewire edges).
     pub fn topo_order(&self) -> Arc<Vec<NodeId>> {
         // Return cached order if available (Arc::clone is O(1), no data copy).

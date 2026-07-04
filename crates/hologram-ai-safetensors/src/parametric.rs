@@ -5,7 +5,7 @@
 //! function of the configuration — hidden size, layers, heads, KV heads, head
 //! dim, vocabulary, `rope_theta`, `rms_norm_eps`, `tie_word_embeddings`,
 //! context length, tensor dtypes. Architecture families are selected from
-//! `config.architectures[0]` via [`SUPPORTED_FAMILIES`]; anything else fails
+//! `config.architectures[0]` via the family registry; anything else fails
 //! loud. No canonical model constant appears in this code path.
 
 use crate::builder::GraphBuilder;

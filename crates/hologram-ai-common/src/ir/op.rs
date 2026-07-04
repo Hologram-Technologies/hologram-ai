@@ -212,7 +212,7 @@ pub enum AiOp {
         group: u64,
         auto_pad: String,
     },
-    /// Max pooling. Inputs: [X].
+    /// Max pooling. Inputs: `[X]`.
     MaxPool {
         kernel_shape: Vec<u64>,
         strides: Vec<u64>,
@@ -221,7 +221,7 @@ pub enum AiOp {
         auto_pad: String,
         ceil_mode: bool,
     },
-    /// Average pooling. Inputs: [X].
+    /// Average pooling. Inputs: `[X]`.
     AveragePool {
         kernel_shape: Vec<u64>,
         strides: Vec<u64>,
@@ -357,12 +357,12 @@ pub enum AiOp {
     OneHot {
         axis: i64,
     },
-    /// Rearrange depth to spatial blocks. Inputs: [X].
+    /// Rearrange depth to spatial blocks. Inputs: `[X]`.
     DepthToSpace {
         blocksize: u64,
         mode: String,
     },
-    /// Rearrange spatial blocks to depth. Inputs: [X].
+    /// Rearrange spatial blocks to depth. Inputs: `[X]`.
     SpaceToDepth {
         blocksize: u64,
     },

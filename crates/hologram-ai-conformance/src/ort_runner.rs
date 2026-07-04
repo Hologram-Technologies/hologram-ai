@@ -244,13 +244,13 @@ pub mod runner {
 /// since hologram-ai-onnx's proto module is private.
 pub mod onnx_builder {
     /// Build a minimal ONNX model for a unary elementwise op.
-    /// Graph: input "X" [1, size] -> op -> output "Y" [1, size]
+    /// Graph: input "X" `[1, size]` -> op -> output "Y" `[1, size]`
     pub fn unary_op(op_type: &str, size: usize) -> Vec<u8> {
         build_model(op_type, &[("X", &[1, size])], &[("Y", &[1, size])], &[])
     }
 
     /// Build a minimal ONNX model for a binary elementwise op.
-    /// Graph: inputs "A" [1, size], "B" [1, size] -> op -> output "Y" [1, size]
+    /// Graph: inputs "A" `[1, size]`, "B" `[1, size]` -> op -> output "Y" `[1, size]`
     pub fn binary_op(op_type: &str, size: usize) -> Vec<u8> {
         build_model(
             op_type,
@@ -261,7 +261,7 @@ pub mod onnx_builder {
     }
 
     /// Build a Softmax ONNX model.
-    /// Graph: input "X" [rows, size] -> Softmax(axis=-1) -> output "Y" [rows, size]
+    /// Graph: input "X" `[rows, size]` -> Softmax(axis=-1) -> output "Y" `[rows, size]`
     pub fn softmax(rows: usize, size: usize) -> Vec<u8> {
         build_model(
             "Softmax",
@@ -272,7 +272,7 @@ pub mod onnx_builder {
     }
 
     /// Build a MatMul ONNX model.
-    /// Graph: inputs "A" [m, k], "B" [k, n] -> MatMul -> output "Y" [m, n]
+    /// Graph: inputs "A" `[m, k]`, "B" `[k, n]` -> MatMul -> output "Y" `[m, n]`
     pub fn matmul(m: usize, k: usize, n: usize) -> Vec<u8> {
         build_model(
             "MatMul",
@@ -313,7 +313,7 @@ pub mod onnx_builder {
     /// RmsNorm(x, weight, eps) = x / sqrt(mean(x^2) + eps) * weight
     ///
     /// Graph:
-    ///   X [rows, size], Weight [size] ->
+    ///   X `[rows, size]`, Weight `[size]` ->
     ///   Pow(X, 2) -> ReduceMean -> Add(eps) -> Sqrt -> Div(X, .) -> Mul(., Weight) -> Y
     pub fn rms_norm(rows: usize, size: usize, epsilon: f32) -> Vec<u8> {
         let nodes = vec![
@@ -407,7 +407,7 @@ pub mod onnx_builder {
     }
 
     /// Build a 4D batched MatMul ONNX model.
-    /// A [batch, heads, m, k] × B [batch, heads, k, n] → Y [batch, heads, m, n]
+    /// A `[batch, heads, m, k]` × B `[batch, heads, k, n]` → Y `[batch, heads, m, n]`
     /// Models the Q@K^T and scores@V patterns in multi-head attention.
     pub fn batched_matmul_4d(batch: usize, heads: usize, m: usize, k: usize, n: usize) -> Vec<u8> {
         build_model(
@@ -419,7 +419,7 @@ pub mod onnx_builder {
     }
 
     /// Build a Concat ONNX model that concatenates two 4D tensors along axis 3 (last axis).
-    /// A [batch, heads, seq, dim_a] ++ B [batch, heads, seq, dim_b] → Y [batch, heads, seq, dim_a+dim_b]
+    /// A `[batch, heads, seq, dim_a]` ++ B `[batch, heads, seq, dim_b]` → Y `[batch, heads, seq, dim_a+dim_b]`
     /// Models the concat-of-halves pattern in RoPE's rotate_half function.
     pub fn concat_4d_last_axis(
         batch: usize,
@@ -446,11 +446,11 @@ pub mod onnx_builder {
     }
 
     /// Build a Scaled Dot-Product Attention ONNX model.
-    /// Q, K, V: [batch, heads, seq, head_dim]
-    /// Steps: K_T = Transpose(K, perm=[0,1,3,2])
+    /// Q, K, V: `[batch, heads, seq, head_dim]`
+    /// Steps: K_T = Transpose(K, perm=`[0,1,3,2]`)
     ///        QK  = Q @ K_T / sqrt(head_dim)
     ///        out = Softmax(QK) @ V
-    /// Output: [batch, heads, seq, head_dim]
+    /// Output: `[batch, heads, seq, head_dim]`
     pub fn scaled_dot_product_attention(
         batch: usize,
         heads: usize,
@@ -493,10 +493,10 @@ pub mod onnx_builder {
     /// Models TinyLlama's GQA expansion pattern where K and V are projected to
     /// n_kv_heads, then repeated to n_heads via Unsqueeze → Expand → Reshape:
     ///
-    ///   K_compact [batch, n_kv_heads, seq, head_dim]
-    ///     → Unsqueeze(axis=2)  → [batch, n_kv_heads, 1, seq, head_dim]
-    ///     → Expand             → [batch, n_kv_heads, group_size, seq, head_dim]
-    ///     → Reshape            → [batch, n_heads, seq, head_dim]
+    ///   K_compact `[batch, n_kv_heads, seq, head_dim]`
+    ///     → Unsqueeze(axis=2)  → `[batch, n_kv_heads, 1, seq, head_dim]`
+    ///     → Expand             → `[batch, n_kv_heads, group_size, seq, head_dim]`
+    ///     → Reshape            → `[batch, n_heads, seq, head_dim]`
     ///
     ///   AttnOut = softmax(Q @ K_T / sqrt(head_dim)) @ V_expanded
     ///
@@ -579,14 +579,14 @@ pub mod onnx_builder {
     /// Build a model that tests `Shape` with `start`/`end` attributes (opset 15).
     ///
     /// Graph:
-    ///   K [batch, n_kv, seq, head_dim]
-    ///   Shape(K, start=0, end=1) → batch_dim INT64[1]     — first dim only
-    ///   Shape(K, start=2, end=4) → seq_hdim INT64[2]      — last two dims only
-    ///   Cast(batch_dim, to=FLOAT) → batch_f32 [1]
-    ///   Cast(seq_hdim,  to=FLOAT) → seqhdim_f32 [2]
-    ///   Concat([batch_f32, seqhdim_f32], axis=0) → Y [3]  — [batch, seq, head_dim]
+    ///   K `[batch, n_kv, seq, head_dim]`
+    ///   Shape(K, start=0, end=1) → batch_dim INT64`[1]`     — first dim only
+    ///   Shape(K, start=2, end=4) → seq_hdim INT64`[2]`      — last two dims only
+    ///   Cast(batch_dim, to=FLOAT) → batch_f32 `[1]`
+    ///   Cast(seq_hdim,  to=FLOAT) → seqhdim_f32 `[2]`
+    ///   Concat(`[batch_f32, seqhdim_f32]`, axis=0) → Y `[3]`  — `[batch, seq, head_dim]`
     ///
-    /// Expected: Y = [batch as f32, seq as f32, head_dim as f32].
+    /// Expected: Y = `[batch as f32, seq as f32, head_dim as f32]`.
     ///
     /// A failure means `Shape` ignores `start`/`end` and returns all dims instead
     /// of the requested slice, yielding `[batch, n_kv, seq, head_dim, ...]` instead.
@@ -646,9 +646,9 @@ pub mod onnx_builder {
     /// Build a GQA K-expand model that uses `Shape` with `start`/`end` attributes
     /// to extract dimensions, matching TinyLlama's exact graph pattern:
     ///
-    ///   batch_dim = Shape(input_like, start=0, end=1)  → INT64[1] = [batch]
-    ///   seq_hdim  = Shape(K_compact,  start=2, end=4)  → INT64[2] = [seq, head_dim]
-    ///   expand_shape = Concat([batch_dim, nkv_c, group_c, seq_hdim])
+    ///   batch_dim = Shape(input_like, start=0, end=1)  → INT64`[1]` = `[batch]`
+    ///   seq_hdim  = Shape(K_compact,  start=2, end=4)  → INT64`[2]` = `[seq, head_dim]`
+    ///   expand_shape = Concat(`[batch_dim, nkv_c, group_c, seq_hdim]`)
     ///   K_exp = Reshape(Expand(Unsqueeze(K_compact), expand_shape), reshape_tgt)
     ///
     /// Exposes the bug where `start`/`end` are stripped from `FloatOp::Shape`,
@@ -722,12 +722,12 @@ pub mod onnx_builder {
     /// instead of 2 — which the test detects as a value or shape mismatch vs ORT.
     ///
     /// Graph:
-    ///   K [batch, n_kv_heads, seq_DYN, head_dim]  ← seq is symbolic ("dyn")
-    ///   Shape(K, start=2, end=4) → seq_hdim INT64[2]
-    ///   Cast(to=FLOAT) → Y f32[2]
+    ///   K `[batch, n_kv_heads, seq_DYN, head_dim]`  ← seq is symbolic ("dyn")
+    ///   Shape(K, start=2, end=4) → seq_hdim INT64`[2]`
+    ///   Cast(to=FLOAT) → Y f32`[2]`
     ///
-    /// Expected: Y = [seq as f32, head_dim as f32]
-    /// Buggy result (FloatOp::Shape ignores start/end): Y = [batch, n_kv_heads, seq, head_dim]
+    /// Expected: Y = `[seq as f32, head_dim as f32]`
+    /// Buggy result (FloatOp::Shape ignores start/end): Y = `[batch, n_kv_heads, seq, head_dim]`
     pub fn shape_start_end_with_dynamic_seq(
         batch: usize,
         n_kv_heads: usize,
@@ -769,7 +769,7 @@ pub mod onnx_builder {
 
     /// Build a model that tests the `Shape` op via `Cast` to float.
     ///
-    /// Graph: X [batch, seq, hidden] → Shape → shape_int64 [3] → Cast(to=FLOAT) → Y [3]
+    /// Graph: X `[batch, seq, hidden]` → Shape → shape_int64 `[3]` → Cast(to=FLOAT) → Y `[3]`
     ///
     /// ORT should return `[batch as f32, seq as f32, hidden as f32]`.
     /// A failure here means `Shape` returns wrong dimension values (e.g. a scalar
@@ -787,11 +787,11 @@ pub mod onnx_builder {
     /// Shape → Slice → Concat, matching TinyLlama's dynamic shape pattern.
     ///
     /// Graph:
-    ///   X [batch, seq, hidden]
-    ///   → Shape(X)                     → shape [3] (INT64)
-    ///   → Slice(shape, 0:2)            → first_two [2] (INT64 = [batch, seq])
-    ///   → Concat([first_two, hdim_c])  → reshape_tgt [3] (INT64 = [batch, seq, hidden])
-    ///   → Expand(X, reshape_tgt)       → Y [batch, seq, hidden]
+    ///   X `[batch, seq, hidden]`
+    ///   → Shape(X)                     → shape `[3]` (INT64)
+    ///   → Slice(shape, 0:2)            → first_two `[2]` (INT64 = `[batch, seq]`)
+    ///   → Concat(`[first_two, hdim_c]`)  → reshape_tgt `[3]` (INT64 = `[batch, seq, hidden]`)
+    ///   → Expand(X, reshape_tgt)       → Y `[batch, seq, hidden]`
     ///
     /// This validates that dynamically computed shape tensors (from Shape op output)
     /// propagate correctly through Slice and Concat and produce the right values in
@@ -838,14 +838,14 @@ pub mod onnx_builder {
     /// Unlike `gqa_expand_attention` (which uses constant INT64 initializers
     /// for the expand target), this model builds the expand shape at runtime:
     ///
-    ///   K_compact [batch, n_kv_heads, seq, head_dim]
-    ///   Shape(K_compact) → k_shape INT64 [4]
-    ///   Slice(k_shape, 2:4) → seq_hdim INT64 [2] = [seq, head_dim]
-    ///   Concat([batch_c, nkv_c, group_c, seq_hdim]) → expand_shape INT64 [5]
-    ///   Unsqueeze(K_compact, [2]) → K_unsq [batch, n_kv, 1, seq, head_dim]
-    ///   Expand(K_unsq, expand_shape) → K_5d [batch, n_kv, group, seq, head_dim]
-    ///   Concat([batch_c, nheads_c, seq_hdim]) → reshape_tgt INT64 [4]
-    ///   Reshape(K_5d, reshape_tgt) → K_exp [batch, n_heads, seq, head_dim]
+    ///   K_compact `[batch, n_kv_heads, seq, head_dim]`
+    ///   Shape(K_compact) → k_shape INT64 `[4]`
+    ///   Slice(k_shape, 2:4) → seq_hdim INT64 `[2]` = `[seq, head_dim]`
+    ///   Concat(`[batch_c, nkv_c, group_c, seq_hdim]`) → expand_shape INT64 `[5]`
+    ///   Unsqueeze(K_compact, `[2]`) → K_unsq `[batch, n_kv, 1, seq, head_dim]`
+    ///   Expand(K_unsq, expand_shape) → K_5d `[batch, n_kv, group, seq, head_dim]`
+    ///   Concat(`[batch_c, nheads_c, seq_hdim]`) → reshape_tgt INT64 `[4]`
+    ///   Reshape(K_5d, reshape_tgt) → K_exp `[batch, n_heads, seq, head_dim]`
     ///
     /// A failure exposes bugs where `Shape(K_compact)` returns wrong values
     /// (e.g. a scalar element count), causing Slice to produce garbage and
@@ -908,15 +908,15 @@ pub mod onnx_builder {
 
     /// Build an ONNX model that exercises Range with i64 scalar inputs.
     ///
-    /// Graph: Range(i64_zero, i64_n, i64_one) → positions [n] → Cast(to=FLOAT) → output [n]
+    /// Graph: Range(i64_zero, i64_n, i64_one) → positions `[n]` → Cast(to=FLOAT) → output `[n]`
     ///
     /// This tests the case where the Range `limit` input is an 8-byte i64 scalar
     /// (as emitted by the Shape op in model_causal.onnx).  Before the fix, hologram
     /// would call cast_f32() on the i64 bytes, interpreting them as subnormals ≈0,
-    /// producing a 1-element output instead of [0.0, 1.0, ..., n-1.0].
+    /// producing a 1-element output instead of `[0.0, 1.0, ..., n-1.0]`.
     ///
-    /// ORT: Range(i64) → i64 [n], Cast → f32 [0.0..n-1.0]
-    /// hologram (fixed): Range reads i64 inputs correctly → f32 [0.0..n-1.0], Cast = no-op
+    /// ORT: Range(i64) → i64 `[n]`, Cast → f32 `[0.0..n-1.0]`
+    /// hologram (fixed): Range reads i64 inputs correctly → f32 `[0.0..n-1.0]`, Cast = no-op
     pub fn range_i64_then_cast(n: usize) -> Vec<u8> {
         let nodes = vec![
             Node::new("Range", &["start", "limit", "delta"], &["positions"]),
@@ -948,9 +948,9 @@ pub mod onnx_builder {
     ///
     /// This is the exact pattern used by `model_causal.onnx` to build the causal
     /// attention mask:
-    ///   query_pos = Unsqueeze(arange, axis=1) → [seq, 1]
-    ///   key_pos   = Unsqueeze(arange, axis=0) → [1, seq]
-    ///   mask      = LessOrEqual(query_pos, key_pos) → [seq, seq]
+    ///   query_pos = Unsqueeze(arange, axis=1) → `[seq, 1]`
+    ///   key_pos   = Unsqueeze(arange, axis=0) → `[1, seq]`
+    ///   mask      = LessOrEqual(query_pos, key_pos) → `[seq, seq]`
     ///
     /// Inputs: none (constants baked in as initializers).
     /// Output: float `[seq, seq]` — upper-triangular 0/1 mask.
@@ -992,8 +992,8 @@ pub mod onnx_builder {
     /// hologram compiles this as the fused `FloatOp::FusedSwiGLU` kernel.
     /// A mismatch here indicates either the ONNX lowering or the fused kernel is wrong.
     ///
-    /// Inputs: gate [rows, cols], up [rows, cols]
-    /// Output: [rows, cols]
+    /// Inputs: gate `[rows, cols]`, up `[rows, cols]`
+    /// Output: `[rows, cols]`
     pub fn swiglu(rows: usize, cols: usize) -> Vec<u8> {
         let nodes = vec![
             // sig_gate = Sigmoid(gate)
@@ -1018,12 +1018,12 @@ pub mod onnx_builder {
     /// import produces: Q/K/V outputs of `Gemm(hidden, W)` → flat.
     ///
     /// The reference ONNX graph:
-    ///   Q flat [seq, n_q*head_dim]  → Reshape [seq, n_q, head_dim] → Transpose [n_q, seq, head_dim]
-    ///   K flat [seq, n_kv*head_dim] → Reshape [seq, n_kv, head_dim] → Transpose [n_kv, seq, head_dim]
-    ///   V flat [seq, n_kv*head_dim] → Reshape → Transpose
+    ///   Q flat `[seq, n_q*head_dim]`  → Reshape `[seq, n_q, head_dim]` → Transpose `[n_q, seq, head_dim]`
+    ///   K flat `[seq, n_kv*head_dim]` → Reshape `[seq, n_kv, head_dim]` → Transpose `[n_kv, seq, head_dim]`
+    ///   V flat `[seq, n_kv*head_dim]` → Reshape → Transpose
     ///   For each query-head group (group_size = n_q / n_kv):
     ///     Gather Q-slice, Gather KV slice, SDPA + causal mask
-    ///   Concat → Transpose → Reshape → output [seq, n_q*head_dim]
+    ///   Concat → Transpose → Reshape → output `[seq, n_q*head_dim]`
     ///
     /// Because the full gather+loop cannot be expressed in a single ONNX graph
     /// for variable n_q, this builder targets the common single-KV-head case
@@ -1032,10 +1032,10 @@ pub mod onnx_builder {
     /// compact-input format. This test validates the flat input path specifically.
     ///
     /// For n_kv_heads=1 (all queries share a single KV head):
-    ///   K is repeated to [n_heads, seq, head_dim] via Expand after Transpose.
+    ///   K is repeated to `[n_heads, seq, head_dim]` via Expand after Transpose.
     ///
-    /// Inputs: Q [seq, n_q*head_dim], K [seq, head_dim], V [seq, head_dim]
-    /// Output: [seq, n_q*head_dim]
+    /// Inputs: Q `[seq, n_q*head_dim]`, K `[seq, head_dim]`, V `[seq, head_dim]`
+    /// Output: `[seq, n_q*head_dim]`
     pub fn gqa_flat_single_kv(n_q_heads: usize, seq: usize, head_dim: usize) -> Vec<u8> {
         let scale = 1.0_f32 / (head_dim as f32).sqrt();
         // K/V come as [seq, head_dim] (single KV head, flat) — same as Q per head.
@@ -1133,14 +1133,14 @@ pub mod onnx_builder {
     ///
     /// Generalizes `gqa_flat_single_kv` to arbitrary `n_kv_heads > 1`.
     /// This matches the input format produced by GGUF import:
-    ///   Q [seq, n_q_heads * head_dim], K [seq, n_kv_heads * head_dim], V [seq, n_kv_heads * head_dim]
+    ///   Q `[seq, n_q_heads * head_dim]`, K `[seq, n_kv_heads * head_dim]`, V `[seq, n_kv_heads * head_dim]`
     ///
     /// The reference computation:
-    ///   1. Reshape Q → [n_q_heads, seq, head_dim]
-    ///   2. Reshape K → [n_kv_heads, seq, head_dim], Expand to [n_q_heads, seq, head_dim]
-    ///   3. Reshape V → [n_kv_heads, seq, head_dim], Expand to [n_q_heads, seq, head_dim]
+    ///   1. Reshape Q → `[n_q_heads, seq, head_dim]`
+    ///   2. Reshape K → `[n_kv_heads, seq, head_dim]`, Expand to `[n_q_heads, seq, head_dim]`
+    ///   3. Reshape V → `[n_kv_heads, seq, head_dim]`, Expand to `[n_q_heads, seq, head_dim]`
     ///   4. QK^T → scale → causal_mask → Softmax → @V
-    ///   5. Reshape output → [seq, n_q_heads * head_dim]
+    ///   5. Reshape output → `[seq, n_q_heads * head_dim]`
     ///
     /// group_size = n_q_heads / n_kv_heads (must divide evenly).
     /// K/V are repeated group_size times along the heads axis via Unsqueeze+Expand+Reshape.
@@ -1398,12 +1398,12 @@ pub mod onnx_builder {
     /// Exercises the identity-op shape changes (Unsqueeze, Squeeze) that caused
     /// TinyLlama failures. Input is `[dyn_seq, hidden]`. The graph does:
     ///
-    /// 1. QKV projections:  X @ W_q/k/v → Q/K/V  [seq, hidden]
-    /// 2. Reshape to heads:  Reshape([seq, hidden]) → [seq, n_heads, head_dim]
-    /// 3. Transpose to head-first: [n_heads, seq, head_dim]
-    /// 4. Unsqueeze K: [1, n_kv_heads, seq, head_dim] (batch dim for broadcast)
+    /// 1. QKV projections:  X @ W_q/k/v → Q/K/V  `[seq, hidden]`
+    /// 2. Reshape to heads:  Reshape(`[seq, hidden]`) → `[seq, n_heads, head_dim]`
+    /// 3. Transpose to head-first: `[n_heads, seq, head_dim]`
+    /// 4. Unsqueeze K: `[1, n_kv_heads, seq, head_dim]` (batch dim for broadcast)
     /// 5. Attention:  Q @ K^T → softmax → @ V
-    /// 6. Transpose back + Reshape → [seq, hidden]
+    /// 6. Transpose back + Reshape → `[seq, hidden]`
     /// 7. Output projection + residual
     ///
     /// hidden=32, n_heads=4, n_kv_heads=4, head_dim=8.
@@ -1617,7 +1617,7 @@ pub mod onnx_builder {
     /// MatMul model with dynamic seq dimension.
     ///
     /// Input:  X  [batch=1, DYN_seq, k] (seq is symbolic/dynamic)
-    ///         W  [k, n]                (concrete weight)
+    ///         W  `[k, n]`                (concrete weight)
     /// Output: Y  [batch=1, DYN_seq, n]
     ///
     /// Used to verify that the MatMul kernel correctly infers `m` from the input
@@ -1633,10 +1633,10 @@ pub mod onnx_builder {
         )
     }
 
-    /// Reshape model that unpacks hidden_dim into [heads, head_dim] with dynamic seq.
+    /// Reshape model that unpacks hidden_dim into `[heads, head_dim]` with dynamic seq.
     ///
     /// Input:  X  [batch=1, DYN_seq, num_heads*head_dim]
-    /// Shape computation: Shape(X) → Slice → Concat → shape tensor [1, num_heads, seq, head_dim]
+    /// Shape computation: Shape(X) → Slice → Concat → shape tensor `[1, num_heads, seq, head_dim]`
     /// Output: Y  [batch=1, num_heads, DYN_seq, head_dim]
     ///
     /// This is the exact pattern used in TinyLlama's transformer attention layers.
@@ -1735,7 +1735,7 @@ pub mod onnx_builder {
     }
 
     /// Build a Conv ONNX model with initializer weights.
-    /// Graph: input "X" [n, ic, h, w] + initializer "W" [oc, ic, kh, kw] → Conv → "Y"
+    /// Graph: input "X" `[n, ic, h, w]` + initializer "W" `[oc, ic, kh, kw]` → Conv → "Y"
     pub fn conv2d(spec: Conv2dSpec) -> Vec<u8> {
         let Conv2dSpec {
             n,

@@ -22,7 +22,7 @@ use std::path::Path;
 pub struct PortInfo {
     /// Semantic port name, or empty string if the port is unnamed.
     pub name: String,
-    /// Backend dtype tag (e.g. `5` = I64, `8` = F32; see [`port_byte_size`]).
+    /// Backend dtype tag (e.g. `5` = I64, `8` = F32; see `port_byte_size`).
     pub dtype: u8,
     /// Logical element count (product of the port's concrete dims).
     pub element_count: usize,
@@ -242,7 +242,7 @@ fn port_byte_size(element_count: usize, tag: u8) -> usize {
 
 /// Byte width of a canonical (whole-byte) dtype tag
 /// (`hologram_backend::cpu::dtype` encoding). Sub-byte dtypes (I4) are handled
-/// by [`port_byte_size`], not here.
+/// by `port_byte_size`, not here.
 fn dtype_byte_width(tag: u8) -> usize {
     match tag {
         0..=2 => 1,     // Bool, U8, I8

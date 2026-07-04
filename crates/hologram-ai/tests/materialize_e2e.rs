@@ -5,14 +5,10 @@
 //! a missing κ aborts naming the label; corrupt store content fails the
 //! content-integrity check.
 
-use hologram_ai::materialize::{
-    kappa_of, kappa_requirements, materialize_archive, DirKappaStore,
-};
+use hologram_ai::materialize::{kappa_of, kappa_requirements, materialize_archive, DirKappaStore};
 use hologram_ai::runner::HoloRunner;
 use hologram_ai::{ModelCompiler, ModelSource};
-use hologram_ai_common::{
-    shape_from_concrete, AiGraph, AiNode, AiOp, AiParam, DType, TensorInfo,
-};
+use hologram_ai_common::{shape_from_concrete, AiGraph, AiNode, AiOp, AiParam, DType, TensorInfo};
 use std::collections::HashMap;
 
 fn ti(dt: DType, dims: &[u64]) -> TensorInfo {
@@ -113,7 +109,10 @@ fn materialized_kform_matches_inline_compile_exactly() {
     let mat_out = mat_runner.execute(&[&x]).expect("materialized executes");
     assert_eq!(inline_out.len(), mat_out.len());
     for (a, b) in inline_out.iter().zip(mat_out.iter()) {
-        assert_eq!(a.bytes, b.bytes, "materialized execution must be byte-identical");
+        assert_eq!(
+            a.bytes, b.bytes,
+            "materialized execution must be byte-identical"
+        );
     }
 
     // And the result is genuinely the matmul, not zeros from empty weights.

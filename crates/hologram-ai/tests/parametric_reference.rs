@@ -65,7 +65,11 @@ fn bytes_for(name: &str, dims: &[u64]) -> Vec<u8> {
     let norm = name.contains("layernorm") || name.ends_with(".norm.weight");
     (0..n)
         .flat_map(|k| {
-            let v: f32 = if norm { 1.0 } else { ((k % 13) as f32 - 6.0) * 0.01 };
+            let v: f32 = if norm {
+                1.0
+            } else {
+                ((k % 13) as f32 - 6.0) * 0.01
+            };
             v.to_le_bytes()
         })
         .collect()
@@ -301,7 +305,11 @@ const TOKENS: [u32; 6] = [3, 141, 59, 26, 5, 35];
 fn pipeline_logits_match_naive_reference() {
     let logits_bytes = run_logits(compile(build_graph(true)), &TOKENS);
     let logits: &[f32] = bytemuck::cast_slice(&logits_bytes);
-    assert_eq!(logits.len(), WINDOW * VOCAB, "logits are [1, window, vocab]");
+    assert_eq!(
+        logits.len(),
+        WINDOW * VOCAB,
+        "logits are [1, window, vocab]"
+    );
 
     let reference = reference_logits(&TOKENS);
     let mut max_abs = 0f32;
@@ -326,10 +334,7 @@ fn external_kappa_compile_is_byte_identical_to_inline() {
     let inline_logits = run_logits(compile(build_graph(true)), &TOKENS);
 
     let kform = compile(build_graph(false));
-    let dir = std::env::temp_dir().join(format!(
-        "hai-parametric-reference-{}",
-        std::process::id()
-    ));
+    let dir = std::env::temp_dir().join(format!("hai-parametric-reference-{}", std::process::id()));
     let store = DirKappaStore::new(&dir);
     for (_, _, bytes) in &fixture_tensors() {
         store.insert(bytes).expect("κ insert");

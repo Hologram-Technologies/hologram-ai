@@ -98,7 +98,8 @@ const CASES: &[NodeTest] = &[
 
 // Pinned to the immutable v1.17.0 release tag (registered in model/oracles.toml
 // as `onnx-node-corpus`; the pin is checked live by `xtask pin-check`).
-const BASE: &str = "https://raw.githubusercontent.com/onnx/onnx/v1.17.0/onnx/backend/test/data/node";
+const BASE: &str =
+    "https://raw.githubusercontent.com/onnx/onnx/v1.17.0/onnx/backend/test/data/node";
 
 fn cache_dir() -> PathBuf {
     let mut p = PathBuf::from(env!("CARGO_MANIFEST_DIR"));

@@ -135,10 +135,8 @@ fn tokenizer_json() -> serde_json::Value {
     // No `<`, `>`, `|`: the only tokens containing them are the specials
     // above, so generated text can never trip the browser's tag-cleaning.
     let chars = " abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.,!?'-:\n";
-    let mut id = 3u32;
-    for c in chars.chars() {
-        vocab.insert(c.to_string(), id.into());
-        id += 1;
+    for (i, c) in chars.chars().enumerate() {
+        vocab.insert(c.to_string(), (3 + i as u32).into());
     }
     serde_json::json!({
         "version": "1.0",

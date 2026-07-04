@@ -1861,7 +1861,13 @@ impl<'a> Ctx<'a> {
     /// apply the norm (with γ/β — and a residual for `AddRmsNorm`) to the
     /// ε-preconditioned input, then reshape the result back to the declared
     /// output shape.
-    fn desugar_norm(&mut self, node: &AiNode, op: OpKind, residual: bool, epsilon: f32) -> Result<()> {
+    fn desugar_norm(
+        &mut self,
+        node: &AiNode,
+        op: OpKind,
+        residual: bool,
+        epsilon: f32,
+    ) -> Result<()> {
         let dtype = self.dtype_of(node.inputs[0]);
         let x_dims = self.in_dims(node, 0)?;
         let feature = x_dims.last().copied().unwrap_or(1).max(1);

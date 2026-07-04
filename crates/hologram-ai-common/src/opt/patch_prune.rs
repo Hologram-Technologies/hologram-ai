@@ -61,7 +61,7 @@
 //! # References
 //!
 //! - PixelPrune paper: arXiv 2604.00886
-//! 
+//!
 
 use super::pipeline::Pass;
 use crate::ir::node::AiNode;

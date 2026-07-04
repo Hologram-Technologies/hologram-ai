@@ -149,8 +149,8 @@ pub fn materialize_archive(archive: &[u8], store: &mut dyn KappaStore) -> Result
         return Ok(archive.to_vec());
     }
 
-    let loader = HoloLoader::from_bytes(archive)
-        .map_err(|e| anyhow::anyhow!("loading archive: {e:?}"))?;
+    let loader =
+        HoloLoader::from_bytes(archive).map_err(|e| anyhow::anyhow!("loading archive: {e:?}"))?;
     let plan = loader
         .into_plan()
         .map_err(|e| anyhow::anyhow!("decoding archive sections: {e:?}"))?;
@@ -294,12 +294,19 @@ mod tests {
 
     #[test]
     fn parse_kappa_map_round_trips() {
-        let text = format!("ConstantId(0):{}\nConstantId(7):{}\n", kappa_of(b"a"), kappa_of(b"b"));
+        let text = format!(
+            "ConstantId(0):{}\nConstantId(7):{}\n",
+            kappa_of(b"a"),
+            kappa_of(b"b")
+        );
         let reqs = parse_kappa_map(text.as_bytes()).expect("well-formed map parses");
         assert_eq!(reqs.len(), 2);
         assert_eq!(reqs[0].constant, 0);
         assert_eq!(reqs[1].constant, 7);
-        assert!(parse_kappa_map(b"garbage-line").is_err(), "malformed lines fail loud");
+        assert!(
+            parse_kappa_map(b"garbage-line").is_err(),
+            "malformed lines fail loud"
+        );
     }
 
     #[test]
@@ -311,14 +318,20 @@ mod tests {
         let bytes = store.resolve(&kappa).expect("resolve");
         assert_eq!(bytes, b"tensor-bytes");
         assert_eq!(kappa_of(&bytes), kappa);
-        assert!(store.resolve("blake3:0000").is_err(), "missing κ fails naming the label");
+        assert!(
+            store.resolve("blake3:0000").is_err(),
+            "missing κ fails naming the label"
+        );
         std::fs::remove_dir_all(&dir).expect("cleanup");
     }
 
     #[test]
     fn material_archive_passes_through() {
         // An archive with no κ-map is already material: identity.
-        let holo = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../oracles/onnx/tiny-mlp.onnx"));
+        let holo = include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../oracles/onnx/tiny-mlp.onnx"
+        ));
         // tiny-mlp.onnx is not a .holo — loading must fail loud, proving we
         // never silently pass through non-archives.
         let mut store = DirKappaStore::new("/nonexistent");

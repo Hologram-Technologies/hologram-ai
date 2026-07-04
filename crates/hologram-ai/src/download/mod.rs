@@ -19,7 +19,7 @@ pub struct DownloadArgs {
     /// HuggingFace model identifier (e.g., meta-llama/Llama-3.2-1B).
     pub model_id: String,
 
-    /// Output directory where model files will be saved [default: ./models/<model-name>].
+    /// Output directory where model files will be saved \[default: `./models/<model-name>`\].
     #[arg(short, long, value_name = "DIR")]
     pub output: Option<PathBuf>,
 
