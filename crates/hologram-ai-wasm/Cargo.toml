@@ -26,9 +26,11 @@ blake3.workspace = true
 hologram-ai-safetensors = { version = "0.1.0", path = "../hologram-ai-safetensors" }
 serde_json.workspace = true
 hologram-ai-common.workspace = true
+anyhow.workspace = true
 
 [dev-dependencies]
 wasm-bindgen-test = "0.3"
 # Build test-fixture models in-wasm (also exercises the compile path).
 hologram-ai-common.workspace = true
+anyhow.workspace = true
 serde_json.workspace = true

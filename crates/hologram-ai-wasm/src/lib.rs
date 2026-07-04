@@ -81,25 +81,50 @@ pub fn compile_safetensors_streamed(
     kappas_js: &js_sys::Array,
     tensor_shapes_js: &js_sys::Array,
     tensor_dtypes_js: &js_sys::Array,
+    context_length: Option<u32>,
 ) -> Result<Vec<u8>, JsValue> {
     let mut keys = Vec::new();
     let mut kappas = Vec::new();
     let mut shapes = Vec::new();
     let mut dtypes = Vec::new();
     for i in 0..keys_js.length() {
-        let key = keys_js.get(i).as_string().unwrap();
-        let kappa = kappas_js.get(i).as_string().unwrap();
-        let shape_str = tensor_shapes_js.get(i).as_string().unwrap();
-        let dtype_str = tensor_dtypes_js.get(i).as_string().unwrap();
+        let key = keys_js
+            .get(i)
+            .as_string()
+            .ok_or_else(|| err(format!("manifest key {i} is not a string")))?;
+        let kappa = kappas_js
+            .get(i)
+            .as_string()
+            .ok_or_else(|| err(format!("κ for `{key}` is not a string")))?;
+        let shape_str = tensor_shapes_js
+            .get(i)
+            .as_string()
+            .ok_or_else(|| err(format!("shape for `{key}` is not a string")))?;
+        let dtype_str = tensor_dtypes_js
+            .get(i)
+            .as_string()
+            .ok_or_else(|| err(format!("dtype for `{key}` is not a string")))?;
 
-        let shape: Vec<u64> = serde_json::from_str(&shape_str).unwrap();
+        let shape: Vec<u64> = serde_json::from_str(&shape_str)
+            .map_err(|e| err(format!("shape for `{key}` does not parse: {e}")))?;
 
+        // safetensors dtype tags (fail loud on anything unmapped: a mislabeled
+        // dtype corrupts every weight downstream).
         let dtype = match dtype_str.as_str() {
             "F32" => hologram_ai_common::DType::F32,
             "F16" => hologram_ai_common::DType::F16,
+            "BF16" => hologram_ai_common::DType::BF16,
+            "F64" => hologram_ai_common::DType::F64,
             "I64" | "INT64" => hologram_ai_common::DType::INT64,
             "I32" | "INT32" => hologram_ai_common::DType::INT32,
-            _ => hologram_ai_common::DType::F16,
+            "I8" | "INT8" => hologram_ai_common::DType::INT8,
+            "U8" => hologram_ai_common::DType::U8,
+            "BOOL" => hologram_ai_common::DType::BOOL,
+            other => {
+                return Err(err(format!(
+                    "tensor `{key}` has unsupported safetensors dtype `{other}`"
+                )))
+            }
         };
 
         keys.push(key);
@@ -110,9 +135,13 @@ pub fn compile_safetensors_streamed(
 
     let config: serde_json::Value =
         serde_json::from_str(config_json).map_err(|e| err(e.to_string()))?;
-    let mut graph =
-        hologram_ai_safetensors::parametric::build_parametric_graph_from_keys(&config, &keys)
-            .map_err(|e| err(e.to_string()))?;
+    let mut graph = hologram_ai_safetensors::parametric::build_parametric_graph_from_manifest(
+        &config,
+        &keys,
+        &dtypes,
+        context_length.map(u64::from),
+    )
+    .map_err(|e| err(e.to_string()))?;
 
     // Inject AiParam::External for each key so the compiled `.holo` has the `holospaces.kappa_map`.
     // The parametric compiler doesn't add parameters, so we add them here.
@@ -151,6 +180,43 @@ pub fn compile_safetensors_streamed(
         .map_err(|e| err(format!("compile_safetensors_streamed: {e:#}")))?;
 
     Ok(archive.bytes)
+}
+
+// ── κ-materialization (journey stage S3) ────────────────────────────────────
+
+/// The κ-labels a k-form archive requires (its `holospaces.kappa_map`
+/// entries), as a JS array of strings. Empty for a material archive.
+#[wasm_bindgen]
+pub fn kappa_requirements(holo: &[u8]) -> Result<js_sys::Array, JsValue> {
+    let reqs = hologram_ai::materialize::kappa_requirements(holo)
+        .map_err(|e| err(format!("kappa_requirements: {e:#}")))?;
+    let out = js_sys::Array::new();
+    for r in reqs {
+        out.push(&JsValue::from_str(&r.kappa));
+    }
+    Ok(out)
+}
+
+/// Materialize a k-form archive against a κ-store resolver.
+///
+/// `resolve` is a synchronous JS function `(kappa: string) => Uint8Array` —
+/// in the browser this reads `tensors/{κ}.bin` from OPFS via a sync access
+/// handle (worker context). Every resolved buffer is re-hashed and must
+/// reproduce its κ (content addressing is the integrity check); a missing or
+/// corrupt κ aborts naming the label. Returns the executable archive bytes.
+#[wasm_bindgen]
+pub fn materialize(holo: &[u8], resolve: &js_sys::Function) -> Result<Vec<u8>, JsValue> {
+    let mut store = |kappa: &str| -> anyhow::Result<Vec<u8>> {
+        let value = resolve
+            .call1(&JsValue::NULL, &JsValue::from_str(kappa))
+            .map_err(|e| anyhow::anyhow!("κ resolver threw for `{kappa}`: {e:?}"))?;
+        if value.is_null() || value.is_undefined() {
+            anyhow::bail!("κ `{kappa}` not present in store");
+        }
+        Ok(js_sys::Uint8Array::new(&value).to_vec())
+    };
+    hologram_ai::materialize::materialize_archive(holo, &mut store)
+        .map_err(|e| err(format!("materialize: {e:#}")))
 }
 
 #[wasm_bindgen]
