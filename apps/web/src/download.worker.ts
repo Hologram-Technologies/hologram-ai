@@ -1,4 +1,25 @@
-import { compileSafetensorsStreamed, KappaHasher, ensureReady } from "./holo";
+// The persistent download worker (journey stage S1).
+//
+// Two phases, per docs/conceptual-model/02-user-journey.md:
+//
+// 1. PREFLIGHT — the model is validated before any shard byte moves: the
+//    tensor manifest is read from the shards' safetensors headers alone
+//    (ranged requests — kilobytes, not weights) and the parametric graph is
+//    built from config + manifest inside wasm. An unsupported family, a
+//    malformed config, or an unrealizable manifest rejects HERE, naming the
+//    reason, with zero shard bytes transferred.
+// 2. STREAM — each shard's tensors are walked from the already-parsed header,
+//    κ-hashed incrementally, persisted to OPFS as tensors/{κ}.bin, and the
+//    content is discarded as it is retrieved. The final step is mechanical:
+//    bind the streamed κs into the already-validated graph and emit the
+//    k-form archive — it cannot fail on model validity.
+import {
+  compileSafetensorsStreamed,
+  validateModelConfig,
+  validateStreamedManifest,
+  KappaHasher,
+  ensureReady,
+} from "./holo";
 
 self.onmessage = async (e) => {
   const { type, payload } = e.data;
@@ -21,110 +42,139 @@ function emitError(err: string) {
   self.postMessage({ type: "error", error: err });
 }
 
+interface ShardTensor {
+  key: string;
+  dtype: string;
+  shape: number[];
+  data_offsets: [number, number];
+}
+
+interface ShardManifest {
+  rfilename: string;
+  url: string;
+  headerLen: number;
+  tensors: ShardTensor[];
+}
+
+/** Fetch `[start, endInclusive]` of `url`. Honors 206; if the server ignores
+ * Range (200), reads only the needed prefix and cancels the stream — never
+ * buffering a shard body. */
+async function fetchRange(url: string, start: number, endInclusive: number): Promise<Uint8Array> {
+  const response = await fetch(url, { headers: { Range: `bytes=${start}-${endInclusive}` } });
+  if (!response.ok || !response.body) {
+    throw new Error(`Failed ranged fetch of ${url} (HTTP ${response.status})`);
+  }
+  if (response.status === 206) {
+    return new Uint8Array(await response.arrayBuffer());
+  }
+  if (start !== 0) {
+    await response.body.cancel();
+    throw new Error(`server ignored the Range request for ${url}`);
+  }
+  const wanted = endInclusive + 1;
+  const reader = response.body.getReader();
+  const out = new Uint8Array(wanted);
+  let got = 0;
+  while (got < wanted) {
+    const { done, value } = await reader.read();
+    if (done) throw new Error(`EOF before ${wanted} bytes of ${url}`);
+    const take = Math.min(wanted - got, value.length);
+    out.set(value.subarray(0, take), got);
+    got += take;
+  }
+  await reader.cancel();
+  return out;
+}
+
+/** Read a shard's safetensors header via ranged requests (8-byte u64 length +
+ * JSON), returning its tensor manifest sorted by data offset. */
+async function fetchShardManifest(url: string, rfilename: string): Promise<ShardManifest> {
+  const lenBytes = await fetchRange(url, 0, 7);
+  const headerLen = Number(
+    new DataView(lenBytes.buffer, lenBytes.byteOffset, 8).getBigUint64(0, true),
+  );
+  if (!Number.isSafeInteger(headerLen) || headerLen === 0) {
+    throw new Error(`${rfilename}: implausible safetensors header length ${headerLen}`);
+  }
+  const headerBytes = await fetchRange(url, 8, 8 + headerLen - 1);
+  const header = JSON.parse(new TextDecoder().decode(headerBytes));
+  const tensors: ShardTensor[] = [];
+  for (const [key, meta] of Object.entries(header)) {
+    if (key === "__metadata__") continue;
+    const m = meta as { dtype: string; shape: number[]; data_offsets: [number, number] };
+    tensors.push({ key, dtype: m.dtype, shape: m.shape, data_offsets: m.data_offsets });
+  }
+  tensors.sort((a, b) => a.data_offsets[0] - b.data_offsets[0]);
+  return { rfilename, url, headerLen, tensors };
+}
+
 export async function handleSafetensorsDownload(
   {
     modelId,
     configText,
     files,
     contextLength,
-    hfBase
+    hfBase,
   }: {
-    modelId: string,
-    configText: string,
-    files: any[],
-    contextLength?: number,
-    hfBase?: string
+    modelId: string;
+    configText: string;
+    files: { rfilename: string }[];
+    contextLength?: number;
+    hfBase?: string;
   },
   emitProgressFn = emitProgress,
   emitDoneFn = emitDone,
-  emitErrorFn = emitError
+  emitErrorFn = emitError,
 ) {
   try {
     await ensureReady();
-    const root = await navigator.storage.getDirectory();
-    const tensorsDir = await root.getDirectoryHandle("tensors", { create: true });
+    const base = hfBase ?? "https://huggingface.co";
 
+    // ── Phase 1: preflight ─────────────────────────────────────────────────
+    // Config-only first: an unsupported family or malformed config rejects
+    // before even the shard HEADERS are touched.
+    emitProgressFn(`Preflight: validating ${modelId} config against the family registry...`);
+    await validateModelConfig(configText);
+    emitProgressFn(`Preflight: reading shard headers for ${modelId} (ranged requests)...`);
+    const manifests: ShardManifest[] = [];
+    for (const file of files) {
+      const url = `${base}/${modelId}/resolve/main/${file.rfilename}`;
+      manifests.push(await fetchShardManifest(url, file.rfilename));
+    }
     const allKeys: string[] = [];
-    const allKappas: string[] = [];
     const allShapes: string[] = [];
     const allDtypes: string[] = [];
+    for (const manifest of manifests) {
+      for (const tensor of manifest.tensors) {
+        allKeys.push(tensor.key);
+        allShapes.push(JSON.stringify(tensor.shape));
+        allDtypes.push(tensor.dtype);
+      }
+    }
+    emitProgressFn(`Preflight: validating ${modelId} (${allKeys.length} tensors) against the parametric family registry...`);
+    await validateStreamedManifest(configText, allKeys, allShapes, allDtypes, contextLength);
+    emitProgressFn("Preflight passed: the model is valid; streaming weights.");
 
-    for (const file of files) {
-      const url = `${hfBase ?? "https://huggingface.co"}/${modelId}/resolve/main/${file.rfilename}`;
-      emitProgressFn(`Streaming ${file.rfilename}...`);
-      
-      const response = await fetch(url);
-      if (!response.ok || !response.body) throw new Error(`Failed to fetch ${file.rfilename}`);
+    // ── Phase 2: stream over k ─────────────────────────────────────────────
+    const root = await navigator.storage.getDirectory();
+    const tensorsDir = await root.getDirectoryHandle("tensors", { create: true });
+    const allKappas: string[] = [];
 
+    for (const manifest of manifests) {
+      emitProgressFn(`Streaming ${manifest.rfilename}...`);
+      const response = await fetch(manifest.url);
+      if (!response.ok || !response.body) {
+        throw new Error(`Failed to fetch ${manifest.rfilename}`);
+      }
       const reader = response.body.getReader();
-      let downloadedBytes = 0;
       const totalBytes = Number(response.headers.get("content-length")) || 0;
+      const baseOffset = 8 + manifest.headerLen;
+      const tensors = manifest.tensors;
+
+      let downloadedBytes = 0;
       let lastEmit = 0;
-
-      // Read header length
-      let headerLengthBuf = new Uint8Array(8);
-      let headerLengthRead = 0;
-      let chunks: Uint8Array[] = [];
-
-      while (headerLengthRead < 8) {
-        const { done, value } = await reader.read();
-        if (done) throw new Error("EOF before reading safetensors length");
-        downloadedBytes += value.length;
-        chunks.push(value);
-        const needed = 8 - headerLengthRead;
-        const toCopy = Math.min(needed, value.length);
-        headerLengthBuf.set(value.slice(0, toCopy), headerLengthRead);
-        headerLengthRead += toCopy;
-      }
-
-      const view = new DataView(headerLengthBuf.buffer);
-      const headerLen = view.getUint32(0, true);
-
-      let headerBuf = new Uint8Array(headerLen);
-      let headerRead = 0;
-      let offsetInChunks = 8;
-
-      for (let i = 0; i < chunks.length; i++) {
-        const chunk = chunks[i];
-        if (offsetInChunks < chunk.length) {
-          const remainingInChunk = chunk.length - offsetInChunks;
-          const needed = headerLen - headerRead;
-          if (needed <= 0) break;
-          const toCopy = Math.min(needed, remainingInChunk);
-          headerBuf.set(chunk.slice(offsetInChunks, offsetInChunks + toCopy), headerRead);
-          headerRead += toCopy;
-          offsetInChunks += toCopy;
-        } else {
-          offsetInChunks -= chunk.length;
-        }
-      }
-
-      while (headerRead < headerLen) {
-        const { done, value } = await reader.read();
-        if (done) throw new Error("EOF before reading safetensors header");
-        downloadedBytes += value.length;
-        chunks.push(value);
-        const needed = headerLen - headerRead;
-        const toCopy = Math.min(needed, value.length);
-        headerBuf.set(value.slice(0, toCopy), headerRead);
-        headerRead += toCopy;
-      }
-
-      const headerStr = new TextDecoder().decode(headerBuf);
-      const header = JSON.parse(headerStr);
-
-      const tensors: any[] = [];
-      for (const [key, meta] of Object.entries(header)) {
-        if (key === "__metadata__") continue;
-        tensors.push({ key, meta });
-      }
-      tensors.sort((a, b) => (a.meta as any).data_offsets[0] - (b.meta as any).data_offsets[0]);
-
       let currentTensorIdx = 0;
       let currentHasher = new KappaHasher();
-      const baseOffset = 8 + headerLen;
-
-      // Buffer for current tensor
       let currentTensorBuffer: Uint8Array | null = null;
       let currentTensorOffset = 0;
 
@@ -132,33 +182,32 @@ export async function handleSafetensorsDownload(
         let localOffset = 0;
         while (localOffset < bytes.length && currentTensorIdx < tensors.length) {
           const tensor = tensors[currentTensorIdx];
-          const tensorStart = baseOffset + tensor.meta.data_offsets[0];
-          const tensorEnd = baseOffset + tensor.meta.data_offsets[1];
+          const tensorStart = baseOffset + tensor.data_offsets[0];
+          const tensorEnd = baseOffset + tensor.data_offsets[1];
           const tensorSize = tensorEnd - tensorStart;
           const currentGlobal = globalOffset + localOffset;
 
           if (currentGlobal < tensorStart) {
-            const toSkip = Math.min(tensorStart - currentGlobal, bytes.length - localOffset);
-            localOffset += toSkip;
+            localOffset += Math.min(tensorStart - currentGlobal, bytes.length - localOffset);
           } else if (currentGlobal < tensorEnd) {
             const toFeed = Math.min(tensorEnd - currentGlobal, bytes.length - localOffset);
             const slice = bytes.slice(localOffset, localOffset + toFeed);
             currentHasher.update(slice);
-            
-            // Allocate buffer if needed
+
             if (!currentTensorBuffer) {
               currentTensorBuffer = new Uint8Array(tensorSize);
               currentTensorOffset = 0;
             }
             currentTensorBuffer.set(slice, currentTensorOffset);
             currentTensorOffset += slice.length;
-
             localOffset += toFeed;
 
             if (currentGlobal + toFeed === tensorEnd) {
+              // The tensor is complete: persist under its κ and DISCARD the
+              // content — only the k-representation flows forward.
               const kappa = currentHasher.finalize();
               const binHandle = await tensorsDir.getFileHandle(`${kappa}.bin`, { create: true });
-              if ('createSyncAccessHandle' in binHandle) {
+              if ("createSyncAccessHandle" in binHandle) {
                 const accessHandle = await (binHandle as any).createSyncAccessHandle();
                 accessHandle.write(currentTensorBuffer);
                 accessHandle.flush();
@@ -168,12 +217,7 @@ export async function handleSafetensorsDownload(
                 await writable.write(currentTensorBuffer);
                 await writable.close();
               }
-
-              allKeys.push(tensor.key);
               allKappas.push(kappa);
-              allShapes.push(JSON.stringify(tensor.meta.shape));
-              allDtypes.push(tensor.meta.dtype);
-              
               currentTensorIdx++;
               currentTensorBuffer = null;
               if (currentTensorIdx < tensors.length) {
@@ -186,13 +230,6 @@ export async function handleSafetensorsDownload(
         }
       }
 
-      let processedOffset = 0;
-      for (const chunk of chunks) {
-        await processBytes(processedOffset, chunk);
-        processedOffset += chunk.length;
-      }
-      chunks = []; // free memory
-
       while (currentTensorIdx < tensors.length) {
         const { done, value } = await reader.read();
         if (done) break;
@@ -204,30 +241,34 @@ export async function handleSafetensorsDownload(
           lastEmit = now;
           if (totalBytes > 0) {
             const percent = Math.round((downloadedBytes / totalBytes) * 100);
-            emitProgressFn(`Streaming ${file.rfilename}: ${percent}% (${(downloadedBytes / 1024 / 1024).toFixed(1)}MB)`);
+            emitProgressFn(
+              `Streaming ${manifest.rfilename}: ${percent}% (${(downloadedBytes / 1024 / 1024).toFixed(1)}MB)`,
+            );
           }
         }
       }
-      
+
       if (currentTensorIdx < tensors.length) {
         throw new Error(`EOF before finishing tensor ${tensors[currentTensorIdx].key}`);
       }
-      emitProgressFn(`Finished streaming ${file.rfilename}.`);
+      emitProgressFn(`Finished streaming ${manifest.rfilename}.`);
     }
 
-    emitProgressFn("Compiling streamed tensors...");
+    // Mechanical: the graph was validated in preflight; this binds the
+    // streamed κs and emits the k-form archive.
+    emitProgressFn("Binding streamed κs into the k-form archive...");
     const holoBytes = await compileSafetensorsStreamed(
       configText,
       allKeys,
       allKappas,
       allShapes,
       allDtypes,
-      contextLength
+      contextLength,
     );
 
     emitDoneFn(holoBytes);
-  } catch (err: any) {
-    emitErrorFn(err.toString());
+  } catch (err) {
+    emitErrorFn(String(err));
   }
 }
 
@@ -236,10 +277,12 @@ export async function handleSafetensorsDownload(
 // and stream in every aspect to avoid contrived 32-bit WebAssembly limits.
 // Therefore, ONNX downloads are not supported in the web IDE.
 async function handleOnnxDownload(
-  _args: any,
+  _args: unknown,
   _emitProgressFn = emitProgress,
   _emitDoneFn = emitDone,
-  emitErrorFn = emitError
+  emitErrorFn = emitError,
 ) {
-  emitErrorFn("ONNX models are not supported in the web IDE because they cannot be streamed over the holospaces/k-representation. Please use safetensors.");
+  emitErrorFn(
+    "ONNX models are not supported in the web IDE because they cannot be streamed over the holospaces/k-representation. Please use safetensors.",
+  );
 }

@@ -1,4 +1,4 @@
-import { computeKappa } from "./holo";
+import { computeKappa, validateModelConfig } from "./holo";
 import { type GenOpts } from "./holo";
 import GenerateWorker from "./generate.worker?worker";
 import { environmentBudgetBytes, estimateResources, formatBytes } from "./resources";
@@ -283,7 +283,7 @@ export async function downloadKnownModel(id: string): Promise<number> {
 
   if (safetensorsFiles.length > 0) {
     // Safetensors flow
-    const companionNames = ["config.json", "tokenizer.json", "tokenizer_config.json", "special_tokens_map.json"];
+    const companionNames = ["config.json", "tokenizer.json", "tokenizer_config.json", "generation_config.json", "special_tokens_map.json"];
     const companions = siblings.filter((f: any) => companionNames.includes(f.rfilename.split('/').pop()!));
   
     let configText = "";
@@ -306,7 +306,9 @@ export async function downloadKnownModel(id: string): Promise<number> {
       }
       
       const text = await response!.text();
-      if (file.rfilename.endsWith("config.json")) {
+      // Exact basename only: tokenizer_config.json / generation_config.json
+      // also end with "config.json" and must never shadow the model config.
+      if (file.rfilename.split('/').pop() === "config.json") {
         configText = text;
       }
       
@@ -326,9 +328,15 @@ export async function downloadKnownModel(id: string): Promise<number> {
       throw new Error("Missing config.json");
     }
 
-    // The memory guard (S1): a config-derived estimate gates the journey
-    // BEFORE any shard bytes move. Parametric — a function of the model's own
-    // config + manifest, never a per-model constant.
+    // Preflight step (a) — the family registry check comes first: an
+    // unsupported architecture or malformed config rejects the journey here,
+    // before the resource estimate and before any shard byte moves.
+    emitLine("models://download-line", { stream: "stdout", line: `Preflight: validating ${model.hfId} config against the family registry...` });
+    await validateModelConfig(configText);
+
+    // The memory guard (S1 preflight step c): a config-derived estimate gates
+    // the journey BEFORE any shard bytes move. Parametric — a function of the
+    // model's own config + manifest, never a per-model constant.
     const config = JSON.parse(configText);
     const shardBytes = safetensorsFiles.reduce(
       (sum: number, f: { size?: number; lfs?: { size?: number } }) =>

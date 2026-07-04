@@ -79,6 +79,16 @@ executor = "browser"
 feature = "features/suites/s1_acquisition/streamed_download.feature"
 
 [[row]]
+id = "model-preflight"
+statement = "Before any shard byte moves, the model is validated: config names a supported family with its required keys, and the parametric graph builds from config + the header-only manifest; rejection names the family/key with zero shard bytes transferred."
+stage = "S1"
+status = "build"
+oracles = ["journey-reference", "hf-hub"]
+tier = "suite"
+executor = "browser"
+feature = "features/suites/s1_acquisition/model_preflight.feature"
+
+[[row]]
 id = "memory-guard"
 statement = "Before transfer, a config-derived resource estimate gates the journey; exceeding the environment budget rejects gracefully with the estimate."
 stage = "S1"

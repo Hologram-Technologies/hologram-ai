@@ -163,6 +163,19 @@ fn generation_config_json() -> serde_json::Value {
     })
 }
 
+/// A tokenizer_config.json companion. Its basename ends with "config.json" —
+/// its presence in the fixture is the regression tripwire for the
+/// suffix-matching bug that let it shadow the model config (the phi-4
+/// failure): were it ever read as the model config, preflight would reject
+/// the fixture and the whole hermetic journey would go red.
+fn tokenizer_config_json() -> serde_json::Value {
+    serde_json::json!({
+        "tokenizer_class": "HologramFixtureTokenizer",
+        "model_max_length": 128,
+        "chat_template": TEMPLATE
+    })
+}
+
 /// Serialize the manifest to safetensors bytes (reference crate = the format
 /// authority; BTreeMap gives a canonical, reproducible header order).
 fn safetensors_bytes(tensors: &[(String, Vec<u64>, Vec<u8>)]) -> Result<Vec<u8>> {
@@ -296,6 +309,7 @@ pub fn gen_fixture() -> Result<()> {
     let tok_json = tokenizer_json();
     let tok_bytes = serde_json::to_vec_pretty(&tok_json)?;
     let gen_bytes = serde_json::to_vec_pretty(&generation_config_json())?;
+    let tok_cfg_bytes = serde_json::to_vec_pretty(&tokenizer_config_json())?;
 
     let tokenizer = NativeTokenizer::from_tokenizer_json_bytes(&tok_bytes)
         .context("the fixture tokenizer must load")?;
@@ -338,10 +352,11 @@ pub fn gen_fixture() -> Result<()> {
     });
     let transcript_bytes = serde_json::to_vec_pretty(&transcript)?;
 
-    let artifacts: [(&str, &[u8]); 5] = [
+    let artifacts: [(&str, &[u8]); 6] = [
         ("config.json", &config_bytes),
         ("model.safetensors", &st_bytes),
         ("tokenizer.json", &tok_bytes),
+        ("tokenizer_config.json", &tok_cfg_bytes),
         ("generation_config.json", &gen_bytes),
         ("reference-transcript.json", &transcript_bytes),
     ];

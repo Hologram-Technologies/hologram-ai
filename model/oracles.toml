@@ -155,6 +155,10 @@ path = "oracles/fixture/tokenizer.json"
 sha256 = "92f9feca48214e06f613255a47c69166b1e2011ee321e31a2141192c02cb2182"
 
 [[oracle.artifacts]]
+path = "oracles/fixture/tokenizer_config.json"
+sha256 = "bd9cf64c595f7d3447fa4f6b2bf869435923c4dc33961cf231feae106b12c23b"
+
+[[oracle.artifacts]]
 path = "oracles/fixture/generation_config.json"
 sha256 = "bc121ce8eef5dad6154908de469b66973a111c315d25f278a4d939dd1c537176"
 

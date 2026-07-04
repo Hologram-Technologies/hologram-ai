@@ -52,6 +52,7 @@ export function chooseContextLength(
   budgetBytes: number,
   budgetShare = 0.25,
 ): number {
+  requireNumeric(config, ["hidden_size", "num_hidden_layers"]);
   const maxPos = config.max_position_embeddings ?? 64;
   const lanes = 8;
   let context = 64;
@@ -68,6 +69,19 @@ export function chooseContextLength(
  * weights (the compiled pipeline computes in F32), and activations at the
  * chosen context.
  */
+/** A config missing a required numeric key can never produce an estimate —
+ * fail loud naming the key (a NaN estimate would silently pass the guard). */
+function requireNumeric(config: Record<string, unknown>, keys: string[]): void {
+  for (const key of keys) {
+    const value = config[key];
+    if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) {
+      throw new Error(
+        `config.json is missing required numeric key \`${key}\` — cannot derive a resource estimate (is this really the model config?)`,
+      );
+    }
+  }
+}
+
 export function estimateResources(
   config: {
     max_position_embeddings?: number;
@@ -78,6 +92,7 @@ export function estimateResources(
   shardBytes: number,
   budgetBytes: number,
 ): ResourceEstimate {
+  requireNumeric(config as Record<string, unknown>, ["hidden_size", "num_hidden_layers"]);
   const contextLength = chooseContextLength(config, budgetBytes);
   const inflation = 4 / dtypeBytes(config.torch_dtype ?? "F32");
   const weightsF32 = shardBytes * inflation;

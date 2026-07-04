@@ -1,0 +1,5 @@
+{
+  "chat_template": "User:\n{prompt}\nAssistant:\n",
+  "model_max_length": 128,
+  "tokenizer_class": "HologramFixtureTokenizer"
+}

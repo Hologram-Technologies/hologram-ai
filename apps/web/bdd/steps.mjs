@@ -7,7 +7,7 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 import { referenceTranscript } from "./world.mjs";
-import { MISSING_REPO, TOO_LARGE_REPO } from "./fixture-server.mjs";
+import { BAD_CONFIG_REPO, MISSING_REPO, TOO_LARGE_REPO, UNSUPPORTED_FAMILY_REPO } from "./fixture-server.mjs";
 
 const WEB_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const ROOT = path.resolve(WEB_DIR, "../..");
@@ -136,6 +136,69 @@ When("downloading a repository that does not exist", async function () {
 Then("the journey fails at the download stage naming the repository", async function () {
   const body = await this.page.locator("body").innerText();
   assert.ok(body.includes(MISSING_REPO), `failure must name ${MISSING_REPO}:\n${body}`);
+});
+
+// ── S1 — model preflight ────────────────────────────────────────────────────
+
+const BARE_ENTRY = {
+  description: "",
+  modality: "text-chat",
+  size: "?",
+  approxArchiveMb: 0,
+  quantize: "none",
+  promptTemplate: null,
+  stop: [],
+  chatTurnSeparator: null,
+};
+
+async function attemptRejectedDownload(world, id, hfId, displayName) {
+  await installCustomEntry(world, { ...BARE_ENTRY, id, hfId, displayName });
+  await world.gotoModels();
+  const row = world.page.locator(".list-item", { hasText: displayName });
+  await row.locator("button", { hasText: "Download" }).click();
+  await world.page.getByText(/error:/).first().waitFor({ timeout: 60_000 });
+}
+
+When("downloading a model whose config names an unsupported family", async function () {
+  await attemptRejectedDownload(this, "unsupported-family", UNSUPPORTED_FAMILY_REPO, "unsupported family model");
+  this.rejectedRepo = UNSUPPORTED_FAMILY_REPO;
+});
+
+Then("the journey is rejected at preflight naming the family", async function () {
+  const body = await this.page.locator("body").innerText();
+  assert.ok(
+    body.includes("Phi3ForCausalLM"),
+    `the rejection must name the unsupported family:\n${body}`,
+  );
+});
+
+When("downloading a model whose config lacks the required keys", async function () {
+  await attemptRejectedDownload(this, "bad-config", BAD_CONFIG_REPO, "bad config model");
+  this.rejectedRepo = BAD_CONFIG_REPO;
+});
+
+Then("the journey is rejected at preflight naming the missing key", async function () {
+  const body = await this.page.locator("body").innerText();
+  assert.ok(
+    /missing required (numeric )?key/.test(body),
+    `the rejection must name the missing key:\n${body}`,
+  );
+});
+
+Then("no shard bytes were transferred for the rejected model", async function () {
+  const log = await this.fixtureRequests();
+  const shardHits = log.filter(
+    (p) => p.includes(this.rejectedRepo.split("/")[1]) && p.endsWith(".safetensors"),
+  );
+  assert.deepEqual(shardHits, [], "preflight must reject before any shard request");
+});
+
+Then("the preflight validated the model before the first shard byte", async function () {
+  const body = await this.page.locator("body").innerText();
+  assert.ok(
+    body.includes("Preflight passed"),
+    `the preflight line must precede streaming:\n${body}`,
+  );
 });
 
 // ── S1 — memory guard ───────────────────────────────────────────────────────

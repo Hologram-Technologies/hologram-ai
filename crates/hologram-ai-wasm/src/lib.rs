@@ -74,28 +74,30 @@ pub fn compile_safetensors(
     Ok(archive.bytes)
 }
 
-#[wasm_bindgen]
-pub fn compile_safetensors_streamed(
-    config_json: &str,
+/// One streamed-manifest row parsed out of the JS arrays.
+struct ManifestRows {
+    keys: Vec<String>,
+    shapes: Vec<Vec<u64>>,
+    dtypes: Vec<hologram_ai_common::DType>,
+}
+
+/// Parse the manifest arrays (names, shapes, dtypes) — fail loud on anything
+/// unmapped: a mislabeled dtype corrupts every weight downstream.
+fn parse_manifest(
     keys_js: &js_sys::Array,
-    kappas_js: &js_sys::Array,
     tensor_shapes_js: &js_sys::Array,
     tensor_dtypes_js: &js_sys::Array,
-    context_length: Option<u32>,
-) -> Result<Vec<u8>, JsValue> {
-    let mut keys = Vec::new();
-    let mut kappas = Vec::new();
-    let mut shapes = Vec::new();
-    let mut dtypes = Vec::new();
+) -> Result<ManifestRows, JsValue> {
+    let mut rows = ManifestRows {
+        keys: Vec::new(),
+        shapes: Vec::new(),
+        dtypes: Vec::new(),
+    };
     for i in 0..keys_js.length() {
         let key = keys_js
             .get(i)
             .as_string()
             .ok_or_else(|| err(format!("manifest key {i} is not a string")))?;
-        let kappa = kappas_js
-            .get(i)
-            .as_string()
-            .ok_or_else(|| err(format!("κ for `{key}` is not a string")))?;
         let shape_str = tensor_shapes_js
             .get(i)
             .as_string()
@@ -108,8 +110,6 @@ pub fn compile_safetensors_streamed(
         let shape: Vec<u64> = serde_json::from_str(&shape_str)
             .map_err(|e| err(format!("shape for `{key}` does not parse: {e}")))?;
 
-        // safetensors dtype tags (fail loud on anything unmapped: a mislabeled
-        // dtype corrupts every weight downstream).
         let dtype = match dtype_str.as_str() {
             "F32" => hologram_ai_common::DType::F32,
             "F16" => hologram_ai_common::DType::F16,
@@ -127,11 +127,68 @@ pub fn compile_safetensors_streamed(
             }
         };
 
-        keys.push(key);
-        kappas.push(kappa);
-        shapes.push(shape);
-        dtypes.push(dtype);
+        rows.keys.push(key);
+        rows.shapes.push(shape);
+        rows.dtypes.push(dtype);
     }
+    Ok(rows)
+}
+
+/// Config-only preflight (journey S1, step a): the architecture family must
+/// be registered and the family's required keys present — checked BEFORE even
+/// the shard headers are fetched. Fails naming the family or the missing key.
+#[wasm_bindgen]
+pub fn validate_model_config(config_json: &str) -> Result<(), JsValue> {
+    let config: serde_json::Value =
+        serde_json::from_str(config_json).map_err(|e| err(format!("config.json: {e}")))?;
+    hologram_ai_safetensors::parametric::validate_config(&config).map_err(|e| err(format!("{e:#}")))
+}
+
+/// Preflight (journey S1): validate that the parametric graph builds from
+/// config.json plus the header-only tensor manifest — BEFORE any shard byte
+/// moves. An unsupported family, a missing config key, or a manifest the
+/// family cannot realize fails here, naming the reason. Weight-free: only
+/// names/shapes/dtypes are consulted.
+#[wasm_bindgen]
+pub fn validate_streamed_manifest(
+    config_json: &str,
+    keys_js: &js_sys::Array,
+    tensor_shapes_js: &js_sys::Array,
+    tensor_dtypes_js: &js_sys::Array,
+    context_length: Option<u32>,
+) -> Result<(), JsValue> {
+    let rows = parse_manifest(keys_js, tensor_shapes_js, tensor_dtypes_js)?;
+    let config: serde_json::Value =
+        serde_json::from_str(config_json).map_err(|e| err(format!("config.json: {e}")))?;
+    hologram_ai_safetensors::parametric::build_parametric_graph_from_manifest(
+        &config,
+        &rows.keys,
+        &rows.dtypes,
+        context_length.map(u64::from),
+    )
+    .map_err(|e| err(format!("{e:#}")))?;
+    Ok(())
+}
+
+#[wasm_bindgen]
+pub fn compile_safetensors_streamed(
+    config_json: &str,
+    keys_js: &js_sys::Array,
+    kappas_js: &js_sys::Array,
+    tensor_shapes_js: &js_sys::Array,
+    tensor_dtypes_js: &js_sys::Array,
+    context_length: Option<u32>,
+) -> Result<Vec<u8>, JsValue> {
+    let rows = parse_manifest(keys_js, tensor_shapes_js, tensor_dtypes_js)?;
+    let mut kappas = Vec::new();
+    for (i, key) in rows.keys.iter().enumerate() {
+        let kappa = kappas_js
+            .get(i as u32)
+            .as_string()
+            .ok_or_else(|| err(format!("κ for `{key}` is not a string")))?;
+        kappas.push(kappa);
+    }
+    let (keys, shapes, dtypes) = (rows.keys, rows.shapes, rows.dtypes);
 
     let config: serde_json::Value =
         serde_json::from_str(config_json).map_err(|e| err(e.to_string()))?;

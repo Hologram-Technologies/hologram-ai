@@ -220,6 +220,16 @@ impl<'a> TensorManifest<'a> {
     }
 }
 
+/// Config-only preflight: the architecture family must be registered and the
+/// family's required keys present and well-formed. Weight- and manifest-free —
+/// the earliest, cheapest rejection point of the journey (S1 preflight, step
+/// a). Fails loud naming the family or the missing key.
+pub fn validate_config(config: &Value) -> Result<()> {
+    let _family = select_family(config)?;
+    let _cfg = ModelConfig::from_json(config)?;
+    Ok(())
+}
+
 /// Build the graph directly from safetensors shard bytes: the manifest (keys,
 /// dtypes) is read from the shard headers and the weights are injected inline.
 pub fn build_parametric_graph(config: &Value, safetensors_shards: &[&[u8]]) -> Result<AiGraph> {

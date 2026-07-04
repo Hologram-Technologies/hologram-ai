@@ -4,6 +4,8 @@
 // not a reimplementation. Build the wasm package first: `pnpm wasm`.
 import init, {
   describe as wasmDescribe,
+  validate_model_config as wasmValidateModelConfig,
+  validate_streamed_manifest as wasmValidateStreamedManifest,
   run as wasmRun,
   compile as wasmCompile,
   generate as wasmGenerate,
@@ -82,6 +84,29 @@ export async function compileSafetensorsStreamed(
 ): Promise<Uint8Array> {
   await ensureReady();
   return wasmCompileSafetensorsStreamed(configJson, keys, kappas, shapes, dtypes, contextLength);
+}
+
+/** Config-only preflight (S1 step a): registered family + required keys —
+ * checked before even the shard headers are fetched. */
+export async function validateModelConfig(configJson: string): Promise<void> {
+  await ensureReady();
+  wasmValidateModelConfig(configJson);
+}
+
+/**
+ * Preflight (S1): validate that the parametric graph builds from config.json
+ * plus the header-only tensor manifest — before any shard byte moves. Throws
+ * naming the family/key/manifest defect.
+ */
+export async function validateStreamedManifest(
+  configJson: string,
+  keys: string[],
+  shapes: string[],
+  dtypes: string[],
+  contextLength?: number,
+): Promise<void> {
+  await ensureReady();
+  wasmValidateStreamedManifest(configJson, keys, shapes, dtypes, contextLength);
 }
 
 /** The κ-labels a k-form archive requires (empty for a material archive). */

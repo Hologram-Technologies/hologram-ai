@@ -16,15 +16,30 @@ Given any HuggingFace repository id:
 1. Resolve the repo's file manifest via the Hub API (`api/models/{id}`), with retry and
    explicit failure surfacing.
 2. Classify files: safetensors shards (weights), companions (`config.json`,
-   `tokenizer.json`, `generation_config.json`).
-3. Before any transfer: derive the resource estimate from `config.json` and the manifest
-   sizes; if the budget (a parametric function of the environment, never a constant baked
-   per model) is exceeded, reject with the estimate — gracefully, before bytes move.
-4. Stream each shard through the persistent download worker: parse the safetensors
-   header (8-byte length + JSON) incrementally, walk tensor byte ranges, hash each tensor
-   incrementally, and persist it to OPFS as `tensors/{κ}.bin`. Peak transient memory is
-   bounded by the largest single tensor, never a shard or the model.
+   `tokenizer.json`, `tokenizer_config.json`, `generation_config.json`) — each matched by
+   its exact basename, never by suffix.
+3. **Preflight — the journey validates the model before any shard byte moves:**
+   a. `config.json` must name a supported architecture family and carry the family's
+      required keys; an unsupported family or malformed config rejects the journey
+      naming the family/key, with zero shard bytes transferred.
+   b. The tensor manifest is read from the shards' safetensors *headers alone*
+      (ranged requests — kilobytes, not weights), and the parametric graph is built
+      from config + manifest. A manifest the family cannot realize rejects here.
+   c. The resource estimate is derived from the validated config and manifest sizes;
+      exceeding the environment budget (a parametric function of the environment,
+      never a per-model constant) rejects with the estimate. A config that cannot
+      produce an estimate is a preflight failure, never a silent pass.
+4. Stream each shard through the persistent download worker: walk the tensor byte
+   ranges from the already-parsed header, hash each tensor incrementally, persist it to
+   OPFS as `tensors/{κ}.bin`, and **discard the content as it is retrieved** — the
+   k-representation is what remains. Peak transient memory is bounded by one tensor,
+   never a shard or the model.
 5. Persist companions under the model's directory.
+
+Because the graph was built and validated in preflight, the post-stream step is
+mechanical — bind the streamed κs into the already-validated graph and emit the k-form
+archive. It cannot fail on model validity; there is no separate failure-prone "compile"
+stage after the transfer.
 
 ## Stage S2 — Compile
 
