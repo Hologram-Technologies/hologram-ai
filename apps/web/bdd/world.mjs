@@ -35,8 +35,10 @@ function waitForOutput(child, pattern) {
       90_000,
     );
     const onData = (chunk) => {
-      const text = chunk.toString();
-      seen += text;
+      // Strip ANSI color codes: on CI vite styles the URL, splitting the
+      // host:port match with escape sequences.
+      // eslint-disable-next-line no-control-regex
+      seen += chunk.toString().replace(/\x1b\[[0-9;]*m/g, "");
       const match = seen.match(pattern);
       if (match) {
         clearTimeout(timer);
@@ -57,6 +59,7 @@ BeforeAll(async () => {
   preview = spawn("pnpm", ["exec", "vite", "preview", "--host", "127.0.0.1", "--port", "4173", "--strictPort"], {
     cwd: WEB_DIR,
     stdio: ["ignore", "pipe", "pipe"],
+    env: { ...process.env, NO_COLOR: "1", FORCE_COLOR: "0" },
   });
   const match = await waitForOutput(preview, /(?:localhost|127\.0\.0\.1):(\d+)/);
   previewPort = Number(match[1]);
