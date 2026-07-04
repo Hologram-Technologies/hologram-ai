@@ -1,6 +1,7 @@
 import { computeKappa } from "./holo";
 import { type GenOpts } from "./holo";
 import GenerateWorker from "./generate.worker?worker";
+import { environmentBudgetBytes, estimateResources, formatBytes } from "./resources";
 
 export interface WorkspacePaths {
   root: string;
@@ -23,6 +24,7 @@ export interface KnownModelStatus {
   promptTemplate: string | null;
   stop: string[];
   chatTurnSeparator: string | null;
+  maxTokens?: number;
   localDir: string | null;
   downloaded: boolean;
   compiledArchive: string | null;
@@ -51,36 +53,33 @@ export interface ProcessLine {
   line: string;
 }
 
-const DEFAULT_CATALOGUE: Omit<KnownModelStatus, "localDir" | "downloaded" | "compiledArchive">[] = [
-  {
-    id: "smollm2-135m-instruct",
-    hfId: "HuggingFaceTB/SmolLM2-135M-Instruct",
-    displayName: "SmolLM2 135M Instruct",
-    description: "Lightweight chat model — fastest path to a working demo.",
-    modality: "text-chat",
-    size: "135M",
-    approxArchiveMb: 150,
-    quantize: "none",
-    promptTemplate: "<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n<|im_start|>user\n{prompt}<|im_end|>\n<|im_start|>assistant\n",
-    stop: ["<|im_end|>"],
-    chatTurnSeparator: "<|im_end|>\n<|im_start|>assistant\n{response}<|im_end|>\n<|im_start|>user\n",
-  },
-  {
-    id: "qwen2.5-0.5b-instruct",
-    hfId: "onnx-community/Qwen2.5-0.5B-Instruct",
-    displayName: "Qwen2.5 0.5B Instruct",
-    description: "Small chat-tuned model — follows instructions and answers questions.",
-    modality: "text-chat",
-    size: "0.5B",
-    approxArchiveMb: 350,
-    quantize: "none",
-    promptTemplate:
-      "<|im_start|>system\nYou are a helpful assistant<|im_end|>\n<|im_start|>user\n{prompt}<|im_end|>\n<|im_start|>assistant\n",
-    stop: ["<|im_end|>"],
-    chatTurnSeparator:
-      "<|im_end|>\n<|im_start|>assistant\n{response}<|im_end|>\n<|im_start|>user\n",
-  },
-];
+type CatalogueEntry = Omit<KnownModelStatus, "localDir" | "downloaded" | "compiledArchive">;
+
+// The catalogue is DATA (public/catalogue.json), never code: the anti-hardcode
+// gate forbids model identities in the app source. localStorage carries
+// user-added entries on top of the shipped file.
+let shippedCatalogue: CatalogueEntry[] | null = null;
+async function loadShippedCatalogue(): Promise<CatalogueEntry[]> {
+  if (shippedCatalogue) return shippedCatalogue;
+  const base = import.meta.env.BASE_URL ?? "/";
+  const res = await fetch(`${base}catalogue.json`);
+  if (!res.ok) throw new Error(`catalogue.json failed to load: HTTP ${res.status}`);
+  shippedCatalogue = (await res.json()) as CatalogueEntry[];
+  return shippedCatalogue;
+}
+
+/** The HuggingFace endpoint — overridable via localStorage for hermetic
+ * testing against a fixture server (the BDD harness sets it before load). */
+export function hfBase(): string {
+  return localStorage.getItem("hologram_hf_base") ?? "https://huggingface.co";
+}
+
+/** Whether a holospaces egress/auth extension is present (either beacon). */
+export function extensionPresent(): boolean {
+  const attr = document.documentElement.getAttribute("data-holospaces-egress");
+  const flag = (window as unknown as Record<string, unknown>).__HOLOSPACES_EXTENSION_INSTALLED__;
+  return attr !== null || flag === true;
+}
 
 let logs: LogEntry[] = [];
 function addLog(level: string, target: string, message: string) {
@@ -108,22 +107,36 @@ async function getOpfsDirIfExists(dir: FileSystemDirectoryHandle, name: string):
   }
 }
 
-function getCatalogue(): Omit<KnownModelStatus, "localDir" | "downloaded" | "compiledArchive">[] {
-  const stored = localStorage.getItem("hologram_catalogue");
+async function getCatalogue(): Promise<CatalogueEntry[]> {
+  const shipped = await loadShippedCatalogue();
+  const stored = localStorage.getItem("hologram_catalogue_custom");
+  let custom: CatalogueEntry[] = [];
   if (stored) {
     try {
-      return JSON.parse(stored);
-    } catch {}
+      custom = JSON.parse(stored);
+    } catch {
+      localStorage.removeItem("hologram_catalogue_custom");
+    }
   }
-  localStorage.setItem("hologram_catalogue", JSON.stringify(DEFAULT_CATALOGUE));
-  return DEFAULT_CATALOGUE;
+  const merged = [...shipped];
+  for (const entry of custom) {
+    if (!merged.some(m => m.hfId === entry.hfId)) merged.push(entry);
+  }
+  return merged;
 }
 
 export async function addCustomModel(hfId: string): Promise<void> {
-  const catalogue = getCatalogue();
+  const catalogue = await getCatalogue();
   if (catalogue.some(m => m.hfId === hfId)) return;
   const id = hfId.split("/").pop()?.toLowerCase() || hfId.toLowerCase();
-  catalogue.push({
+  const stored = localStorage.getItem("hologram_catalogue_custom");
+  let custom: CatalogueEntry[] = [];
+  if (stored) {
+    try {
+      custom = JSON.parse(stored);
+    } catch {}
+  }
+  custom.push({
     id,
     hfId,
     displayName: hfId,
@@ -136,14 +149,14 @@ export async function addCustomModel(hfId: string): Promise<void> {
     stop: [],
     chatTurnSeparator: null,
   });
-  localStorage.setItem("hologram_catalogue", JSON.stringify(catalogue));
+  localStorage.setItem("hologram_catalogue_custom", JSON.stringify(custom));
 }
 
 export async function listKnownModels(): Promise<KnownModelStatus[]> {
   const root = await getOpfsDir();
   const modelsDir = await root.getDirectoryHandle("models", { create: true });
-  const catalogue = getCatalogue();
-  
+  const catalogue = await getCatalogue();
+
   const results: KnownModelStatus[] = [];
   for (const model of catalogue) {
     const localName = model.hfId.split("/").pop() || model.hfId;
@@ -231,7 +244,7 @@ function getDownloadWorker(): Worker {
 }
 
 export async function downloadKnownModel(id: string): Promise<number> {
-  const catalogue = getCatalogue();
+  const catalogue = await getCatalogue();
   const model = catalogue.find(m => m.id === id);
   if (!model) throw new Error("Unknown model");
   
@@ -247,13 +260,13 @@ export async function downloadKnownModel(id: string): Promise<number> {
   while (infoAttempts < 3) {
     infoAttempts++;
     try {
-      const response = await fetch(`https://huggingface.co/api/models/${model.hfId}`);
+      const response = await fetch(`${hfBase()}/api/models/${model.hfId}?blobs=true`);
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
       info = await response.json();
       break;
     } catch (err) {
       if (infoAttempts >= 3) {
-        throw new Error(`Failed to fetch model info after 3 attempts: ${err}`);
+        throw new Error(`Failed to fetch model info for ${model.hfId} after 3 attempts: ${err}`);
       }
       emitLine("models://download-line", { stream: "stdout", line: `Failed to fetch model info (attempt ${infoAttempts}/3). Retrying in ${1 << infoAttempts}s...` });
       await new Promise(r => setTimeout(r, (1 << infoAttempts) * 1000));
@@ -277,7 +290,7 @@ export async function downloadKnownModel(id: string): Promise<number> {
     
     // Download companions to OPFS
     for (const file of companions) {
-      const url = `https://huggingface.co/${model.hfId}/resolve/main/${file.rfilename}`;
+      const url = `${hfBase()}/${model.hfId}/resolve/main/${file.rfilename}`;
       emitLine("models://download-line", { stream: "stdout", line: `Fetching ${file.rfilename}...` });
       
       let response: Response | null = null;
@@ -312,6 +325,31 @@ export async function downloadKnownModel(id: string): Promise<number> {
     if (!configText) {
       throw new Error("Missing config.json");
     }
+
+    // The memory guard (S1): a config-derived estimate gates the journey
+    // BEFORE any shard bytes move. Parametric — a function of the model's own
+    // config + manifest, never a per-model constant.
+    const config = JSON.parse(configText);
+    const shardBytes = safetensorsFiles.reduce(
+      (sum: number, f: { size?: number; lfs?: { size?: number } }) =>
+        sum + (f.size ?? f.lfs?.size ?? 0),
+      0,
+    );
+    const budget = environmentBudgetBytes((navigator as { deviceMemory?: number }).deviceMemory);
+    const estimate = estimateResources(config, shardBytes, budget);
+    if (estimate.runtimeBytes > budget) {
+      const msg =
+        `Memory guard: ${model.hfId} needs ~${formatBytes(estimate.runtimeBytes)} at run time ` +
+        `(weights ${formatBytes(shardBytes)} + activations at context ${estimate.contextLength}), ` +
+        `but the environment budget is ${formatBytes(budget)}. Rejecting before transfer.`;
+      emitLine("models://download-progress", { stream: "stderr", line: msg });
+      throw new Error(msg);
+    }
+    emitLine("models://download-line", {
+      stream: "stdout",
+      line: `Memory guard: ~${formatBytes(estimate.runtimeBytes)} within budget ${formatBytes(budget)}; context length ${estimate.contextLength}.`,
+    });
+
     const worker = getDownloadWorker();
     const holoBytes = await new Promise<Uint8Array>((resolve, reject) => {
       worker.onmessage = (e) => {
@@ -328,7 +366,9 @@ export async function downloadKnownModel(id: string): Promise<number> {
         payload: {
           modelId: model.hfId,
           configText,
-          files: safetensorsFiles
+          files: safetensorsFiles,
+          contextLength: estimate.contextLength,
+          hfBase: hfBase()
         }
       });
     });
@@ -426,6 +466,8 @@ export async function generate(opts: GenerateOpts): Promise<number> {
       if (e.data.type === 'token') {
         emitLine("chat://line", { stream: "stdout", line: e.data.text });
       } else if (e.data.type === 'done') {
+        const g = globalThis as unknown as { __hologram_completions?: string[] };
+        (g.__hologram_completions ??= []).push(e.data.text);
         emitLine("chat://line", { stream: "stdout", line: e.data.text });
         if (activeWorker) {
           activeWorker.terminate();

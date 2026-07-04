@@ -8,6 +8,8 @@ import {
   addCustomModel,
   onProcessLine,
   workspacePaths,
+  extensionPresent,
+  hfBase,
 } from "../ipc";
 
 type Busy = { id: string; phase: "downloading" | "compiling" } | null;
@@ -80,7 +82,7 @@ export function Models() {
       const q = encodeURIComponent(searchQuery.trim());
       // Parametric search for models
       const [res1] = await Promise.all([
-        fetch(`https://huggingface.co/api/models?search=${q}&sort=downloads&direction=-1&limit=20`)
+        fetch(`${hfBase()}/api/models?search=${q}&sort=downloads&direction=-1&limit=20`)
       ]);
       if (!res1.ok) throw new Error(`Search failed`);
       
@@ -147,13 +149,13 @@ export function Models() {
           <code>.holo</code> archive for WebAssembly execution.
         </p>
 
-        {!(window as any).__HOLOSPACES_EXTENSION_INSTALLED__ && (
+        {!extensionPresent() && (
           <div style={{ padding: "8px 12px", background: "var(--bg-hover)", borderLeft: "4px solid var(--accent)", marginBottom: 16, fontSize: 13, borderRadius: 4 }}>
-            <strong>Extension Missing:</strong> To download gated models or bypass CORS issues, please install the <a href={`${import.meta.env.BASE_URL}extension.zip`} download>Holospaces Egress Extension</a>. Load it unpacked in your browser (chrome://extensions).
+            <strong>Extension (optional):</strong> public models download directly; to download gated models install the <a href={`${import.meta.env.BASE_URL}extension.zip`} download>Holospaces Egress Extension</a> (load unpacked in chrome://extensions).
           </div>
         )}
-        
-        {(window as any).__HOLOSPACES_EXTENSION_INSTALLED__ && (
+
+        {extensionPresent() && (
           <div style={{ padding: "8px 12px", background: "rgba(0, 200, 100, 0.1)", borderLeft: "4px solid rgb(0, 200, 100)", marginBottom: 16, fontSize: 13, borderRadius: 4 }}>
             <strong>Extension Active:</strong> Holospaces Egress Extension is loaded. You can download gated models.
           </div>

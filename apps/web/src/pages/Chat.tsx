@@ -243,7 +243,7 @@ export function Chat() {
       await generate({
         archive,
         prompt: promptForModel,
-        maxTokens: 8192,
+        maxTokens: selectedKnown?.maxTokens ?? 8192,
         temperature,
         stop: stopStrings,
         promptTemplate: selectedKnown?.promptTemplate ?? undefined,

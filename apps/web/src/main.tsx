@@ -4,19 +4,18 @@ import { HashRouter, NavLink, Navigate, Route, Routes } from "react-router-dom";
 import { Models } from "./pages/Models";
 import { Chat } from "./pages/Chat";
 import { Logs } from "./pages/Logs";
+import { extensionPresent } from "./ipc";
 import "katex/dist/katex.min.css";
 import "./styles.css";
 
 function Shell() {
-  const [hasExtension, setHasExtension] = useState(
-    !!document.documentElement.getAttribute("data-holospaces-egress")
-  );
+  const [hasExtension, setHasExtension] = useState(extensionPresent());
 
   useEffect(() => {
     // In case the extension script runs slightly after React mounts
     if (hasExtension) return;
     const interval = setInterval(() => {
-      if (document.documentElement.getAttribute("data-holospaces-egress")) {
+      if (extensionPresent()) {
         setHasExtension(true);
         clearInterval(interval);
       }
@@ -34,12 +33,12 @@ function Shell() {
       </nav>
       <main className="content">
         {!hasExtension && (
-          <div style={{ background: "#ffcc00", color: "#333", padding: "10px", textAlign: "center", fontWeight: "bold" }}>
-            The holospaces egress extension is required to download models.{" "}
-            <a href={`${import.meta.env.BASE_URL}extension.zip`} download style={{ color: "#0055cc", textDecoration: "underline" }}>
-              Download extension.zip
+          <div style={{ background: "var(--bg-hover)", color: "var(--fg-dim)", padding: "8px", textAlign: "center", fontSize: 13 }}>
+            Optional: the holospaces egress extension enables gated-model downloads.{" "}
+            <a href={`${import.meta.env.BASE_URL}extension.zip`} download style={{ textDecoration: "underline" }}>
+              extension.zip
             </a>
-            {" "}(Load unpacked in chrome://extensions)
+            {" "}(load unpacked in chrome://extensions)
           </div>
         )}
         <Routes>

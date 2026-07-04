@@ -10,6 +10,8 @@ import init, {
   compute_kappa as wasmComputeKappa,
   compile_onnx_with_data as wasmCompileOnnxWithData,
   compile_safetensors_streamed as wasmCompileSafetensorsStreamed,
+  kappa_requirements as wasmKappaRequirements,
+  materialize as wasmMaterialize,
   KappaHasher,
 } from "./wasm/hologram_ai_wasm.js";
 
@@ -75,10 +77,30 @@ export async function compileSafetensorsStreamed(
   keys: string[],
   kappas: string[],
   shapes: string[],
-  dtypes: string[]
+  dtypes: string[],
+  contextLength?: number,
 ): Promise<Uint8Array> {
   await ensureReady();
-  return wasmCompileSafetensorsStreamed(configJson, keys, kappas, shapes, dtypes);
+  return wasmCompileSafetensorsStreamed(configJson, keys, kappas, shapes, dtypes, contextLength);
+}
+
+/** The κ-labels a k-form archive requires (empty for a material archive). */
+export async function kappaRequirements(holo: Uint8Array): Promise<string[]> {
+  await ensureReady();
+  return wasmKappaRequirements(holo) as string[];
+}
+
+/**
+ * Materialize a k-form archive against a κ-store: `resolve` returns the bytes
+ * for a κ (or undefined when absent — the pipeline aborts naming the label).
+ * Every buffer is re-hashed and must reproduce its κ (S3, content-verified).
+ */
+export async function materialize(
+  holo: Uint8Array,
+  resolve: (kappa: string) => Uint8Array | undefined,
+): Promise<Uint8Array> {
+  await ensureReady();
+  return wasmMaterialize(holo, resolve);
 }
 
 export { KappaHasher };

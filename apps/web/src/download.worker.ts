@@ -25,11 +25,15 @@ export async function handleSafetensorsDownload(
   {
     modelId,
     configText,
-    files
+    files,
+    contextLength,
+    hfBase
   }: {
     modelId: string,
     configText: string,
-    files: any[]
+    files: any[],
+    contextLength?: number,
+    hfBase?: string
   },
   emitProgressFn = emitProgress,
   emitDoneFn = emitDone,
@@ -46,7 +50,7 @@ export async function handleSafetensorsDownload(
     const allDtypes: string[] = [];
 
     for (const file of files) {
-      const url = `https://huggingface.co/${modelId}/resolve/main/${file.rfilename}`;
+      const url = `${hfBase ?? "https://huggingface.co"}/${modelId}/resolve/main/${file.rfilename}`;
       emitProgressFn(`Streaming ${file.rfilename}...`);
       
       const response = await fetch(url);
@@ -217,7 +221,8 @@ export async function handleSafetensorsDownload(
       allKeys,
       allKappas,
       allShapes,
-      allDtypes
+      allDtypes,
+      contextLength
     );
 
     emitDoneFn(holoBytes);
