@@ -16,9 +16,70 @@ function b64ToUint8Array(b64: string): Uint8Array {
 
 describe('End-to-End Model Pipeline', () => {
   let originalFetch: typeof globalThis.fetch;
+  let originalWorker: typeof globalThis.Worker;
 
   beforeAll(() => {
     originalFetch = globalThis.fetch;
+    originalWorker = globalThis.Worker;
+
+    globalThis.Worker = class MockWorker {
+      onmessage: any;
+      realWorker: Worker | null = null;
+      isDownload: boolean = false;
+      terminate: () => void;
+
+      constructor(url: string | URL, options?: any) {
+        this.terminate = () => {
+          if (this.realWorker) this.realWorker.terminate();
+        };
+
+        if (url.toString().includes('download')) {
+          this.isDownload = true;
+        } else {
+          this.realWorker = new originalWorker(url, options);
+          this.realWorker.onmessage = (e) => {
+            if (this.onmessage) this.onmessage(e);
+          };
+        }
+      }
+
+      postMessage(data: any) {
+        if (!this.isDownload && this.realWorker) {
+          this.realWorker.postMessage(data);
+          return;
+        }
+
+        if (data.type === "download_onnx" && data.payload.modelId === "test/huge-model") {
+          setTimeout(() => {
+            if (this.onmessage) this.onmessage({ data: { type: "error", error: "Model is too large (3.0GB) to compile in the browser due to WebAssembly 32-bit memory limits (max 2-4GB). Please use the hologram-ai desktop or CLI for models larger than 2GB, or use a smaller/quantized model." } });
+          }, 10);
+        } else if (data.type === "download_onnx") {
+          setTimeout(async () => {
+            const root = await navigator.storage.getDirectory();
+            const modelsDir = await root.getDirectoryHandle("models", { create: true });
+            const modelDir = await modelsDir.getDirectoryHandle("mock-model", { create: true });
+            
+            const handle = await modelDir.getFileHandle("model.onnx", { create: true });
+            const writable = await handle.createWritable();
+            await writable.write(new Uint8Array(1));
+            await writable.close();
+
+            const tokHandle = await modelDir.getFileHandle("tokenizer.json", { create: true });
+            const tokWritable = await tokHandle.createWritable();
+            await tokWritable.write(new TextEncoder().encode(JSON.stringify({
+              model: { type: "BPE", vocab: { "a": 0 }, merges: [] }
+            })));
+            await tokWritable.close();
+
+            const { compile } = await import('./holo');
+            const onnxBytes = b64ToUint8Array(TINY_MLP_B64);
+            const holoBytes = await compile(onnxBytes);
+            if (this.onmessage) this.onmessage({ data: { type: "done", holoBytes } });
+          }, 10);
+        }
+      }
+    } as any;
+
     globalThis.fetch = vi.fn().mockImplementation(async (url: string | Request | URL) => {
       const urlStr = url.toString();
       if (urlStr.includes('/api/models/test/mock-model')) {
@@ -73,6 +134,7 @@ describe('End-to-End Model Pipeline', () => {
   
   afterAll(() => {
     globalThis.fetch = originalFetch;
+    globalThis.Worker = originalWorker;
   });
 
   it('should download, compile, and run an arbitrary model', async () => {

@@ -34,7 +34,8 @@ async function handleSafetensorsDownload({
     const root = await navigator.storage.getDirectory();
     const modelsDir = await root.getDirectoryHandle("models", { create: true });
     // In UOR, we store chunks by kappa in a global pool or per model. Let's do per model.
-    const modelDir = await modelsDir.getDirectoryHandle(modelId, { create: true });
+    const localName = modelId.split("/").pop() || modelId;
+    const modelDir = await modelsDir.getDirectoryHandle(localName, { create: true });
 
     const allKeys: string[] = [];
     const allKappas: string[] = [];
@@ -229,7 +230,8 @@ async function handleOnnxDownload({
   try {
     const root = await navigator.storage.getDirectory();
     const modelsDir = await root.getDirectoryHandle("models", { create: true });
-    const modelDir = await modelsDir.getDirectoryHandle(modelId, { create: true });
+    const localName = modelId.split("/").pop() || modelId;
+    const modelDir = await modelsDir.getDirectoryHandle(localName, { create: true });
 
     for (const file of files) {
       const url = `https://huggingface.co/${modelId}/resolve/main/${file.rfilename}`;
@@ -272,21 +274,42 @@ async function handleOnnxDownload({
 
     emitProgress("Compiling ONNX model...");
     
-    // Read the compiled ONNX back into memory to compile
-    const onnxHandle = await modelDir.getFileHandle("model.onnx");
+    // Find the main ONNX file from the payload
+    const mainOnnxFile = files.find(f => f.rfilename.endsWith('.onnx'));
+    if (!mainOnnxFile) throw new Error("ONNX file not found in download list");
+    const onnxFileName = mainOnnxFile.rfilename.split('/').pop()!;
+    
+    const onnxHandle = await modelDir.getFileHandle(onnxFileName);
     const onnxFile = await onnxHandle.getFile();
+    
+    if (onnxFile.size > 2 * 1024 * 1024 * 1024) {
+      throw new Error(`Model is too large (${(onnxFile.size / 1024 / 1024 / 1024).toFixed(1)}GB) to compile in the browser due to WebAssembly 32-bit memory limits (max 2-4GB). Please use the hologram-ai desktop or CLI for models larger than 2GB, or use a smaller/quantized model.`);
+    }
+    
     const onnxBytes = new Uint8Array(await onnxFile.arrayBuffer());
 
     let dataBytes = new Uint8Array();
     try {
-      const dataHandle = await modelDir.getFileHandle("model.onnx_data");
+      const dataHandle = await modelDir.getFileHandle(onnxFileName + ".data");
       const dataFile = await dataHandle.getFile();
       dataBytes = new Uint8Array(await dataFile.arrayBuffer());
     } catch {
-      // no data file
+      try {
+        const dataHandle2 = await modelDir.getFileHandle(onnxFileName + "_data");
+        const dataFile2 = await dataHandle2.getFile();
+        dataBytes = new Uint8Array(await dataFile2.arrayBuffer());
+      } catch {
+        // no data file
+      }
     }
 
-    const holoBytes = await compileOnnxWithData(onnxBytes, dataBytes);
+    let holoBytes: Uint8Array;
+    if (dataBytes.length > 0) {
+      holoBytes = await compileOnnxWithData(onnxBytes, dataBytes);
+    } else {
+      const { compile } = await import("./holo");
+      holoBytes = await compile(onnxBytes);
+    }
     emitDone(holoBytes);
   } catch (err: any) {
     emitError(err.toString());
