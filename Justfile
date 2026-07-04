@@ -1,213 +1,123 @@
-# hologram-ai — build & maintenance commands
+# hologram-ai task runner — the docs-as-code / BDD / V&V gate set.
+# `just` with no args lists everything. `just vv` is the full local gate;
+# CI mirrors it job-for-job (.github/workflows/ci.yml).
 
 set dotenv-load := true
 
-# Default recipe: list all available recipes
 default:
     @just --list
 
-# Full CI: format check, clippy, tests
-ci: fmt-check clippy test
+# Install the pre-push hook: the full V&V gate runs before every push.
+install-hooks:
+    @printf '#!/bin/bash\nset -e\necho "pre-push: running the V&V gate (just vv)"\njust vv\n' > .git/hooks/pre-push
+    @chmod +x .git/hooks/pre-push
+    @echo "pre-push hook installed"
 
-# ─────────────────────────────────────────────────────────────────────────────
-# V&V — Verification & Validation (see CONFORMANCE.md / VERIFICATION.md)
-#
-# Reproduces the full invariant catalog. Mirrors hologram's `just vv`.
-# Sub-targets map to the V&V axes; an axis fails loud if its invariant breaks.
-# ─────────────────────────────────────────────────────────────────────────────
+# ── Quality gates (each is also a CI gate) ──────────────────────────────────
 
-# Full V&V suite: architecture, conformance, structural, portability, perf.
-vv: vv-arch vv-conformance vv-structural vv-portability vv-perf
+# Format check (CI uses --check; locally `just fmt-fix` rewrites).
+fmt:
+    cargo fmt --all --check
+fmt-fix:
+    cargo fmt --all
 
-# Axis 1 — Architecture (class AR): fmt, clippy, build, test against hologram 0.5.0.
-vv-arch: fmt-check clippy build test
+# Clippy across all targets. Warnings are errors.
+lint:
+    cargo clippy --workspace --all-targets -- -D warnings
 
-# Axis 2/3/4 — Import + correctness + e2e + addressing (classes IM/LW/CF/QZ/TK/EE/MA).
-vv-conformance: conformance conformance-ort
+# Unit + integration tests (includes the honesty meta-gate and the
+# κ-materialization e2e witness).
+test:
+    cargo test --workspace
 
-# Axis 5 — Structural guarantees: zero-alloc (ZA), zero-movement (ZM),
-# elision (CE), canonical-forms (CF), lowering-vs-reference (LW), and the
-# import-byte-parsing perimeter (IM-3). Each axis lives in its own
-# `structural_<class>.rs` test file under `crates/hologram-ai-conformance/tests`.
-vv-structural:
-    cargo test -p hologram-ai-conformance --features=structural \
+# Rustdoc must build clean (docs-as-code).
+doc:
+    RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps
+
+# ── BDD / conceptual model / oracles ────────────────────────────────────────
+
+# The Rust Gherkin suites, default lane (pure/local/network witnesses).
+# The runner is model-driven and fails on any skipped or undefined step.
+bdd:
+    HOLOGRAM_AI_BDD_LANE=default cargo test -p hologram-ai-conformance --test bdd
+
+# The ORT lane (needs ORT_DYLIB_PATH → ONNX Runtime v1.18.1).
+bdd-ort:
+    HOLOGRAM_AI_BDD_LANE=ort cargo test -p hologram-ai-conformance --features conformance --test bdd
+
+# The model lane (needs the pinned real model on disk; see architectures.yml).
+bdd-model:
+    HOLOGRAM_AI_BDD_LANE=model cargo test -p hologram-ai-conformance --features conformance --test bdd
+
+# The measured probes for `open` rows (non-gating; reported).
+bdd-target:
+    HOLOGRAM_AI_BDD_LANE=target cargo test -p hologram-ai-conformance --test bdd
+
+# The honesty meta-gate: model ⇄ features ⇄ witnesses coverage + status discipline.
+honesty:
+    cargo test -p hologram-ai-conformance --test honesty -- --nocapture
+
+# Every committed oracle artifact matches its recorded sha256 (offline).
+oracles:
+    cargo run -q -p xtask -- oracle-verify
+
+# Every pinned upstream (git revs, HF revisions, release tags) is live (online).
+pin-check:
+    cargo run -q -p xtask -- pin-check
+
+# Emit the conformance ledger.
+report:
+    cargo run -q -p xtask -- report
+
+# ── Structural / conformance / portability axes ─────────────────────────────
+
+# The substrate-contract witnesses: ZA, ZM, CE, CF, LW, IM (isolated binaries).
+structural:
+    cargo test --release -p hologram-ai-conformance --features=structural \
         --test structural_ce --test structural_za --test structural_zm \
         --test structural_cf --test structural_lw --test structural_im
 
-# Axis 6 — Portability (class NS): runtime core builds no_std on wasm + embedded.
-vv-portability: vv-wasm vv-embedded
+# External-authority execution parity (needs ORT_DYLIB_PATH).
+conformance-ort:
+    cargo test --release -p hologram-ai-conformance --features=conformance
 
-# NS-1 — the runtime core (dequant + tokenizer encode/decode) builds on
-# wasm32-unknown-unknown (no_std + alloc).
-vv-wasm:
+# The runtime core builds no_std on wasm + embedded; the browser binding
+# builds with wasm-pack.
+portability:
     cargo build --target wasm32-unknown-unknown -p hologram-ai-quant
     cargo build --target wasm32-unknown-unknown -p hologram-ai-tokenizer --no-default-features
-
-# NS-2 — the runtime core builds on thumbv7em-none-eabi (no_std, bare metal).
-vv-embedded:
     cargo build --target thumbv7em-none-eabi -p hologram-ai-quant
     cargo build --target thumbv7em-none-eabi -p hologram-ai-tokenizer --no-default-features
+    cargo check --target wasm32-unknown-unknown -p hologram-ai-wasm
 
-# Axis 7 — Performance (class PV): the asserted contract floors (no arbitrary
-# limit at 1B–20B params, content-addressed reuse O(1), weight-size-independent
-# compile, the 64/128/256/512 matmul sweep) plus the criterion scaling benches.
-vv-perf:
-    cargo test --release -p hologram-ai --test perf_contract -- --nocapture
-    cargo bench -p hologram-ai --bench scaling
+# No canonical-instance constant leaks into generic code.
+anti-hardcode:
+    ./scripts/anti-hardcode.sh
 
-# PV-5 — full-weight billion-parameter execution (real ~4 GB weight set).
-# Hardware-bound: needs RAM ≳ weight set. HOLOGRAM_AI_PARAMS scales the target.
-vv-perf-large:
-    HOLOGRAM_AI_LARGE=1 cargo test --release -p hologram-ai --test perf_contract_large -- --nocapture --test-threads=1
+# ── The browser journey (S4) ────────────────────────────────────────────────
 
-# Install the cross-compilation targets the portability axis needs.
-vv-setup:
-    rustup target add wasm32-unknown-unknown thumbv7em-none-eabi
+# Build the wasm binding into the web app.
+wasm:
+    cd apps/web && pnpm wasm
 
-# Run all tests
-test:
-    cargo nextest run --workspace
+# Install web deps.
+web-install:
+    cd apps/web && pnpm install --frozen-lockfile
 
-# Run clippy with deny warnings
-clippy:
-    cargo clippy --workspace -- -D warnings
+# Web unit tests (vitest).
+web-unit:
+    cd apps/web && pnpm test
 
-# Format all code
-fmt:
-    cargo fmt --all
+# The hermetic browser journey: download → compile → materialize → run →
+# three-message handshake, in real Chromium against the fixture server.
+journey:
+    cd apps/web && pnpm bdd
 
-# Check formatting (no changes)
-fmt-check:
-    cargo fmt --all -- --check
+# The live journey against the pinned SmolLM2 (network + weights; scheduled lane).
+journey-live:
+    cd apps/web && pnpm bdd:live
 
-# Build all crates
-build:
-    cargo build --workspace
+# ── The full local gate ─────────────────────────────────────────────────────
 
-# Build in release mode
-release:
-    cargo build --workspace --release
-
-# Clean build artifacts
-clean:
-    cargo clean
-
-# Pull latest architecture docs
-sync:
-    holoarch pull
-
-# Check architecture conformance
-check:
-    holoarch check
-
-# Generate test fixtures (ONNX models + quant golden vectors)
-gen-fixtures:
-    python3 scripts/gen-fixtures.py
-    python3 scripts/gen-quant-vectors.py
-
-# Run conformance tests (Tier 1: no external deps)
-conformance:
-    cargo test -p hologram-ai-conformance
-
-# Run ORT conformance tests (Tier 2: requires ORT_DYLIB_PATH)
-conformance-ort:
-    cargo test -p hologram-ai-conformance --features=conformance
-
-# Run validate integration tests
-conformance-validate:
-    cargo test -p hologram-ai --test validate_test
-
-# Run all conformance tiers (Tier 1 + 2 + validate)
-conformance-all: conformance conformance-ort conformance-validate
-
-# Run tests for hologram base crate (sibling dependency)
-test-base:
-    cd ../hologram && cargo test --workspace
-
-# Run clippy on hologram base crate
-clippy-base:
-    cd ../hologram && cargo clippy --workspace -- -D warnings
-
-# Full CI across both repos
-ci-all: ci test-base
-
-# Run the desktop Tauri app in dev mode. Builds the CLI in debug (fast
-# rebuilds; the desktop spawns it as a subprocess and falls back to
-# `target/debug/hologram-ai` when no release binary is present). Override
-# the lookup with HOLOGRAM_AI_BIN pointing at a different binary.
-tauri-dev:
-    cargo build -p hologram-ai
-    cd apps/desktop && pnpm install && pnpm tauri dev
-
-# Short alias.
-alias tauri := tauri-dev
-
-# Cut a desktop release: tags `desktop-vVERSION` and pushes it, which
-# triggers .github/workflows/release-desktop.yml on GitHub. The workflow
-# builds the universal macOS .dmg and creates a draft GitHub Release.
-#
-# Preconditions checked:
-#   - working tree clean
-#   - on `main`, fully in sync with `origin/main`
-#   - tag does not already exist (locally or remote)
-#   - version matches apps/desktop/src-tauri/tauri.conf.json
-#
-# Usage: just release-desktop 0.1.0
-release-desktop VERSION:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    TAG="desktop-v{{VERSION}}"
-
-    if ! git diff --quiet || ! git diff --cached --quiet; then
-        echo "error: working tree not clean. Commit or stash changes first." >&2
-        exit 1
-    fi
-    BRANCH=$(git rev-parse --abbrev-ref HEAD)
-    if [ "$BRANCH" != "main" ]; then
-        echo "error: not on main (currently on $BRANCH)." >&2
-        exit 1
-    fi
-    git fetch origin main --quiet
-    if ! git merge-base --is-ancestor origin/main HEAD; then
-        echo "error: local main is behind origin/main. Pull first." >&2
-        exit 1
-    fi
-    LOCAL=$(git rev-parse HEAD)
-    REMOTE=$(git rev-parse origin/main)
-    if [ "$LOCAL" != "$REMOTE" ]; then
-        echo "error: local main has unpushed commits. Push first." >&2
-        exit 1
-    fi
-
-    if git rev-parse -q --verify "refs/tags/$TAG" > /dev/null; then
-        echo "error: tag $TAG already exists locally." >&2
-        exit 1
-    fi
-    if git ls-remote --tags origin "$TAG" | grep -q .; then
-        echo "error: tag $TAG already exists on origin." >&2
-        exit 1
-    fi
-
-    CONF_VERSION=$(grep -E '"version":' apps/desktop/src-tauri/tauri.conf.json | head -1 | sed -E 's/.*"version": *"([^"]+)".*/\1/')
-    if [ "$CONF_VERSION" != "{{VERSION}}" ]; then
-        echo "error: tauri.conf.json version is $CONF_VERSION, refusing to tag as {{VERSION}}." >&2
-        echo "       Bump the version field in apps/desktop/src-tauri/tauri.conf.json first." >&2
-        exit 1
-    fi
-
-    echo "Tagging $TAG ..."
-    git tag -a "$TAG" -m "hologram-ai-desktop $TAG"
-    git push origin "$TAG"
-
-    echo ""
-    echo "Pushed $TAG. Track the build at:"
-    echo "  https://github.com/Hologram-Technologies/hologram-ai/actions/workflows/release-desktop.yml"
-    echo ""
-    echo "When the workflow completes, the draft release will appear at:"
-    echo "  https://github.com/Hologram-Technologies/hologram-ai/releases"
-
-# Trigger a release-desktop workflow run without tagging — useful for
-# testing the build pipeline. Requires the `gh` CLI authenticated.
-# Artifacts are uploaded to the workflow run page (no GitHub Release created).
-release-desktop-dispatch:
-    gh workflow run release-desktop.yml --ref main
+vv: fmt lint doc test bdd honesty oracles report anti-hardcode structural portability web-install web-unit wasm journey pin-check
+    @echo "V&V: all gates green."

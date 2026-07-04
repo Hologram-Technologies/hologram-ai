@@ -14,7 +14,7 @@ name: Architecture Regression Matrix
 #     conformance crate, the Cargo.lock (for hologram dep bumps), or the
 #     workflows themselves
 #
-# Auth model mirrors ci.yml / nightly.yml: an App-token + git insteadOf so
+# All substrate repos are public: cargo fetches the pinned git deps directly, so
 # cargo's `git-fetch-with-cli` can authenticate against the private
 # hologram repo. No sibling clone.
 
@@ -49,21 +49,6 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
-
-      - name: Generate GitHub App token (hologram read access)
-        id: app-token
-        uses: actions/create-github-app-token@v1
-        with:
-          app-id: ${{ secrets.APP_ID }}
-          private-key: ${{ secrets.APP_PRIVATE_KEY }}
-          owner: Hologram-Technologies
-          repositories: hologram
-
-      - name: Configure git auth for cargo
-        run: |
-          git config --global \
-            url."https://x-access-token:${{ steps.app-token.outputs.token }}@github.com/Hologram-Technologies/".insteadOf \
-            "https://github.com/Hologram-Technologies/"
 
       - name: Install protoc
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
@@ -119,27 +104,24 @@ jobs:
       - name: SmolLM2 generation (EE-2/EE-3)
         run: cargo test --release -p hologram-ai-conformance --features=onnx-spec --test real_model_generation -- --nocapture
 
+      - name: Install ONNX Runtime (pinned v1.18.1)
+        run: |
+          curl -fsSL -o /tmp/ort.tgz \
+            https://github.com/microsoft/onnxruntime/releases/download/v1.18.1/onnxruntime-linux-x64-1.18.1.tgz
+          tar -xzf /tmp/ort.tgz -C /tmp
+          echo "ORT_DYLIB_PATH=/tmp/onnxruntime-linux-x64-1.18.1/lib/libonnxruntime.so" >> "$GITHUB_ENV"
+
+      - name: bdd (model lane — execution-parity row)
+        run: cargo test -p hologram-ai-conformance --features conformance --test bdd
+        env:
+          HOLOGRAM_AI_BDD_LANE: model
+
   qwen2-0_5b-instruct:
     name: Qwen2.5-0.5B-Instruct
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
-
-      - name: Generate GitHub App token (hologram read access)
-        id: app-token
-        uses: actions/create-github-app-token@v1
-        with:
-          app-id: ${{ secrets.APP_ID }}
-          private-key: ${{ secrets.APP_PRIVATE_KEY }}
-          owner: Hologram-Technologies
-          repositories: hologram
-
-      - name: Configure git auth for cargo
-        run: |
-          git config --global \
-            url."https://x-access-token:${{ steps.app-token.outputs.token }}@github.com/Hologram-Technologies/".insteadOf \
-            "https://github.com/Hologram-Technologies/"
 
       - name: Install protoc
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler

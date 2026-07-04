@@ -1,9 +1,6 @@
 name: Build the hologram-ai site
 description: Build the hologram-ai browser GUI into a static directory.
 inputs:
-  app-token:
-    description: GitHub App token for fetching dependencies
-    required: true
   out-dir:
     description: The directory the assembled site is written to
     required: false
@@ -12,10 +9,6 @@ inputs:
 runs:
   using: composite
   steps:
-    - name: Configure git auth for cargo
-      shell: bash
-      run: |
-        git config --global url."https://x-access-token:${{ inputs.app-token }}@github.com/Hologram-Technologies/".insteadOf "https://github.com/Hologram-Technologies/"
     - name: Install protoc
       shell: bash
       run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
@@ -28,9 +21,9 @@ runs:
       shell: bash
       run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
     - uses: pnpm/action-setup@v4
-      with: { version: 9 }
+      with: { version: 10 }
     - uses: actions/setup-node@v4
-      with: { node-version: 20, cache: pnpm, cache-dependency-path: apps/web/pnpm-lock.yaml }
+      with: { node-version: 22, cache: pnpm, cache-dependency-path: apps/web/pnpm-lock.yaml }
     - name: Build wasm
       shell: bash
       run: wasm-pack build crates/hologram-ai-wasm --target web --out-dir ../../apps/web/src/wasm --release
@@ -41,7 +34,7 @@ runs:
         VITE_BASE: /hologram-ai/
         npm_config_verify_deps_before_run: "false"
       run: |
-        pnpm install --no-frozen-lockfile
+        pnpm install --frozen-lockfile
         pnpm exec tsc -b
         pnpm exec vite build
     - name: Move artifacts

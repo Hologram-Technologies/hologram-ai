@@ -1,20 +1,16 @@
-name: CI
+name: ci
 
-# Per-PR + per-push contract. Mirrors `just vv-arch` (fmt + clippy + build +
-# test) plus the structural and portability V&V axes that don't need live
-# models or network access. The live-model EE classes run via
-# `nightly.yml` (manual or scheduled).
-#
-# Auth model: the hologram-* crates are git deps on a private repo. CI
-# generates a GitHub App token scoped to that repo and configures git's
-# `insteadOf` so cargo's `git-fetch-with-cli` (set in `.cargo/config.toml`)
-# picks it up transparently. No sibling-checkout step — cargo fetches the
-# dep itself.
+# The V&V gate set — mirrors `just vv` job-for-job (docs/architecture/ARCHITECTURE.md §5).
+# All substrate repos are public: cargo fetches the pinned git deps directly.
 
 on:
   push:
     branches: [main]
   pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 env:
   CARGO_TERM_COLOR: always
@@ -22,189 +18,174 @@ env:
   RUST_BACKTRACE: 1
 
 jobs:
-  build-test:
-    name: Build + Test
+  # fmt, lint, docs, the whole test suite (unit + integration + the honesty
+  # meta-gate + the κ-materialization e2e witness), the default-lane BDD run,
+  # oracle integrity, the ledger, and the anti-hardcode gate.
+  gate:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
-      - name: Generate GitHub App token (hologram read access)
-        id: app-token
-        uses: actions/create-github-app-token@v1
-        with:
-          app-id: ${{ secrets.APP_ID }}
-          private-key: ${{ secrets.APP_PRIVATE_KEY }}
-          owner: Hologram-Technologies
-          repositories: hologram
-
-      - name: Configure git auth for cargo
-        run: |
-          git config --global \
-            url."https://x-access-token:${{ steps.app-token.outputs.token }}@github.com/Hologram-Technologies/".insteadOf \
-            "https://github.com/Hologram-Technologies/"
-
       - name: Install protoc
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@stable
         with:
-          components: clippy, rustfmt
-
-      - name: Cache cargo
-        uses: Swatinem/rust-cache@v2
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
         with:
-          shared-key: ci
-
-      - name: Format check
-        run: cargo fmt --all -- --check
-
-      # hologram-ai-desktop depends on gdk-3.0 (system library) which is not
-      # available on ubuntu-latest by default. Its build/test is exercised
-      # by the dedicated macOS release-desktop workflow.
-      - name: Clippy
-        run: cargo clippy --workspace --tests --bins -- -D warnings
-
-      - name: Build
-        run: cargo build --workspace --tests --bins
-
-      - name: Unit tests
+          shared-key: gate
+      - name: fmt
+        run: cargo fmt --all --check
+      - name: clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: doc
+        run: cargo doc --workspace --no-deps
+        env:
+          RUSTDOCFLAGS: -D warnings
+      - name: test (unit + integration + honesty + materialize e2e)
         run: cargo test --workspace
+      - name: bdd (default lane — fails on any skipped/undefined step)
+        run: cargo test -p hologram-ai-conformance --test bdd
+        env:
+          HOLOGRAM_AI_BDD_LANE: default
+      - name: oracle integrity
+        run: cargo run -q -p xtask -- oracle-verify
+      - name: conformance ledger
+        run: cargo run -q -p xtask -- report
+      - name: anti-hardcode
+        run: ./scripts/anti-hardcode.sh
 
+  # The substrate-contract witnesses in their isolated binaries (ZA needs the
+  # counting allocator to own the process).
   structural:
-    name: Structural V&V (CE/ZA/ZM/CF/LW/IM)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
-      - name: Generate GitHub App token (hologram read access)
-        id: app-token
-        uses: actions/create-github-app-token@v1
-        with:
-          app-id: ${{ secrets.APP_ID }}
-          private-key: ${{ secrets.APP_PRIVATE_KEY }}
-          owner: Hologram-Technologies
-          repositories: hologram
-
-      - name: Configure git auth for cargo
-        run: |
-          git config --global \
-            url."https://x-access-token:${{ steps.app-token.outputs.token }}@github.com/Hologram-Technologies/".insteadOf \
-            "https://github.com/Hologram-Technologies/"
-
       - name: Install protoc
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Cache cargo
-        uses: Swatinem/rust-cache@v2
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
         with:
           shared-key: structural
-
-      # Mirrors `just vv-structural`. Each axis lives in its own
-      # `structural_<class>.rs` so a failure pinpoints the broken
-      # invariant. CE = content-addressed elision; ZA = zero-alloc; ZM =
-      # zero-movement; CF = canonical-forms totality; LW = lowering vs
-      # reference; IM = import-byte-parsing perimeter.
-      - name: Structural witnesses
+      - name: structural witnesses (ZA/ZM/CE/CF/LW/IM)
         run: |
           cargo test --release -p hologram-ai-conformance --features=structural \
-            --test structural_ce \
-            --test structural_za \
-            --test structural_zm \
-            --test structural_cf \
-            --test structural_lw \
-            --test structural_im
+            --test structural_ce --test structural_za --test structural_zm \
+            --test structural_cf --test structural_lw --test structural_im
 
-  portability:
-    name: Portability V&V (NS — wasm + embedded)
+  # External-authority execution parity: ONNX Runtime linked as the reference.
+  ort:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
-      - name: Generate GitHub App token (hologram read access)
-        id: app-token
-        uses: actions/create-github-app-token@v1
-        with:
-          app-id: ${{ secrets.APP_ID }}
-          private-key: ${{ secrets.APP_PRIVATE_KEY }}
-          owner: Hologram-Technologies
-          repositories: hologram
-
-      - name: Configure git auth for cargo
-        run: |
-          git config --global \
-            url."https://x-access-token:${{ steps.app-token.outputs.token }}@github.com/Hologram-Technologies/".insteadOf \
-            "https://github.com/Hologram-Technologies/"
-
       - name: Install protoc
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
-
-      - name: Install Rust toolchain + cross targets
-        uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
         with:
-          targets: wasm32-unknown-unknown,thumbv7em-none-eabi
+          shared-key: ort
+      - name: Install ONNX Runtime (pinned v1.18.1)
+        run: |
+          curl -fsSL -o /tmp/ort.tgz \
+            https://github.com/microsoft/onnxruntime/releases/download/v1.18.1/onnxruntime-linux-x64-1.18.1.tgz
+          tar -xzf /tmp/ort.tgz -C /tmp
+          echo "ORT_DYLIB_PATH=/tmp/onnxruntime-linux-x64-1.18.1/lib/libonnxruntime.so" >> "$GITHUB_ENV"
+      - name: bdd (ort lane)
+        run: cargo test -p hologram-ai-conformance --features conformance --test bdd
+        env:
+          HOLOGRAM_AI_BDD_LANE: ort
+      - name: conformance (EE — execution parity vs ORT)
+        run: cargo test --release -p hologram-ai-conformance --features=conformance
 
-      - name: Cache cargo
-        uses: Swatinem/rust-cache@v2
+  # The runtime core stays no_std-portable; the browser binding builds for wasm.
+  portability:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install protoc
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown, thumbv7em-none-eabi
+      - uses: Swatinem/rust-cache@v2
         with:
           shared-key: portability
-
-      # NS-1: runtime core (dequant + tokenizer encode/decode) on
-      # wasm32-unknown-unknown (no_std + alloc).
-      - name: Build runtime core on wasm32
+      - name: runtime core on wasm32
         run: |
           cargo build --target wasm32-unknown-unknown -p hologram-ai-quant
           cargo build --target wasm32-unknown-unknown -p hologram-ai-tokenizer --no-default-features
-
-      # NS-2: runtime core on thumbv7em-none-eabi (no_std, bare metal).
-      - name: Build runtime core on thumbv7em-none-eabi
+      - name: runtime core on thumbv7em (bare metal)
         run: |
           cargo build --target thumbv7em-none-eabi -p hologram-ai-quant
           cargo build --target thumbv7em-none-eabi -p hologram-ai-tokenizer --no-default-features
+      - name: browser binding on wasm32
+        run: cargo check --target wasm32-unknown-unknown -p hologram-ai-wasm
 
-  ort-conformance:
-    name: ORT Conformance (EE-1)
+  # Every pinned upstream is live (online).
+  pin-check:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
-      - name: Generate GitHub App token (hologram read access)
-        id: app-token
-        uses: actions/create-github-app-token@v1
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
         with:
-          app-id: ${{ secrets.APP_ID }}
-          private-key: ${{ secrets.APP_PRIVATE_KEY }}
-          owner: Hologram-Technologies
-          repositories: hologram
+          shared-key: gate
+      - name: pin-check
+        run: cargo run -q -p xtask -- pin-check
 
-      - name: Configure git auth for cargo
-        run: |
-          git config --global \
-            url."https://x-access-token:${{ steps.app-token.outputs.token }}@github.com/Hologram-Technologies/".insteadOf \
-            "https://github.com/Hologram-Technologies/"
-
+  # The measured probes for `open` rows — reported, never gating.
+  target-probes:
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
       - name: Install protoc
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Cache cargo
-        uses: Swatinem/rust-cache@v2
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
         with:
-          shared-key: ort
+          shared-key: gate
+      - name: bdd (target lane — measurements)
+        run: cargo test -p hologram-ai-conformance --test bdd -- --nocapture
+        env:
+          HOLOGRAM_AI_BDD_LANE: target
 
-      - name: Install ONNX Runtime
-        run: |
-          wget -q https://github.com/microsoft/onnxruntime/releases/download/v1.18.1/onnxruntime-linux-x64-1.18.1.tgz
-          tar xzf onnxruntime-linux-x64-1.18.1.tgz
-          echo "ORT_DYLIB_PATH=$(pwd)/onnxruntime-linux-x64-1.18.1/lib/libonnxruntime.so" >> "$GITHUB_ENV"
-
-      # EE-1 mini transformer vs ORT (max rel err 2.2e-5). Doesn't need
-      # HOLOGRAM_AI_LIVE — the fixture is built in-test from
-      # `onnx_builder`.
-      - name: ORT conformance
-        run: cargo test --release -p hologram-ai-conformance --features=conformance
+  # The hermetic browser journey: download → compile → materialize → run →
+  # three-message handshake, in real Chromium. The same job name gates the
+  # Pages deployment (dictionary row `deployment-gate`).
+  journey:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install protoc
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: journey
+      - name: Install wasm-pack
+        run: curl -fsSL https://rustwasm.github.io/wasm-pack/installer/init.sh | sh
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: apps/web/pnpm-lock.yaml
+      - name: Install web deps
+        working-directory: apps/web
+        run: pnpm install --frozen-lockfile
+      - name: Build wasm binding
+        working-directory: apps/web
+        run: pnpm wasm
+      - name: Install Chromium
+        working-directory: apps/web
+        run: pnpm exec playwright install --with-deps chromium
+      - name: Web unit tests
+        working-directory: apps/web
+        run: pnpm test
+      - name: Browser BDD (hermetic journey + handshake)
+        working-directory: apps/web
+        run: pnpm bdd

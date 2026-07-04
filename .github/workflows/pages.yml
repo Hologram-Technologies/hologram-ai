@@ -1,54 +1,81 @@
 name: Deploy web GUI to GitHub Pages
 
-# Builds the hologram-ai browser GUI (ADR-0017): compile the real runtime core to
-# WebAssembly, bundle the React app, publish the static site to Pages.
+# Builds the hologram-ai browser app (ADR-0017) and publishes it to Pages.
+# The deployment REQUIRES the hermetic browser journey green (dictionary row
+# `deployment-gate`): no publish without download → compile → materialize →
+# run → three-message handshake passing in real Chromium.
 
 on:
   push:
     branches: [main]
   workflow_dispatch:
 
-env:
-  ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION: true
-
 permissions:
-  contents: write
+  contents: read
   pages: write
   id-token: write
 
 # One in-flight deployment; don't cancel a running one.
 concurrency:
   group: pages
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
-  build:
+  # The same journey gate as ci.yml, run on the exact commit being deployed.
+  journey:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
-      - name: Generate GitHub App token (hologram read access)
-        id: app-token
-        uses: actions/create-github-app-token@v1
+      - name: Install protoc
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+      - uses: dtolnay/rust-toolchain@stable
         with:
-          app-id: ${{ secrets.APP_ID }}
-          private-key: ${{ secrets.APP_PRIVATE_KEY }}
-          owner: Hologram-Technologies
-          repositories: hologram
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: journey
+      - name: Install wasm-pack
+        run: curl -fsSL https://rustwasm.github.io/wasm-pack/installer/init.sh | sh
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: apps/web/pnpm-lock.yaml
+      - name: Install web deps
+        working-directory: apps/web
+        run: pnpm install --frozen-lockfile
+      - name: Build wasm binding
+        working-directory: apps/web
+        run: pnpm wasm
+      - name: Install Chromium
+        working-directory: apps/web
+        run: pnpm exec playwright install --with-deps chromium
+      - name: Web unit tests
+        working-directory: apps/web
+        run: pnpm test
+      - name: Browser BDD (hermetic journey + handshake)
+        working-directory: apps/web
+        run: pnpm bdd
 
+  build:
+    needs: journey
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
       - name: Build site
         uses: ./.github/actions/build-site
         with:
-          app-token: ${{ steps.app-token.outputs.token }}
           out-dir: _site
-
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v5
         with:
           path: './_site'
 
   deploy:
-    needs: build
+    needs: [journey, build]
     runs-on: ubuntu-latest
     permissions:
       pages: write
