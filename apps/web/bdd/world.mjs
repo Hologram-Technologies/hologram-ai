@@ -136,18 +136,18 @@ class HologramWorld {
 
   /** Evaluate inside the page: list OPFS κ-store entries (`tensors/`). */
   async opfsTensorNames() {
-    return this.page.evaluate(async () => {
+    return this.retryOpfs(() => this.page.evaluate(async () => {
       const root = await navigator.storage.getDirectory();
       const dir = await root.getDirectoryHandle("tensors");
       const names = [];
       for await (const [name] of dir.entries()) names.push(name);
       return names;
-    });
+    }));
   }
 
   /** Read a file under OPFS `models/<dir>/` (returns bytes as number[]). */
   async opfsModelFile(modelDir, fileName) {
-    return this.page.evaluate(
+    return this.retryOpfs(() => this.page.evaluate(
       async ([dirName, name]) => {
         const root = await navigator.storage.getDirectory();
         const models = await root.getDirectoryHandle("models");
@@ -168,12 +168,44 @@ class HologramWorld {
         return Array.from(new Uint8Array(await file.arrayBuffer()));
       },
       [modelDir, fileName],
-    );
+    ));
+  }
+
+  /** Dump the OPFS tree (diagnostics). */
+  async opfsTree() {
+    return this.page.evaluate(async () => {
+      const root = await navigator.storage.getDirectory();
+      async function walk(dir, prefix) {
+        const out = [];
+        for await (const [name, handle] of dir.entries()) {
+          out.push(`${prefix}${name}${handle.kind === "directory" ? "/" : ""}`);
+          if (handle.kind === "directory") out.push(...(await walk(handle, `${prefix}${name}/`)));
+        }
+        return out;
+      }
+      return walk(root, "");
+    });
+  }
+
+  /** Retry `fn` briefly: OPFS directory entries written by another realm
+   * (worker/page) can lag visibility for a moment after creation. */
+  async retryOpfs(fn) {
+    let lastErr;
+    for (let attempt = 0; attempt < 20; attempt++) {
+      try {
+        return await fn();
+      } catch (err) {
+        lastErr = err;
+        if (!String(err).includes("NotFoundError")) throw err;
+        await new Promise((r) => setTimeout(r, 250));
+      }
+    }
+    throw lastErr;
   }
 
   /** The OPFS `.holo` under models/<dir>/ (first match), as number[]. */
   async opfsArchive(modelDir) {
-    return this.page.evaluate(async (dirName) => {
+    return this.retryOpfs(() => this.page.evaluate(async (dirName) => {
       const root = await navigator.storage.getDirectory();
       const models = await root.getDirectoryHandle("models");
       const dir = await models.getDirectoryHandle(dirName);
@@ -184,7 +216,7 @@ class HologramWorld {
         }
       }
       return null;
-    });
+    }, modelDir));
   }
 
   /** Send a chat message and wait for the assistant turn to finish. */

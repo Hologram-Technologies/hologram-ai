@@ -466,8 +466,10 @@ export async function generate(opts: GenerateOpts): Promise<number> {
       if (e.data.type === 'token') {
         emitLine("chat://line", { stream: "stdout", line: e.data.text });
       } else if (e.data.type === 'done') {
-        const g = globalThis as unknown as { __hologram_completions?: string[] };
-        (g.__hologram_completions ??= []).push(e.data.text);
+        const g = globalThis as unknown as {
+          __hologram_completions?: { prompt: string; text: string }[];
+        };
+        (g.__hologram_completions ??= []).push({ prompt: opts.prompt, text: e.data.text });
         emitLine("chat://line", { stream: "stdout", line: e.data.text });
         if (activeWorker) {
           activeWorker.terminate();

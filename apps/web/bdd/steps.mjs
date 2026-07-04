@@ -46,9 +46,13 @@ function cleanCompletion(text) {
 }
 
 async function installCustomEntry(world, entry) {
-  await world.page.evaluate((json) => {
-    localStorage.setItem("hologram_catalogue_custom", json);
-  }, JSON.stringify([entry]));
+  // As an init script: the world's own init script re-writes the custom
+  // catalogue on every navigation, so this must run after it, appending.
+  await world.page.addInitScript((json) => {
+    const current = JSON.parse(localStorage.getItem("hologram_catalogue_custom") ?? "[]");
+    current.push(JSON.parse(json));
+    localStorage.setItem("hologram_catalogue_custom", JSON.stringify(current));
+  }, JSON.stringify(entry));
   await world.page.reload({ waitUntil: "networkidle" });
 }
 
@@ -64,11 +68,8 @@ Given("the app is open in the browser against the live HuggingFace Hub", async f
 
 // ── S1 — download ───────────────────────────────────────────────────────────
 
+// Matched keyword-agnostically (used as both When and background Given).
 When("the fixture model is downloaded", async function () {
-  await this.downloadModel(FIXTURE_DISPLAY);
-});
-
-Given("the fixture model is downloaded", async function () {
   await this.downloadModel(FIXTURE_DISPLAY);
 });
 
@@ -207,7 +208,13 @@ Then(
   "the model directory holds a k-form archive whose κ-map is fully resolvable from OPFS",
   async function () {
     const { kappa_requirements } = await wasm();
-    const holo = await this.opfsArchive("handshake-tiny");
+    let holo;
+    try {
+      holo = await this.opfsArchive("handshake-tiny");
+    } catch (err) {
+      const tree = await this.opfsTree();
+      throw new Error(`opfsArchive failed: ${err}\nOPFS tree:\n${tree.join("\n")}`);
+    }
     assert.ok(holo, "no .holo archive in the model directory");
     const required = kappa_requirements(new Uint8Array(holo));
     assert.ok(required.length > 0, "the archive must be a k-form (κ-map present)");
@@ -231,9 +238,18 @@ When("a single-turn prompt is sent", async function () {
 });
 
 Then("a non-empty completion streams back", async function () {
+  // The hook records only *successfully finished* generations — a DOM bubble
+  // could be an error message and must not satisfy this step.
+  const completions = await this.page.evaluate(
+    () => globalThis.__hologram_completions ?? [],
+  );
+  if (completions.length === 0) {
+    const bubbles = await this.page.locator(".bubble.assistant").allInnerTexts();
+    assert.fail(`generation did not complete; assistant bubbles: ${JSON.stringify(bubbles)}`);
+  }
   assert.ok(
-    this.lastCompletion && this.lastCompletion.trim().length > 0,
-    "the assistant turn must stream non-empty text",
+    cleanCompletion(completions[0].text).length > 0,
+    `the assistant turn must stream non-empty text (raw: ${JSON.stringify(completions)})`,
   );
 });
 
@@ -251,10 +267,13 @@ Then("assistant turn {int} streams a non-empty completion", async function (n) {
   const completions = await this.page.evaluate(
     () => globalThis.__hologram_completions ?? [],
   );
-  assert.ok(completions.length >= n, `turn ${n} did not complete`);
+  if (completions.length < n) {
+    const bubbles = await this.page.locator(".bubble.assistant").allInnerTexts();
+    assert.fail(`turn ${n} did not complete; assistant bubbles: ${JSON.stringify(bubbles)}`);
+  }
   assert.ok(
-    cleanCompletion(completions[n - 1]).length > 0,
-    `assistant turn ${n} must be non-empty`,
+    cleanCompletion(completions[n - 1].text).length > 0,
+    `assistant turn ${n} must be non-empty; raw completions: ${JSON.stringify(completions)}`,
   );
 });
 
@@ -265,8 +284,15 @@ Then("the transcript matches the committed reference transcript", async function
   );
   assert.equal(completions.length, reference.turns.length, "turn count");
   reference.turns.forEach((turn, i) => {
+    // The hook records the pre-template slot; the reference stores the
+    // templated prompt (template application is the shared Rust code path).
     assert.equal(
-      cleanCompletion(completions[i]),
+      reference.template.replace("{prompt}", completions[i].prompt),
+      turn.prompt,
+      `turn ${i + 1} prompt assembly deviates from the committed reference`,
+    );
+    assert.equal(
+      cleanCompletion(completions[i].text),
       turn.completion,
       `assistant turn ${i + 1} deviates from the committed reference`,
     );
@@ -300,8 +326,8 @@ Then(
     );
     assert.equal(completions.length, HANDSHAKE.length, "three turns must complete");
     for (const completion of completions) {
-      assert.ok(completion.trim().length > 0, "every turn must be non-empty");
-      assert.ok(!completion.includes("<|im_end|>"), "stop token must terminate the turn");
+      assert.ok(completion.text.trim().length > 0, "every turn must be non-empty");
+      assert.ok(!completion.text.includes("<|im_end|>"), "stop token must terminate the turn");
     }
   },
 );

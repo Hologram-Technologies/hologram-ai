@@ -186,8 +186,12 @@ export function Chat() {
 
     const unlisten = onProcessLine("chat://line", (l) => {
       if (l.stream === "stderr") return;
-      streamingRef.current += (streamingRef.current ? "\n" : "") + l.line;
-      
+      // Each event is a cumulative SNAPSHOT of the whole completion so far
+      // (the generation loop re-decodes the full token sequence each step for
+      // correct BPE spacing) — replace, never append: appending garbles the
+      // stored turn and poisons every subsequent multi-turn prompt.
+      streamingRef.current = l.line;
+
       if (!isFlushing) {
         isFlushing = true;
         timeoutId = window.setTimeout(flushText, 50);
