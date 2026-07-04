@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/*",
+    "xtask",
 ]
 
 [workspace.package]
@@ -36,7 +37,9 @@ hologram-ai-quant  = { path = "crates/hologram-ai-quant" }
 hologram-ai-common = { path = "crates/hologram-ai-common" }
 hologram-ai-onnx   = { path = "crates/hologram-ai-onnx" }
 hologram-ai-tokenizer = { path = "crates/hologram-ai-tokenizer" }
+hologram-ai-safetensors = { path = "crates/hologram-ai-safetensors" }
 hologram-ai-core   = { path = "crates/hologram-ai-core" }
+hologram-ai-model  = { path = "crates/hologram-ai-model" }
 
 criterion     = { version = "0.5", features = ["html_reports"] }
 

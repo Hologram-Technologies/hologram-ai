@@ -1,0 +1,26 @@
+# The status ledger: the controlled vocabulary for hologram-ai.
+# A status is a CONTRACT on what the V&V suite may assert about a row.
+# Parsed by `hologram-ai-model`; enforced by the honesty meta-gate in
+# `hologram-ai-conformance`. See docs/conceptual-model/03-status-discipline.md.
+#
+# This is the UOR-Atlas-UTQC vocabulary (some-true/build/open) mapped to this
+# domain: `verified` plays `some-true` (the sourced fact); `build` and `open`
+# are unchanged.
+
+[[level]]
+id = "verified"
+summary = "Established: an external oracle artifact reproduced, a live authority matched, or a substrate witness green."
+may_assert = "green-gating"   # the implementation reproduces the sourced fact
+gating = true
+
+[[level]]
+id = "build"
+summary = "A precisely-scoped construction on verified pieces, validated against structural invariants and deterministic references."
+may_assert = "invariants-only" # never asserted as externally sourced
+gating = true
+
+[[level]]
+id = "open"
+summary = "A genuine unknown. Measured and reported, never asserted true."
+may_assert = "measurement-only"
+gating = false

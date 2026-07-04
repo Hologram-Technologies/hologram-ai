@@ -1,0 +1,143 @@
+# The oracle registry: every authoritative external source a witness may
+# validate against. Committed artifacts carry provenance + a sha256 verified by
+# `xtask oracle-verify` (offline); pinned upstreams are confirmed live by
+# `xtask pin-check` (online). Kinds:
+#   official-test-vectors    — a standards body / project's published KATs, committed
+#   golden-vectors           — committed vectors reproducing an external reference
+#   generated-fixture        — committed inputs whose *authority* is elsewhere (integrity-tracked)
+#   deterministic-reference  — committed outputs of a seeded, reproducible derivation
+#   live-authority           — a live external system exercised at a pinned revision
+#   reference-implementation — an external reference library the suite diffs against
+#   substrate-witness        — the pinned substrate's own V&V surface
+
+[[oracle]]
+id = "blake3-kats"
+authority = "BLAKE3 — official test vectors"
+source = "https://github.com/BLAKE3-team/BLAKE3"
+pin = "master:test_vectors/test_vectors.json"
+license = "CC0-1.0 OR Apache-2.0"
+kind = "official-test-vectors"
+note = "κ-addressing is `blake3:<hex>` of content; the KATs anchor the hash itself."
+
+[[oracle.artifacts]]
+path = "oracles/blake3/test_vectors.json"
+sha256 = "dcb91ea8accc77e6d6e632af7cdc1a99a9f3ae78cf648da595c7d064db32f624"
+
+[[oracle]]
+id = "quant-goldens"
+authority = "GGML/ONNX quantization references — Q4_0/Q8_0 golden vectors"
+source = "https://github.com/ggerganov/ggml"
+pin = ""
+license = "MIT"
+kind = "golden-vectors"
+note = "Block-dequant vectors matching the GGML reference layout (class QZ)."
+
+[[oracle.artifacts]]
+path = "oracles/quant/q4_0_golden.json"
+sha256 = "73b3194022f5933c0fc093174b9cf16bd6cb63782bd9ecade5198eae25cbe29b"
+
+[[oracle.artifacts]]
+path = "oracles/quant/q8_0_golden.json"
+sha256 = "5ddcff0dd35ab4bed6e806aa59014d0c77614bdada5bf4a5d92214c6dcfba4aa"
+
+[[oracle]]
+id = "onnx-fixtures"
+authority = "Committed ONNX graphs whose execution authority is ONNX Runtime"
+source = "crates/hologram-ai-conformance/fixtures/generate.py"
+pin = ""
+license = "MIT OR Apache-2.0"
+kind = "generated-fixture"
+note = "Integrity-tracked inputs; correctness is asserted by diffing against ORT, never against ourselves."
+
+[[oracle.artifacts]]
+path = "oracles/onnx/identity.onnx"
+sha256 = "e5c6d14534948732c7aa001f958c3cb9ac2c68e794f070430c517ddf388c65fa"
+
+[[oracle.artifacts]]
+path = "oracles/onnx/tiny-mlp.onnx"
+sha256 = "e9a853dc4980e19a0a7f6c3abf06f03505683d6470b2aa3fd245b7f8ce67463b"
+
+[[oracle.artifacts]]
+path = "oracles/onnx/tiny-mlp-output-shape.json"
+sha256 = "88c566285436b83430533f666359db8c38b884757d3459eefbd90162dbbef1d3"
+
+[[oracle]]
+id = "onnx-runtime"
+authority = "ONNX Runtime — reference execution engine"
+source = "https://github.com/microsoft/onnxruntime"
+pin = "v1.18.1"
+license = "MIT"
+kind = "live-authority"
+note = "Linked via ORT_DYLIB_PATH in CI; logits/token parity within declared tolerance."
+
+[[oracle]]
+id = "onnx-node-corpus"
+authority = "ONNX — official operator node-test corpus"
+source = "https://github.com/onnx/onnx"
+pin = "v1.17.0"
+license = "Apache-2.0"
+kind = "live-authority"
+note = "onnx/backend/test/data/node at the pinned release tag; fetched and cached at test time."
+
+[[oracle]]
+id = "hf-hub"
+authority = "HuggingFace Hub API"
+source = "https://huggingface.co"
+pin = ""
+license = "varies by artifact"
+kind = "live-authority"
+note = "Model resolution (api/models/{id}) and file transport; models are exercised at pinned revisions (see usecases)."
+
+[[oracle]]
+id = "hf-tokenizers"
+authority = "HuggingFace `tokenizers` — reference tokenization"
+source = "https://crates.io/crates/tokenizers"
+pin = "0.20"
+license = "Apache-2.0"
+kind = "reference-implementation"
+note = "Encode/decode parity on the model's own published tokenizer.json (class TK)."
+
+[[oracle]]
+id = "safetensors-ref"
+authority = "safetensors — reference format implementation"
+source = "https://crates.io/crates/safetensors"
+pin = "0.4"
+license = "Apache-2.0"
+kind = "reference-implementation"
+note = "Header/layout round-trip: files produced by the reference crate must stream-parse identically."
+
+[[oracle]]
+id = "hologram-substrate"
+authority = "hologram — structural witnesses (ZA/ZM/CE/CF) at the pinned revision"
+source = "https://github.com/Hologram-Technologies/hologram"
+pin = "18f553d8578997ce32e7b653786a0bcf9b09a2c0"
+license = "MIT OR Apache-2.0"
+kind = "substrate-witness"
+note = "Pinned by Cargo.lock (branch main); pin-check confirms the commit is live upstream."
+
+[[oracle]]
+id = "holospaces-substrate"
+authority = "holospaces — κ-addressing witnesses at the pinned revision"
+source = "https://github.com/Hologram-Technologies/holospaces"
+pin = "d406c60e47096bf1c237e6eb73086562eeb0fc28"
+license = "MIT"
+kind = "substrate-witness"
+note = "`holospaces::address` is the κ-labeling; pinned by Cargo.lock (branch main)."
+
+[[oracle]]
+id = "smollm2-135m"
+authority = "HuggingFaceTB/SmolLM2-135M-Instruct at a pinned revision"
+source = "https://huggingface.co/HuggingFaceTB/SmolLM2-135M-Instruct"
+pin = "12fd25f77366fa6b3b4b768ec3050bf629380bac"
+license = "Apache-2.0"
+kind = "live-authority"
+note = "The canonical use-case instance: safetensors + ONNX export + tokenizer.json, all at the pin."
+
+[[oracle]]
+id = "journey-reference"
+authority = "Committed deterministic references for the hermetic journey fixture"
+source = "xtask gen-fixture (seeded, reproducible)"
+pin = ""
+license = "MIT OR Apache-2.0"
+kind = "deterministic-reference"
+note = "The handshake-tiny model (safetensors/config/tokenizer) and its reference logits + chat transcript, generated with a recorded seed; artifacts registered below once generated."

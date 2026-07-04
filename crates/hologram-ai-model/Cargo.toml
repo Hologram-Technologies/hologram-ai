@@ -1,0 +1,12 @@
+[package]
+name = "hologram-ai-model"
+description = "Typed, invariant-checked registries for the hologram-ai conceptual model (model/*.toml)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+serde = { workspace = true }
+toml = { workspace = true }
+thiserror = { workspace = true }

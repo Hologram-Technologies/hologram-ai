@@ -1,0 +1,22 @@
+[package]
+name = "xtask"
+description = "Workspace automation: oracle verification, pin checks, the conformance ledger, fixture generation"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+anyhow = { workspace = true }
+sha2 = { workspace = true }
+serde_json = { workspace = true }
+hologram-ai-model = { workspace = true }
+
+# gen-fixture: build the hermetic handshake-tiny model + reference transcript
+# through the real k-form pipeline (compile → materialize → generate).
+hologram-ai = { path = "../crates/hologram-ai", default-features = false }
+hologram-ai-safetensors = { workspace = true }
+hologram-ai-tokenizer = { workspace = true }
+hologram-ai-common = { workspace = true }
+safetensors = "0.4"

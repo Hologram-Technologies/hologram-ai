@@ -1,166 +1,84 @@
-# `hologram-ai`
+# hologram-ai
 
-`hologram-ai` is the AI model compiler and runtime-adjacent library for the
-Hologram ecosystem. It imports models, validates and lowers them, and emits
-`.holo` archives through `hologram-compiler`.
+**An in-browser AI application on the hologram substrate**: it downloads models
+from HuggingFace, compiles them into content-addressed (κ-form) `.holo`
+archives, and runs them — entirely client-side, with the k-representation
+discipline inherited from [holospaces]. The same pipeline is available natively
+(CLI + library), where its external-authority conformance is anchored.
 
-The repository now has two practical, working layers:
+This repository is **docs-as-code / BDD-driven / V&V-gated**, following the
+[UOR-Atlas-UTQC] methodology: the conceptual model is authored once — as prose
+*and* as typed data — every feature begins as a Gherkin definition, and every
+claim is validated against an authority this repository did not author.
 
-- model compilation and execution packaging for `.holo`
-- app-domain foundations for deterministic AI applications above that layer
+## Where things are
 
-## What Works Now
+| Path | Role |
+|---|---|
+| [`docs/conceptual-model/`](docs/conceptual-model/) | the conceptual authority (prose): what the system is, the k-representation principle, the normative user journey, the status discipline |
+| [`docs/architecture/`](docs/architecture/) | how it is realized: the docs-as-code flow, workspace organization, the k-form pipeline |
+| [`docs/adrs/`](docs/adrs/) | architecture decision records |
+| [`model/`](model/) | the conceptual model as typed data: the dictionary (one row per capability), the status ledger, the oracle registry, the parametric use-cases |
+| [`features/`](features/) | Gherkin definitions — one feature per dictionary row (BDD-first) |
+| [`oracles/`](oracles/) | committed external validation artifacts + checksums |
+| [`crates/`](crates/) | the Rust workspace (see the crate table in [ARCHITECTURE.md](docs/architecture/ARCHITECTURE.md)) |
+| [`apps/web/`](apps/web/) | the browser application (React + the wasm binding) + the browser BDD suite |
+| [`xtask/`](xtask/) | automation: oracle verification, pin checks, the conformance ledger, fixture generation |
 
-### 1. Compile ONNX models to `.holo`
+## The user journey
 
-The primary path is ONNX-first. `hologram-ai` compiles ONNX graphs into `.holo`
-archives that can be executed by Hologram runtime surfaces.
+The application's contract is one journey, verified end-to-end in real
+Chromium — hermetically on every push, against live HuggingFace on the
+scheduled matrix:
 
-Example:
+1. **Download** — any HuggingFace repository; safetensors shards stream
+   tensor-by-tensor into the OPFS κ-store (`tensors/{κ}.bin`), gated by a
+   config-derived memory guard.
+2. **Compile** — a parametric decoder graph built solely from the model's own
+   `config.json` + tensor manifest, compiled to a weightless k-form `.holo`
+   bound to its weights by κ-labels.
+3. **Run** — the archive materializes against the κ-store (every buffer
+   re-hashes to its κ — content addressing is the integrity check) and
+   executes in an inference session. Autoregressive reuse is content-addressed
+   elision; there is no KV-cache.
+4. **Chat** — a three-message handshake with streamed tokens, the model's own
+   template, and its declared stop conditions.
 
-```bash
-cargo run -p hologram-ai -- compile \
-  --model models/bert-base-uncased/model.onnx \
-  --output /tmp/out \
-  --seq-len 8
+## Quickstart
+
+```sh
+just            # list tasks
+just vv         # the full local gate (fmt, lint, test, bdd, honesty, oracles, journey, …)
+just bdd        # the Rust Gherkin suites (default lane)
+just journey    # the hermetic browser journey in headless Chromium
+just report     # the conformance ledger
 ```
 
-### 2. Export deterministic fixtures for `holospaces`
+Native CLI (host shell):
 
-`hologram-ai` can compile a model and export a deterministic fixture bundle for
-`holospaces`. The bundle contains:
-
-- the compiled `.holo` archive
-- typed input blobs
-- expected output blobs
-- content-addressed κ labels
-- a `manifest.json` describing archive, tensors, port order, and file layout
-
-Example:
-
-```bash
-cargo run -p hologram-ai -- export-fixture \
-  --model models/bert-base-uncased/model.onnx \
-  --output /tmp/bert-holospaces \
-  --preset bert-base-uncased \
-  --seq-len 8
+```sh
+cargo run -p hologram-ai -- compile --model model.onnx --output out/
+cargo run -p hologram-ai -- run --model out/model.holo --fill ones
+cargo run -p hologram-ai -- download <hf-repo-id>
 ```
 
-For `bert-base-uncased`, the current preset synthesizes the canonical sequence:
+## Verification & validation
 
-- `input_ids = [101, 2023, 2003, 1037, 3231, 102, 0, 0]`
-- `attention_mask = [1, 1, 1, 1, 1, 1, 0, 0]`
-- `token_type_ids = [0, 0, 0, 0, 0, 0, 0, 0]`
+Every dictionary row carries a status that is a *contract on what the suite
+may assert* (`verified` / `build` / `open` — see
+[03-status-discipline.md](docs/conceptual-model/03-status-discipline.md)), an
+oracle from the registry, and a Gherkin feature executed by the Rust cucumber
+runner or the browser (cucumber-js + Playwright) runner. A mechanical
+**honesty meta-gate** enforces the model ⇄ features ⇄ witnesses links and
+forbids asserting open claims. `just vv` runs the whole gate set; CI mirrors
+it job-for-job, and the Pages deployment requires the browser journey green.
 
-### 3. Run exported `.holo` artifacts in `holospaces`
+External authorities: ONNX Runtime and the official ONNX node-test corpus,
+the BLAKE3 test vectors, the reference `safetensors` and HuggingFace
+`tokenizers` implementations, GGML quantization goldens, the live HuggingFace
+Hub at pinned revisions, and the pinned [hologram]/[holospaces] substrate
+witnesses. See [`model/oracles.toml`](model/oracles.toml).
 
-The intended bridge is:
-
-1. compile or export from `hologram-ai`
-2. hand the emitted `.holo` plus deterministic inputs to `holospaces`
-3. execute with `holospaces::engine::HoloEngine::run`
-4. verify the resulting output κ labels match the exported fixture manifest
-
-The practical witness currently lives in the sibling `holospaces` repository.
-The end-to-end BERT proof flow is:
-
-```bash
-cd /Users/auser/work/uor/hologram/hologram-ai
-cargo run -p hologram-ai -- export-fixture \
-  --model models/bert-base-uncased/model.onnx \
-  --output /tmp/bert-holospaces \
-  --preset bert-base-uncased \
-  --seq-len 8
-```
-
-Then in the `holospaces` checkout:
-
-```bash
-HOLOSPACES_HOLO_FIXTURE_DIR=/tmp/bert-holospaces \
-cargo test -p holospaces --test cc2_holo_engine \
-  exported_hologram_ai_fixture_runs_to_expected_kappas -- --nocapture
-```
-
-That witness proves a real `hologram-ai`-compiled BERT `.holo` can execute
-through `holospaces` and reproduce the expected output κ labels.
-
-## New App-Domain Foundation: `hologram-ai-core`
-
-This repository now also includes `crates/hologram-ai-core`, a deterministic
-application-layer foundation above the compiler/runtime boundary.
-
-It provides:
-
-- content-addressed model, runner, prompt, request, output, and provenance types
-- `AiEvent` variants for registration, submission, start, completion, and failure
-- a pure `reduce(events: &[AiEvent]) -> AiView` projection
-- a `ModelRunner` trait so inference execution stays outside reducers
-
-This layer exists so higher-level AI applications can remain:
-
-- deterministic
-- replayable
-- event-sourced
-- independent from any single server or mutable coordinator
-
-The intended execution model is:
-
-1. a prompt is submitted as an event
-2. the reducer projects a pending job
-3. a worker observes that job
-4. the worker runs inference through a real runner path
-5. the worker emits completion or failure events
-
-What is intentionally not wired yet:
-
-- direct `holospaces` dependency from `hologram-ai-core`
-- worker discovery and scheduling
-- `.holo` input materialization and output decoding policy
-- streaming output
-- Wasm userland app SDK
-
-## CLI Surface
-
-`hologram-ai` currently exposes four primary commands:
-
-- `compile`: compile a model into a `.holo` archive
-- `export-fixture`: compile and export a deterministic `holospaces` bundle
-- `run`: execute a compiled `.holo` archive
-- `download`: fetch a model repository into `models/`
-
-Example download:
-
-```bash
-cargo run -p hologram-ai -- download bert-base-uncased
-```
-
-Use `download` instead of external model download tools so the repository keeps
-the expected layout (`model.onnx`, `tokenizer.json`, `config.json`, and related
-assets under `models/`).
-
-## Repository Layout
-
-- `crates/hologram-ai`: top-level CLI and library surface
-- `crates/hologram-ai-core`: deterministic AI app-domain foundation
-- `crates/hologram-ai-common`: shared IR, shapes, and compilation data model
-- `crates/hologram-ai-onnx`: ONNX import and lowering pipeline
-- `crates/hologram-ai-conformance`: end-to-end conformance harness
-- `models/`: checked-in development models and downloaded model repos
-- `specs/docs/`: architecture and pipeline documentation
-
-## Validation
-
-The current `hologram-ai-core` foundation was validated with:
-
-```bash
-cargo fmt --check
-cargo test -p hologram-ai-core
-cargo clippy --workspace --all-targets --all-features -- -D warnings
-```
-
-For more detail, see:
-
-- [CLI docs](specs/docs/cli.md)
-- [Architecture docs](specs/docs/architecture.md)
-- [Repository layout docs](specs/docs/repository-layout.md)
-- [Holo AI apps notes](specs/docs/holo-ai-apps.md)
+[hologram]: https://github.com/Hologram-Technologies/hologram
+[holospaces]: https://github.com/Hologram-Technologies/holospaces
+[UOR-Atlas-UTQC]: https://github.com/afflom/UOR-Atlas-UTQC

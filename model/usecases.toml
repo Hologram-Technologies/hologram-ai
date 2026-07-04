@@ -1,0 +1,72 @@
+# Use-case instances of the parametric framework. The implementation is generic
+# over the model's own published configuration (`config.json` + tensor manifest);
+# these are the instances it is validated at.
+#
+# `smollm2-135m` is the canonical instance — a real published model at a pinned
+# revision, validated against external authorities (ORT parity, HF tokenizers,
+# the live journey). `handshake-tiny` is an arbitrary instance whose presence
+# proves the framework is genuinely parametric (no canonical constant leaks into
+# generic code); it powers the hermetic browser journey with committed
+# deterministic references. `qwen2_5-0_5b` exercises a second architecture
+# family through the same code paths.
+#
+# `expects` records config-derived quantities a witness must reproduce FROM THE
+# MODEL'S OWN config.json — the dictionary forbids these values appearing as
+# literals in pipeline code (the anti-hardcode gate).
+
+[[usecase]]
+id = "smollm2-135m"
+canonical = true
+family = "LlamaForCausalLM"
+hf_repo = "HuggingFaceTB/SmolLM2-135M-Instruct"
+hf_revision = "12fd25f77366fa6b3b4b768ec3050bf629380bac"
+oracle = "smollm2-135m"
+note = "Canonical instance: tied embeddings, GQA (9 heads / 3 KV heads)."
+
+[usecase.expects]
+hidden_size = 576
+num_hidden_layers = 30
+num_attention_heads = 9
+num_key_value_heads = 3
+vocab_size = 49152
+rope_theta = 100000.0
+rms_norm_eps = 1e-5
+tie_word_embeddings = true
+
+[[usecase]]
+id = "handshake-tiny"
+canonical = false
+family = "LlamaForCausalLM"
+hf_repo = ""
+hf_revision = ""
+oracle = "journey-reference"
+note = "Arbitrary tiny instance (deterministically generated, committed under oracles/fixture/). Proves parametricity; powers the hermetic browser journey."
+
+[usecase.expects]
+hidden_size = 64
+num_hidden_layers = 2
+num_attention_heads = 4
+num_key_value_heads = 2
+vocab_size = 512
+rope_theta = 10000.0
+rms_norm_eps = 1e-6
+tie_word_embeddings = false
+
+[[usecase]]
+id = "qwen2_5-0_5b"
+canonical = false
+family = "Qwen2ForCausalLM"
+hf_repo = "Qwen/Qwen2.5-0.5B-Instruct"
+hf_revision = "7ae557604adf67be50417f59c2c2f167def9a775"
+oracle = "hf-hub"
+note = "Second architecture family (attention QKV biases, rope_theta 1e6) through the same parametric builder."
+
+[usecase.expects]
+hidden_size = 896
+num_hidden_layers = 24
+num_attention_heads = 14
+num_key_value_heads = 2
+vocab_size = 151936
+rope_theta = 1000000.0
+rms_norm_eps = 1e-6
+tie_word_embeddings = true
