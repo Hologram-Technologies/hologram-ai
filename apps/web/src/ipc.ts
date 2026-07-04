@@ -1,7 +1,7 @@
 import { computeKappa, validateModelConfig } from "./holo";
 import { type GenOpts } from "./holo";
 import GenerateWorker from "./generate.worker?worker";
-import { environmentBudgetBytes, estimateResources, formatBytes, measuredStorageHeadroomBytes } from "./resources";
+import { cacheBudgetFromHeadroom, environmentBudgetBytes, estimateResources, formatBytes, measuredStorageHeadroomBytes } from "./resources";
 
 export interface WorkspacePaths {
   root: string;
@@ -351,19 +351,24 @@ export async function downloadKnownModel(id: string): Promise<number> {
     const stageKnob = Number(localStorage.getItem("hologram_stage_window") ?? "");
     const stagePlanBudget = Number.isFinite(stageKnob) && stageKnob > 0 ? stageKnob : windowBudget;
     const estimate = estimateResources(config, shardBytes, windowBudget, stagePlanBudget);
+
+    // The resource PROJECTION (information, never rejection): the κ-store is
+    // a cache over recorded provenance — tensors beyond the local headroom
+    // resolve at run time from their revision-pinned source. The cache-budget
+    // knob (hologram_cache_budget) tunes local caching; a safety margin keeps
+    // headroom for archives/companions.
     const headroom = await measuredStorageHeadroomBytes();
-    if (shardBytes > headroom) {
-      const msg =
-        `Resource guard: ${model.hfId} needs ${formatBytes(shardBytes)} of κ-store, ` +
-        `but the measured storage quota headroom is ${formatBytes(headroom)}. ` +
-        `Rejecting before transfer (genuine storage shortfall).`;
-      emitLine("models://download-progress", { stream: "stderr", line: msg });
-      throw new Error(msg);
-    }
+    const cacheKnob = localStorage.getItem("hologram_cache_budget");
+    const knobValue = cacheKnob === null ? NaN : Number(cacheKnob);
+    const cacheBudget = Number.isFinite(knobValue) && knobValue >= 0
+      ? knobValue
+      : cacheBudgetFromHeadroom(headroom);
+    const coverage = shardBytes > 0 ? Math.min(1, cacheBudget / shardBytes) : 1;
     emitLine("models://download-line", {
       stream: "stdout",
       line:
-        `Resource guard: κ-store ${formatBytes(shardBytes)} within measured headroom ${formatBytes(headroom)}; ` +
+        `Resource projection: κ-store ${formatBytes(shardBytes)}, measured local headroom ${formatBytes(headroom)}, ` +
+        `cache coverage ~${Math.round(coverage * 100)}% (the remainder resolves from recorded κ-provenance); ` +
         `execution window ~${formatBytes(estimate.windowBytes)} ` +
         `(${estimate.stageCount === 1 ? "monolithic" : `${estimate.stageCount} stages, ${estimate.layersPerStage} layer(s) each`}), ` +
         `context ${estimate.contextLength}.`,
@@ -393,6 +398,8 @@ export async function downloadKnownModel(id: string): Promise<number> {
             layersPerStage: estimate.layersPerStage,
             stageCount: estimate.stageCount,
             localName,
+            revision: info.sha,
+            cacheBudgetBytes: cacheBudget,
             hfBase: hfBase()
           }
         });
@@ -530,7 +537,8 @@ export async function generate(opts: GenerateOpts): Promise<number> {
     
     activeWorker.postMessage({
       holoBytes,
-      staged: staged ? { modelDir: archiveParts[1], stageCount } : undefined,
+      modelDir: archiveParts[1],
+      staged: staged ? { stageCount } : undefined,
       prompt: opts.prompt,
       genOpts,
       tokenizerBytes,

@@ -30,18 +30,18 @@ Given any HuggingFace repository id:
    b. The tensor manifest is read from the shards' safetensors *headers alone*
       (ranged requests — kilobytes, not weights), and the parametric graph is built
       from config + manifest. A manifest the family cannot realize rejects here.
-   c. The κ-store requirement (the manifest's shard bytes) is checked against the
-      **measured** OPFS quota (`navigator.storage.estimate()`); genuine shortfall
-      rejects naming both figures. Model SIZE is never a rejection criterion: the
-      execution working set is a window (stage size × context, chosen from the
-      environment), and projected window/storage/throughput figures are surfaced as
-      information. A config that cannot produce an estimate is a preflight failure,
-      never a silent pass.
+   c. Resource PROJECTION (information, never rejection): κ-store need, the measured
+      local headroom, the resulting cache coverage, the execution window, and the
+      stage plan are surfaced before transfer. The κ-store is a cache — tensors
+      beyond the local headroom resolve at run time from their recorded provenance —
+      so no resource figure refuses the journey. A config that cannot produce a
+      projection is a preflight failure, never a silent pass.
 4. Stream each shard through the persistent download worker: walk the tensor byte
-   ranges from the already-parsed header, hash each tensor incrementally, persist it to
-   OPFS as `tensors/{κ}.bin`, and **discard the content as it is retrieved** — the
-   k-representation is what remains. Peak transient memory is bounded by one tensor,
-   never a shard or the model.
+   ranges from the already-parsed header, hash each tensor incrementally, cache it to
+   OPFS as `tensors/{κ}.bin` **while local headroom allows**, record every tensor's
+   provenance (revision-pinned URL + byte range) in the model's κ-source map, and
+   **discard the content as it is retrieved** — the k-representation is what remains.
+   Peak transient memory is bounded by one tensor, never a shard or the model.
 5. Persist companions under the model's directory.
 
 Because the graph was built and validated in preflight, the post-stream step is
@@ -61,9 +61,10 @@ stage after the transfer.
 
 ## Stage S3 — Run
 
-1. Materialize: resolve κ-map entries against the OPFS κ-store; verify each buffer
-   re-hashes to its κ; patch the archive's constants into an executable form. A missing
-   or corrupt κ aborts with the label.
+1. Materialize: resolve κ-map entries against the κ-store — the local OPFS cache
+   first, then the recorded provenance (a verified ranged refetch) for anything not
+   cached; every buffer re-hashes to its κ either way. A κ that resolves nowhere, or
+   content that does not reproduce its κ, aborts with the label.
 2. Execution is **windowed over k**: when the model's weight set exceeds the environment
    window, the compiled stage archives (embedding, layer blocks, head) are materialized,
    executed, and released in sequence — activations flow between stages; peak weight

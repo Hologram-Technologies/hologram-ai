@@ -1,19 +1,18 @@
 @row:memory-guard @stage:S1 @status:build @executor:browser
-Feature: The resource guard — quota, never size
-  The guard rejects only genuine resource shortfall: the κ-store bytes the
-  model actually needs versus the MEASURED OPFS quota
-  (navigator.storage.estimate()). Model size is never a rejection criterion —
-  execution is windowed over k — and the projected window/storage figures are
-  surfaced as information before transfer.
+Feature: The resource guard — pure projection, never refusal
+  The guard surfaces the resource picture before transfer: κ-store need, the
+  MEASURED local headroom (navigator.storage.estimate()), the resulting cache
+  coverage, the execution window, and the stage plan. The κ-store is a cache
+  over recorded provenance, so no resource figure refuses the journey.
 
   Background:
     Given the app is open in the browser against the hermetic model server
 
-  Scenario: a model within the storage quota proceeds with figures surfaced
+  Scenario: the projection is surfaced before transfer
     When the fixture model is downloaded
     Then the journey proceeds past the resource guard with figures surfaced
 
-  Scenario: genuine storage shortfall is rejected before transfer naming both figures
-    When downloading a model whose κ-store requirement exceeds the measured storage quota
-    Then the journey is rejected naming the requirement and the quota
-    And no shard bytes were transferred
+  Scenario: a model beyond local headroom is not refused
+    When downloading a model whose κ-store need exceeds the measured local headroom
+    Then the resource projection reports partial cache coverage
+    And the journey is not refused at the guard

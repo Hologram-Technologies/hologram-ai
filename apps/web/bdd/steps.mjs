@@ -240,15 +240,15 @@ Then("the preflight validated the model before the first shard byte", async func
 Then("the journey proceeds past the resource guard with figures surfaced", async function () {
   const body = await this.page.locator("body").innerText();
   assert.ok(
-    body.includes("Resource guard:") &&
-      body.includes("within measured headroom") &&
+    body.includes("Resource projection:") &&
+      body.includes("cache coverage") &&
       body.includes("execution window"),
-    `the guard figures must be surfaced:\n${body}`,
+    `the projection figures must be surfaced:\n${body}`,
   );
 });
 
 When(
-  "downloading a model whose κ-store requirement exceeds the measured storage quota",
+  "downloading a model whose κ-store need exceeds the measured local headroom",
   async function () {
     await installCustomEntry(this, {
       id: "too-large",
@@ -266,26 +266,81 @@ When(
     await this.gotoModels();
     const row = this.page.locator(".list-item", { hasText: "too large model" });
     await row.locator("button", { hasText: "Download" }).click();
-    await this.page.getByText(/Resource guard:/).first().waitFor({ timeout: 60_000 });
+    await this.page.getByText(/Resource projection:/).first().waitFor({ timeout: 60_000 });
   },
 );
 
-Then("the journey is rejected naming the requirement and the quota", async function () {
+Then("the resource projection reports partial cache coverage", async function () {
   const body = await this.page.locator("body").innerText();
+  const match = /cache coverage ~(\d+)%/.exec(body);
+  assert.ok(match, `the projection must report cache coverage:\n${body}`);
   assert.ok(
-    body.includes("Resource guard:") &&
-      body.includes("storage quota headroom") &&
-      body.includes("genuine storage shortfall"),
-    `the rejection must name both figures:\n${body}`,
+    Number(match[1]) < 100,
+    `an over-headroom model must report partial coverage, got ${match[1]}%`,
   );
 });
 
-Then("no shard bytes were transferred", async function () {
-  const log = await this.fixtureRequests();
-  const shardHits = log.filter(
-    (p) => p.includes(TOO_LARGE_REPO.split("/")[1]) && p.endsWith(".safetensors"),
+Then("the journey is not refused at the guard", async function () {
+  const body = await this.page.locator("body").innerText();
+  assert.ok(
+    !body.includes("Rejecting before transfer") && !body.includes("genuine storage shortfall"),
+    `no resource figure may refuse the journey:\n${body}`,
   );
-  assert.deepEqual(shardHits, [], "the guard must reject before any shard request");
+});
+
+// ── S3 — κ-provenance resolution ────────────────────────────────────────────
+
+Given("a zero local cache budget", async function () {
+  // Nothing caches locally; every κ must resolve from recorded provenance.
+  // Prior scenarios' state is cleared so the assertion below is meaningful.
+  await this.page.evaluate(async () => {
+    localStorage.setItem("hologram_cache_budget", "0");
+    const root = await navigator.storage.getDirectory();
+    try {
+      const models = await root.getDirectoryHandle("models");
+      await models.removeEntry("handshake-tiny", { recursive: true });
+    } catch {}
+    try {
+      const tensors = await root.getDirectoryHandle("tensors");
+      const names = [];
+      for await (const [name] of tensors.entries()) names.push(name);
+      for (const name of names) await tensors.removeEntry(name);
+    } catch {}
+  });
+});
+
+Then("the local κ-store holds no fixture tensors", async function () {
+  const names = await this.opfsTensorNames();
+  assert.deepEqual(names, [], `a zero budget must cache nothing, found: ${names}`);
+});
+
+Then("the model directory records κ provenance for every manifest tensor", async function () {
+  const { compute_kappa } = await wasm();
+  const raw = await this.opfsModelFile("handshake-tiny", "kappa-sources.json");
+  assert.ok(raw, "kappa-sources.json missing from the model directory");
+  const sources = JSON.parse(Buffer.from(raw).toString("utf8"));
+  for (const [tensor, bytes] of fixtureTensors()) {
+    const kappa = compute_kappa(bytes);
+    const source = sources[kappa];
+    assert.ok(source, `no provenance recorded for tensor ${tensor} (κ ${kappa})`);
+    assert.ok(
+      source.url && source.end > source.start,
+      `malformed provenance for ${tensor}: ${JSON.stringify(source)}`,
+    );
+  }
+});
+
+Then("the completion matches reference turn 1", async function () {
+  const reference = referenceTranscript();
+  const completions = await this.page.evaluate(
+    () => globalThis.__hologram_completions ?? [],
+  );
+  assert.ok(completions.length >= 1, "turn 1 did not complete");
+  assert.equal(
+    cleanCompletion(completions[0].text),
+    reference.turns[0].completion,
+    "provenance-resolved execution must reproduce the committed reference exactly",
+  );
 });
 
 // ── S1 — companions ─────────────────────────────────────────────────────────

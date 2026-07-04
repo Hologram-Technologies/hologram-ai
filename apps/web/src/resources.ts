@@ -153,12 +153,26 @@ export function estimateResources(
   };
 }
 
-/** The measured OPFS headroom — the only genuine storage bound. */
+/** The measured OPFS headroom. When the environment cannot measure
+ * (no storage API), the headroom is unknown — reported as Infinity so the
+ * cache stays best-effort rather than inventing a limit. */
 export async function measuredStorageHeadroomBytes(): Promise<number> {
+  if (!("storage" in navigator) || typeof navigator.storage.estimate !== "function") {
+    return Number.POSITIVE_INFINITY;
+  }
   const estimate = await navigator.storage.estimate();
   const quota = estimate.quota ?? 0;
   const usage = estimate.usage ?? 0;
   return Math.max(0, quota - usage);
+}
+
+/** The local cache budget: headroom minus a PROPORTIONAL safety margin for
+ * archives/companions (never a fixed constant that could swallow a small
+ * measured headroom). */
+export function cacheBudgetFromHeadroom(headroomBytes: number): number {
+  if (!Number.isFinite(headroomBytes)) return Number.POSITIVE_INFINITY;
+  const margin = Math.min(64 * 1024 ** 2, Math.floor(headroomBytes / 10));
+  return Math.max(0, headroomBytes - margin);
 }
 
 /** Human-readable byte figure for guard messages. */

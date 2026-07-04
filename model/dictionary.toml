@@ -100,7 +100,7 @@ feature = "features/suites/s1_acquisition/model_preflight.feature"
 
 [[row]]
 id = "memory-guard"
-statement = "The guard rejects only genuine resource shortfall — the model's κ-store bytes versus the MEASURED storage quota — naming both figures; model size is never a rejection criterion, and window/storage projections are surfaced as information."
+statement = "The resource guard is pure projection: κ-store need, measured local headroom, cache coverage, window, and stage plan are surfaced as information before transfer; the journey is never refused for resources."
 stage = "S1"
 status = "build"
 oracles = ["journey-reference"]
@@ -201,6 +201,16 @@ oracles = ["journey-reference"]
 tier = "suite"
 executor = "rust"
 feature = "features/suites/s3_execution/staged_execution.feature"
+
+[[row]]
+id = "kappa-provenance-resolution"
+statement = "The κ-store is a cache over recorded provenance: a κ absent from the local store resolves from its revision-pinned source (verified by re-hashing to its κ), and the journey completes with an empty local cache — local and remote resolution are indistinguishable."
+stage = "S3"
+status = "build"
+oracles = ["journey-reference"]
+tier = "suite"
+executor = "browser"
+feature = "features/suites/s3_execution/kappa_provenance_resolution.feature"
 
 [[row]]
 id = "kappa-materialization"

@@ -35,11 +35,15 @@ by resource:
 
 - **Network**: shards stream tensor-by-tensor and the content is discarded as retrieved;
   transfer is bounded by nothing but the wire. Unbounded model size.
-- **Storage**: the κ-store lives in OPFS — disk, not heap. Its bound is the browser's
-  storage quota, a REAL resource measured at runtime (`navigator.storage.estimate()`),
-  never a constant. Unique content costs its entropy (the density proof deduplicates
-  *identical* content and *identical* compute; it does not repeal Shannon), and identical
-  tensors across shards, revisions, and models cost once.
+- **Storage**: the κ-store is a CACHE tier, not a mirror. Every tensor's κ is recorded
+  with its provenance (a revision-pinned URL + byte range) at streaming time; a κ absent
+  from the local store re-resolves from its source and must re-hash to its κ — the same
+  integrity check that guards local content, so remote and local resolution are
+  indistinguishable to the pipeline. The measured quota (`navigator.storage.estimate()`)
+  is therefore a performance dial (how much caches locally), never a capacity bound.
+  Identical tensors across shards, revisions, and models cache once; unique content
+  costs its entropy at its source (the density proof deduplicates *identical* content
+  and *identical* compute; it does not repeal Shannon).
 - **Compile**: the archive is a weightless k-form — structure and κ-bindings. Its size is
   a function of the graph, not the parameters. Unbounded model size.
 - **Runtime**: execution resolves κ → content **per stage**: the model is partitioned
@@ -58,9 +62,12 @@ Accordingly, the dictionary tracks:
   monolithic logits, with peak weight residency bounded by the window.
 - `decode-elision` — the measured elision witness: consecutive decode steps report
   skipped kernel dispatches for the unchanged prefix cone.
-- `memory-guard` — the guard rejects **only genuine resource shortfall**: the κ-store
-  bytes the model actually needs versus the measured OPFS quota. Working-set and
-  throughput figures are surfaced as information, never used to refuse a model.
+- `kappa-provenance-resolution` — a κ absent from the local store resolves from its
+  recorded provenance and reproduces the reference exactly; the local cache may be
+  empty and the journey still completes.
+- `memory-guard` — pure projection: κ-store need, measured local headroom, cache
+  coverage, window, and stage plan are surfaced as information. **The journey is never
+  refused for resources.**
 
 Any stronger scaling statement (asymptotics across model families, wall-clock claims) is
 an `open` row: measured, reported, never asserted.

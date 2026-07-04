@@ -122,6 +122,8 @@ export async function handleSafetensorsDownload(
     layersPerStage,
     stageCount,
     localName,
+    revision,
+    cacheBudgetBytes,
     hfBase,
   }: {
     modelId: string;
@@ -131,6 +133,8 @@ export async function handleSafetensorsDownload(
     layersPerStage?: number;
     stageCount?: number;
     localName?: string;
+    revision?: string;
+    cacheBudgetBytes?: number;
     hfBase?: string;
   },
   emitProgressFn = emitProgress,
@@ -148,9 +152,11 @@ export async function handleSafetensorsDownload(
     emitProgressFn(`Preflight: validating ${modelId} config against the family registry...`);
     await validateModelConfig(configText);
     emitProgressFn(`Preflight: reading shard headers for ${modelId} (ranged requests)...`);
+    // Revision-pinned URLs: the recorded κ-provenance must be immutable.
+    const rev = revision ?? "main";
     const manifests: ShardManifest[] = [];
     for (const file of files) {
-      const url = `${base}/${modelId}/resolve/main/${file.rfilename}`;
+      const url = `${base}/${modelId}/resolve/${rev}/${file.rfilename}`;
       manifests.push(await fetchShardManifest(url, file.rfilename));
     }
     const allKeys: string[] = [];
@@ -168,9 +174,15 @@ export async function handleSafetensorsDownload(
     emitProgressFn("Preflight passed: the model is valid; streaming weights.");
 
     // ── Phase 2: stream over k ─────────────────────────────────────────────
+    // The κ-store is a CACHE: tensors persist locally while the budget
+    // allows; every tensor's provenance (revision-pinned URL + absolute byte
+    // range) is recorded so the rest resolve at run time.
     const root = await navigator.storage.getDirectory();
     const tensorsDir = await root.getDirectoryHandle("tensors", { create: true });
     const allKappas: string[] = [];
+    const kappaSources: Record<string, { url: string; start: number; end: number }> = {};
+    const cacheBudget = cacheBudgetBytes ?? Number.POSITIVE_INFINITY;
+    let cachedBytes = 0;
 
     for (const manifest of manifests) {
       emitProgressFn(`Streaming ${manifest.rfilename}...`);
@@ -215,19 +227,24 @@ export async function handleSafetensorsDownload(
             localOffset += toFeed;
 
             if (currentGlobal + toFeed === tensorEnd) {
-              // The tensor is complete: persist under its κ and DISCARD the
-              // content — only the k-representation flows forward.
+              // The tensor is complete: record its provenance, cache it
+              // within budget, and DISCARD the content — only the
+              // k-representation flows forward.
               const kappa = currentHasher.finalize();
-              const binHandle = await tensorsDir.getFileHandle(`${kappa}.bin`, { create: true });
-              if ("createSyncAccessHandle" in binHandle) {
-                const accessHandle = await (binHandle as any).createSyncAccessHandle();
-                accessHandle.write(currentTensorBuffer);
-                accessHandle.flush();
-                accessHandle.close();
-              } else {
-                const writable = await (binHandle as any).createWritable();
-                await writable.write(currentTensorBuffer);
-                await writable.close();
+              kappaSources[kappa] = { url: manifest.url, start: tensorStart, end: tensorEnd };
+              if (cachedBytes + tensorSize <= cacheBudget) {
+                const binHandle = await tensorsDir.getFileHandle(`${kappa}.bin`, { create: true });
+                if ("createSyncAccessHandle" in binHandle) {
+                  const accessHandle = await (binHandle as any).createSyncAccessHandle();
+                  accessHandle.write(currentTensorBuffer);
+                  accessHandle.flush();
+                  accessHandle.close();
+                } else {
+                  const writable = await (binHandle as any).createWritable();
+                  await writable.write(currentTensorBuffer);
+                  await writable.close();
+                }
+                cachedBytes += tensorSize;
               }
               allKappas.push(kappa);
               currentTensorIdx++;
@@ -264,6 +281,17 @@ export async function handleSafetensorsDownload(
         throw new Error(`EOF before finishing tensor ${tensors[currentTensorIdx].key}`);
       }
       emitProgressFn(`Finished streaming ${manifest.rfilename}.`);
+    }
+
+    // Record κ-provenance under the model directory: the run-time resolver's
+    // network tier.
+    if (localName) {
+      const modelsDir = await root.getDirectoryHandle("models", { create: true });
+      const localDir = await modelsDir.getDirectoryHandle(localName, { create: true });
+      const srcHandle = await localDir.getFileHandle("kappa-sources.json", { create: true });
+      const writable = await srcHandle.createWritable();
+      await writable.write(JSON.stringify(kappaSources));
+      await writable.close();
     }
 
     // Mechanical: the graph was validated in preflight; this binds the
