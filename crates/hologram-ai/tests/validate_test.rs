@@ -1,6 +1,6 @@
 //! Integration tests for the validate command.
 //!
-//! Uses committed ONNX fixtures (tests/fixtures/onnx/) so these work in CI.
+//! Uses committed ONNX oracle artifacts (oracles/onnx/) so these work in CI.
 
 use hologram_ai::validate::validate_model;
 use std::path::PathBuf;
@@ -9,7 +9,7 @@ fn fixture_path(name: &str) -> PathBuf {
     let mut p = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     p.pop(); // crates/hologram-ai -> crates/
     p.pop(); // crates/ -> repo root
-    p.push("tests/fixtures/onnx");
+    p.push("oracles/onnx");
     p.push(name);
     p
 }

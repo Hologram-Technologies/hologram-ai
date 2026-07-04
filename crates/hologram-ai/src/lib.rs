@@ -14,6 +14,7 @@ pub mod compiler;
 #[cfg(feature = "native")]
 pub mod download;
 pub mod engine;
+pub mod materialize;
 pub mod runner;
 pub mod validate;
 
