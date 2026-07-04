@@ -61,7 +61,7 @@
 //! # References
 //!
 //! - PixelPrune paper: arXiv 2604.00886
-//! - Plan 063: specs/plans/063-vit-patch-prune.md
+//! 
 
 use super::pipeline::Pass;
 use crate::ir::node::AiNode;

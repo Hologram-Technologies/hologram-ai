@@ -53,10 +53,22 @@ pub enum DesugarKind {
     /// into the row dimension (hologram's MatMul kernel is strictly 2-D).
     MatMul,
     /// `MultiHeadAttention`/`GroupedQueryAttention` → canonical `Attention` op
-    /// with `AttentionAttrs` (causal + softmax scale) attached.
+    /// with `AttentionAttrs` (causal + softmax scale) attached. The canonical
+    /// kernel's operand contract is Q `[batch, heads, seq, head_dim]` / K,V
+    /// `[batch, kv_heads, seq, head_dim]` (params derived positionally from
+    /// the operand shapes), so `heads_first`/`rope` are layout/positional
+    /// information the builder must realize — dropping them executes seq-first
+    /// operands with transposed parameters and no positional encoding.
     Attention {
         causal: bool,
         scale_bits: u32,
+        /// `true` ⇒ Q/K/V already carry the kernel layout `[B, H, S, D]`;
+        /// `false` ⇒ seq-first `[B, S, H, D]`, transposed around the op.
+        heads_first: bool,
+        /// Apply rotary embeddings (rotate-half, non-interleaved) to Q/K
+        /// before the canonical op, tables built from `rope_base`.
+        rope: bool,
+        rope_base: f32,
     },
     /// `Concat(axis)` → flat (axis-0) `Concat` chain. hologram's Concat is a flat
     /// byte append (axis-0 only), so a non-axis-0 concat is realized by
@@ -198,9 +210,13 @@ pub enum DesugarKind {
     /// Normalization: reshape the input to rank-2 `[rows, feature]` (hologram
     /// derives `feature` only from a rank-2 operand), apply `op` with the γ/β
     /// (and optional residual) operands, then reshape back to the output shape.
+    /// `epsilon` is the op's variance-stabilizer: the canonical graph carries
+    /// no ε channel (the substrate's norm kernels run at their 1e-9 floor), so
+    /// the builder realizes it by input preconditioning.
     Norm {
         op: OpKind,
         residual: bool,
+        epsilon: f32,
     },
     /// A `Constant`/`ConstantOfShape` value materialized into the `ConstantStore`.
     Constant,
@@ -262,33 +278,55 @@ pub fn dispatch(op: &AiOp) -> OpPlan {
         A::LogSoftmax { .. } => P::Direct(OpKind::LogSoftmax),
 
         // ── Normalization (reshape to rank-2; γ/β are trailing operands) ─────
-        A::LayerNorm { .. } => P::Desugar(DesugarKind::Norm {
+        A::LayerNorm { epsilon, .. } => P::Desugar(DesugarKind::Norm {
             op: OpKind::LayerNorm,
             residual: false,
+            epsilon: *epsilon,
         }),
-        A::RmsNorm { .. } => P::Desugar(DesugarKind::Norm {
+        A::RmsNorm { epsilon } => P::Desugar(DesugarKind::Norm {
             op: OpKind::RmsNorm,
             residual: false,
+            epsilon: *epsilon,
         }),
-        A::GroupNorm { .. } => P::Desugar(DesugarKind::Norm {
+        A::GroupNorm { epsilon, .. } => P::Desugar(DesugarKind::Norm {
             op: OpKind::GroupNorm,
             residual: false,
+            epsilon: *epsilon,
         }),
-        A::InstanceNorm { .. } => P::Desugar(DesugarKind::Norm {
+        A::InstanceNorm { epsilon } => P::Desugar(DesugarKind::Norm {
             op: OpKind::InstanceNorm,
             residual: false,
+            epsilon: *epsilon,
         }),
         A::BatchNorm { epsilon, .. } => P::Desugar(DesugarKind::BatchNorm { epsilon: *epsilon }),
 
         // ── Attention (Q/K/V + optional norm/rope tables are operands) ───────
         // Causal masking + softmax scale ride on `AttentionAttrs` (the kernel is
         // a faithful SDPA: causal + grouped-query + scale). kv_heads is derived
-        // by the compiler from the K operand's head dim. FlashAttentionHint
-        // carries no semantics → default (non-causal, 1/√d).
-        A::MultiHeadAttention { scale, causal, .. }
-        | A::GroupedQueryAttention { scale, causal, .. } => P::Desugar(DesugarKind::Attention {
+        // by the compiler from the K operand's head dim. MultiHeadAttention
+        // carries no layout/rope fields: its importers emit the kernel layout
+        // directly (heads-first, no fused rope). FlashAttentionHint carries no
+        // semantics → default (non-causal, 1/√d).
+        A::MultiHeadAttention { scale, causal, .. } => P::Desugar(DesugarKind::Attention {
             causal: *causal,
             scale_bits: scale.map(|s| s.to_bits()).unwrap_or(0),
+            heads_first: true,
+            rope: false,
+            rope_base: 0.0,
+        }),
+        A::GroupedQueryAttention {
+            scale,
+            causal,
+            heads_first,
+            rope,
+            rope_base,
+            ..
+        } => P::Desugar(DesugarKind::Attention {
+            causal: *causal,
+            scale_bits: scale.map(|s| s.to_bits()).unwrap_or(0),
+            heads_first: *heads_first,
+            rope: *rope,
+            rope_base: *rope_base,
         }),
         A::FlashAttentionHint => P::Operandized(OpKind::Attention),
 
@@ -505,9 +543,10 @@ pub fn dispatch(op: &AiOp) -> OpPlan {
 
         // ── Canonical composites (hologram desugars/fuses structurally) ─────
         A::FusedSwiGLU => P::Desugar(DesugarKind::SwiGlu),
-        A::FusedLayerNormResidual { .. } => P::Desugar(DesugarKind::Norm {
+        A::FusedLayerNormResidual { epsilon } => P::Desugar(DesugarKind::Norm {
             op: OpKind::AddRmsNorm,
             residual: true,
+            epsilon: *epsilon,
         }),
         // hologram-ai's legacy fusions are unfused into canonical ops (§5.3).
         A::MatMulRelu => P::Desugar(DesugarKind::MatMulActivation {

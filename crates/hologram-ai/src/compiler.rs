@@ -351,11 +351,15 @@ impl ModelCompiler {
             } => {
                 let config: serde_json::Value =
                     serde_json::from_str(&config_json).context("Failed to parse config.json")?;
+                // Build with the manifest's storage dtypes so narrow weights
+                // (F16/BF16) are declared as stored and widened to the F32
+                // compute type via the builder's canonical Cast insertion —
+                // never left to leak a narrow dtype into lowering.
                 let mut graph =
-                    hologram_ai_safetensors::parametric::build_parametric_graph_from_keys(
-                        &config, &keys,
+                    hologram_ai_safetensors::parametric::build_parametric_graph_from_manifest(
+                        &config, &keys, &dtypes, None,
                     )
-                    .context("building parametric graph from keys")?;
+                    .context("building parametric graph from the streamed manifest")?;
 
                 let mut next_id = graph.tensor_names.keys().max().copied().unwrap_or(0) + 1;
                 let mut name_to_id = std::collections::HashMap::new();

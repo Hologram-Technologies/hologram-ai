@@ -514,9 +514,13 @@ impl<'a> Ctx<'a> {
     fn desugar(&mut self, node: &AiNode, kind: DesugarKind) -> Result<()> {
         match kind {
             DesugarKind::MatMul => self.desugar_matmul(node),
-            DesugarKind::Attention { causal, scale_bits } => {
-                self.desugar_attention(node, causal, scale_bits)
-            }
+            DesugarKind::Attention {
+                causal,
+                scale_bits,
+                heads_first,
+                rope,
+                rope_base,
+            } => self.desugar_attention(node, causal, scale_bits, heads_first, rope, rope_base),
             DesugarKind::Concat { axis } => self.desugar_concat(node, axis),
             DesugarKind::Constant => self.desugar_constant(node),
             DesugarKind::Split { axis, sizes } => self.desugar_split(node, axis, &sizes),
@@ -577,7 +581,11 @@ impl<'a> Ctx<'a> {
             } => self.desugar_norm_projection(node, epsilon, &split_sizes, has_residual_add),
             DesugarKind::SwiGlu => self.desugar_swiglu(node),
             DesugarKind::SwiGluProjection => self.desugar_swiglu_projection(node),
-            DesugarKind::Norm { op, residual } => self.desugar_norm(node, op, residual),
+            DesugarKind::Norm {
+                op,
+                residual,
+                epsilon,
+            } => self.desugar_norm(node, op, residual, epsilon),
         }
     }
 
@@ -930,16 +938,123 @@ impl<'a> Ctx<'a> {
     }
 
     /// Lower MultiHead/GroupedQuery attention to the canonical `Attention` op,
-    /// attaching `AttentionAttrs` (causal masking + softmax scale). Q/K/V (and
-    /// any norm/rope operands) flow through as the node's inputs; the compiler
-    /// derives heads/seq/head_dim from Q's shape and `kv_heads` from K's, so a
-    /// grouped-query K/V with fewer heads is handled by the kernel directly (no
-    /// hand-rolled repeat_kv expansion).
-    fn desugar_attention(&mut self, node: &AiNode, causal: bool, scale_bits: u32) -> Result<()> {
-        let nid = self.emit_simple(node, OpKind::Attention)?;
+    /// attaching `AttentionAttrs` (causal masking + softmax scale). The
+    /// compiler derives batch/heads/seq/head_dim positionally from Q's rank-4
+    /// shape as `[batch, heads, seq, head_dim]` and `kv_heads` from K's dim 1,
+    /// so a grouped-query K/V with fewer heads is handled by the kernel
+    /// directly (no hand-rolled repeat_kv expansion). A seq-first (`heads_first:
+    /// false`) Q/K/V is transposed into that operand contract and the context
+    /// transposed back to seq-first, preserving the downstream reshape contract.
+    /// When `rope` is set, rotary embeddings are applied to Q and K first.
+    fn desugar_attention(
+        &mut self,
+        node: &AiNode,
+        causal: bool,
+        scale_bits: u32,
+        heads_first: bool,
+        rope: bool,
+        rope_base: f32,
+    ) -> Result<()> {
+        // Heads-first without rope is exactly the canonical op (the proven
+        // ONNX-fused SDPA path): one node, all operands flowing through.
+        if heads_first && !rope {
+            let nid = self.emit_simple(node, OpKind::Attention)?;
+            self.graph
+                .set_attention_attrs(nid, AttentionAttrs { causal, scale_bits });
+            return self.bind_out(node, InputSource::Node(nid));
+        }
+
+        anyhow::ensure!(
+            node.inputs.len() >= 3,
+            "attention needs Q/K/V operands, got {}",
+            node.inputs.len()
+        );
+        let dtype = self.dtype_of(node.inputs[0]);
+        // [B, S, H, D] ↔ [B, H, S, D]; the perm is its own inverse.
+        let perm = [0u32, 2, 1, 3];
+        let mut qkv: Vec<(InputSource, Vec<u64>)> = Vec::with_capacity(3);
+        for i in 0..3 {
+            let src = self.src(node.inputs[i])?;
+            let dims = self.in_dims(node, i)?;
+            anyhow::ensure!(
+                dims.len() == 4,
+                "attention operand {i} must be rank-4, got {dims:?}"
+            );
+            if heads_first {
+                qkv.push((src, dims));
+            } else {
+                let t_dims: Vec<u64> = perm.iter().map(|&p| dims[p as usize]).collect();
+                let t = self.transpose(src, dtype, &dims, &perm);
+                qkv.push((t, t_dims));
+            }
+        }
+
+        if rope {
+            for slot in qkv.iter_mut().take(2) {
+                let dims = slot.1.clone();
+                slot.0 = self.rope_rotate(slot.0, dtype, &dims, rope_base)?;
+            }
+        }
+
+        let out_dims = qkv[0].1.clone();
+        let shape = self.intern(&out_dims);
+        let nid = self.add(
+            GraphOp::Op(OpKind::Attention),
+            SmallVec::from_iter([qkv[0].0, qkv[1].0, qkv[2].0]),
+            dtype,
+            shape,
+        );
         self.graph
             .set_attention_attrs(nid, AttentionAttrs { causal, scale_bits });
-        self.bind_out(node, InputSource::Node(nid))
+        let ctx = InputSource::Node(nid);
+        let out = if heads_first {
+            ctx
+        } else {
+            self.transpose(ctx, dtype, &out_dims, &perm)
+        };
+        self.bind_out(node, out)
+    }
+
+    /// Apply rotary embeddings to a `[batch, heads, seq, head_dim]` tensor via
+    /// the canonical `RotaryEmbedding` op (rotate-half, non-interleaved: the
+    /// pair partner of element `j` is `j ± head_dim/2`, matching the kernel).
+    /// The kernel reads cos/sin at each element's flat index with `head_dim` =
+    /// the operand's last dim, so the compile-time `[1, 1, seq, head_dim]`
+    /// tables — `cos[s][j] = cos(s · base^(-2(j mod d/2)/d))`, the standard
+    /// `inv_freq = base^(-2i/d)` — are Expand-broadcast over batch and heads.
+    fn rope_rotate(
+        &mut self,
+        src: InputSource,
+        dtype: DTypeId,
+        dims: &[u64],
+        base: f32,
+    ) -> Result<InputSource> {
+        anyhow::ensure!(
+            dtype == DTypeId(DTYPE_F32),
+            "RoPE lowering builds f32 cos/sin tables; operand dtype {dtype:?} is unsupported"
+        );
+        let (seq, d) = (dims[2], dims[3]);
+        anyhow::ensure!(
+            d > 0 && d % 2 == 0 && base > 0.0,
+            "RoPE needs an even head_dim and a positive base (head_dim {d}, base {base})"
+        );
+        let half = d / 2;
+        let mut cos = Vec::with_capacity((seq * d) as usize);
+        let mut sin = Vec::with_capacity((seq * d) as usize);
+        for s in 0..seq {
+            for j in 0..d {
+                let inv_freq = (base as f64).powf(-2.0 * (j % half) as f64 / d as f64);
+                let angle = s as f64 * inv_freq;
+                cos.push(angle.cos() as f32);
+                sin.push(angle.sin() as f32);
+            }
+        }
+        let table_dims = [1, 1, seq, d];
+        let cos_c = self.const_f32(&cos, &table_dims);
+        let sin_c = self.const_f32(&sin, &table_dims);
+        let cos_b = self.broadcast_to(cos_c, dtype, &table_dims, dims);
+        let sin_b = self.broadcast_to(sin_c, dtype, &table_dims, dims);
+        Ok(self.op(OpKind::RotaryEmbedding, &[src, cos_b, sin_b], dtype, dims))
     }
 
     /// Emit `Transpose(src)` by `perm` (synthesizing the i64 perm operand the
@@ -1604,12 +1719,13 @@ impl<'a> Ctx<'a> {
     fn desugar_norm_projection(
         &mut self,
         node: &AiNode,
-        _epsilon: f64,
+        epsilon: f64,
         split_sizes: &[usize],
         has_residual_add: bool,
     ) -> Result<()> {
         let dtype = self.dtype_of(node.inputs[0]);
         let x_dims = self.in_dims(node, 0)?;
+        let epsilon = epsilon as f32;
         let (norm, wstart) = if has_residual_add {
             // FusedNormProjection inputs (AI side, residual variant):
             //   [x, residual, norm_weight, W_0..]
@@ -1620,12 +1736,15 @@ impl<'a> Ctx<'a> {
             // compiler order; the FusedLayerNormResidual desugar uses
             // the same convention.
             let x = self.src(node.inputs[0])?;
+            let x = self.precondition_norm_eps(x, dtype, &x_dims, epsilon);
             let res = self.src(node.inputs[1])?;
+            let res = self.precondition_norm_eps(res, dtype, &x_dims, epsilon);
             let w = self.src(node.inputs[2])?;
             let n = self.op(OpKind::AddRmsNorm, &[x, w, res], dtype, &x_dims);
             (n, 3)
         } else {
             let x = self.src(node.inputs[0])?;
+            let x = self.precondition_norm_eps(x, dtype, &x_dims, epsilon);
             let w = self.src(node.inputs[1])?;
             let n = self.op(OpKind::RmsNorm, &[x, w], dtype, &x_dims);
             (n, 2)
@@ -1705,11 +1824,44 @@ impl<'a> Ctx<'a> {
 
     // ── normalization ──────────────────────────────────────────────────────────
 
+    /// Realize a norm op's ε exactly. The canonical graph has no ε channel:
+    /// hologram's compiler leaves `NormCall::epsilon_bits` at 0 and the norm
+    /// kernels clamp it to the 1e-9 floor, so a model's ε (typically 1e-5/1e-6)
+    /// would silently degrade to 1e-9. Scaling the normalized input by
+    /// `c = √(ε₀/ε)` is exact algebra: every norm here divides by
+    /// `√(V(c·x) + ε₀) = c·√(V(x) + ε₀/c²) = c·√(V(x) + ε)` while the
+    /// numerator scales by the same `c` (μ and σ scale together for the
+    /// mean-subtracting norms), so the normalized value — and hence γ/β — is
+    /// untouched. Returns `src` unchanged when the floor already realizes ε
+    /// (ε ≤ 0) or the operand is not f32 (the scale constant is emitted f32;
+    /// this lowering's compute type is f32 — weights are widened at import).
+    fn precondition_norm_eps(
+        &mut self,
+        src: InputSource,
+        dtype: DTypeId,
+        dims: &[u64],
+        epsilon: f32,
+    ) -> InputSource {
+        // The substrate norm kernels' ε floor: `f32::from_bits(0).abs().max(1e-9)`.
+        const NORM_KERNEL_EPS: f64 = 1e-9;
+        if epsilon <= 0.0 || dtype != DTypeId(DTYPE_F32) {
+            return src;
+        }
+        let c = (NORM_KERNEL_EPS / epsilon as f64).sqrt() as f32;
+        if !c.is_finite() || c <= 0.0 || c == 1.0 {
+            return src;
+        }
+        let c_const = self.const_f32(&[c], &[1]);
+        let c_b = self.broadcast_to(c_const, dtype, &[1], dims);
+        self.op(OpKind::Mul, &[src, c_b], dtype, dims)
+    }
+
     /// Normalization over the last axis. hologram derives the per-row `feature`
     /// only from a rank-2 operand, so we reshape the input to `[rows, feature]`,
-    /// apply the norm (with γ/β — and a residual for `AddRmsNorm`), then reshape
-    /// the result back to the declared output shape.
-    fn desugar_norm(&mut self, node: &AiNode, op: OpKind, residual: bool) -> Result<()> {
+    /// apply the norm (with γ/β — and a residual for `AddRmsNorm`) to the
+    /// ε-preconditioned input, then reshape the result back to the declared
+    /// output shape.
+    fn desugar_norm(&mut self, node: &AiNode, op: OpKind, residual: bool, epsilon: f32) -> Result<()> {
         let dtype = self.dtype_of(node.inputs[0]);
         let x_dims = self.in_dims(node, 0)?;
         let feature = x_dims.last().copied().unwrap_or(1).max(1);
@@ -1717,6 +1869,7 @@ impl<'a> Ctx<'a> {
 
         let x = self.src(node.inputs[0])?;
         let x2d = self.reshape_to(x, dtype, &[rows, feature]);
+        let x2d = self.precondition_norm_eps(x2d, dtype, &[rows, feature], epsilon);
 
         let mut operands: SmallVec<[InputSource; 4]> = SmallVec::new();
         operands.push(x2d);
@@ -1733,6 +1886,7 @@ impl<'a> Ctx<'a> {
             // rank-1 [feature] and passes through.
             let res = self.src(node.inputs[1])?;
             let res2d = self.reshape_to(res, dtype, &[rows, feature]);
+            let res2d = self.precondition_norm_eps(res2d, dtype, &[rows, feature], epsilon);
             let gamma = self.src(node.inputs[2])?;
             operands.push(gamma);
             operands.push(res2d);

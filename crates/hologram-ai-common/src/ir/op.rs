@@ -51,7 +51,7 @@ pub enum ScatterReduce {
 
 /// Canonical AI IR operation.
 ///
-/// This is the full operation set from `specs/docs/lowering.md`.
+/// This is the full operation set from the lowering docs (docs/architecture/ARCHITECTURE.md §4).
 /// Variants produced by optimization passes carry a `Fused` prefix.
 #[derive(Debug, Clone)]
 pub enum AiOp {
