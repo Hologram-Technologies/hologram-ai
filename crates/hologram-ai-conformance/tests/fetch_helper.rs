@@ -106,3 +106,19 @@ pub async fn fetch_authoritative_metadata(
 
     (config_json, keys, kappas, shapes, dtypes)
 }
+
+#[tokio::test]
+async fn test_phi4_streamed_compile() {
+    let (config, keys, kappas, shapes, dtypes) =
+        fetch_authoritative_metadata("microsoft/phi-4").await;
+    let source = hologram_ai::compiler::ModelSource::SafetensorsStreamed {
+        config_json: config,
+        keys,
+        kappas,
+        shapes,
+        dtypes,
+    };
+    let compiler = hologram_ai::compiler::ModelCompiler::default();
+    let prepared = compiler.prepare(source).unwrap();
+    let _ = prepared.compile_at(Some(128), Default::default()).unwrap();
+}

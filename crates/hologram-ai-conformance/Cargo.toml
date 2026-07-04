@@ -54,6 +54,7 @@ holospaces = { workspace = true }
 # tokenizer the model was trained with — never against our own output.
 tokenizers = { version = "0.20", default-features = false, features = ["onig"] }
 reqwest = { workspace = true, features = ["json"] }
+hologram-ai = { path = "../hologram-ai" }
 
 [[test]]
 name = "bdd"

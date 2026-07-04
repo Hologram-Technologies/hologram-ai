@@ -116,11 +116,22 @@ pub fn compile_safetensors_streamed(
 
     // Inject AiParam::External for each key so the compiled `.holo` has the `holospaces.kappa_map`.
     // The parametric compiler doesn't add parameters, so we add them here.
-    let next_id = graph.tensor_names.keys().max().copied().unwrap_or(0) + 1;
-    for (i, key) in keys.iter().enumerate() {
-        let id = next_id + i as u32;
+    let mut next_id = graph.tensor_names.keys().max().copied().unwrap_or(0) + 1;
+    let mut name_to_id = std::collections::HashMap::new();
+    for (id, name) in &graph.tensor_names {
+        name_to_id.insert(name.clone(), *id);
+    }
 
-        graph.tensor_names.insert(id, key.clone());
+    for (i, key) in keys.iter().enumerate() {
+        let id = if let Some(existing_id) = name_to_id.get(key) {
+            *existing_id
+        } else {
+            let new_id = next_id;
+            next_id += 1;
+            graph.tensor_names.insert(new_id, key.clone());
+            new_id
+        };
+
         let info = hologram_ai_common::TensorInfo::new(
             dtypes[i],
             hologram_ai_common::shape_from_concrete(&shapes[i]),
