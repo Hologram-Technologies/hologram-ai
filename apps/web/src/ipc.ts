@@ -342,60 +342,10 @@ export async function downloadKnownModel(id: string): Promise<number> {
     
     emitLine("models://compile-line", { stream: "stdout", line: `Compiled and saved to ${holoName} (${holoBytes.length} bytes).` });
   } else {
-    // ONNX flow
-    const companionNames = ["tokenizer.json", "config.json", "tokenizer_config.json", "special_tokens_map.json"];
-    const companions = siblings.filter((f: any) => companionNames.includes(f.rfilename.split('/').pop()!));
-  
-    let selectedOnnxFiles: any[] = [];
-    if (onnxFiles.length > 0) {
-      const mainOnnxFiles = onnxFiles.filter((f: any) => f.rfilename.endsWith('.onnx'));
-      let chosenMain = mainOnnxFiles[0];
-      for (const f of mainOnnxFiles) {
-        const name = f.rfilename.toLowerCase();
-        if (name.includes('cpu') || name.includes('int4')) {
-          chosenMain = f;
-          if (name.includes('cpu') && name.includes('int4')) break;
-        }
-      }
-      if (chosenMain) {
-        selectedOnnxFiles.push(chosenMain);
-        const expectedDataName = chosenMain.rfilename + '.data';
-        const dataFile = onnxFiles.find((f: any) => f.rfilename === expectedDataName || f.rfilename === chosenMain.rfilename + '_data');
-        if (dataFile) selectedOnnxFiles.push(dataFile);
-      } else {
-        selectedOnnxFiles = onnxFiles;
-      }
-    }
-  
-    const filesToDownload = [...selectedOnnxFiles, ...companions];
-    const worker = getDownloadWorker();
-    const holoBytes = await new Promise<Uint8Array>((resolve, reject) => {
-      worker.onmessage = (e) => {
-        if (e.data.type === "progress") {
-          emitLine("models://download-progress", { stream: "stdout", line: e.data.line });
-        } else if (e.data.type === "done") {
-          resolve(e.data.holoBytes);
-        } else if (e.data.type === "error") {
-          reject(new Error(e.data.error));
-        }
-      };
-      worker.postMessage({
-        type: "download_onnx",
-        payload: {
-          modelId: model.hfId,
-          files: filesToDownload
-        }
-      });
-    });
-    
-    const kappa = await computeKappa(holoBytes);
-    const holoName = `${kappa}.holo`;
-    const holoHandle = await localDir.getFileHandle(holoName, { create: true });
-    const writable = await holoHandle.createWritable();
-    await writable.write(holoBytes as any);
-    await writable.close();
-    
-    emitLine("models://compile-line", { stream: "stdout", line: `Compiled and saved to ${holoName} (${holoBytes.length} bytes).` });
+    // ONNX flow - unsupported because it cannot be streamed over k
+    emitLine("models://download-progress", { stream: "stderr", line: "Error: ONNX models are not supported in the web IDE because they cannot be streamed over the holospaces/k-representation." });
+    emitLine("models://download-progress", { stream: "stderr", line: "Please use a model with safetensors." });
+    throw new Error("Model lacks safetensors export.");
   }
   return 0;
 }

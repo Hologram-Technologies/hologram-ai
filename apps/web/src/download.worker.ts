@@ -1,4 +1,4 @@
-import { compileSafetensorsStreamed, KappaHasher, compileOnnxWithData } from "./holo";
+import { compileSafetensorsStreamed, KappaHasher, ensureReady } from "./holo";
 
 self.onmessage = async (e) => {
   const { type, payload } = e.data;
@@ -21,21 +21,24 @@ function emitError(err: string) {
   self.postMessage({ type: "error", error: err });
 }
 
-async function handleSafetensorsDownload({
-  modelId,
-  configText,
-  files
-}: {
-  modelId: string,
-  configText: string,
-  files: any[]
-}) {
+export async function handleSafetensorsDownload(
+  {
+    modelId,
+    configText,
+    files
+  }: {
+    modelId: string,
+    configText: string,
+    files: any[]
+  },
+  emitProgressFn = emitProgress,
+  emitDoneFn = emitDone,
+  emitErrorFn = emitError
+) {
   try {
+    await ensureReady();
     const root = await navigator.storage.getDirectory();
-    const modelsDir = await root.getDirectoryHandle("models", { create: true });
-    // In UOR, we store chunks by kappa in a global pool or per model. Let's do per model.
-    const localName = modelId.split("/").pop() || modelId;
-    const modelDir = await modelsDir.getDirectoryHandle(localName, { create: true });
+    const tensorsDir = await root.getDirectoryHandle("tensors", { create: true });
 
     const allKeys: string[] = [];
     const allKappas: string[] = [];
@@ -44,7 +47,7 @@ async function handleSafetensorsDownload({
 
     for (const file of files) {
       const url = `https://huggingface.co/${modelId}/resolve/main/${file.rfilename}`;
-      emitProgress(`Streaming ${file.rfilename}...`);
+      emitProgressFn(`Streaming ${file.rfilename}...`);
       
       const response = await fetch(url);
       if (!response.ok || !response.body) throw new Error(`Failed to fetch ${file.rfilename}`);
@@ -150,14 +153,17 @@ async function handleSafetensorsDownload({
 
             if (currentGlobal + toFeed === tensorEnd) {
               const kappa = currentHasher.finalize();
-              
-              // Write the completed tensor buffer to OPFS as <kappa>.bin
-              const binHandle = await modelDir.getFileHandle(`${kappa}.bin`, { create: true });
-              // Use SyncAccessHandle for blazing fast writes in worker
-              const accessHandle = await (binHandle as any).createSyncAccessHandle();
-              accessHandle.write(currentTensorBuffer);
-              accessHandle.flush();
-              accessHandle.close();
+              const binHandle = await tensorsDir.getFileHandle(`${kappa}.bin`, { create: true });
+              if ('createSyncAccessHandle' in binHandle) {
+                const accessHandle = await (binHandle as any).createSyncAccessHandle();
+                accessHandle.write(currentTensorBuffer);
+                accessHandle.flush();
+                accessHandle.close();
+              } else {
+                const writable = await (binHandle as any).createWritable();
+                await writable.write(currentTensorBuffer);
+                await writable.close();
+              }
 
               allKeys.push(tensor.key);
               allKappas.push(kappa);
@@ -194,7 +200,7 @@ async function handleSafetensorsDownload({
           lastEmit = now;
           if (totalBytes > 0) {
             const percent = Math.round((downloadedBytes / totalBytes) * 100);
-            emitProgress(`Streaming ${file.rfilename}: ${percent}% (${(downloadedBytes / 1024 / 1024).toFixed(1)}MB)`);
+            emitProgressFn(`Streaming ${file.rfilename}: ${percent}% (${(downloadedBytes / 1024 / 1024).toFixed(1)}MB)`);
           }
         }
       }
@@ -202,10 +208,10 @@ async function handleSafetensorsDownload({
       if (currentTensorIdx < tensors.length) {
         throw new Error(`EOF before finishing tensor ${tensors[currentTensorIdx].key}`);
       }
-      emitProgress(`Finished streaming ${file.rfilename}.`);
+      emitProgressFn(`Finished streaming ${file.rfilename}.`);
     }
 
-    emitProgress("Compiling streamed tensors...");
+    emitProgressFn("Compiling streamed tensors...");
     const holoBytes = await compileSafetensorsStreamed(
       configText,
       allKeys,
@@ -214,104 +220,21 @@ async function handleSafetensorsDownload({
       allDtypes
     );
 
-    emitDone(holoBytes);
+    emitDoneFn(holoBytes);
   } catch (err: any) {
-    emitError(err.toString());
+    emitErrorFn(err.toString());
   }
 }
 
-async function handleOnnxDownload({
-  modelId,
-  files
-}: {
-  modelId: string,
-  files: any[]
-}) {
-  try {
-    const root = await navigator.storage.getDirectory();
-    const modelsDir = await root.getDirectoryHandle("models", { create: true });
-    const localName = modelId.split("/").pop() || modelId;
-    const modelDir = await modelsDir.getDirectoryHandle(localName, { create: true });
-
-    for (const file of files) {
-      const url = `https://huggingface.co/${modelId}/resolve/main/${file.rfilename}`;
-      emitProgress(`Downloading ${file.rfilename}...`);
-      
-      const response = await fetch(url);
-      if (!response.ok || !response.body) throw new Error(`Failed to fetch ${file.rfilename}`);
-
-      const handle = await modelDir.getFileHandle(file.rfilename, { create: true });
-      const accessHandle = await (handle as any).createSyncAccessHandle();
-      
-      const reader = response.body.getReader();
-      let downloadedBytes = 0;
-      const totalBytes = Number(response.headers.get("content-length")) || 0;
-      let lastEmit = 0;
-
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        
-        accessHandle.write(value);
-        downloadedBytes += value.length;
-        
-        const now = Date.now();
-        if (now - lastEmit > 500) {
-          lastEmit = now;
-          if (totalBytes > 0) {
-            const percent = Math.round((downloadedBytes / totalBytes) * 100);
-            emitProgress(`Downloading ${file.rfilename}: ${percent}% (${(downloadedBytes / 1024 / 1024).toFixed(1)}MB)`);
-          } else {
-            emitProgress(`Downloading ${file.rfilename}: ${(downloadedBytes / 1024 / 1024).toFixed(1)}MB`);
-          }
-        }
-      }
-      
-      accessHandle.flush();
-      accessHandle.close();
-      emitProgress(`Finished downloading ${file.rfilename}.`);
-    }
-
-    emitProgress("Compiling ONNX model...");
-    
-    // Find the main ONNX file from the payload
-    const mainOnnxFile = files.find(f => f.rfilename.endsWith('.onnx'));
-    if (!mainOnnxFile) throw new Error("ONNX file not found in download list");
-    const onnxFileName = mainOnnxFile.rfilename.split('/').pop()!;
-    
-    const onnxHandle = await modelDir.getFileHandle(onnxFileName);
-    const onnxFile = await onnxHandle.getFile();
-    
-    if (onnxFile.size > 2 * 1024 * 1024 * 1024) {
-      throw new Error(`Model is too large (${(onnxFile.size / 1024 / 1024 / 1024).toFixed(1)}GB) to compile in the browser due to WebAssembly 32-bit memory limits (max 2-4GB). Please use the hologram-ai desktop or CLI for models larger than 2GB, or use a smaller/quantized model.`);
-    }
-    
-    const onnxBytes = new Uint8Array(await onnxFile.arrayBuffer());
-
-    let dataBytes = new Uint8Array();
-    try {
-      const dataHandle = await modelDir.getFileHandle(onnxFileName + ".data");
-      const dataFile = await dataHandle.getFile();
-      dataBytes = new Uint8Array(await dataFile.arrayBuffer());
-    } catch {
-      try {
-        const dataHandle2 = await modelDir.getFileHandle(onnxFileName + "_data");
-        const dataFile2 = await dataHandle2.getFile();
-        dataBytes = new Uint8Array(await dataFile2.arrayBuffer());
-      } catch {
-        // no data file
-      }
-    }
-
-    let holoBytes: Uint8Array;
-    if (dataBytes.length > 0) {
-      holoBytes = await compileOnnxWithData(onnxBytes, dataBytes);
-    } else {
-      const { compile } = await import("./holo");
-      holoBytes = await compile(onnxBytes);
-    }
-    emitDone(holoBytes);
-  } catch (err: any) {
-    emitError(err.toString());
-  }
+// ONNX models cannot be streamed over k without a complex streaming protobuf parser in JS.
+// Per architectural constraints, the implementation MUST operate over the k-representation
+// and stream in every aspect to avoid contrived 32-bit WebAssembly limits.
+// Therefore, ONNX downloads are not supported in the web IDE.
+async function handleOnnxDownload(
+  _args: any,
+  _emitProgressFn = emitProgress,
+  _emitDoneFn = emitDone,
+  emitErrorFn = emitError
+) {
+  emitErrorFn("ONNX models are not supported in the web IDE because they cannot be streamed over the holospaces/k-representation. Please use safetensors.");
 }
