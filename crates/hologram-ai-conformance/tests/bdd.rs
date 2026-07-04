@@ -143,7 +143,7 @@ async fn when_safetensors_fetched_and_streamed(w: &mut HologramWorld) {
 }
 
 #[cfg(not(feature = "conformance"))]
-#[when(expr = "the safetensors metadata is streamed to the holographic compiler")]
+#[when(expr = "the safetensors metadata is fetched and streamed to the holographic compiler")]
 async fn when_safetensors_streamed_skip(_w: &mut HologramWorld) {}
 
 #[cfg(feature = "conformance")]
