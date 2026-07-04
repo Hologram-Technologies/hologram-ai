@@ -79,6 +79,16 @@ executor = "browser"
 feature = "features/suites/s1_acquisition/streamed_download.feature"
 
 [[row]]
+id = "supported-search"
+statement = "Model discovery lists only models whose architecture family the registry supports — the journey never begins on a model preflight would reject for family support."
+stage = "S1"
+status = "build"
+oracles = ["journey-reference", "hf-hub"]
+tier = "suite"
+executor = "browser"
+feature = "features/suites/s1_acquisition/supported_search.feature"
+
+[[row]]
 id = "model-preflight"
 statement = "Before any shard byte moves, the model is validated: config names a supported family with its required keys, and the parametric graph builds from config + the header-only manifest; rejection names the family/key with zero shard bytes transferred."
 stage = "S1"
@@ -149,6 +159,16 @@ oracles = ["quant-goldens"]
 tier = "suite"
 executor = "rust"
 feature = "features/suites/s2_compilation/quant_dequant.feature"
+
+[[row]]
+id = "family-registry-support"
+statement = "Every registered architecture family is verified against a pinned published model: the parametric k-form compiles from the model's real config.json and safetensors manifest, its κ-map covering every tensor exactly once."
+stage = "S2"
+status = "verified"
+oracles = ["hf-hub", "smollm2-135m", "mistral-7b-instruct", "phi-4"]
+tier = "suite"
+executor = "rust"
+feature = "features/suites/s2_compilation/family_registry_support.feature"
 
 [[row]]
 id = "parametricity"

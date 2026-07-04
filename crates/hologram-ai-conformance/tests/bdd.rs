@@ -41,7 +41,9 @@ use hologram_ai_core::{
 };
 use hologram_ai_model::{Executor, Model, Tier, UseCaseExpects};
 use hologram_ai_quant::{dequant_q4_0, dequant_q8_0};
-use hologram_ai_safetensors::parametric::build_parametric_graph_from_manifest;
+use hologram_ai_safetensors::parametric::{
+    build_parametric_graph_from_manifest, selected_family, supported_families,
+};
 use hologram_ai_tokenizer::{NativeTokenizer, Tokenizer};
 use serde::Deserialize;
 
@@ -763,6 +765,9 @@ struct BddWorld {
     graph: Option<AiGraph>,
     graph_err: Option<String>,
     streamed: Option<StreamedMeta>,
+    /// Weight-byte audit of the pinned-revision metadata walk (dictionary
+    /// row `family-registry-support`): must be zero — headers only.
+    streamed_weight_bytes: Option<u64>,
     archive: Option<Vec<u8>>,
     goldens: Vec<GoldenVector>,
     dequant: Vec<(String, Vec<f32>, Vec<f64>)>,
@@ -1411,6 +1416,55 @@ async fn given_streamed_metadata(w: &mut BddWorld, repo: String) {
         shapes,
         dtypes,
     });
+}
+
+// ─────────────── S2 — family-registry support (external authority) ──────────
+
+/// The pinned-revision variant of the streamed-metadata Given: the
+/// family-registry witness holds every registered family to its published
+/// authority *at the oracle pin*, auditing that no weight bytes flow.
+#[given(expr = "the streamed metadata of {string} at revision {string} from the Hub")]
+async fn given_streamed_metadata_at(w: &mut BddWorld, repo: String, revision: String) {
+    let m = fetch_helper::fetch_authoritative_metadata_at(&repo, &revision).await;
+    assert!(!m.keys.is_empty(), "the Hub manifest must name tensors");
+    w.streamed_weight_bytes = Some(m.weight_bytes_fetched);
+    w.streamed = Some(StreamedMeta {
+        config_json: m.config_json,
+        keys: m.keys,
+        kappas: m.kappas,
+        shapes: m.shapes,
+        dtypes: m.dtypes,
+    });
+}
+
+#[then(expr = "the selected family is {string}")]
+async fn then_selected_family(w: &mut BddWorld, family: String) {
+    let m = w.streamed.as_ref().expect("streamed metadata");
+    let config: serde_json::Value =
+        serde_json::from_str(&m.config_json).expect("parsing the authority's config.json");
+    let selected =
+        selected_family(&config).expect("the registry selects a family for the authority's config");
+    assert_eq!(
+        selected, family,
+        "registry selection diverges from the outline row"
+    );
+    assert!(
+        supported_families().contains(&selected),
+        "`{selected}` must be listed by supported_families()"
+    );
+    println!("[family-registry] {selected}: selected for the pinned authority");
+}
+
+#[then("no weight bytes were fetched")]
+async fn then_no_weight_bytes(w: &mut BddWorld) {
+    let bytes = w
+        .streamed_weight_bytes
+        .expect("the pinned-revision walk recorded its weight-byte audit");
+    assert_eq!(
+        bytes, 0,
+        "the metadata walk must fetch zero weight bytes, got {bytes}"
+    );
+    println!("[family-registry] weight bytes fetched: {bytes}");
 }
 
 #[when("the manifest is compiled without weights")]

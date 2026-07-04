@@ -11,6 +11,11 @@ a feature, a witness, and an oracle. The journey is verified in two forms:
 
 ## Stage S1 — Download
 
+Model discovery (search) lists **only** models whose architecture family the
+registry supports — the journey never begins on a model that preflight would
+reject for family support. Each registered family is itself verified against a
+pinned published model (`family-registry-support`).
+
 Given any HuggingFace repository id:
 
 1. Resolve the repo's file manifest via the Hub API (`api/models/{id}`), with retry and

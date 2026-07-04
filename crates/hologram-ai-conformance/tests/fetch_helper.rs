@@ -11,28 +11,61 @@ use reqwest::Client;
 use serde_json::Value;
 use std::convert::TryInto;
 
+/// Streamed authority metadata plus the weight-byte audit of the walk that
+/// produced it.
+pub struct StreamedAuthority {
+    pub config_json: String,
+    pub keys: Vec<String>,
+    pub kappas: Vec<String>,
+    pub shapes: Vec<Vec<u64>>,
+    pub dtypes: Vec<DType>,
+    /// Bytes received from within any shard's data section. The walk issues
+    /// only ranged requests for the 8-byte length prefix and the JSON header,
+    /// so any non-zero count means weight payload actually flowed (e.g. a
+    /// server that ignored the Range header).
+    pub weight_bytes_fetched: u64,
+}
+
 pub async fn fetch_authoritative_metadata(
     model_name: &str,
 ) -> (String, Vec<String>, Vec<String>, Vec<Vec<u64>>, Vec<DType>) {
+    let m = fetch_authoritative_metadata_at(model_name, "main").await;
+    (m.config_json, m.keys, m.kappas, m.shapes, m.dtypes)
+}
+
+/// Resolve a repo's shard set at an explicit revision (a pinned commit or a
+/// branch name) and stream-parse each shard's safetensors header into the
+/// tensor manifest — metadata and headers only, never weight bytes.
+pub async fn fetch_authoritative_metadata_at(
+    model_name: &str,
+    revision: &str,
+) -> StreamedAuthority {
     let client = Client::new();
-    let config_url = format!("https://huggingface.co/{}/raw/main/config.json", model_name);
-    let config_json = client
+    let config_url = format!(
+        "https://huggingface.co/{}/raw/{}/config.json",
+        model_name, revision
+    );
+    let config_resp = client
         .get(&config_url)
         .send()
         .await
-        .expect("fetching config.json")
-        .text()
-        .await
-        .expect("reading config.json body");
+        .expect("fetching config.json");
+    assert!(
+        config_resp.status().is_success(),
+        "fetching {config_url}: HTTP {}",
+        config_resp.status()
+    );
+    let config_json = config_resp.text().await.expect("reading config.json body");
 
     let mut keys = Vec::new();
     let mut kappas = Vec::new();
     let mut shapes = Vec::new();
     let mut dtypes = Vec::new();
+    let mut weight_bytes_fetched = 0u64;
 
     let index_url = format!(
-        "https://huggingface.co/{}/raw/main/model.safetensors.index.json",
-        model_name
+        "https://huggingface.co/{}/raw/{}/model.safetensors.index.json",
+        model_name, revision
     );
     let index_resp = client
         .get(&index_url)
@@ -57,8 +90,8 @@ pub async fn fetch_authoritative_metadata(
 
     for file in shard_files {
         let st_url = format!(
-            "https://huggingface.co/{}/resolve/main/{}",
-            model_name, file
+            "https://huggingface.co/{}/resolve/{}/{}",
+            model_name, revision, file
         );
         let len_resp = client
             .get(&st_url)
@@ -66,12 +99,20 @@ pub async fn fetch_authoritative_metadata(
             .send()
             .await
             .expect("fetching the 8-byte header length");
+        assert!(
+            len_resp.status().is_success(),
+            "fetching {st_url} length prefix: HTTP {}",
+            len_resp.status()
+        );
         let len_bytes = len_resp.bytes().await.expect("reading the header length");
         let header_len = u64::from_le_bytes(
             len_bytes[0..8]
                 .try_into()
                 .expect("an 8-byte range response"),
         );
+        // The shard's data section (the weights) begins at 8 + header_len;
+        // anything received past it is weight payload.
+        weight_bytes_fetched += (len_bytes.len() as u64).saturating_sub(8 + header_len);
 
         let header_resp = client
             .get(&st_url)
@@ -79,9 +120,16 @@ pub async fn fetch_authoritative_metadata(
             .send()
             .await
             .expect("fetching the JSON header");
+        assert!(
+            header_resp.status().is_success(),
+            "fetching {st_url} JSON header: HTTP {}",
+            header_resp.status()
+        );
         let header_bytes = header_resp.bytes().await.expect("reading the JSON header");
+        weight_bytes_fetched += (header_bytes.len() as u64).saturating_sub(header_len);
+        let header = &header_bytes[..header_bytes.len().min(header_len as usize)];
 
-        for entry in parse_streamed_header(&header_bytes).expect("stream-parsing the header") {
+        for entry in parse_streamed_header(header).expect("stream-parsing the header") {
             kappas.push(format!("blake3:{}", entry.name));
             keys.push(entry.name);
             dtypes.push(entry.dtype);
@@ -89,7 +137,14 @@ pub async fn fetch_authoritative_metadata(
         }
     }
 
-    (config_json, keys, kappas, shapes, dtypes)
+    StreamedAuthority {
+        config_json,
+        keys,
+        kappas,
+        shapes,
+        dtypes,
+        weight_bytes_fetched,
+    }
 }
 
 /// The second registered architecture family (Qwen2: attention QKV biases,

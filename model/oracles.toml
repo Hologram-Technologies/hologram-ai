@@ -134,6 +134,24 @@ kind = "live-authority"
 note = "The canonical use-case instance: safetensors + ONNX export + tokenizer.json, all at the pin."
 
 [[oracle]]
+id = "mistral-7b-instruct"
+authority = "mistralai/Mistral-7B-Instruct-v0.3 at a pinned revision"
+source = "https://huggingface.co/mistralai/Mistral-7B-Instruct-v0.3"
+pin = "c170c708c41dac9275d15a8fff4eca08d52bab71"
+license = "Apache-2.0"
+kind = "live-authority"
+note = "The MistralForCausalLM family authority: real config + safetensors manifest for the family-registry-support witness."
+
+[[oracle]]
+id = "phi-4"
+authority = "microsoft/phi-4 at a pinned revision"
+source = "https://huggingface.co/microsoft/phi-4"
+pin = "932b33c0ec9ca189badeb22480721a8de9d0e006"
+license = "MIT"
+kind = "live-authority"
+note = "The Phi3ForCausalLM family authority (fused qkv_proj / gate_up_proj tensor layout): real config + safetensors manifest for the family-registry-support witness."
+
+[[oracle]]
 id = "journey-reference"
 authority = "Committed deterministic references for the hermetic journey fixture"
 source = "xtask gen-fixture (seeded, reproducible)"

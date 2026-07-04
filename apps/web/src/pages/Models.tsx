@@ -11,6 +11,7 @@ import {
   extensionPresent,
   hfBase,
 } from "../ipc";
+import { supportedFamilies } from "../holo";
 
 type Busy = { id: string; phase: "downloading" | "compiling" } | null;
 
@@ -80,18 +81,31 @@ export function Models() {
     setTail([]);
     try {
       const q = encodeURIComponent(searchQuery.trim());
-      // Parametric search for models
-      const [res1] = await Promise.all([
-        fetch(`${hfBase()}/api/models?search=${q}&sort=downloads&direction=-1&limit=20`)
-      ]);
-      if (!res1.ok) throw new Error(`Search failed`);
-      
-      const data1 = await res1.json();
-      // Deduplicate
-      const unique = Array.from(new Map(data1.map((item: any) => [item.id, item])).values());
-      (unique as any[]).sort((a, b) => b.downloads - a.downloads);
-      
-      setSearchResults(unique.slice(0, 15));
+      const res = await fetch(`${hfBase()}/api/models?search=${q}&sort=downloads&direction=-1&limit=20`);
+      if (!res.ok) throw new Error(`Search failed`);
+
+      const data = await res.json();
+      const unique = Array.from(new Map(data.map((item: any) => [item.id, item])).values()) as any[];
+      unique.sort((a, b) => b.downloads - a.downloads);
+
+      // Supported-only discovery (row `supported-search`): resolve each
+      // candidate's architecture family and list only what the parametric
+      // registry supports. The supported set comes from the registry itself.
+      const supported = new Set(await supportedFamilies());
+      const resolved = await Promise.all(
+        unique.slice(0, 15).map(async (item: any) => {
+          try {
+            const info = await fetch(`${hfBase()}/api/models/${item.id}`);
+            if (!info.ok) return null;
+            const detail = await info.json();
+            const family = detail?.config?.architectures?.[0];
+            return family && supported.has(family) ? { ...item, family } : null;
+          } catch {
+            return null;
+          }
+        }),
+      );
+      setSearchResults(resolved.filter(Boolean).slice(0, 15));
     } catch (e) {
       setTail((t) => [...t, `search error: ${String(e)}`]);
     } finally {
@@ -186,7 +200,7 @@ export function Models() {
               <div className="list-item" key={r.id} style={{ alignItems: "center" }}>
                 <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
                   <strong>{r.id}</strong>
-                  <div className="meta">Downloads: {r.downloads} · Tags: {(r.tags || []).slice(0, 5).join(", ")}</div>
+                  <div className="meta">Downloads: {r.downloads} · Family: {r.family} · Tags: {(r.tags || []).slice(0, 4).join(", ")}</div>
                 </div>
                 <button onClick={() => onAddAndDownload(r.id)} disabled={busy !== null}>
                   Add & Download

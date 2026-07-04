@@ -4,6 +4,7 @@
 // not a reimplementation. Build the wasm package first: `pnpm wasm`.
 import init, {
   describe as wasmDescribe,
+  supported_families as wasmSupportedFamilies,
   validate_model_config as wasmValidateModelConfig,
   validate_streamed_manifest as wasmValidateStreamedManifest,
   run as wasmRun,
@@ -84,6 +85,13 @@ export async function compileSafetensorsStreamed(
 ): Promise<Uint8Array> {
   await ensureReady();
   return wasmCompileSafetensorsStreamed(configJson, keys, kappas, shapes, dtypes, contextLength);
+}
+
+/** The architecture families the parametric registry supports — the single
+ * source the search filter reads (row `supported-search`). */
+export async function supportedFamilies(): Promise<string[]> {
+  await ensureReady();
+  return wasmSupportedFamilies() as string[];
 }
 
 /** Config-only preflight (S1 step a): registered family + required keys —

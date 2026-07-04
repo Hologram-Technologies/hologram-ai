@@ -134,6 +134,17 @@ fn parse_manifest(
     Ok(rows)
 }
 
+/// The architecture-family names the registry supports (drives the browser's
+/// supported-only model search — dictionary row `supported-search`).
+#[wasm_bindgen]
+pub fn supported_families() -> js_sys::Array {
+    let out = js_sys::Array::new();
+    for name in hologram_ai_safetensors::parametric::supported_families() {
+        out.push(&JsValue::from_str(name));
+    }
+    out
+}
+
 /// Config-only preflight (journey S1, step a): the architecture family must
 /// be registered and the family's required keys present — checked BEFORE even
 /// the shard headers are fetched. Fails naming the family or the missing key.

@@ -19,6 +19,7 @@ export const TOO_LARGE_REPO = "hologram-fixture/too-large";
 export const MISSING_REPO = "hologram-fixture/does-not-exist";
 export const UNSUPPORTED_FAMILY_REPO = "hologram-fixture/unsupported-family";
 export const BAD_CONFIG_REPO = "hologram-fixture/bad-config";
+export const SEARCH_UNSUPPORTED_REPO = "hologram-fixture/gpt2-tiny";
 
 const FIXTURE_FILES = [
   "config.json",
@@ -28,22 +29,18 @@ const FIXTURE_FILES = [
   "generation_config.json",
 ];
 
-// The user-reported phi-4 shape: a valid repo whose family the parametric
-// registry does not support. Preflight must reject it on config alone.
+// A valid repo whose family the parametric registry does not support
+// (GPT2: learned positions + LayerNorm — structurally outside the decoder
+// families the registry realizes). Preflight must reject on config alone.
 const UNSUPPORTED_FAMILY_CONFIG = JSON.stringify({
-  architectures: ["Phi3ForCausalLM"],
-  hidden_size: 5120,
-  intermediate_size: 17920,
-  num_hidden_layers: 40,
-  num_attention_heads: 40,
-  num_key_value_heads: 10,
-  vocab_size: 100352,
-  rms_norm_eps: 1e-5,
-  rope_theta: 250000.0,
-  max_position_embeddings: 16384,
-  tie_word_embeddings: false,
-  torch_dtype: "bfloat16",
-  model_type: "phi3",
+  architectures: ["GPT2LMHeadModel"],
+  n_embd: 768,
+  n_layer: 12,
+  n_head: 12,
+  vocab_size: 50257,
+  n_positions: 1024,
+  torch_dtype: "float32",
+  model_type: "gpt2",
 });
 
 // A config that is not a model config at all (the tokenizer_config-overwrite
@@ -113,12 +110,40 @@ export function startFixtureServer() {
       send(200, JSON.stringify(requests));
       return;
     }
+    if (url.pathname === "/api/models" && url.searchParams.has("search")) {
+      send(
+        200,
+        JSON.stringify([
+          { id: FIXTURE_REPO, downloads: 1000, tags: ["text-generation"] },
+          { id: SEARCH_UNSUPPORTED_REPO, downloads: 999, tags: ["text-generation"] },
+        ]),
+      );
+      return;
+    }
+    if (url.pathname === `/api/models/${SEARCH_UNSUPPORTED_REPO}`) {
+      send(
+        200,
+        JSON.stringify({
+          id: SEARCH_UNSUPPORTED_REPO,
+          config: { architectures: ["GPT2LMHeadModel"] },
+          siblings: [{ rfilename: "config.json", size: 200 }],
+        }),
+      );
+      return;
+    }
     if (url.pathname === `/api/models/${FIXTURE_REPO}`) {
       const siblings = FIXTURE_FILES.map((name) => {
         const size = readFileSync(path.join(FIXTURE_DIR, name)).length;
         return { rfilename: name, size };
       });
-      send(200, JSON.stringify({ id: FIXTURE_REPO, siblings }));
+      send(
+        200,
+        JSON.stringify({
+          id: FIXTURE_REPO,
+          config: { architectures: ["LlamaForCausalLM"] },
+          siblings,
+        }),
+      );
       return;
     }
     if (url.pathname === `/api/models/${TOO_LARGE_REPO}`) {

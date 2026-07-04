@@ -7,7 +7,7 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 import { referenceTranscript } from "./world.mjs";
-import { BAD_CONFIG_REPO, MISSING_REPO, TOO_LARGE_REPO, UNSUPPORTED_FAMILY_REPO } from "./fixture-server.mjs";
+import { BAD_CONFIG_REPO, FIXTURE_REPO, MISSING_REPO, SEARCH_UNSUPPORTED_REPO, TOO_LARGE_REPO, UNSUPPORTED_FAMILY_REPO } from "./fixture-server.mjs";
 
 const WEB_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const ROOT = path.resolve(WEB_DIR, "../..");
@@ -138,6 +138,40 @@ Then("the journey fails at the download stage naming the repository", async func
   assert.ok(body.includes(MISSING_REPO), `failure must name ${MISSING_REPO}:\n${body}`);
 });
 
+// ── S1 — supported-only discovery ───────────────────────────────────────────
+
+When("searching the catalog for {string}", async function (query) {
+  await this.gotoModels();
+  await this.page.locator('input[type="text"]').fill(query);
+  await this.page.locator("button", { hasText: "Search Catalog" }).click();
+  // The results panel renders once the (filtered) search resolves.
+  await this.page.getByText("Search Results").waitFor({ timeout: 30_000 });
+});
+
+Then("the search results include the supported fixture model", async function () {
+  const results = this.page.locator(".list-item", { hasText: FIXTURE_REPO });
+  await results.first().waitFor({ timeout: 10_000 });
+});
+
+Then("the search results do not include the unsupported-family model", async function () {
+  const body = await this.page.locator("body").innerText();
+  assert.ok(
+    !body.includes(SEARCH_UNSUPPORTED_REPO),
+    `the GPT2-family repo must be filtered out of discovery:\n${body}`,
+  );
+});
+
+Then("each search result names its architecture family", async function () {
+  const metas = await this.page
+    .locator(".list-item", { hasText: FIXTURE_REPO })
+    .locator(".meta")
+    .allInnerTexts();
+  assert.ok(
+    metas.some((m) => m.includes("Family: LlamaForCausalLM")),
+    `the result must carry its family badge: ${JSON.stringify(metas)}`,
+  );
+});
+
 // ── S1 — model preflight ────────────────────────────────────────────────────
 
 const BARE_ENTRY = {
@@ -167,7 +201,7 @@ When("downloading a model whose config names an unsupported family", async funct
 Then("the journey is rejected at preflight naming the family", async function () {
   const body = await this.page.locator("body").innerText();
   assert.ok(
-    body.includes("Phi3ForCausalLM"),
+    body.includes("GPT2LMHeadModel"),
     `the rejection must name the unsupported family:\n${body}`,
   );
 });
