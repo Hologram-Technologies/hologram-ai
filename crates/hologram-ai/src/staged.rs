@@ -526,6 +526,8 @@ pub struct GrowableStagedSession {
     residency_budget: u64,
     admission_probe: Option<std::rc::Rc<dyn Fn() -> bool>>,
     verified: std::rc::Rc<std::cell::RefCell<std::collections::HashSet<String>>>,
+    derived_store: Option<Box<dyn DerivedStore>>,
+    derived_hits: u64,
     current: Option<(usize, StagedRunner<'static>)>,
 }
 
@@ -568,6 +570,8 @@ impl GrowableStagedSession {
             residency_budget: 0,
             admission_probe: None,
             verified: std::rc::Rc::new(std::cell::RefCell::new(std::collections::HashSet::new())),
+            derived_store: None,
+            derived_hits: 0,
             current: None,
         })
     }
@@ -625,16 +629,7 @@ impl SessionProvider for GrowableStagedSession {
             }
             // Drop the previous window first: peak residency stays one stage.
             self.current = None;
-            let archives = compile_stages(
-                &self.config_json,
-                &self.keys,
-                &self.kappas,
-                &self.shapes,
-                &self.dtypes,
-                Some(window as u64),
-                self.layers_per_stage,
-            )
-            .with_context(|| format!("compiling a {window}-token staged window"))?;
+            let archives = self.stages_for_window(window)?;
             let mut runner = StagedRunner::from_archives(
                 archives,
                 Box::new(SharedStore(std::rc::Rc::clone(&self.store))),
@@ -659,5 +654,161 @@ impl SessionProvider for GrowableStagedSession {
 
     fn max_window(&self) -> usize {
         self.max_window
+    }
+}
+
+// ── Derived-artifact closure (row `derived-artifact-kappa`) ──────────────────
+
+/// A derived-artifact store: the known set closes over deterministic
+/// derivation (resource model, Closure). A window's stage archives are
+/// computed deterministically from κ inputs (config, manifest, window,
+/// partition — `deterministic-compile` witnesses bit-identity), so they are
+/// themselves content: derived once, persisted under their derivation key
+/// with their recorded content-κs, and RESOLVED by later sessions instead of
+/// re-derived. Soundness is inherited: content verifies against its recorded
+/// κ at load (once per load — off the per-token path), a mismatch evaporates
+/// the entry and recovery is derivation itself, and everything here is
+/// re-derivable locally, so a wrong prior can never dead-end or execute
+/// unverified content.
+pub trait DerivedStore {
+    /// The archives + recorded content-κs stored under `key`, if present.
+    fn load(&mut self, key: &str) -> Option<(Vec<Vec<u8>>, Vec<String>)>;
+    /// Persist `stages` (+ their content-κs) under `key`.
+    fn store(&mut self, key: &str, stages: &[Vec<u8>], kappas: &[String]);
+    /// Evaporate a corrupted or stale entry (the unpin of this tier).
+    fn evaporate(&mut self, key: &str);
+}
+
+/// [`DerivedStore`] over a directory: `{key}/{i}.holo` + `{key}/kappas.json`
+/// (the native mirror of the browser's `models/<dir>/derived/` layout).
+pub struct DirDerivedStore {
+    root: std::path::PathBuf,
+}
+
+impl DirDerivedStore {
+    /// Create a derived-artifact store rooted at `root`.
+    pub fn new(root: impl Into<std::path::PathBuf>) -> Self {
+        Self { root: root.into() }
+    }
+}
+
+impl DerivedStore for DirDerivedStore {
+    fn load(&mut self, key: &str) -> Option<(Vec<Vec<u8>>, Vec<String>)> {
+        let dir = self.root.join(key);
+        let kappas: Vec<String> =
+            serde_json::from_slice(&std::fs::read(dir.join("kappas.json")).ok()?).ok()?;
+        let mut stages = Vec::with_capacity(kappas.len());
+        for i in 0..kappas.len() {
+            stages.push(std::fs::read(dir.join(format!("{i}.holo"))).ok()?);
+        }
+        Some((stages, kappas))
+    }
+
+    fn store(&mut self, key: &str, stages: &[Vec<u8>], kappas: &[String]) {
+        let dir = self.root.join(key);
+        let write = || -> std::io::Result<()> {
+            std::fs::create_dir_all(&dir)?;
+            for (i, stage) in stages.iter().enumerate() {
+                std::fs::write(dir.join(format!("{i}.holo")), stage)?;
+            }
+            std::fs::write(
+                dir.join("kappas.json"),
+                serde_json::to_vec(kappas).expect("κ list serializes"),
+            )
+        };
+        // Persistence is an optimization; a failed write only costs a
+        // future re-derivation.
+        let _ = write();
+    }
+
+    fn evaporate(&mut self, key: &str) {
+        let _ = std::fs::remove_dir_all(self.root.join(key));
+    }
+}
+
+impl GrowableStagedSession {
+    /// Install a derived-artifact store: window regrows resolve their stage
+    /// archives from it (content-verified at load) and persist fresh
+    /// derivations into it. Without one, every window compiles fresh — the
+    /// same semantics, more derivation.
+    pub fn set_derived_store(&mut self, store: Box<dyn DerivedStore>) {
+        self.derived_store = Some(store);
+    }
+
+    /// Window regrows served from the derived store instead of compiled —
+    /// the derivation-reuse instrument.
+    pub fn derived_hits(&self) -> u64 {
+        self.derived_hits
+    }
+
+    /// Stage materializations of the resident window's runner (0 before the
+    /// first window) — the cross-turn bandwidth instrument: a second
+    /// generation over a warm session adds none while the resident set holds.
+    pub fn materialization_count(&self) -> u64 {
+        self.current
+            .as_ref()
+            .map_or(0, |(_, r)| r.materialization_count())
+    }
+
+    /// The derivation key of this session's stages at `window`: a κ over the
+    /// exact inputs the derivation is a deterministic function of. Two
+    /// sessions with identical inputs resolve each other's artifacts; any
+    /// input change is a different key, never a reinterpretation.
+    fn derivation_key(&self, window: usize) -> String {
+        let mut ingest = format!(
+            "stage-archives:v1:window={window}:layers_per_stage={}:context={}:config=",
+            self.layers_per_stage, self.max_window
+        )
+        .into_bytes();
+        ingest.extend_from_slice(self.config_json.as_bytes());
+        for (key, kappa) in self.keys.iter().zip(&self.kappas) {
+            ingest.extend_from_slice(key.as_bytes());
+            ingest.push(b'=');
+            ingest.extend_from_slice(kappa.as_bytes());
+            ingest.push(b';');
+        }
+        crate::materialize::kappa_of(&ingest)
+    }
+
+    /// Resolve the window's stage archives: derived store first (verified at
+    /// load; a mismatch evaporates the entry — derive-as-recovery), else
+    /// compile and persist the fresh derivation.
+    fn stages_for_window(&mut self, window: usize) -> Result<Vec<Vec<u8>>> {
+        let key = self.derivation_key(window);
+        if let Some(store) = self.derived_store.as_mut() {
+            if let Some((stages, kappas)) = store.load(&key) {
+                let intact = stages.len() == kappas.len()
+                    && !stages.is_empty()
+                    && stages
+                        .iter()
+                        .zip(&kappas)
+                        .all(|(s, k)| crate::materialize::kappa_of(s) == *k);
+                if intact {
+                    self.derived_hits += 1;
+                    tracing::info!(window, "staged window resolved from derived κ-store");
+                    return Ok(stages);
+                }
+                // Corrupted or torn: evaporate and recover by deriving.
+                store.evaporate(&key);
+            }
+        }
+        let stages = compile_stages(
+            &self.config_json,
+            &self.keys,
+            &self.kappas,
+            &self.shapes,
+            &self.dtypes,
+            Some(window as u64),
+            self.layers_per_stage,
+        )
+        .with_context(|| format!("compiling a {window}-token staged window"))?;
+        if let Some(store) = self.derived_store.as_mut() {
+            let kappas: Vec<String> = stages
+                .iter()
+                .map(|s| crate::materialize::kappa_of(s))
+                .collect();
+            store.store(&key, &stages, &kappas);
+        }
+        Ok(stages)
     }
 }

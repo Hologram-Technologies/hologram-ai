@@ -30,3 +30,7 @@ Feature: κ-store bandwidth is paid per window, never per token
   Scenario: cached and strict execution produce the same completion
     When the same greedy completion is generated with and without a residency budget
     Then both completions are identical and non-empty
+
+  Scenario: the resident set survives across chat turns
+    When two completions are generated over one warm session within the budget
+    Then the second completion adds no stage materializations

@@ -152,6 +152,13 @@ export async function generateStaged(
   layersPerStage: number,
   resolveKappa: (kappa: string) => Uint8Array | undefined,
   invalidateKappa: ((kappa: string) => void) | undefined,
+  derived:
+    | {
+        load: (key: string) => { stages: Uint8Array[]; kappas: string[] } | undefined;
+        store: (key: string, stages: Uint8Array[], kappas: string[]) => void;
+        evaporate: (key: string) => void;
+      }
+    | undefined,
   prompt: string,
   opts: GenOpts,
   tokenizer?: Uint8Array,
@@ -169,6 +176,9 @@ export async function generateStaged(
     layersPerStage,
     resolveKappa,
     invalidateKappa,
+    derived?.load,
+    derived?.store,
+    derived?.evaporate,
     tokenizer ?? undefined,
     prompt,
     opts,

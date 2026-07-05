@@ -359,6 +359,64 @@ impl hologram_ai::materialize::KappaStore for JsKappaStore {
     }
 }
 
+/// A derived-artifact store backed by JS callbacks (row
+/// `derived-artifact-kappa`): `load(key)` returns
+/// `{ stages: Uint8Array[], kappas: string[] }` or undefined; `store(key,
+/// stages, kappas)` persists a fresh derivation (async on the JS side —
+/// persistence is an optimization, a lost write only costs re-derivation);
+/// `evaporate(key)` unpins a corrupted entry.
+struct JsDerivedStore {
+    load: js_sys::Function,
+    store: js_sys::Function,
+    evaporate: js_sys::Function,
+}
+
+impl hologram_ai::staged::DerivedStore for JsDerivedStore {
+    fn load(&mut self, key: &str) -> Option<(Vec<Vec<u8>>, Vec<String>)> {
+        let value = self
+            .load
+            .call1(&JsValue::NULL, &JsValue::from_str(key))
+            .ok()?;
+        if value.is_null() || value.is_undefined() {
+            return None;
+        }
+        let stages_js = js_sys::Reflect::get(&value, &JsValue::from_str("stages")).ok()?;
+        let kappas_js = js_sys::Reflect::get(&value, &JsValue::from_str("kappas")).ok()?;
+        let stages: Vec<Vec<u8>> = js_sys::Array::from(&stages_js)
+            .iter()
+            .map(|v| js_sys::Uint8Array::new(&v).to_vec())
+            .collect();
+        let kappas: Vec<String> = js_sys::Array::from(&kappas_js)
+            .iter()
+            .filter_map(|v| v.as_string())
+            .collect();
+        Some((stages, kappas))
+    }
+
+    fn store(&mut self, key: &str, stages: &[Vec<u8>], kappas: &[String]) {
+        let stages_js = js_sys::Array::new();
+        for stage in stages {
+            stages_js.push(&js_sys::Uint8Array::from(stage.as_slice()).into());
+        }
+        let kappas_js = js_sys::Array::new();
+        for kappa in kappas {
+            kappas_js.push(&JsValue::from_str(kappa));
+        }
+        let _ = self.store.call3(
+            &JsValue::NULL,
+            &JsValue::from_str(key),
+            &stages_js,
+            &kappas_js,
+        );
+    }
+
+    fn evaporate(&mut self, key: &str) {
+        let _ = self
+            .evaporate
+            .call1(&JsValue::NULL, &JsValue::from_str(key));
+    }
+}
+
 #[wasm_bindgen]
 pub fn materialize(
     holo: &[u8],
@@ -738,6 +796,9 @@ pub fn generate_staged(
     layers_per_stage: u32,
     resolve_kappa: &js_sys::Function,
     invalidate_kappa: Option<js_sys::Function>,
+    derived_load: Option<js_sys::Function>,
+    derived_store: Option<js_sys::Function>,
+    derived_evaporate: Option<js_sys::Function>,
     tokenizer_json: Option<Vec<u8>>,
     prompt: &str,
     opts: JsValue,
@@ -775,6 +836,16 @@ pub fn generate_staged(
         store,
     )
     .map_err(|e| err(format!("generate_staged: {e:#}")))?;
+
+    if let (Some(load), Some(store), Some(evaporate)) =
+        (derived_load, derived_store, derived_evaporate)
+    {
+        session.set_derived_store(Box::new(JsDerivedStore {
+            load,
+            store,
+            evaporate,
+        }));
+    }
 
     // Residency admission — an environment MEASUREMENT, never a preference:
     // the wasm32 address space is a structural 4 GiB ceiling, and a stage

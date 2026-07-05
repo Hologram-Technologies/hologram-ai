@@ -263,6 +263,16 @@ executor = "rust"
 feature = "features/suites/s3_execution/saturation_residency.feature"
 
 [[row]]
+id = "derived-artifact-kappa"
+statement = "The known set closes over deterministic derivation: a window's stage archives persist under their derivation key with recorded content-κs, a later session with identical inputs resolves them (content-verified at load) instead of re-deriving, resolution and derivation are output-identical, and a corrupted entry evaporates with derivation itself as the recovery — a wrong prior never dead-ends and never executes unverified content."
+stage = "S3"
+status = "build"
+oracles = ["journey-reference"]
+tier = "suite"
+executor = "rust"
+feature = "features/suites/s3_execution/derived_artifact_kappa.feature"
+
+[[row]]
 id = "bounded-embedding"
 statement = "A model is bounded by its unavoidable per-row/per-tile work, never whole-matrix F32 materialization: the embedding gathers the token rows at the table's native dtype and widens only the gathered result, so the whole [vocab, hidden] F32 image is never materialized, and a fused Phi3-family model executes monolithically and staged to identical logits."
 stage = "S3"

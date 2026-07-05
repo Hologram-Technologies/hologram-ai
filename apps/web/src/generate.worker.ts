@@ -149,6 +149,83 @@ async function readModelText(dir: FileSystemDirectoryHandle, name: string): Prom
   return (await handle.getFile()).text();
 }
 
+type DerivedEntry = { stages: Uint8Array[]; kappas: string[] };
+
+/** Preload the model's derived-artifact store (row `derived-artifact-kappa`):
+ * `derived/{key}/{i}.holo` + `kappas.json`, written by earlier sessions. The
+ * wasm derived-store callbacks are synchronous, so entries load up front
+ * (weightless k-forms — tens of KB per window). */
+async function loadDerivedEntries(
+  modelDir: FileSystemDirectoryHandle,
+): Promise<Map<string, DerivedEntry>> {
+  const entries = new Map<string, DerivedEntry>();
+  let derivedDir: FileSystemDirectoryHandle;
+  try {
+    derivedDir = await modelDir.getDirectoryHandle("derived");
+  } catch {
+    return entries;
+  }
+  // The async-iterable OPFS surface is missing from the webworker lib.
+  const iter = (
+    derivedDir as unknown as {
+      entries(): AsyncIterableIterator<[string, FileSystemHandle]>;
+    }
+  ).entries();
+  for await (const [key, handle] of iter) {
+    if (handle.kind !== "directory") continue;
+    try {
+      const dir = handle as FileSystemDirectoryHandle;
+      const kappas = JSON.parse(
+        await (await (await dir.getFileHandle("kappas.json")).getFile()).text(),
+      ) as string[];
+      const stages: Uint8Array[] = [];
+      for (let i = 0; i < kappas.length; i++) {
+        const file = await (await dir.getFileHandle(`${i}.holo`)).getFile();
+        stages.push(new Uint8Array(await file.arrayBuffer()));
+      }
+      entries.set(key, { stages, kappas });
+    } catch {
+      // A torn entry loads as absent; the session re-derives and rewrites.
+    }
+  }
+  return entries;
+}
+
+/** The derived-store callbacks over the preloaded map: `store` persists a
+ * fresh derivation asynchronously (a lost write only costs re-derivation);
+ * `evaporate` unpins a corrupted entry from map and disk. */
+function derivedStore(entries: Map<string, DerivedEntry>, modelDir: FileSystemDirectoryHandle) {
+  const persist = async (key: string, entry: DerivedEntry) => {
+    const derivedDir = await modelDir.getDirectoryHandle("derived", { create: true });
+    const dir = await derivedDir.getDirectoryHandle(key, { create: true });
+    for (let i = 0; i < entry.stages.length; i++) {
+      const handle = await dir.getFileHandle(`${i}.holo`, { create: true });
+      const writable = await handle.createWritable();
+      await writable.write(entry.stages[i] as unknown as ArrayBufferView<ArrayBuffer>);
+      await writable.close();
+    }
+    const meta = await dir.getFileHandle("kappas.json", { create: true });
+    const writable = await meta.createWritable();
+    await writable.write(JSON.stringify(entry.kappas));
+    await writable.close();
+  };
+  return {
+    load: (key: string) => entries.get(key),
+    store: (key: string, stages: Uint8Array[], kappas: string[]) => {
+      const entry = { stages, kappas };
+      entries.set(key, entry);
+      void persist(key, entry).catch(() => {});
+    },
+    evaporate: (key: string) => {
+      entries.delete(key);
+      void modelDir
+        .getDirectoryHandle("derived")
+        .then((d) => d.removeEntry(key, { recursive: true }))
+        .catch(() => {});
+    },
+  };
+}
+
 // Staged generation with a sequence-following window (row
 // `staged-window-growth`): the session recompiles the weightless stage
 // k-forms per geometric window bucket from the recorded manifest, so
@@ -180,6 +257,8 @@ async function runStaged(
     contextLength?: number;
   };
 
+  const derivedEntries = await loadDerivedEntries(modelDir);
+
   const tensorsDir = await root.getDirectoryHandle("tensors");
   const kappaHandles = new Map<string, OpenHandle>();
   try {
@@ -198,6 +277,7 @@ async function runStaged(
       stagesMeta.layersPerStage,
       kappaResolver(kappaHandles, sources),
       kappaInvalidator(kappaHandles, tensorsDir),
+      derivedStore(derivedEntries, modelDir),
       prompt,
       genOpts as never,
       tokenizerBytes,

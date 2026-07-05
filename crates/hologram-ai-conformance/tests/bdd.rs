@@ -811,6 +811,10 @@ struct BddWorld {
     verified_second_pass: Option<anyhow::Result<Vec<u8>>>,
     verified_fresh_err: Option<String>,
     verified_corrupt_kappa: Option<String>,
+    // S3 — derived-artifact closure (row `derived-artifact-kappa`)
+    derived_completions: Option<(String, String)>,
+    derived_hits: Option<u64>,
+    derived_root: Option<StoreDir>,
     // S3 — saturation residency (row `saturation-residency`)
     unpin_result: Option<anyhow::Result<Vec<u8>>>,
     unpin_corrupt_kappa: Option<String>,
@@ -2883,6 +2887,167 @@ async fn then_float_tally(w: &mut BddWorld) {
         float_nodes,
         total,
         100.0 * float_nodes as f64 / total as f64
+    );
+}
+
+// ── S3 — cross-turn residency (row `stage-residency-cache`, turns scenario) ──
+
+#[when("two completions are generated over one warm session within the budget")]
+async fn when_cross_turn(w: &mut BddWorld) {
+    use hologram_ai::commands::generate::{generate_stream, GenConfig};
+    let store = w.staged_store.as_ref().expect("the fixture κ-store");
+    let kit = staged_kit();
+    let windows = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let mut session = growable_staged_session(&store.path, windows);
+    session.set_residency_budget(kit.total_weight_bytes * 2);
+    let cfg = GenConfig {
+        max_tokens: Some(4),
+        temperature: 0.0,
+        ..Default::default()
+    };
+    let mut sink = Vec::new();
+    generate_stream(&mut session, &DecimalTok, "3 141 59", &cfg, &mut sink)
+        .expect("turn one completes");
+    let after_turn_one = session.materialization_count();
+    let mut sink = Vec::new();
+    generate_stream(&mut session, &DecimalTok, "3 141 59 26 5", &cfg, &mut sink)
+        .expect("turn two completes");
+    let after_turn_two = session.materialization_count();
+    w.residency_run = Some(ResidencyRun {
+        completion: String::new(),
+        materializations: after_turn_two - after_turn_one,
+        peak_resident_bytes: 0,
+        stage_count: session.stage_count(),
+        passes: 2,
+        budget: kit.total_weight_bytes * 2,
+        largest_stage_bytes: 0,
+    });
+}
+
+#[then("the second completion adds no stage materializations")]
+async fn then_cross_turn(w: &mut BddWorld) {
+    let run = w.residency_run.as_ref().expect("both turns ran");
+    assert_eq!(
+        run.materializations, 0,
+        "a warm session's resident set must carry across turns — κ-store \
+         bandwidth is per window, never per turn"
+    );
+    println!(
+        "[stage-residency-cache] turn two over {} resident stages: zero rematerializations",
+        run.stage_count
+    );
+}
+
+// ──────── S3 — derived-artifact closure (row `derived-artifact-kappa`) ───────
+
+/// A growable staged session over the fixture with a derived store rooted at
+/// `derived_root`; returns (completion, derived_hits).
+fn generate_with_derived(
+    store_path: &std::path::Path,
+    derived_root: &std::path::Path,
+) -> (String, u64) {
+    use hologram_ai::commands::generate::{generate_stream, GenConfig};
+    use hologram_ai::staged::DirDerivedStore;
+    let windows = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let mut session = growable_staged_session(store_path, windows);
+    session.set_derived_store(Box::new(DirDerivedStore::new(derived_root)));
+    let cfg = GenConfig {
+        max_tokens: Some(8),
+        temperature: 0.0,
+        ..Default::default()
+    };
+    let mut sink = Vec::new();
+    let text = generate_stream(&mut session, &DecimalTok, "3 141 59 26 5", &cfg, &mut sink)
+        .expect("derived-store generation completes");
+    (text, session.derived_hits())
+}
+
+#[when("two sessions with identical inputs generate over a shared derived store")]
+async fn when_derived_warm(w: &mut BddWorld) {
+    let store = w.staged_store.as_ref().expect("the fixture κ-store");
+    let derived = StoreDir::new("derived-warm");
+    let (cold_text, cold_hits) = generate_with_derived(&store.path, &derived.path);
+    assert_eq!(
+        cold_hits, 0,
+        "the first session derives — nothing to resolve yet"
+    );
+    let (warm_text, warm_hits) = generate_with_derived(&store.path, &derived.path);
+    w.derived_completions = Some((cold_text, warm_text));
+    w.derived_hits = Some(warm_hits);
+    w.derived_root = Some(derived);
+}
+
+#[then("the second session resolves its window from the derived store")]
+async fn then_derived_resolved(w: &mut BddWorld) {
+    let hits = w.derived_hits.expect("the warm session ran");
+    assert!(
+        hits >= 1,
+        "a warm session with identical inputs must resolve, not re-derive"
+    );
+    println!("[derived-artifact-kappa] warm session resolved {hits} window(s)");
+    // Reuse the shared parity assertion.
+    w.staged_completions = w.derived_completions.clone();
+}
+
+#[when("a session generates over a derived store with a corrupted entry")]
+async fn when_derived_corrupt(w: &mut BddWorld) {
+    let store = w.staged_store.as_ref().expect("the fixture κ-store");
+    let derived = StoreDir::new("derived-corrupt");
+    let (cold_text, _) = generate_with_derived(&store.path, &derived.path);
+    // Corrupt the persisted stage-0 archive of the (single) derivation.
+    let key_dir = std::fs::read_dir(&derived.path)
+        .expect("the derived store lists")
+        .filter_map(|e| e.ok())
+        .find(|e| e.path().is_dir())
+        .expect("one derivation persisted");
+    let stage0 = key_dir.path().join("0.holo");
+    let mut bytes = std::fs::read(&stage0).expect("the derived archive reads");
+    bytes[0] ^= 0xFF;
+    std::fs::write(&stage0, bytes).expect("the corruption writes");
+
+    let (recovered_text, hits) = generate_with_derived(&store.path, &derived.path);
+    w.derived_completions = Some((cold_text, recovered_text));
+    w.derived_hits = Some(hits);
+    w.derived_root = Some(derived);
+}
+
+#[then("the window is re-derived instead of resolved")]
+async fn then_derived_rederived(w: &mut BddWorld) {
+    assert_eq!(
+        w.derived_hits.expect("the recovery session ran"),
+        0,
+        "a corrupted entry must not count as a resolution"
+    );
+}
+
+#[then("the completion is unaffected")]
+async fn then_derived_unaffected(w: &mut BddWorld) {
+    let (cold, recovered) = w.derived_completions.as_ref().expect("both sessions ran");
+    assert_eq!(
+        cold, recovered,
+        "derive-as-recovery must be output-identical to the original derivation"
+    );
+    assert!(!cold.is_empty(), "the completion must be non-empty");
+    println!("[derived-artifact-kappa] recovery by derivation: {recovered:?}");
+}
+
+#[then("the derived store holds the fresh derivation")]
+async fn then_derived_rewritten(w: &mut BddWorld) {
+    use hologram_ai::staged::DerivedStore;
+    let derived = w.derived_root.as_ref().expect("the derived store");
+    let key = std::fs::read_dir(&derived.path)
+        .expect("the derived store lists")
+        .filter_map(|e| e.ok())
+        .find(|e| e.path().is_dir())
+        .expect("the fresh derivation persisted")
+        .file_name()
+        .to_string_lossy()
+        .to_string();
+    let entry = hologram_ai::staged::DirDerivedStore::new(&derived.path).load(&key);
+    let (stages, kappas) = entry.expect("the fresh entry loads");
+    assert!(
+        stages.iter().zip(&kappas).all(|(s, k)| kappa_of(s) == *k),
+        "the rewritten derivation must verify against its recorded κs"
     );
 }
 

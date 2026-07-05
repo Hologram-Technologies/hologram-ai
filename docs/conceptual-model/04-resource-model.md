@@ -13,7 +13,7 @@ only.
 | Rest | corpus entropy / addressing quotient | coarsen the quotient (canonical form) | `kappa-addressing`; candidate S0 canonical rows (open) |
 | Transit | set-difference(remote, known) under the quotient; known = provenance-recorded κ, not cached bytes | κ-prior: provenance (exact repeat, under the hf-hub revision-pin oracle), κ-manifest (cross-model); coalesced ranges | `kappa-provenance-resolution`; candidate S1 `network-skip` (open) |
 | Structure | O(config) graph + 32B·#tensors(config) identity data | parametric generation; minimal rep = (family id, config, κ-manifest) | `parametric-graph`, `parametricity` |
-| Residency | max stage + context window, per environment | stage granularity; measured-headroom residency (stages stay resident while the environment measurably has room, one stage is the floor) | `staged-execution`, `stage-residency-cache`, `memory-guard` |
+| Residency | max stage + context window + resident prefix labels O(L·seq·d_kv), per environment | stage granularity; measured-headroom residency (stages stay resident while the environment measurably has room, one stage is the floor) | `staged-execution`, `stage-residency-cache`, `memory-guard` |
 | Generation | novel suffix cone only | window follows the sequence (geometric buckets, model context as ceiling); recursion through the known: resident labels re-derived, not re-executed (CE) | `staged-window-growth`, `decode-elision`, `structural-ce` |
 
 ## Critical path (in-browser)
@@ -157,6 +157,100 @@ asserted. Discipline: hologram-ai needs only the eviction ordering σ
 induces, not the thermodynamic vocabulary; FiberBudget/T_ctx stay upstream
 primitives.
 
+## Closure of the known set over derivation
+
+The known set closes over deterministic derivation: any artifact computed
+deterministically from κ inputs has a derived κ and is itself content,
+persisted in the κ-store exactly like weights. Each expensive step runs once
+per host and enters every later session's prior (the UTQC seeding pattern);
+the warm browser resolves work instead of re-performing it.
+
+Artifact classes this admits:
+
+| Derived artifact | Derivation inputs | Cost it removes | Status |
+|---|---|---|---|
+| Compiled stage archives | model κ-manifest, config, window bucket, partition | streamed compile per window per session | **build** — row `derived-artifact-kappa` |
+| Fused LUTs (Q0/Q1 unary chains) | op chain, dtype, tier | table build | declared (kernels upstream) |
+| Quantized weight forms | tensor κ, quantization params | wide-form re-transit and re-materialization | declared — candidate `quantized-transit` |
+| Curvature profiles | model κ-manifest, calibration set κ | per-layer lift decisions | declared (carry lift upstream) |
+| Prefill cones (recurring prompt prefixes) | graph κ, template/prefix κ, bucket | prefill of the recurring prefix | declared — candidate `prefill-cone-reuse`, behind `structural-ce` |
+
+Soundness is inherited, nothing new: a derived artifact persists under its
+derivation key (a κ over the exact inputs the derivation is a function of)
+with its recorded content-κs; a later session with identical inputs resolves
+it, content-verified at load — once, off the per-token path; a corrupted
+entry evaporates and the recovery is derivation itself, so a wrong prior
+degrades to a compile, never a dead end, and never executes unverified
+content. Any input change is a different key, never a reinterpretation.
+Saturation composes: derived artifacts pin by the same events, so hot
+derivations crystallize and rare ones evaporate — the κ-store is a
+derivation cache ordered by use.
+
+## Annealing: memo and table are one spectrum (declared)
+
+A table is a total memo over a finite domain; a memo is a partial table over
+an observed domain. The Q0 LUT, the prefill cone, and the session memo are
+the same object at three densities: total, one point, sparse. A cone
+tabulates when either bound is met — structural (finite input domain within
+the table feasibility hierarchy) or statistical (σ over its observed domain
+crosses the crystallization threshold; tabulation is what σ = 1 means
+operationally). Tables tier by size across the residency hierarchy (Q0 op
+tables in L1, fused chains in heap, vocab-scale cone tables in the OPFS
+κ-store); tabulation is a density claim, never a residency claim. Both
+directions are semantics-free: a table entry is `derive(inputs)` by
+construction; eviction is melting, by the same lifecycle. Idle time feeds
+the anneal (pre-deriving entailed work off the critical path; speculation is
+the lowest-σ content, so pressure throttles it first). Candidate rows
+`cone-tabulation` and `idle-derivation` are held open: both depend on
+elision/memo internals owned by the substrate (the session memo is inside
+the runner) and on the derivation-closure machinery above, which is now the
+build foundation they compose over.
+
+## End state: two traffic classes (declared)
+
+The annealed per-token access set is total over two classes: structurally
+L1-resident reused state (hit rate 1 by the kernel floor) and single-pass
+prefetchable streams (compulsory misses only) — weights in materialization
+order, resident prefix labels under attention, activations. Elision removes
+recomputation, tabulation removes derivation where use concentrates,
+totality removes every access outside the two classes. The per-token floor
+is then O(L·d²) table-lookup MACs + O(L·seq·d_kv) streamed label reads, both
+bandwidth-shaped. Anything measured above the floor is attributable: a cone
+not yet elided, a table not yet dense, or an access in neither class — a
+defect by Totality. This sharpens the critical-path rule into an audit.
+Predicated on the kernel floor and totality, both upstream-owned today (see
+Totality's measured present); the resident-prefix-label term of the
+residency floor becomes measurable when decode elision externalizes the
+prefix labels.
+
+## Benchmark: efficiency against floors (the `performance-contract` content)
+
+The floors make benchmarking generic: report measured/floor per axis, never
+absolute times — the ratios are the implementation's quality, comparable
+across hosts, models, and inputs; a ratio of 1 is the ceiling for that axis.
+Calibration first (measured stream bandwidth + lookup throughput, so floors
+are stated in the environment's own units). Per-axis ratios: wire (bytes
+fetched / set-difference entropy), rest (store bytes / corpus entropy under
+the active quotient), structure (archive bytes / O(config) + 32B·#tensors),
+residency (peak claimed heap / max stage + window + prefix labels), TTFT
+(measured / wire+compile+prefill floors, each 0 on hit), decode (s/token /
+bandwidth-shaped two-class floor). Coverage is parametric: a (family,
+config) sweep with scale as a dimension — the claim is only witnessed where
+the model exceeds what the environment holds, and a flat ratio across each
+structural boundary IS the scaling claim, measured. Input sweeps an
+entropy-controlled corpus across the reuse spectrum; the primary output is
+the reuse curve. Attribution counters (elided vs executed, hits vs derives,
+skipped vs fetched, asserted vs verified, in- vs out-of-class) map every
+excess to one lever in this document; a residual mapping to no lever is a
+model gap and becomes a row. The harness is itself a k-citizen: fixtures are
+parametric derivations (never fully materialized anywhere), and everything
+the harness produces enters the κ-store as derived content under the
+lifecycle — a run's residual footprint is its report κ.
+
+This is the content of the open `performance-contract` row: ratio thresholds
+per axis, held open until measured, tightened as levers land, never
+asserted.
+
 ## Verification placement
 
 Verify at trust-boundary crossings, once per crossing, never per traversal.
@@ -184,9 +278,15 @@ cone and executes only the novel suffix — the cache-collapse advantage
 established by UOR-Atlas-UTQC, inherited through holospaces, instantiated as
 decode elision with no KV-cache (`decode-elision`). Generated content is
 itself κ-labeled on production, so generation extends the known set.
-Cross-session reuse is conditioned on the full derivation key recurring:
-identical graph, prompt cone, and pinned sampler state (params + seed); the
-sampler is part of the walk. Derived-label reuse requires bit-exact kernel
+Elision keys on realized token ids: once emitted, a token is an input, and
+the prefix cone derives from it regardless of how it was chosen. Pinned
+sampler state (params + seed) enters the derivation key only where the walk
+itself is reproduced: speculative continuation cones and cross-session
+identical walks. The novel cone, precisely: one position's forward pass —
+per token, O(L·d²) projection/MLP work at the new position plus attention
+reads over the resident prefix labels (the K/V-class outputs of every prior
+position), which are O(L·seq·d_kv) bytes, grow linearly with the sequence,
+and belong in the residency floor. Derived-label reuse requires bit-exact kernel
 determinism, witnessed per environment (`structural-ce`); cross-environment
 reuse is open, not build.
 
