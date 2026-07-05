@@ -811,6 +811,11 @@ struct BddWorld {
     verified_second_pass: Option<anyhow::Result<Vec<u8>>>,
     verified_fresh_err: Option<String>,
     verified_corrupt_kappa: Option<String>,
+    // S3 — idle derivation (row `idle-derivation`)
+    idle_state: Option<IdleDeriveState>,
+    // S3 — admission margin (row `stage-residency-cache`)
+    admission_margins: Option<Vec<u64>>,
+    admission_refused_materializations: Option<(u64, usize, usize)>,
     // S3 — derived-artifact closure (row `derived-artifact-kappa`)
     derived_completions: Option<(String, String)>,
     derived_hits: Option<u64>,
@@ -2565,7 +2570,9 @@ fn growable_staged_session(
         Box::new(DirKappaStore::new(store_path)),
     )
     .expect("the growable staged session builds");
-    session.set_window_observer(Box::new(move |w| windows.lock().expect("lock").push(w)));
+    session.set_window_observer(Box::new(move |w, _resolved| {
+        windows.lock().expect("lock").push(w)
+    }));
     session
 }
 
@@ -2935,6 +2942,253 @@ async fn then_cross_turn(w: &mut BddWorld) {
     println!(
         "[stage-residency-cache] turn two over {} resident stages: zero rematerializations",
         run.stage_count
+    );
+}
+
+// ──────────── S3 — idle derivation (row `idle-derivation`) ───────────────────
+
+struct IdleDeriveState {
+    session: hologram_ai::staged::GrowableStagedSession,
+    windows: std::sync::Arc<std::sync::Mutex<Vec<(usize, bool)>>>,
+    prederived: Option<usize>,
+    window_before: usize,
+    materializations_before: u64,
+    materializations_after_prederive: u64,
+    crossed: Option<(usize, bool)>,
+}
+
+#[when("a turn completes and the session pre-derives the next window bucket")]
+async fn when_idle_prederive(w: &mut BddWorld) {
+    use hologram_ai::commands::generate::{generate_stream, GenConfig};
+    let store = w.staged_store.as_ref().expect("the fixture κ-store");
+    let derived = StoreDir::new("idle-derive");
+    let windows = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let mut session = {
+        // Rebuild the growable helper inline to observe (window, resolved).
+        let manifest = staged_manifest(false);
+        let (keys, shapes): (Vec<String>, Vec<Vec<u64>>) = manifest.into_iter().unzip();
+        let kappas: Vec<String> = keys
+            .iter()
+            .zip(&shapes)
+            .map(|(name, dims)| kappa_of(&staged_tensor_bytes(name, dims)))
+            .collect();
+        let dtypes = vec![DType::F32; keys.len()];
+        hologram_ai::staged::GrowableStagedSession::new(
+            staged_config(false).to_string(),
+            keys,
+            kappas,
+            shapes,
+            dtypes,
+            None,
+            std::num::NonZeroU64::new(1).expect("1 is non-zero"),
+            Box::new(DirKappaStore::new(&store.path)),
+        )
+        .expect("the growable staged session builds")
+    };
+    {
+        let windows = std::sync::Arc::clone(&windows);
+        session.set_window_observer(Box::new(move |win, resolved| {
+            windows.lock().expect("lock").push((win, resolved));
+        }));
+    }
+    session.set_derived_store(Box::new(hologram_ai::staged::DirDerivedStore::new(
+        &derived.path,
+    )));
+    let cfg = GenConfig {
+        max_tokens: Some(4),
+        temperature: 0.0,
+        ..Default::default()
+    };
+    let mut sink = Vec::new();
+    generate_stream(&mut session, &DecimalTok, "3 141 59", &cfg, &mut sink)
+        .expect("the turn completes");
+    let window_before = windows
+        .lock()
+        .expect("lock")
+        .last()
+        .expect("a window built")
+        .0;
+    let materializations_before = session.materialization_count();
+    let prederived = session
+        .prederive_next_window()
+        .expect("idle pre-derivation is inert on failure, not an error here");
+    let materializations_after_prederive = session.materialization_count();
+    w.derived_root = Some(derived);
+    w.idle_state = Some(IdleDeriveState {
+        session,
+        windows,
+        prederived,
+        window_before,
+        materializations_before,
+        materializations_after_prederive,
+        crossed: None,
+    });
+}
+
+#[then("the pre-derivation moved no weights and left the resident window untouched")]
+async fn then_idle_inert(w: &mut BddWorld) {
+    let st = w.idle_state.as_ref().expect("the idle run");
+    assert_eq!(
+        st.prederived,
+        Some((st.window_before * 2).min(STG_WINDOW as usize)),
+        "the next geometric bucket is the entailed speculation"
+    );
+    assert_eq!(
+        st.materializations_before, st.materializations_after_prederive,
+        "speculation moves no weights"
+    );
+    let windows = st.windows.lock().expect("lock");
+    assert_eq!(
+        windows.len(),
+        1,
+        "the resident window never rebuilt during speculation: {windows:?}"
+    );
+    println!(
+        "[idle-derivation] pre-derived the {}-token bucket off the token path",
+        st.prederived.expect("prederived")
+    );
+}
+
+#[when("a following turn crosses the window bucket boundary")]
+async fn when_idle_crossing(w: &mut BddWorld) {
+    use hologram_ai::commands::generate::{generate_stream, GenConfig};
+    let st = w.idle_state.as_mut().expect("the idle run");
+    let prompt: String = (0..60)
+        .map(|i| (i % 9 + 1).to_string())
+        .collect::<Vec<_>>()
+        .join(" ");
+    let cfg = GenConfig {
+        max_tokens: Some(8),
+        temperature: 0.0,
+        ..Default::default()
+    };
+    let mut sink = Vec::new();
+    generate_stream(&mut st.session, &DecimalTok, &prompt, &cfg, &mut sink)
+        .expect("the crossing turn completes");
+    st.crossed = st
+        .windows
+        .lock()
+        .expect("lock")
+        .iter()
+        .copied()
+        .find(|(win, _)| *win > st.window_before);
+}
+
+#[then("the crossing resolves the window from the derived store instead of compiling")]
+async fn then_idle_resolved(w: &mut BddWorld) {
+    let st = w.idle_state.as_ref().expect("the idle run");
+    let (window, resolved) = st.crossed.expect("the boundary was crossed");
+    assert_eq!(
+        Some(window),
+        st.prederived,
+        "the crossing hit the speculated bucket"
+    );
+    assert!(
+        resolved,
+        "the pre-derived window must RESOLVE on crossing, not recompile"
+    );
+    assert!(
+        st.session.derived_hits() >= 1,
+        "the derived store served the speculation"
+    );
+    println!("[idle-derivation] crossing resolved the {window}-token bucket from derived κ");
+}
+
+// ─────── S3 — admission margin (row `stage-residency-cache`, margin) ─────────
+
+#[when("a completion is generated under a margin-recording admission probe")]
+async fn when_margin_probe(w: &mut BddWorld) {
+    use hologram_ai::commands::generate::{generate_stream, GenConfig};
+    let store = w.staged_store.as_ref().expect("the fixture κ-store");
+    let kit = staged_kit();
+    let cfg = GenConfig {
+        max_tokens: Some(4),
+        temperature: 0.0,
+        ..Default::default()
+    };
+
+    // Accepting probe: record the margin each admission carries.
+    let margins = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let windows = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let mut session = growable_staged_session(&store.path, windows);
+    session.set_residency_budget(kit.total_weight_bytes * 2);
+    {
+        let margins = std::sync::Arc::clone(&margins);
+        session.set_admission_probe(std::rc::Rc::new(move |margin| {
+            margins.lock().expect("lock").push(margin);
+            true
+        }));
+    }
+    let mut sink = Vec::new();
+    generate_stream(&mut session, &DecimalTok, "3 141 59 26 5", &cfg, &mut sink)
+        .expect("probed generation completes");
+    w.admission_margins = Some(margins.lock().expect("lock").clone());
+
+    // Refusing probe: admission never granted ⇒ strict windowing.
+    let windows = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let mut strict = growable_staged_session(&store.path, windows);
+    strict.set_residency_budget(kit.total_weight_bytes * 2);
+    strict.set_admission_probe(std::rc::Rc::new(|_| false));
+    let mut sink = Vec::new();
+    let text = generate_stream(&mut strict, &DecimalTok, "3 141 59 26 5", &cfg, &mut sink)
+        .expect("refused generation completes");
+    let passes = DecimalTok.encode(&text).len();
+    w.admission_refused_materializations =
+        Some((strict.materialization_count(), strict.stage_count(), passes));
+}
+
+#[then("every admission carried the largest stage's transient bound as its margin")]
+async fn then_margin_value(w: &mut BddWorld) {
+    let margins = w.admission_margins.as_ref().expect("the probe recorded");
+    assert!(!margins.is_empty(), "admissions were consulted");
+    let kit = staged_kit();
+    // The expected margin: 4× the largest stage's raw weight bytes, computed
+    // independently from each stage archive's κ-map and the fixture tensors.
+    let size_of: std::collections::HashMap<String, u64> = staged_manifest(false)
+        .into_iter()
+        .map(|(name, dims)| {
+            let bytes = staged_tensor_bytes(&name, &dims);
+            (kappa_of(&bytes), bytes.len() as u64)
+        })
+        .collect();
+    // Per-constant (NOT per-distinct-κ): two constants sharing content each
+    // materialize their own copy, so the transient counts both.
+    let largest: u64 = kit
+        .stages
+        .iter()
+        .map(|archive| {
+            kappa_requirements(archive)
+                .expect("the κ-map parses")
+                .iter()
+                .map(|r| size_of.get(&r.kappa).copied().unwrap_or(0))
+                .sum::<u64>()
+        })
+        .max()
+        .expect("stages exist");
+    // The bound is 3×raw bytes + 8 bytes per ELEMENT (two full F32
+    // execution images: the widened panel and the kernel's pre-transposed
+    // scratch); the fixture is F32, so elements = raw/4 and the bound is
+    // 5×raw.
+    let bound = largest * 3 + (largest / 4) * 8;
+    assert!(
+        margins.iter().all(|&m| m == bound),
+        "the margin is the model's own transient bound ({bound}), got {margins:?}"
+    );
+    println!(
+        "[stage-residency-cache] admission margin = {bound} bytes across {} admissions",
+        margins.len()
+    );
+}
+
+#[then("a probe that refuses admission yields strict windowing")]
+async fn then_margin_refused(w: &mut BddWorld) {
+    let (materializations, stage_count, passes) = w
+        .admission_refused_materializations
+        .expect("the refused run");
+    assert_eq!(
+        materializations,
+        (stage_count * passes) as u64,
+        "refused admission must rematerialize every stage every pass — a projection, never a refusal"
     );
 }
 

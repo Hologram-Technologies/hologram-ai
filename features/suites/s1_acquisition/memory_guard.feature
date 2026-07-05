@@ -16,3 +16,11 @@ Feature: The resource guard — pure projection, never refusal
     When downloading a model whose κ-store need exceeds the measured local headroom
     Then the resource projection reports partial cache coverage
     And the journey is not refused at the guard
+
+  Scenario: a hard storage quota degrades caching, never the journey
+    Given the origin's storage quota is capped below the model's size
+    When the fixture model is downloaded
+    Then the download reports the quota and continues on recorded provenance
+    And the model directory records κ provenance for every manifest tensor
+    When the user sends handshake message 1
+    Then assistant turn 1 streams a non-empty completion

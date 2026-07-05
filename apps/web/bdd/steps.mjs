@@ -138,6 +138,34 @@ Then("the journey fails at the download stage naming the repository", async func
   assert.ok(body.includes(MISSING_REPO), `failure must name ${MISSING_REPO}:\n${body}`);
 });
 
+// ── S1 — quota fail-soft (row `memory-guard`) ───────────────────────────────
+
+Given("the origin's storage quota is capped below the model's size", async function () {
+  // A REAL quota, enforced by the browser (CDP override) — the measured
+  // headroom is a projection; the write is where the environment answers.
+  // The cap is far below the fixture's tensor bytes, so caching MUST hit
+  // QuotaExceededError mid-stream.
+  const cdp = await this.context.newCDPSession(this.page);
+  const origin = new URL(this.appUrl).origin;
+  // Between the structure size (~100 KB: archive, companions, provenance
+  // records — load-bearing) and the tensor bytes (~558 KB): caching hits
+  // the wall mid-stream, everything essential still persists.
+  await cdp.send("Storage.overrideQuotaForOrigin", { origin, quotaSize: 300 * 1024 });
+});
+
+Then("the download reports the quota and continues on recorded provenance", async function () {
+  const body = await this.page.locator("body").innerText();
+  assert.ok(
+    body.includes("quota reached"),
+    `the projection must narrate the quota:\n${body.slice(0, 400)}`,
+  );
+  assert.ok(
+    !/\berror:\s/i.test(body),
+    `a refused cache write must never error the journey:\n${body.slice(0, 600)}`,
+  );
+  console.log("[memory-guard] quota hit reported; journey continued on provenance");
+});
+
 // ── S1 — transit prior (row `network-skip`) ─────────────────────────────────
 
 /** The committed fixture's shard-body start (8-byte length + JSON header). */

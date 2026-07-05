@@ -519,15 +519,24 @@ const fn f32_materialization_ceiling() -> u64 {
 /// weight would exceed `ceiling`; `None` when it fits. Split from the guard so
 /// the floor logic is witnessed on a 64-bit host (where the live ceiling is
 /// unbounded) with an explicit ceiling.
-fn f32_head_floor_error(name: &str, rows: u64, cols: u64, ceiling: u64) -> Option<String> {
-    let bytes = f32_weight_bytes(rows, cols);
+fn f32_head_floor_error(
+    name: &str,
+    rows: u64,
+    cols: u64,
+    storage_elem_bytes: u64,
+    ceiling: u64,
+) -> Option<String> {
+    let elems = rows * cols;
+    let bytes = 2 * f32_weight_bytes(rows, cols) + 3 * elems * storage_elem_bytes;
     (bytes > ceiling).then(|| {
         format!(
-            "the language-model head weight `{name}` is [{rows}, {cols}] = {bytes} bytes at \
-             F32, exceeding the {ceiling}-byte heap ceiling of a 32-bit (wasm) target. The \
-             whole-vocabulary F32 head is a genuine floor there: the matmul kernel consults \
-             the weight in full and widens even a narrow-dtype operand to a full F32 panel, \
-             so no storage dtype avoids the allocation. Run this model on a 64-bit host."
+            "the language-model head `{name}` is [{rows}, {cols}]: its execution working set \
+             (two whole-vocabulary F32 images — the widened panel and the kernel's transposed \
+             scratch — plus the stored weight's material copies) is {bytes} bytes, exceeding \
+             the {ceiling}-byte working ceiling of a 32-bit (wasm) target. No storage dtype \
+             avoids the F32 images: the matmul widens the panel in full. The 32-bit path for \
+             a head at this scale is a quantized (i8/i4) or vocab-chunked head; today, run \
+             this model on a 64-bit host."
         )
     })
 }
@@ -536,8 +545,19 @@ fn f32_head_floor_error(name: &str, rows: u64, cols: u64, ceiling: u64) -> Optio
 /// weight to a dense `[rows, cols]` F32 matrix would exceed the build target's
 /// heap ceiling, rather than proceeding to an opaque `RuntimeError: unreachable`
 /// allocation trap. No-op on a 64-bit host.
-fn guard_f32_head_materialization(name: &str, rows: u64, cols: u64) -> Result<()> {
-    match f32_head_floor_error(name, rows, cols, f32_materialization_ceiling()) {
+fn guard_f32_head_materialization(
+    name: &str,
+    rows: u64,
+    cols: u64,
+    storage_elem_bytes: u64,
+) -> Result<()> {
+    match f32_head_floor_error(
+        name,
+        rows,
+        cols,
+        storage_elem_bytes,
+        f32_materialization_ceiling(),
+    ) {
         Some(msg) => Err(anyhow!(msg)),
         None => Ok(()),
     }
@@ -1387,6 +1407,10 @@ impl<'a> DecoderRecipe<'a> {
                 head_bytes_source,
                 self.cfg.vocab_size,
                 self.cfg.hidden_size,
+                manifest
+                    .dtype_of(head_bytes_source)
+                    .byte_size()
+                    .unwrap_or(4) as u64,
             )?;
             let embed = match embed_native {
                 // Monolithic: widen the native embedding weight to F32 for the
@@ -1408,6 +1432,7 @@ impl<'a> DecoderRecipe<'a> {
                 "lm_head.weight",
                 self.cfg.vocab_size,
                 self.cfg.hidden_size,
+                manifest.dtype_of("lm_head.weight").byte_size().unwrap_or(4) as u64,
             )?;
             let weight = add_weight_f32(builder, manifest, "lm_head.weight", head_shape);
             (weight, "lm_head.weight")
@@ -2088,23 +2113,24 @@ mod tests {
         // returns no error. Uses an explicit ceiling so the floor logic is
         // witnessed on a 64-bit host, where the live ceiling is unbounded.
         let (rows, cols) = (100_000u64, 5_000u64);
-        let bytes = f32_weight_bytes(rows, cols);
-        assert_eq!(bytes, rows * cols * 4);
+        // bf16 storage (2 B/elem): two F32 images + three material copies.
+        let working = 2 * f32_weight_bytes(rows, cols) + 3 * rows * cols * 2;
+        assert_eq!(working, rows * cols * (8 + 6));
 
-        let err = f32_head_floor_error("lm_head.weight", rows, cols, 1_000_000_000)
-            .expect("a 2 GB F32 head must exceed a 1 GB ceiling");
+        let err = f32_head_floor_error("lm_head.weight", rows, cols, 2, 1_000_000_000)
+            .expect("a multi-GB head working set must exceed a 1 GB ceiling");
         assert!(err.contains("lm_head.weight"), "names the tensor: {err}");
         assert!(
-            err.contains(&bytes.to_string()),
-            "names the byte size: {err}"
+            err.contains(&working.to_string()),
+            "names the working-set bytes: {err}"
         );
 
         assert!(
-            f32_head_floor_error("lm_head.weight", rows, cols, u64::MAX).is_none(),
+            f32_head_floor_error("lm_head.weight", rows, cols, 2, u64::MAX).is_none(),
             "an unbounded ceiling (64-bit host) admits the head"
         );
         // The live guard is a no-op on a 64-bit host.
-        assert!(guard_f32_head_materialization("lm_head.weight", rows, cols).is_ok());
+        assert!(guard_f32_head_materialization("lm_head.weight", rows, cols, 2).is_ok());
     }
 
     #[test]

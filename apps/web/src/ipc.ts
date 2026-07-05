@@ -415,10 +415,34 @@ export async function downloadKnownModel(id: string): Promise<number> {
       const holoBytes = outcome.holoBytes!;
       const kappa = await computeKappa(holoBytes);
       const holoName = `${kappa}.holo`;
-      const holoHandle = await localDir.getFileHandle(holoName, { create: true });
-      const writable = await holoHandle.createWritable();
-      await writable.write(holoBytes as any);
-      await writable.close();
+      // The archive is crystalline structure; cached tensors are gas phase
+      // (provenance-recoverable). Under quota pressure the cache evaporates
+      // to make room — the journey is never refused for resources.
+      for (;;) {
+        try {
+          const holoHandle = await localDir.getFileHandle(holoName, { create: true });
+          const writable = await holoHandle.createWritable();
+          await writable.write(holoBytes as any);
+          await writable.close();
+          break;
+        } catch (e) {
+          const tensorsDir = await root.getDirectoryHandle("tensors", { create: true });
+          let evicted = false;
+          const iter = (
+            tensorsDir as unknown as { entries(): AsyncIterableIterator<[string, FileSystemHandle]> }
+          ).entries();
+          for await (const [name] of iter) {
+            await tensorsDir.removeEntry(name).catch(() => {});
+            evicted = true;
+            break;
+          }
+          if (!evicted) throw e;
+          emitLine("models://compile-line", {
+            stream: "stdout",
+            line: "κ-store pressure: evaporated a cached tensor to persist the archive.",
+          });
+        }
+      }
       emitLine("models://compile-line", { stream: "stdout", line: `Compiled and saved to ${holoName} (${holoBytes.length} bytes).` });
     }
   } else {

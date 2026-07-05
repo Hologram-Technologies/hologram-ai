@@ -13,7 +13,7 @@ only.
 | Rest | corpus entropy / addressing quotient | coarsen the quotient (canonical form) | `kappa-addressing`; candidate S0 canonical rows (open) |
 | Transit | set-difference(remote, known) under the quotient; known = provenance-recorded κ, not cached bytes | κ-prior: provenance (exact repeat, under the shard's content pin — build, row `network-skip`), κ-manifest (cross-model — declared); coalesced ranges | `kappa-provenance-resolution`, `network-skip` |
 | Structure | O(config) graph + 32B·#tensors(config) identity data | parametric generation; minimal rep = (family id, config, κ-manifest) | `parametric-graph`, `parametricity` |
-| Residency | max stage + context window + resident prefix labels O(L·seq·d_kv), per environment | stage granularity; measured-headroom residency (stages stay resident while the environment measurably has room, one stage is the floor) | `staged-execution`, `stage-residency-cache`, `memory-guard` |
+| Residency | max stage + context window + resident prefix labels O(L·seq·d_kv), per environment | stage granularity; measured-headroom residency — admission leaves the model's own largest-stage transient bound free (a MODEL-derived margin, computed from the manifest before any byte moves; a fixed margin crashed a 1.5B head stage while smaller stages held the room); one stage is the floor; fallback to strict windowing, never refusal | `staged-execution`, `stage-residency-cache`, `memory-guard` |
 | Generation | novel suffix cone only | window follows the sequence (geometric buckets, model context as ceiling); recursion through the known: resident labels re-derived, not re-executed (CE) | `staged-window-growth`, `decode-elision`, `structural-ce` |
 
 ## Critical path (in-browser)
@@ -157,15 +157,26 @@ evaporation, neighbors untouched, unverifiable-recovery rejection) and in
 the hermetic browser journey (a corrupted κ-store tensor: the handshake
 still matches the reference and the entry has evaporated).
 
-**Declared, open** — the graded remainder: σ-ordered pressure eviction of
-the κ-store (unbound gas-phase content of unloaded models evaporates first;
-the active binding is crystalline by construction), λ_base pressure-scaling
-generalizing the residency admission probe from binary to graded, and
-session-memo decay derivation (prefix-cone labels re-pin every token).
-These need an eviction-pressure mechanism that does not yet exist in-repo —
-today the κ-store budget is write-time only and nothing else evicts. Policy
-quality (hit rate vs an LRU baseline) is measured when they land, never
-asserted. Discipline: hologram-ai needs only the eviction ordering σ
+**Build (σ-order at write pressure, row `memory-guard`)** — the first
+pressure-driven eviction, ordered by σ: when the environment's REAL quota
+refuses a write (measured headroom is a projection; the write is where the
+environment answers), gas-phase content evaporates for crystalline
+structure — a refused tensor-cache write stops caching and the journey
+continues on recorded provenance; a refused structure write (archive,
+provenance record) evaporates cached tensors (provenance-recoverable, gas
+by definition) until it lands. Witnessed under a browser-enforced quota cap
+between the structure size and the tensor bytes: the download completes,
+provenance is fully recorded, and the chat still answers. The admission
+margin is likewise model-derived now: a stage session joins the resident
+set only while the environment leaves the pipeline's largest-stage
+transient bound free (a fixed margin crashed a 1.5B head stage while
+smaller stages held the room).
+
+**Declared, open** — the graded remainder: full σ-ordered eviction of the
+κ-store across models (unloaded models' tensors evaporate first), λ_base
+pressure-scaling generalizing admission to a graded policy, and
+session-memo decay derivation. Policy quality (hit rate vs an LRU baseline)
+is measured when they land, never asserted. Discipline: hologram-ai needs only the eviction ordering σ
 induces, not the thermodynamic vocabulary; FiberBudget/T_ctx stay upstream
 primitives.
 
@@ -212,11 +223,15 @@ tables in L1, fused chains in heap, vocab-scale cone tables in the OPFS
 directions are semantics-free: a table entry is `derive(inputs)` by
 construction; eviction is melting, by the same lifecycle. Idle time feeds
 the anneal (pre-deriving entailed work off the critical path; speculation is
-the lowest-σ content, so pressure throttles it first). Candidate rows
-`cone-tabulation` and `idle-derivation` are held open: both depend on
-elision/memo internals owned by the substrate (the session memo is inside
-the runner) and on the derivation-closure machinery above, which is now the
-build foundation they compose over.
+the lowest-σ content, so pressure throttles it first). Candidate row `cone-tabulation` is held open (it depends on elision/memo
+internals owned by the substrate — the session memo is inside the runner).
+Row `idle-derivation` is **build** for its first clause: between turns the
+session pre-derives the next window bucket's stage archives into the
+derived store, off the per-token path (weightless — no weights move, the
+resident window and its counters untouched), and a later crossing RESOLVES
+the window instead of compiling on the critical path; abandoned speculation
+is ordinary derived content, evaporable by the lifecycle. Continuation
+cones and table densification stay declared with `cone-tabulation`.
 
 ## End state: two traffic classes (declared)
 
@@ -341,6 +356,21 @@ its own measured cost; no aggregate canonicalization claim.
   carry these workloads; structural-only until then.
 - Measured, never asserted: dedup ratio per corpus; elision ratio per
   workload; stage-granularity optimum per environment.
+
+## Measured (2026-07-05, addendum — Qwen2.5-1.5B bf16, headless Chromium)
+
+The 1.5B staged journey drove three fixes, each measured against a real
+trap: the fixed admission margin crashed its head stage (fixed:
+model-derived margins); the codespace's REAL quota (enforced at the write
+while estimate() reported 6.4 GB — the projection-vs-write distinction,
+observed) killed the download (fixed: fail-soft + σ-eviction); and the head
+EXECUTION working set — two whole-vocabulary F32 images plus material
+copies, 3.27 GB — structurally exceeds the 2.15 GB working ceiling of a
+32-bit tab even fully strict (measured: 30/30 stages materialized, the
+matmul trapped). The head floor now bounds the execution working set and
+rejects AT PREFLIGHT, zero bytes moved, naming the numbers and the path:
+a quantized (i8/i4) or vocab-chunked head. Qwen2.5-0.5B's tied head
+(1.91 GB working set) passes the same bound and measurably runs.
 
 ## Measured (2026-07-05 — Qwen2.5-0.5B-Instruct bf16, headless Chromium, codespace)
 

@@ -839,32 +839,38 @@ impl StagedChatSession {
             }));
         }
 
-        // Residency admission — an environment MEASUREMENT, never a
-        // preference: the wasm32 address space is a structural 4 GiB
-        // ceiling, and a stage session may join the resident set only while
-        // the heap has measurably claimed less than half of it (the other
-        // half is the working margin for materialization transients and
-        // activations — the same halving the download planner documents).
-        // Raw κ-byte budgets under-count a live session's true footprint,
-        // so admission asks the environment directly. Stages that fit stay
-        // resident across tokens AND turns — κ-store bandwidth is paid once
-        // per window; a model past the headroom falls back to strict
-        // one-stage windowing, never refused.
+        // Residency admission — an environment MEASUREMENT against a
+        // MODEL-DERIVED margin, never a preference: the wasm32 address space
+        // is a structural 4 GiB ceiling, and a stage session may join the
+        // resident set only while the heap measurably leaves the pipeline's
+        // largest-stage transient bound free (the probe's `margin` argument
+        // — a fixed half-ceiling margin crashed a 1.5B model at its head
+        // stage while smaller stages held the room). Raw κ-byte budgets
+        // under-count a live session's true footprint, so admission asks
+        // the environment directly. Stages that fit stay resident across
+        // tokens AND turns — κ-store bandwidth is paid once per window; a
+        // model past the headroom falls back to strict one-stage windowing,
+        // never refused.
         #[cfg(target_arch = "wasm32")]
         {
             const STRUCTURAL_CEILING: u64 = 4 << 30;
             session.set_residency_budget(u64::MAX);
-            session.set_admission_probe(std::rc::Rc::new(|| {
-                (core::arch::wasm32::memory_size(0) as u64) * 65536 < STRUCTURAL_CEILING / 2
+            session.set_admission_probe(std::rc::Rc::new(|margin: u64| {
+                (core::arch::wasm32::memory_size(0) as u64) * 65536 + margin < STRUCTURAL_CEILING
             }));
         }
 
         if let Some(progress) = on_progress {
             let for_window = progress.clone();
-            session.set_window_observer(Box::new(move |window| {
+            session.set_window_observer(Box::new(move |window, resolved| {
+                let verb = if resolved {
+                    "resolving (derived κ)"
+                } else {
+                    "compiling"
+                };
                 let _ = for_window.call1(
                     &JsValue::NULL,
-                    &JsValue::from_str(&format!("compiling a {window}-token window")),
+                    &JsValue::from_str(&format!("{verb} a {window}-token window")),
                 );
             }));
             session.set_stage_observer(Box::new(move |stage, count, bytes| {
@@ -919,6 +925,17 @@ impl StagedChatSession {
     /// Window regrows resolved from the derived store instead of compiled.
     pub fn derived_hits(&self) -> u64 {
         self.session.derived_hits()
+    }
+
+    /// Idle pre-derivation (row `idle-derivation`): derive the next window
+    /// bucket's stage archives into the derived store, off the per-token
+    /// path — no weights move, the resident window is untouched. Returns
+    /// the pre-derived bucket, or undefined at the ceiling.
+    pub fn prederive_next_window(&mut self) -> Result<Option<u32>, JsValue> {
+        self.session
+            .prederive_next_window()
+            .map(|w| w.map(|w| w as u32))
+            .map_err(|e| err(format!("prederive: {e:#}")))
     }
 }
 

@@ -332,6 +332,20 @@ self.onmessage = async (e) => {
         self.postMessage({ type: "token", text });
       });
       self.postMessage({ type: "done", text: result });
+      // Idle anneal (row `idle-derivation`): with the turn delivered, derive
+      // the next window bucket's archives into the derived store — off the
+      // per-token path, no weights moved. A later crossing resolves instead
+      // of compiling. Failure is inert: speculation is never load-bearing.
+      setTimeout(() => {
+        try {
+          const bucket = session.prederive_next_window();
+          if (bucket !== undefined) {
+            self.postMessage({ type: "progress", line: `idle: pre-derived the ${bucket}-token window` });
+          }
+        } catch {
+          // abandoned speculation — the next crossing derives on demand
+        }
+      }, 0);
       return;
     }
     const material = await materializeFromOpfs(holoBytes, modelDir);

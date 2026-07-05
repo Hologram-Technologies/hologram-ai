@@ -182,6 +182,7 @@ export interface StagedSession {
   generate(prompt: string, opts: GenOpts, callback?: (text: string) => void): string;
   materialization_count(): bigint;
   derived_hits(): bigint;
+  prederive_next_window(): number | undefined;
   free(): void;
 }
 

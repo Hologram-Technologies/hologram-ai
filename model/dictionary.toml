@@ -283,6 +283,16 @@ executor = "rust"
 feature = "features/suites/s3_execution/derived_artifact_kappa.feature"
 
 [[row]]
+id = "idle-derivation"
+statement = "Idle time feeds the anneal: between turns the session pre-derives the next window bucket's stage archives into the derived store — off the per-token path (no weights move, the resident window and its counters are untouched) — so a later bucket crossing resolves the window instead of compiling it on the critical path; abandoned speculation is ordinary derived content, evaporable by the same lifecycle; failed speculation is inert, never load-bearing."
+stage = "S3"
+status = "build"
+oracles = ["journey-reference"]
+tier = "suite"
+executor = "rust"
+feature = "features/suites/s3_execution/idle_derivation.feature"
+
+[[row]]
 id = "bounded-embedding"
 statement = "A model is bounded by its unavoidable per-row/per-tile work, never whole-matrix F32 materialization: the embedding gathers the token rows at the table's native dtype and widens only the gathered result, so the whole [vocab, hidden] F32 image is never materialized, and a fused Phi3-family model executes monolithically and staged to identical logits."
 stage = "S3"

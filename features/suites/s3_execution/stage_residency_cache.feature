@@ -34,3 +34,8 @@ Feature: κ-store bandwidth is paid per window, never per token
   Scenario: the resident set survives across chat turns
     When two completions are generated over one warm session within the budget
     Then the second completion adds no stage materializations
+
+  Scenario: admission asks the environment with the model's own transient margin
+    When a completion is generated under a margin-recording admission probe
+    Then every admission carried the largest stage's transient bound as its margin
+    And a probe that refuses admission yields strict windowing

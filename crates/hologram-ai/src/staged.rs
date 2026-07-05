@@ -142,12 +142,30 @@ pub type StageObserver<'a> = Box<dyn FnMut(usize, usize, u64) + 'a>;
 /// [`GrowableStagedSession`].
 type SharedStageObserver = std::rc::Rc<std::cell::RefCell<dyn FnMut(usize, usize, u64)>>;
 
-/// Admission probe: consulted before a stage session is kept resident.
-/// `false` means the environment measurably lacks headroom — the session
-/// drops (strict windowing) instead of risking the heap. Raw κ-byte budgets
-/// under-count a live session's true footprint; only the environment can
-/// answer whether it has room, so admission asks it directly.
-pub type AdmissionProbe<'a> = Box<dyn Fn() -> bool + 'a>;
+/// Admission probe: consulted before a stage session is kept resident,
+/// with the byte MARGIN the pipeline must keep free — the structural
+/// transient bound of its largest stage (archive copy + materialized copy +
+/// loaded constants + up-to-2× dtype widening ≤ 4× the stage's raw weight
+/// bytes). `false` means the environment measurably lacks that headroom —
+/// the session drops (strict windowing) instead of risking the heap. A
+/// fixed margin crashed a 1.5B model at its head stage while smaller
+/// stages held the room; the margin is a function of the MODEL, so the
+/// probe receives it. Raw κ-byte budgets under-count a live session's true
+/// footprint; only the environment can answer whether it has room, so
+/// admission asks it directly.
+pub type AdmissionProbe<'a> = Box<dyn Fn(u64) -> bool + 'a>;
+
+/// The structural transient bound of a stage's materialize-and-execute:
+/// the raw copies (archive + materialized image, plus slack for the loaded
+/// runner) and TWO full F32 images of the stage's elements — the kernel
+/// widens a narrow-dtype panel to F32 and holds a pre-transposed scratch of
+/// the same size. Parametric in elements, not bytes: a bf16 stage's
+/// execution image is twice its storage.
+fn stage_transient_bound(stage_weight_bytes: u64, stage_elements: u64) -> u64 {
+    stage_weight_bytes
+        .saturating_mul(3)
+        .saturating_add(stage_elements.saturating_mul(8))
+}
 
 /// Windowed execution over the stage archives of [`compile_stages`].
 ///
@@ -196,6 +214,11 @@ pub struct StagedRunner<'a> {
     /// Environment headroom probe consulted at admission (see
     /// [`AdmissionProbe`]). `None` = admission by byte budget alone.
     admission_probe: Option<AdmissionProbe<'a>>,
+    /// Expected (raw weight bytes, element count) per stage, computed by the
+    /// session from the manifest BEFORE anything materializes — the largest
+    /// transient bound drives the admission margin. Falls back to measured
+    /// bytes as stages run.
+    expected_stage_bytes: Vec<(u64, u64)>,
     /// The session verified-κ set (row `session-verified-kappa`): a κ
     /// verifies at its first materialization this session; later
     /// rematerializations are read-only I/O. Shared across regrows of a
@@ -265,8 +288,36 @@ impl<'a> StagedRunner<'a> {
             resident_bytes: 0,
             materialization_count: 0,
             admission_probe: None,
+            expected_stage_bytes: Vec::new(),
             verified: std::rc::Rc::new(std::cell::RefCell::new(std::collections::HashSet::new())),
         })
+    }
+
+    /// Provide the manifest-derived (raw weight bytes, element count) per
+    /// stage (known before any materialization) — the largest stage's
+    /// transient bound is the margin every admission must leave free.
+    pub fn set_expected_stage_bytes(&mut self, bytes: Vec<(u64, u64)>) {
+        self.expected_stage_bytes = bytes;
+    }
+
+    /// The admission margin: the largest stage transient bound, expected
+    /// (manifest-derived) or measured, whichever is larger. Measured raw
+    /// bytes carry no dtype, so their element count is bounded by bytes
+    /// (1-byte elements — the widest F32 image a byte count can imply).
+    fn admission_margin(&self) -> u64 {
+        let expected = self
+            .expected_stage_bytes
+            .iter()
+            .map(|&(bytes, elems)| stage_transient_bound(bytes, elems))
+            .max()
+            .unwrap_or(0);
+        let measured = self
+            .stage_weight_bytes
+            .iter()
+            .map(|&bytes| stage_transient_bound(bytes, bytes / 4))
+            .max()
+            .unwrap_or(0);
+        expected.max(measured)
     }
 
     /// Adopt a shared session verified-κ set (a growable session forwards
@@ -400,12 +451,19 @@ impl<'a> StagedRunner<'a> {
             // residency window. `resident[stage]` was `take`n above, so
             // `resident_bytes` counts it at most once.
             let bytes = self.stage_weight_bytes[stage];
+            let margin = self.admission_margin();
             let admissible = bytes > 0
                 && self.resident_bytes + bytes <= self.residency_budget
-                && self.admission_probe.as_ref().is_none_or(|p| p());
+                && self.admission_probe.as_ref().is_none_or(|p| p(margin));
             if admissible {
                 self.resident[stage] = Some((runner, bytes));
                 self.resident_bytes += bytes;
+            } else if bytes > 0 && self.resident_bytes > 0 {
+                tracing::debug!(
+                    stage,
+                    margin,
+                    "residency full — the stage streams per pass (projection, not refusal)"
+                );
             }
             self.peak_resident_weight_bytes = self
                 .peak_resident_weight_bytes
@@ -522,9 +580,9 @@ pub struct GrowableStagedSession {
     max_window: usize,
     store: std::rc::Rc<std::cell::RefCell<Box<dyn KappaStore>>>,
     on_stage: Option<SharedStageObserver>,
-    on_window: Option<Box<dyn FnMut(usize)>>,
+    on_window: Option<Box<dyn FnMut(usize, bool)>>,
     residency_budget: u64,
-    admission_probe: Option<std::rc::Rc<dyn Fn() -> bool>>,
+    admission_probe: Option<std::rc::Rc<dyn Fn(u64) -> bool>>,
     verified: std::rc::Rc<std::cell::RefCell<std::collections::HashSet<String>>>,
     derived_store: Option<Box<dyn DerivedStore>>,
     derived_hits: u64,
@@ -578,8 +636,38 @@ impl GrowableStagedSession {
 
     /// Install an environment headroom probe forwarded to every regrown
     /// runner (see [`AdmissionProbe`]).
-    pub fn set_admission_probe(&mut self, p: std::rc::Rc<dyn Fn() -> bool>) {
+    pub fn set_admission_probe(&mut self, p: std::rc::Rc<dyn Fn(u64) -> bool>) {
         self.admission_probe = Some(p);
+    }
+
+    /// (Raw weight bytes, element count) each stage of `archives` will
+    /// materialize — summed per constant from its κ-map entries' manifest
+    /// sizes, known BEFORE any byte moves.
+    fn expected_stage_bytes(&self, archives: &[Vec<u8>]) -> Vec<(u64, u64)> {
+        let size_of: std::collections::HashMap<&str, (u64, u64)> = self
+            .kappas
+            .iter()
+            .zip(self.shapes.iter().zip(&self.dtypes))
+            .map(|(kappa, (shape, dtype))| {
+                let elems: u64 = shape.iter().product();
+                (
+                    kappa.as_str(),
+                    (elems * dtype.byte_size().unwrap_or(1) as u64, elems),
+                )
+            })
+            .collect();
+        archives
+            .iter()
+            .map(|archive| {
+                crate::materialize::kappa_requirements(archive)
+                    .map(|reqs| {
+                        reqs.iter()
+                            .map(|r| size_of.get(r.kappa.as_str()).copied().unwrap_or((0, 0)))
+                            .fold((0u64, 0u64), |(b, e), (rb, re)| (b + rb, e + re))
+                    })
+                    .unwrap_or((0, 0))
+            })
+            .collect()
     }
 
     /// Forward a residency budget (bytes) to every regrown runner: stages
@@ -599,10 +687,36 @@ impl GrowableStagedSession {
         self.on_stage = Some(std::rc::Rc::from(std::cell::RefCell::new(f)));
     }
 
-    /// Install a window observer: called with the bucket size at the start of
-    /// each window (re)compile — the other honest wait in a staged turn.
-    pub fn set_window_observer(&mut self, f: Box<dyn FnMut(usize)>) {
+    /// Install a window observer: called with the bucket size when a window
+    /// (re)builds, and whether it RESOLVED from the derived store (true) or
+    /// compiled fresh (false) — the narration must not say "compiling" for a
+    /// resolution.
+    pub fn set_window_observer(&mut self, f: Box<dyn FnMut(usize, bool)>) {
         self.on_window = Some(f);
+    }
+
+    /// Pre-derive the next geometric window bucket's stage archives into the
+    /// derived store, OFF the per-token path (row `idle-derivation`): no
+    /// weights move (stage k-forms are weightless), the resident window is
+    /// untouched, and a later crossing resolves the bucket instead of
+    /// compiling it on the critical path. Returns the pre-derived bucket, or
+    /// `None` at the ceiling. Abandoned speculation is ordinary derived
+    /// content — evaporable by the same lifecycle that admitted it.
+    pub fn prederive_next_window(&mut self) -> Result<Option<usize>> {
+        let next = match &self.current {
+            Some((current, _)) if *current >= self.max_window => return Ok(None),
+            Some((current, _)) => {
+                crate::engine::geometric_window(current.saturating_mul(2), self.max_window)
+            }
+            None => crate::engine::geometric_window(1, self.max_window),
+        };
+        if matches!(&self.current, Some((current, _)) if *current >= next) {
+            return Ok(None);
+        }
+        // Derivation persists via the derived store; the result is dropped —
+        // this call moves no weights and swaps no runner.
+        let _ = self.stages_for_window(next)?;
+        Ok(Some(next))
     }
 
     /// The stage count of the currently-resident window (0 before the first).
@@ -623,13 +737,14 @@ impl SessionProvider for GrowableStagedSession {
         let fits = matches!(&self.current, Some((cur, _)) if *cur >= want);
         if !fits {
             let window = crate::engine::geometric_window(want, self.max_window);
-            tracing::info!(window, want, "compiling staged generation window");
-            if let Some(f) = self.on_window.as_mut() {
-                f(window);
-            }
+            tracing::info!(window, want, "building staged generation window");
             // Drop the previous window first: peak residency stays one stage.
             self.current = None;
-            let archives = self.stages_for_window(window)?;
+            let (archives, resolved) = self.stages_for_window(window)?;
+            if let Some(f) = self.on_window.as_mut() {
+                f(window, resolved);
+            }
+            let expected = self.expected_stage_bytes(&archives);
             let mut runner = StagedRunner::from_archives(
                 archives,
                 Box::new(SharedStore(std::rc::Rc::clone(&self.store))),
@@ -643,9 +758,10 @@ impl SessionProvider for GrowableStagedSession {
             }
             runner.set_residency_budget(self.residency_budget);
             runner.share_verified_set(std::rc::Rc::clone(&self.verified));
+            runner.set_expected_stage_bytes(expected);
             if let Some(probe) = &self.admission_probe {
                 let probe = std::rc::Rc::clone(probe);
-                runner.set_admission_probe(Box::new(move || probe()));
+                runner.set_admission_probe(Box::new(move |margin| probe(margin)));
             }
             self.current = Some((window, runner));
         }
@@ -773,7 +889,7 @@ impl GrowableStagedSession {
     /// Resolve the window's stage archives: derived store first (verified at
     /// load; a mismatch evaporates the entry — derive-as-recovery), else
     /// compile and persist the fresh derivation.
-    fn stages_for_window(&mut self, window: usize) -> Result<Vec<Vec<u8>>> {
+    fn stages_for_window(&mut self, window: usize) -> Result<(Vec<Vec<u8>>, bool)> {
         let key = self.derivation_key(window);
         if let Some(store) = self.derived_store.as_mut() {
             if let Some((stages, kappas)) = store.load(&key) {
@@ -786,7 +902,7 @@ impl GrowableStagedSession {
                 if intact {
                     self.derived_hits += 1;
                     tracing::info!(window, "staged window resolved from derived κ-store");
-                    return Ok(stages);
+                    return Ok((stages, true));
                 }
                 // Corrupted or torn: evaporate and recover by deriving.
                 store.evaporate(&key);
@@ -809,6 +925,6 @@ impl GrowableStagedSession {
                 .collect();
             store.store(&key, &stages, &kappas);
         }
-        Ok(stages)
+        Ok((stages, false))
     }
 }

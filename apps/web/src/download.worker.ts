@@ -172,6 +172,31 @@ async function saveShardPrior(
   }
 }
 
+/** Write a load-bearing (crystalline) file, evaporating gas-phase tensor
+ * cache entries to make room when the quota refuses (lifecycle σ-order:
+ * cached tensors are provenance-recoverable; the structure is not). Fails
+ * loud only when nothing is left to evaporate. */
+async function writeEssential(
+  tensorsDir: FileSystemDirectoryHandle,
+  evictable: string[],
+  emitProgressFn: (msg: string) => void,
+  write: () => Promise<void>,
+): Promise<void> {
+  for (;;) {
+    try {
+      await write();
+      return;
+    } catch (e) {
+      const kappa = evictable.pop();
+      if (!kappa) throw e;
+      await tensorsDir.removeEntry(`${kappa}.bin`).catch(() => {});
+      emitProgressFn(
+        `κ-store pressure: evaporated a cached tensor (gas phase, provenance-recoverable) to persist the model structure.`,
+      );
+    }
+  }
+}
+
 export async function handleSafetensorsDownload(
   {
     modelId,
@@ -241,8 +266,9 @@ export async function handleSafetensorsDownload(
     const provDir = await root.getDirectoryHandle("provenance", { create: true });
     const allKappas: string[] = [];
     const kappaSources: Record<string, { url: string; start: number; end: number }> = {};
-    const cacheBudget = cacheBudgetBytes ?? Number.POSITIVE_INFINITY;
+    let cacheBudget = cacheBudgetBytes ?? Number.POSITIVE_INFINITY;
     let cachedBytes = 0;
+    const cachedKappas: string[] = [];
 
     for (const manifest of manifests) {
       const baseOffset = 8 + manifest.headerLen;
@@ -274,7 +300,11 @@ export async function handleSafetensorsDownload(
       let lastEmit = 0;
 
       /** A completed tensor: record provenance, cache within budget, and
-       * DISCARD the content — only the k-representation flows forward. */
+       * DISCARD the content — only the k-representation flows forward. The
+       * κ-store is a CACHE: a refused write (quota, I/O) stops caching and
+       * the journey continues on recorded provenance — measured headroom is
+       * a projection, and the environment's real quota answers at the write
+       * (row memory-guard: never refused for resources). */
       const finalizeTensor = async (
         tensor: ShardTensor,
         kappa: string,
@@ -287,18 +317,28 @@ export async function handleSafetensorsDownload(
         allKappas.push(kappa);
         const tensorSize = tensorEnd - tensorStart;
         if (buffer && cachedBytes + tensorSize <= cacheBudget) {
-          const binHandle = await tensorsDir.getFileHandle(`${kappa}.bin`, { create: true });
-          if ("createSyncAccessHandle" in binHandle) {
-            const accessHandle = await (binHandle as any).createSyncAccessHandle();
-            accessHandle.write(buffer);
-            accessHandle.flush();
-            accessHandle.close();
-          } else {
-            const writable = await (binHandle as any).createWritable();
-            await writable.write(buffer);
-            await writable.close();
+          try {
+            const binHandle = await tensorsDir.getFileHandle(`${kappa}.bin`, { create: true });
+            if ("createSyncAccessHandle" in binHandle) {
+              const accessHandle = await (binHandle as any).createSyncAccessHandle();
+              accessHandle.write(buffer);
+              accessHandle.flush();
+              accessHandle.close();
+            } else {
+              const writable = await (binHandle as any).createWritable();
+              await writable.write(buffer);
+              await writable.close();
+            }
+            cachedBytes += tensorSize;
+            cachedKappas.push(kappa);
+          } catch (e) {
+            cacheBudget = 0; // the environment answered: cache no further
+            void tensorsDir.removeEntry(`${kappa}.bin`).catch(() => {});
+            void e;
+            emitProgressFn(
+              "κ-store quota reached — remaining tensors stream via recorded provenance (cache, not mirror).",
+            );
           }
-          cachedBytes += tensorSize;
         }
       };
 
@@ -402,22 +442,28 @@ export async function handleSafetensorsDownload(
     if (localName) {
       const modelsDir = await root.getDirectoryHandle("models", { create: true });
       const localDir = await modelsDir.getDirectoryHandle(localName, { create: true });
-      const srcHandle = await localDir.getFileHandle("kappa-sources.json", { create: true });
-      const writable = await srcHandle.createWritable();
-      await writable.write(JSON.stringify(kappaSources));
-      await writable.close();
-      const metaHandle = await localDir.getFileHandle("model-meta.json", { create: true });
-      const metaWritable = await metaHandle.createWritable();
-      await metaWritable.write(JSON.stringify({ contextLength }));
-      await metaWritable.close();
+      await writeEssential(tensorsDir, cachedKappas, emitProgressFn, async () => {
+        const srcHandle = await localDir.getFileHandle("kappa-sources.json", { create: true });
+        const writable = await srcHandle.createWritable();
+        await writable.write(JSON.stringify(kappaSources));
+        await writable.close();
+      });
+      await writeEssential(tensorsDir, cachedKappas, emitProgressFn, async () => {
+        const metaHandle = await localDir.getFileHandle("model-meta.json", { create: true });
+        const metaWritable = await metaHandle.createWritable();
+        await metaWritable.write(JSON.stringify({ contextLength }));
+        await metaWritable.close();
+      });
       // The streamed manifest (name → κ/shape/dtype): chat recompiles stage
       // windows from it, so the generation window can follow the sequence.
-      const manifestHandle = await localDir.getFileHandle("manifest.json", { create: true });
-      const manifestWritable = await manifestHandle.createWritable();
-      await manifestWritable.write(
-        JSON.stringify({ keys: allKeys, kappas: allKappas, shapes: allShapes, dtypes: allDtypes }),
-      );
-      await manifestWritable.close();
+      await writeEssential(tensorsDir, cachedKappas, emitProgressFn, async () => {
+        const manifestHandle = await localDir.getFileHandle("manifest.json", { create: true });
+        const manifestWritable = await manifestHandle.createWritable();
+        await manifestWritable.write(
+          JSON.stringify({ keys: allKeys, kappas: allKappas, shapes: allShapes, dtypes: allDtypes }),
+        );
+        await manifestWritable.close();
+      });
     }
 
     // Mechanical: the graph was validated in preflight; this binds the
@@ -440,17 +486,21 @@ export async function handleSafetensorsDownload(
       const localDir = await modelsDir.getDirectoryHandle(localName, { create: true });
       const stagesDir = await localDir.getDirectoryHandle("stages", { create: true });
       for (let i = 0; i < stages.length; i++) {
-        const handle = await stagesDir.getFileHandle(`${i}.holo`, { create: true });
-        const writable = await handle.createWritable();
-        await writable.write(stages[i] as unknown as ArrayBufferView<ArrayBuffer>);
-        await writable.close();
+        await writeEssential(tensorsDir, cachedKappas, emitProgressFn, async () => {
+          const handle = await stagesDir.getFileHandle(`${i}.holo`, { create: true });
+          const writable = await handle.createWritable();
+          await writable.write(stages[i] as unknown as ArrayBufferView<ArrayBuffer>);
+          await writable.close();
+        });
       }
-      const metaHandle = await localDir.getFileHandle("stages.json", { create: true });
-      const writable = await metaHandle.createWritable();
-      await writable.write(
-        JSON.stringify({ stageCount: stages.length, layersPerStage, contextLength }),
-      );
-      await writable.close();
+      await writeEssential(tensorsDir, cachedKappas, emitProgressFn, async () => {
+        const metaHandle = await localDir.getFileHandle("stages.json", { create: true });
+        const writable = await metaHandle.createWritable();
+        await writable.write(
+          JSON.stringify({ stageCount: stages.length, layersPerStage, contextLength }),
+        );
+        await writable.close();
+      });
       emitDoneStagedFn(stages.length);
       return;
     }
