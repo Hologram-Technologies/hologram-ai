@@ -805,6 +805,8 @@ struct BddWorld {
     staged_growth_err: Option<String>,
     // S3 — stage residency cache (row `stage-residency-cache`)
     residency_run: Option<ResidencyRun>,
+    // S3 — total algebraic path (row `total-algebraic-path`, open/measured)
+    float_dispatch_tally: Option<(usize, usize)>,
     // S3 — session verified-κ (row `session-verified-kappa`)
     verified_second_pass: Option<anyhow::Result<Vec<u8>>>,
     verified_fresh_err: Option<String>,
@@ -2831,6 +2833,52 @@ async fn when_residency_parity(w: &mut BddWorld) {
     let strict = run_with_residency(&store.path, 0);
     let cached = run_with_residency(&store.path, kit.total_weight_bytes * 2);
     w.staged_completions = Some((strict.completion, cached.completion));
+}
+
+// ──────── S3 — total algebraic path (row `total-algebraic-path`, open) ───────
+
+#[when("the fixture decoder's lowered kernel dtypes are tallied")]
+async fn when_float_tally(w: &mut BddWorld) {
+    let manifest = staged_manifest(false);
+    let (keys, _): (Vec<String>, Vec<Vec<u64>>) = manifest.into_iter().unzip();
+    let dtypes = vec![DType::F32; keys.len()];
+    let graph = build_parametric_graph_from_manifest(&staged_config(false), &keys, &dtypes, None)
+        .expect("the fixture decoder graph builds");
+    // Classify each node by its first output's dtype: the substrate's
+    // dispatch selects kernels by dtype tag, float first, so a float-dtyped
+    // node is a runtime float dispatch today.
+    let mut float_nodes = 0usize;
+    let mut total = 0usize;
+    for node in &graph.nodes {
+        let Some(out) = node.outputs.first() else {
+            continue;
+        };
+        let Some(info) = graph.tensor_info.get(out) else {
+            continue;
+        };
+        total += 1;
+        if matches!(
+            info.logical_dtype,
+            DType::F32 | DType::F16 | DType::BF16 | DType::F64
+        ) {
+            float_nodes += 1;
+        }
+    }
+    w.float_dispatch_tally = Some((float_nodes, total));
+}
+
+#[then("the float-dispatched fraction is reported, never asserted")]
+async fn then_float_tally(w: &mut BddWorld) {
+    let (float_nodes, total) = w.float_dispatch_tally.expect("the tally ran");
+    assert!(total > 0, "the tally must cover a real graph");
+    println!(
+        "[total-algebraic-path] {}/{} kernels float-dtyped ({:.0}%) — the substrate \
+         dispatches these to native IEEE-754 kernels at runtime; the row flips to \
+         build at 0% with gate-time reference parity per (op, tier)",
+        float_nodes,
+        total,
+        100.0 * float_nodes as f64 / total as f64
+    );
 }
 
 // ─────────── S3 — session verified-κ (row `session-verified-kappa`) ──────────

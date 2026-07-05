@@ -30,12 +30,91 @@ owned by exactly one lever:
   residency cache removes it from the per-token path entirely while the
   environment has measured headroom (`stage-residency-cache`). OPFS sync
   access handles on the worker path.
-- **Decode:** elision bounds per-token compute to the novel suffix cone; zero
-  verification, zero recompute-to-check. This is the tokens/sec owner.
+- **Decode:** two levers, one per factor of cost = cone size × per-element
+  cost. Elision bounds the cone to the novel suffix; the Q0 kernel floor
+  bounds per-element cost (see Kernel floor). Zero verification, zero
+  recompute-to-check. This is the tokens/sec owner.
 - **Sampler:** pinned state; negligible cost, but on the path and part of the
   derivation key.
 
 **A cost on the per-token path that is not decode or sampler is a defect.**
+
+## Kernel floor (micro-architectural)
+
+The rest/generation principle recurs at cache scale. A function over a finite
+domain is its own table: at Q0 (Z/256) any operation's value-dependent state
+is a 256-entry LUT (4 cache lines) plus a 64B psumbook (1 line), L1-resident
+by construction. Hit rate on reused state is structurally 1; residual traffic
+is single-pass sequential streaming (compulsory misses only, prefetch-hidden).
+Fiber-ordered Q8 GEMM touches 1 L1 line per radix pass (substrate plan 033).
+
+Scope: the bound is per tier. Q1 tables (`[u16;65536]`, 128 KB) are
+L2-resident on typical L1d; the claim does not lift to Q1. Precision above Q0
+routes through the carry chain only (see Totality); there is no float escape.
+
+Grounding in the pinned substrate (read-only, inspected at `hologram-backend`):
+the Q1 LUT tier is real and bit-identity-constructed — `cpu/lut.rs`
+materializes 16-bit activations as `narrow(f(widen(bits)))` tables, "a pure
+speedup, not an approximation" — and the Q0 byte-domain kernels with the
+carry chain (CurvatureFlux) exist in `cpu/kernels.rs`. Witness: native
+hardware counters (L1-dcache miss ratio partitioned into table vs streaming
+accesses, ~0 on the former after warmup) as a performance-contract row. wasm
+exposes no counters; in-browser the statement stays structural, native
+measurement is the proxy.
+
+## One principle, three scales
+
+Recursion through the known (UOR-Atlas-UTQC: cache collapse subverts
+expansion) instantiated at each residency tier:
+
+| Scale | Known set | Reuse act | Store |
+|---|---|---|---|
+| Content | provenance-recorded κ | wire skip, materialize-once | OPFS κ-store |
+| Compute | derived labels (CE) | decode elision of the prefix cone | session memo |
+| Kernel | function values over finite domain | LUT lookup replaces recompute | L1 |
+
+The wasm/native decode gap closes from both ends: elision shrinks the cone
+(fewer elements), the Q0 floor bounds cost per element (table lookups, no
+transcendentals, no thrashing). Neither lever requires threads; both are
+admissible in wasm today. What remains after both is irreducible novel
+arithmetic, which is the definition of the floor.
+
+## Totality: no classical fallback
+
+The normative posture: the execution path is single and total. Every graph
+operation lowers to the quantum hierarchy (Q0→Q3 carry chain); precision is
+not a mode switch to a float path but a carry lift, decided by curvature
+(CurvatureFlux, statically promoted where the compiler proves it). The float
+reference exists at gate time only: tables are built `narrow(f(widen(bits)))`,
+bit-identical to the reference by construction, and the reference is then
+retired from runtime. A runtime float escape is a defect of the same kind as
+per-token verification: it reintroduces the cost structure the model
+eliminates and forks semantics into two paths with two behaviors.
+
+Distinguish resource fallback from semantic fallback. Strict windowing under
+memory pressure is a projection within the k-model (same semantics, different
+plan; never refused). A classical kernel path is a second semantics and is
+inadmissible. The first degrades performance; the second forfeits the model.
+
+**The measured present contradicts the posture, and the ledger says so.** The
+pinned substrate's dispatch (`hologram-backend::cpu::kernels::dispatch`)
+tries `try_dispatch_float` FIRST: any float-dtype kernel call runs in native
+IEEE-754 kernels (`cpu/float_kernels.rs`) at runtime, and this repo's
+f32/bf16 LLM workloads therefore run the float path today, pervasively. The
+substrate is a read-only upstream dependency: retiring runtime float
+dispatch for these workloads (the carry lift) is owned there. The row
+`total-algebraic-path` is held **open** as a measured target — the probe
+reports the float-dispatch fraction of the compiled plan (today ~all of it)
+so the frontier is a number, not a hope. It flips to build only when the
+number reaches zero and gate-time parity with the retired reference is
+witnessed per (op, tier).
+
+Arbitrary models: coverage is the totality of the lowering, measured by the
+open row `arbitrary-architecture-coverage`. An op the hierarchy does not yet
+express is a dictionary gap that halts loudly, never a license for a float
+path. Arbitrary input: totality holds per tier by finiteness (any byte
+stream is Q0-valid; higher tiers reached by carry), so novel input executes
+on the same path as known input; reuse varies, semantics never.
 
 ## Verification placement
 
@@ -100,6 +179,14 @@ its own measured cost; no aggregate canonicalization claim.
   materialization or resolution rejects and recovers by re-mint + rebind.
   Exact-repeat tier from recorded provenance (hf-hub revision-pin oracle);
   cross-model tier from a published κ-manifest.
+- S3 `total-algebraic-path` (open, measured): every executed kernel is a
+  hierarchy kernel; zero runtime float dispatch; parity with the retired
+  reference witnessed at gate time per (op, tier). Held open by the pinned
+  substrate's float-first dispatch for float dtypes (see Totality); the
+  probe reports the measured float-dispatch fraction.
+- Kernel-floor performance contract: native hardware-counter witness
+  (L1-dcache table-access miss ratio ~0 after warmup) once Q0-tier kernels
+  carry these workloads; structural-only until then.
 - Measured, never asserted: dedup ratio per corpus; elision ratio per
   workload; stage-granularity optimum per environment.
 

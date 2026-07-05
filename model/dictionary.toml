@@ -243,6 +243,16 @@ executor = "rust"
 feature = "features/suites/s3_execution/session_verified_kappa.feature"
 
 [[row]]
+id = "total-algebraic-path"
+statement = "Every executed kernel is a hierarchy kernel — zero runtime float dispatch, parity with the retired float reference witnessed at gate time per (op, tier); held open by the pinned substrate's float-first dispatch for float dtypes, with the float-dispatch fraction of a compiled plan measured and reported, never asserted."
+stage = "S3"
+status = "open"
+oracles = ["hologram-substrate"]
+tier = "target"
+executor = "rust"
+feature = "features/suites/s3_execution/total_algebraic_path.feature"
+
+[[row]]
 id = "bounded-embedding"
 statement = "A model is bounded by its unavoidable per-row/per-tile work, never whole-matrix F32 materialization: the embedding gathers the token rows at the table's native dtype and widens only the gathered result, so the whole [vocab, hidden] F32 image is never materialized, and a fused Phi3-family model executes monolithically and staged to identical logits."
 stage = "S3"
