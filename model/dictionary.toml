@@ -109,6 +109,16 @@ executor = "browser"
 feature = "features/suites/s1_acquisition/memory_guard.feature"
 
 [[row]]
+id = "network-skip"
+statement = "Transit is the set-difference from the known: under a shard's content pin (its HTTP ETag — the Hub's blob hash), ranges whose κ an earlier stream recorded never re-transit (known = provenance-recorded κ, not cached bytes; unknown runs move as coalesced ranges); a changed pin discards the prior and streams fully; no skipped byte is trusted — every κ verifies at first materialization and a wrong prior unpins and recovers."
+stage = "S1"
+status = "build"
+oracles = ["journey-reference", "hf-hub"]
+tier = "suite"
+executor = "browser"
+feature = "features/suites/s1_acquisition/network_skip.feature"
+
+[[row]]
 id = "companion-assets"
 statement = "config.json, tokenizer.json, and generation_config.json are fetched and persisted under the model directory."
 stage = "S1"

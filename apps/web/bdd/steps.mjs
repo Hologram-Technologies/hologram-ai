@@ -138,6 +138,83 @@ Then("the journey fails at the download stage naming the repository", async func
   assert.ok(body.includes(MISSING_REPO), `failure must name ${MISSING_REPO}:\n${body}`);
 });
 
+// ── S1 — transit prior (row `network-skip`) ─────────────────────────────────
+
+/** The committed fixture's shard-body start (8-byte length + JSON header). */
+function fixtureBodyStart() {
+  const bytes = readFileSync(path.join(ROOT, "oracles/fixture/model.safetensors"));
+  const headerLen = Number(new DataView(bytes.buffer, bytes.byteOffset, 8).getBigUint64(0, true));
+  return 8 + headerLen;
+}
+
+/** Requests for the shard since `mark`, with their Range start (null = full body). */
+async function shardRequestsSince(world, mark) {
+  const log = await world.fixtureRequests();
+  return log
+    .slice(mark)
+    .filter((entry) => entry.includes("model.safetensors"))
+    .map((entry) => {
+      const range = /#bytes=(\d+)-/.exec(entry);
+      return { entry, rangeStart: range ? Number(range[1]) : null };
+    });
+}
+
+When("the model directory is removed but the transit prior survives", async function () {
+  // The κ-store (tensors/) and the transit prior (provenance/) persist; only
+  // the model directory goes — the repeat download must rebuild it from the
+  // known set without moving shard bytes.
+  await this.page.evaluate(async () => {
+    const root = await navigator.storage.getDirectory();
+    const models = await root.getDirectoryHandle("models");
+    await models.removeEntry("handshake-tiny", { recursive: true });
+  });
+  // The Models page scans OPFS on load; reload so the row offers Download.
+  await this.page.reload({ waitUntil: "networkidle" });
+  this.transitMark = (await this.fixtureRequests()).length;
+});
+
+When("the fixture model is downloaded again", async function () {
+  await this.downloadModel(FIXTURE_DISPLAY);
+});
+
+Then("the repeat download transferred no shard body bytes", async function () {
+  assert.ok(this.transitMark !== undefined, "the transit mark was set");
+  const bodyStart = fixtureBodyStart();
+  const shardRequests = await shardRequestsSince(this, this.transitMark);
+  assert.ok(shardRequests.length > 0, "the repeat download read the shard header");
+  const bodyTransfers = shardRequests.filter(
+    (r) => r.rangeStart === null || r.rangeStart >= bodyStart,
+  );
+  assert.deepEqual(
+    bodyTransfers.map((r) => r.entry),
+    [],
+    "known content must never re-transit — only header ranges may move",
+  );
+  console.log(
+    `[network-skip] repeat download: ${shardRequests.length} header-range request(s), zero body bytes`,
+  );
+});
+
+When("the shard content pin changes", async function () {
+  const res = await fetch(`${this.fixtureBase()}/__etag-salt?value=changed-${Date.now()}`);
+  assert.equal(res.status, 200, "the pin toggle responds");
+  this.transitMark = (await this.fixtureRequests()).length;
+});
+
+Then("the repeat download streamed the shard body", async function () {
+  assert.ok(this.transitMark !== undefined, "the transit mark was set");
+  const bodyStart = fixtureBodyStart();
+  const shardRequests = await shardRequestsSince(this, this.transitMark);
+  const bodyTransfers = shardRequests.filter(
+    (r) => r.rangeStart === null || r.rangeStart >= bodyStart,
+  );
+  assert.ok(
+    bodyTransfers.length > 0,
+    `a changed pin discards the prior — the shard must stream: ${JSON.stringify(shardRequests)}`,
+  );
+  console.log(`[network-skip] changed pin: ${bodyTransfers.length} body transfer(s)`);
+});
+
 // ── S1 — supported-only discovery ───────────────────────────────────────────
 
 When("searching the catalog for {string}", async function (query) {

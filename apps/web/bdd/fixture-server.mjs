@@ -5,6 +5,7 @@
 // app itself. Also serves a `too-large` repo (for the memory-guard row) and
 // records every request for the "no shard bytes moved" assertion.
 import { createServer } from "node:http";
+import { createHash } from "node:crypto";
 import { readFileSync, existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
@@ -71,9 +72,12 @@ const TOO_LARGE_SHARD_BYTES = 800 * 1024 ** 3;
 
 export function startFixtureServer() {
   const requests = [];
+  // The content-pin salt: changing it changes every served ETag, so a
+  // recorded transit prior no longer matches (row `network-skip`).
+  let etagSalt = "";
   const server = createServer((req, res) => {
     const url = new URL(req.url, "http://localhost");
-    requests.push(url.pathname);
+    requests.push(url.pathname + (req.headers.range ? `#${req.headers.range}` : ""));
     res.setHeader("Access-Control-Allow-Origin", "*");
     res.setHeader("Access-Control-Allow-Headers", "*");
     if (req.method === "OPTIONS") {
@@ -87,8 +91,11 @@ export function startFixtureServer() {
       res.end(body);
     };
     // Honor Range for binary payloads (the preflight reads safetensors
-    // headers via ranged requests — kilobytes, never the shard body).
+    // headers via ranged requests — kilobytes, never the shard body). Every
+    // binary response carries a strong content-derived ETag — the pin the
+    // exact-repeat transit prior keys on, like the HF Hub's blob hash.
     const sendBytes = (body) => {
+      const etag = `"${createHash("sha256").update(body).update(etagSalt).digest("hex").slice(0, 32)}"`;
       const range = req.headers.range;
       const match = range && /^bytes=(\d+)-(\d+)?$/.exec(range);
       if (match) {
@@ -99,15 +106,28 @@ export function startFixtureServer() {
           "Content-Type": "application/octet-stream",
           "Content-Length": slice.length,
           "Content-Range": `bytes ${start}-${end}/${body.length}`,
+          ETag: etag,
+          "Access-Control-Expose-Headers": "ETag, Content-Range",
         });
         res.end(slice);
         return;
       }
-      send(200, body, "application/octet-stream");
+      res.writeHead(200, {
+        "Content-Type": "application/octet-stream",
+        "Content-Length": body.length,
+        ETag: etag,
+        "Access-Control-Expose-Headers": "ETag, Content-Range",
+      });
+      res.end(body);
     };
 
     if (url.pathname === "/__log") {
       send(200, JSON.stringify(requests));
+      return;
+    }
+    if (url.pathname === "/__etag-salt") {
+      etagSalt = url.searchParams.get("value") ?? "";
+      send(200, JSON.stringify({ etagSalt }));
       return;
     }
     if (url.pathname === "/api/models" && url.searchParams.has("search")) {

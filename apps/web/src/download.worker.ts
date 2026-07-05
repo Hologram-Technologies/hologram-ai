@@ -59,13 +59,36 @@ interface ShardManifest {
   url: string;
   headerLen: number;
   tensors: ShardTensor[];
+  /** The shard's content pin (HTTP ETag — on the HF Hub this is the blob's
+   * content hash). Identical pin ⇒ byte-identical shard ⇒ every recorded
+   * (range → κ) of an earlier stream is valid (row `network-skip`). */
+  etag: string | null;
 }
 
 /** Fetch `[start, endInclusive]` of `url`. Honors 206; if the server ignores
  * Range (200), reads only the needed prefix and cancels the stream — never
  * buffering a shard body. */
-async function fetchRange(url: string, start: number, endInclusive: number): Promise<Uint8Array> {
+async function fetchRangeMeta(
+  url: string,
+  start: number,
+  endInclusive: number,
+): Promise<{ bytes: Uint8Array; etag: string | null }> {
   const response = await fetch(url, { headers: { Range: `bytes=${start}-${endInclusive}` } });
+  const etag = response.headers.get("x-linked-etag") ?? response.headers.get("etag");
+  const bytes = await readRangeBody(response, url, start, endInclusive);
+  return { bytes, etag };
+}
+
+async function fetchRange(url: string, start: number, endInclusive: number): Promise<Uint8Array> {
+  return (await fetchRangeMeta(url, start, endInclusive)).bytes;
+}
+
+async function readRangeBody(
+  response: Response,
+  url: string,
+  start: number,
+  endInclusive: number,
+): Promise<Uint8Array> {
   if (!response.ok || !response.body) {
     throw new Error(`Failed ranged fetch of ${url} (HTTP ${response.status})`);
   }
@@ -94,7 +117,7 @@ async function fetchRange(url: string, start: number, endInclusive: number): Pro
 /** Read a shard's safetensors header via ranged requests (8-byte u64 length +
  * JSON), returning its tensor manifest sorted by data offset. */
 async function fetchShardManifest(url: string, rfilename: string): Promise<ShardManifest> {
-  const lenBytes = await fetchRange(url, 0, 7);
+  const { bytes: lenBytes, etag } = await fetchRangeMeta(url, 0, 7);
   const headerLen = Number(
     new DataView(lenBytes.buffer, lenBytes.byteOffset, 8).getBigUint64(0, true),
   );
@@ -110,7 +133,43 @@ async function fetchShardManifest(url: string, rfilename: string): Promise<Shard
     tensors.push({ key, dtype: m.dtype, shape: m.shape, data_offsets: m.data_offsets });
   }
   tensors.sort((a, b) => a.data_offsets[0] - b.data_offsets[0]);
-  return { rfilename, url, headerLen, tensors };
+  return { rfilename, url, headerLen, tensors, etag };
+}
+
+/** A shard's transit prior: absolute range → κ, recorded by an earlier
+ * stream, valid only under the same content pin. */
+type ShardPrior = Record<string, string>;
+
+/** The prior's OPFS name for a pin (an ETag is quoted and may be weak). */
+function pinFileName(etag: string): string {
+  return `${etag.replace(/[^A-Za-z0-9._-]/g, "")}.json`;
+}
+
+async function loadShardPrior(
+  provDir: FileSystemDirectoryHandle,
+  etag: string,
+): Promise<ShardPrior | null> {
+  try {
+    const handle = await provDir.getFileHandle(pinFileName(etag));
+    return JSON.parse(await (await handle.getFile()).text()) as ShardPrior;
+  } catch {
+    return null;
+  }
+}
+
+async function saveShardPrior(
+  provDir: FileSystemDirectoryHandle,
+  etag: string,
+  prior: ShardPrior,
+): Promise<void> {
+  try {
+    const handle = await provDir.getFileHandle(pinFileName(etag), { create: true });
+    const writable = await handle.createWritable();
+    await writable.write(JSON.stringify(prior));
+    await writable.close();
+  } catch {
+    // The prior is an optimization; a lost write only costs a re-stream.
+  }
 }
 
 export async function handleSafetensorsDownload(
@@ -179,108 +238,163 @@ export async function handleSafetensorsDownload(
     // range) is recorded so the rest resolve at run time.
     const root = await navigator.storage.getDirectory();
     const tensorsDir = await root.getDirectoryHandle("tensors", { create: true });
+    const provDir = await root.getDirectoryHandle("provenance", { create: true });
     const allKappas: string[] = [];
     const kappaSources: Record<string, { url: string; start: number; end: number }> = {};
     const cacheBudget = cacheBudgetBytes ?? Number.POSITIVE_INFINITY;
     let cachedBytes = 0;
 
     for (const manifest of manifests) {
-      emitProgressFn(`Streaming ${manifest.rfilename}...`);
-      const response = await fetch(manifest.url);
-      if (!response.ok || !response.body) {
-        throw new Error(`Failed to fetch ${manifest.rfilename}`);
-      }
-      const reader = response.body.getReader();
-      const totalBytes = Number(response.headers.get("content-length")) || 0;
       const baseOffset = 8 + manifest.headerLen;
       const tensors = manifest.tensors;
 
-      let downloadedBytes = 0;
-      let lastEmit = 0;
-      let currentTensorIdx = 0;
-      let currentHasher = new KappaHasher();
-      let currentTensorBuffer: Uint8Array | null = null;
-      let currentTensorOffset = 0;
-
-      async function processBytes(globalOffset: number, bytes: Uint8Array) {
-        let localOffset = 0;
-        while (localOffset < bytes.length && currentTensorIdx < tensors.length) {
-          const tensor = tensors[currentTensorIdx];
-          const tensorStart = baseOffset + tensor.data_offsets[0];
-          const tensorEnd = baseOffset + tensor.data_offsets[1];
-          const tensorSize = tensorEnd - tensorStart;
-          const currentGlobal = globalOffset + localOffset;
-
-          if (currentGlobal < tensorStart) {
-            localOffset += Math.min(tensorStart - currentGlobal, bytes.length - localOffset);
-          } else if (currentGlobal < tensorEnd) {
-            const toFeed = Math.min(tensorEnd - currentGlobal, bytes.length - localOffset);
-            const slice = bytes.slice(localOffset, localOffset + toFeed);
-            currentHasher.update(slice);
-
-            if (!currentTensorBuffer) {
-              currentTensorBuffer = new Uint8Array(tensorSize);
-              currentTensorOffset = 0;
-            }
-            currentTensorBuffer.set(slice, currentTensorOffset);
-            currentTensorOffset += slice.length;
-            localOffset += toFeed;
-
-            if (currentGlobal + toFeed === tensorEnd) {
-              // The tensor is complete: record its provenance, cache it
-              // within budget, and DISCARD the content — only the
-              // k-representation flows forward.
-              const kappa = currentHasher.finalize();
-              kappaSources[kappa] = { url: manifest.url, start: tensorStart, end: tensorEnd };
-              if (cachedBytes + tensorSize <= cacheBudget) {
-                const binHandle = await tensorsDir.getFileHandle(`${kappa}.bin`, { create: true });
-                if ("createSyncAccessHandle" in binHandle) {
-                  const accessHandle = await (binHandle as any).createSyncAccessHandle();
-                  accessHandle.write(currentTensorBuffer);
-                  accessHandle.flush();
-                  accessHandle.close();
-                } else {
-                  const writable = await (binHandle as any).createWritable();
-                  await writable.write(currentTensorBuffer);
-                  await writable.close();
-                }
-                cachedBytes += tensorSize;
-              }
-              allKappas.push(kappa);
-              currentTensorIdx++;
-              currentTensorBuffer = null;
-              if (currentTensorIdx < tensors.length) {
-                currentHasher = new KappaHasher();
-              }
-            }
-          } else {
-            localOffset++;
-          }
+      // Exact-repeat transit prior (row `network-skip`): under the shard's
+      // content pin, ranges whose κ an earlier stream recorded are KNOWN —
+      // known = provenance-recorded κ, not cached bytes — and known content
+      // never re-transits. No skipped byte is trusted: the κ only enters
+      // the manifest; it verifies at first materialization, and a wrong
+      // prior unpins and recovers from provenance (`saturation-residency`).
+      const prior = manifest.etag ? await loadShardPrior(provDir, manifest.etag) : null;
+      const known = new Map<number, string>();
+      if (prior) {
+        for (const [i, t] of tensors.entries()) {
+          const kappa = prior[`${t.data_offsets[0]}-${t.data_offsets[1]}`];
+          if (kappa) known.set(i, kappa);
         }
       }
 
-      while (currentTensorIdx < tensors.length) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        await processBytes(downloadedBytes, value);
-        downloadedBytes += value.length;
+      emitProgressFn(
+        known.size > 0
+          ? `Streaming ${manifest.rfilename} (${known.size}/${tensors.length} tensors known under the content pin)...`
+          : `Streaming ${manifest.rfilename}...`,
+      );
 
-        const now = Date.now();
-        if (now - lastEmit > 500) {
-          lastEmit = now;
-          if (totalBytes > 0) {
-            const percent = Math.round((downloadedBytes / totalBytes) * 100);
+      const freshPrior: ShardPrior = {};
+      let skippedBytes = 0;
+      let lastEmit = 0;
+
+      /** A completed tensor: record provenance, cache within budget, and
+       * DISCARD the content — only the k-representation flows forward. */
+      const finalizeTensor = async (
+        tensor: ShardTensor,
+        kappa: string,
+        buffer: Uint8Array | null,
+      ) => {
+        const tensorStart = baseOffset + tensor.data_offsets[0];
+        const tensorEnd = baseOffset + tensor.data_offsets[1];
+        kappaSources[kappa] = { url: manifest.url, start: tensorStart, end: tensorEnd };
+        freshPrior[`${tensor.data_offsets[0]}-${tensor.data_offsets[1]}`] = kappa;
+        allKappas.push(kappa);
+        const tensorSize = tensorEnd - tensorStart;
+        if (buffer && cachedBytes + tensorSize <= cacheBudget) {
+          const binHandle = await tensorsDir.getFileHandle(`${kappa}.bin`, { create: true });
+          if ("createSyncAccessHandle" in binHandle) {
+            const accessHandle = await (binHandle as any).createSyncAccessHandle();
+            accessHandle.write(buffer);
+            accessHandle.flush();
+            accessHandle.close();
+          } else {
+            const writable = await (binHandle as any).createWritable();
+            await writable.write(buffer);
+            await writable.close();
+          }
+          cachedBytes += tensorSize;
+        }
+      };
+
+      /** Stream-hash the unknown run `tensors[from..to)` via one coalesced
+       * ranged request — the transit is exactly the unknown set. */
+      const streamRun = async (from: number, to: number) => {
+        const runStart = baseOffset + tensors[from].data_offsets[0];
+        const runEnd = baseOffset + tensors[to - 1].data_offsets[1];
+        const response = await fetch(manifest.url, {
+          headers: { Range: `bytes=${runStart}-${runEnd - 1}` },
+        });
+        if (!response.ok || !response.body) {
+          throw new Error(`Failed to fetch ${manifest.rfilename}`);
+        }
+        // 206 starts at runStart; a server that ignores Range (200) starts
+        // at 0 — the loop skips the prefix and cancels past the run.
+        let globalPos = response.status === 206 ? runStart : 0;
+        const reader = response.body.getReader();
+
+        let idx = from;
+        let hasher = new KappaHasher();
+        let buffer: Uint8Array | null = null;
+        let bufferOffset = 0;
+
+        while (idx < to) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          let localOffset = 0;
+          while (localOffset < value.length && idx < to) {
+            const tensor = tensors[idx];
+            const tensorStart = baseOffset + tensor.data_offsets[0];
+            const tensorEnd = baseOffset + tensor.data_offsets[1];
+            const currentGlobal = globalPos + localOffset;
+            if (currentGlobal < tensorStart) {
+              localOffset += Math.min(tensorStart - currentGlobal, value.length - localOffset);
+              continue;
+            }
+            const toFeed = Math.min(tensorEnd - currentGlobal, value.length - localOffset);
+            const slice = value.slice(localOffset, localOffset + toFeed);
+            hasher.update(slice);
+            if (!buffer) {
+              buffer = new Uint8Array(tensorEnd - tensorStart);
+              bufferOffset = 0;
+            }
+            buffer.set(slice, bufferOffset);
+            bufferOffset += slice.length;
+            localOffset += toFeed;
+            if (currentGlobal + toFeed === tensorEnd) {
+              await finalizeTensor(tensor, hasher.finalize(), buffer);
+              idx++;
+              buffer = null;
+              if (idx < to) hasher = new KappaHasher();
+            }
+          }
+          globalPos += value.length;
+
+          const now = Date.now();
+          if (now - lastEmit > 500) {
+            lastEmit = now;
+            const streamed = Math.min(globalPos, runEnd) - runStart;
             emitProgressFn(
-              `Streaming ${manifest.rfilename}: ${percent}% (${(downloadedBytes / 1024 / 1024).toFixed(1)}MB)`,
+              `Streaming ${manifest.rfilename}: ${(streamed / 1024 / 1024).toFixed(1)}MB (run ${from + 1}–${to}/${tensors.length})`,
             );
           }
+          if (globalPos >= runEnd) break;
         }
+        if (idx < to) {
+          throw new Error(`EOF before finishing tensor ${tensors[idx].key}`);
+        }
+        await reader.cancel().catch(() => {});
+      };
+
+      let i = 0;
+      while (i < tensors.length) {
+        const kappa = known.get(i);
+        if (kappa !== undefined) {
+          const tensor = tensors[i];
+          await finalizeTensor(tensor, kappa, null);
+          skippedBytes += tensor.data_offsets[1] - tensor.data_offsets[0];
+          i++;
+          continue;
+        }
+        let j = i;
+        while (j < tensors.length && !known.has(j)) j++;
+        await streamRun(i, j);
+        i = j;
       }
 
-      if (currentTensorIdx < tensors.length) {
-        throw new Error(`EOF before finishing tensor ${tensors[currentTensorIdx].key}`);
+      if (manifest.etag) {
+        await saveShardPrior(provDir, manifest.etag, freshPrior);
       }
-      emitProgressFn(`Finished streaming ${manifest.rfilename}.`);
+      emitProgressFn(
+        skippedBytes > 0
+          ? `Finished ${manifest.rfilename}: skipped ${(skippedBytes / 1024 / 1024).toFixed(1)}MB already known under the content pin.`
+          : `Finished streaming ${manifest.rfilename}.`,
+      );
     }
 
     // Record κ-provenance + model metadata (the session's context window)

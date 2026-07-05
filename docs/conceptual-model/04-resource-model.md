@@ -11,7 +11,7 @@ only.
 | Axis | Floor | Lever | Ledger anchor |
 |---|---|---|---|
 | Rest | corpus entropy / addressing quotient | coarsen the quotient (canonical form) | `kappa-addressing`; candidate S0 canonical rows (open) |
-| Transit | set-difference(remote, known) under the quotient; known = provenance-recorded κ, not cached bytes | κ-prior: provenance (exact repeat, under the hf-hub revision-pin oracle), κ-manifest (cross-model); coalesced ranges | `kappa-provenance-resolution`; candidate S1 `network-skip` (open) |
+| Transit | set-difference(remote, known) under the quotient; known = provenance-recorded κ, not cached bytes | κ-prior: provenance (exact repeat, under the shard's content pin — build, row `network-skip`), κ-manifest (cross-model — declared); coalesced ranges | `kappa-provenance-resolution`, `network-skip` |
 | Structure | O(config) graph + 32B·#tensors(config) identity data | parametric generation; minimal rep = (family id, config, κ-manifest) | `parametric-graph`, `parametricity` |
 | Residency | max stage + context window + resident prefix labels O(L·seq·d_kv), per environment | stage granularity; measured-headroom residency (stages stay resident while the environment measurably has room, one stage is the floor) | `staged-execution`, `stage-residency-cache`, `memory-guard` |
 | Generation | novel suffix cone only | window follows the sequence (geometric buckets, model context as ceiling); recursion through the known: resident labels re-derived, not re-executed (CE) | `staged-window-growth`, `decode-elision`, `structural-ce` |
@@ -21,8 +21,13 @@ only.
 What the user experiences is time-to-first-token and tokens/sec. Each cost is
 owned by exactly one lever:
 
-- **Wire:** transit prior (skip known κ, coalesced ranges). Dominates
-  time-to-first-use on cold start; zero on warm start.
+- **Wire:** transit prior (row `network-skip`): under a shard's content pin
+  (its HTTP ETag — the Hub's blob hash), provenance-recorded ranges never
+  re-transit and unknown runs move as coalesced ranges; a changed pin
+  discards the prior wholesale. No skipped byte is trusted — the prior only
+  asserts labels; first-touch verification and unpin-recovery govern.
+  Dominates time-to-first-use on cold start; zero on warm start. The
+  cross-model κ-manifest tier stays declared.
 - **Compile:** weightless, O(config); per window bucket, reused while the
   window fits (`staged-window-growth`). Off the per-token path.
 - **Materialization:** per stage per window; the session verified-κ set makes
@@ -323,10 +328,9 @@ its own measured cost; no aggregate canonicalization claim.
   decidable; canonicalize-then-hash reproduces a fixed point; congruence
   witnessed against execution parity on representative pairs; κ tagged with
   the quotient; fail-closed at materialization.
-- S1 `network-skip`: no skipped byte is trusted; every asserted κ verifies at
-  materialization or resolution rejects and recovers by re-mint + rebind.
-  Exact-repeat tier from recorded provenance (hf-hub revision-pin oracle);
-  cross-model tier from a published κ-manifest.
+- S1 `network-skip` cross-model tier: a published κ-manifest as a
+  content-addressed local prior across models. (The exact-repeat tier is
+  build — see the Wire lever.)
 - S3 `total-algebraic-path` (open, measured): every executed kernel is a
   hierarchy kernel; zero runtime float dispatch; parity with the retired
   reference witnessed at gate time per (op, tier). Held open by the pinned
