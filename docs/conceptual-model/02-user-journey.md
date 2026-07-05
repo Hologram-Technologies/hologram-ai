@@ -77,6 +77,14 @@ stage after the transfer.
 
 ## Stage S4 — Chat (the three-message handshake)
 
+**The model's own limits are the only limits.** The context is compiled at the
+model's own `max_position_embeddings` — the stage plan absorbs the memory
+scaling, shrinking the context only when even a single-layer stage cannot
+carry it. Generation is bounded by the model's stop conditions, the remaining
+context, and the user's cancel — never a fixed token cap. A session whose
+transcript outgrows the context trims oldest-turn-first (whole user/assistant
+pairs) so the conversation continues; it never dead-ends.
+
 Given a materialized session and the model's own chat template and stop conditions:
 
 1. The user sends message 1; the assistant streams a completion.

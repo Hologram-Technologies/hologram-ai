@@ -339,52 +339,63 @@ pub fn build_parametric_graph(config: &Value, safetensors_shards: &[&[u8]]) -> R
         st_instances.push(st);
     }
 
-    let mut keys = Vec::new();
-    let mut dtypes = Vec::new();
+    // Collect the manifest in a deterministic (name-sorted) order. `safetensors`
+    // stores its tensor index in a `HashMap`, so `SafeTensors::tensors()`
+    // iteration order varies per call; sorting by name makes tensor-id
+    // allocation — and thus the emitted archive — a pure function of the shard
+    // bytes, never of a map seed (content addressing requires a stable κ).
+    let mut tensors: Vec<(String, safetensors::tensor::TensorView<'_>)> = Vec::new();
     for st in &st_instances {
         for (k, view) in st.tensors() {
-            dtypes.push(map_dtype(view.dtype())?);
-            keys.push(k.clone());
+            tensors.push((k, view));
         }
+    }
+    tensors.sort_by(|(a, _), (b, _)| a.cmp(b));
+
+    let mut keys = Vec::with_capacity(tensors.len());
+    let mut dtypes = Vec::with_capacity(tensors.len());
+    for (k, view) in &tensors {
+        dtypes.push(map_dtype(view.dtype())?);
+        keys.push(k.clone());
     }
 
     let mut graph = build_parametric_graph_from_manifest(config, &keys, &dtypes, None)?;
 
-    // Inject the actual safetensors weights into the graph's params.
+    // Inject the actual safetensors weights into the graph's params, in the same
+    // name-sorted order so any tensor the builder did not declare (an unused
+    // checkpoint buffer) is allocated a deterministic tensor id.
     let mut name_to_id = HashMap::new();
     for (id, name) in &graph.tensor_names {
         name_to_id.insert(name.clone(), *id);
     }
 
     let mut next_id = graph.tensor_names.keys().max().copied().unwrap_or(0) + 1;
-    for st in &st_instances {
-        for (k, tensor_view) in st.tensors() {
-            let id = if let Some(existing_id) = name_to_id.get(&k) {
-                *existing_id
-            } else {
-                let new_id = next_id;
-                next_id += 1;
-                graph.tensor_names.insert(new_id, k.clone());
-                new_id
-            };
+    for (k, tensor_view) in &tensors {
+        let id = if let Some(existing_id) = name_to_id.get(k) {
+            *existing_id
+        } else {
+            let new_id = next_id;
+            next_id += 1;
+            graph.tensor_names.insert(new_id, k.clone());
+            new_id
+        };
 
-            let dtype = map_dtype(tensor_view.dtype())?;
-            let shape = hologram_ai_common::shape_from_concrete(
-                &tensor_view
-                    .shape()
-                    .iter()
-                    .map(|&x| x as u64)
-                    .collect::<Vec<_>>(),
-            );
-            let info = hologram_ai_common::TensorInfo::new(dtype, shape);
-            graph.tensor_info.insert(id, info.clone());
+        let dtype = map_dtype(tensor_view.dtype())?;
+        let shape = hologram_ai_common::shape_from_concrete(
+            &tensor_view
+                .shape()
+                .iter()
+                .map(|&x| x as u64)
+                .collect::<Vec<_>>(),
+        );
+        let info = hologram_ai_common::TensorInfo::new(dtype, shape);
+        graph.tensor_info.insert(id, info.clone());
 
-            let data = tensor_view.data().to_vec();
-            graph.params.insert(
-                id,
-                hologram_ai_common::ir::param::AiParam::inline(data, info),
-            );
-        }
+        let data = tensor_view.data().to_vec();
+        graph.params.insert(
+            id,
+            hologram_ai_common::ir::param::AiParam::inline(data, info),
+        );
     }
 
     Ok(graph)
@@ -449,6 +460,87 @@ fn add_weight_f32(
     let cast = builder.add_tensor(&format!("{name}.f32"), DType::F32, shape);
     builder.add_node(AiOp::Cast { to: DType::F32 }, vec![weight], vec![cast]);
     cast
+}
+
+/// Declare a weight tensor at its manifest storage dtype and return it **as
+/// stored** — no widening `Cast`. Used where a downstream op consumes the
+/// weight in its native dtype and only a small, bounded result needs widening:
+/// the embedding gathers the token rows from the native-dtype table, then
+/// widens the `[batch, seq, hidden]` result — never the whole `[vocab, hidden]`
+/// matrix (whose F32 image is ~`vocab · hidden · 4` bytes, the 32-bit-heap
+/// allocation trap for a large-vocabulary model).
+fn add_weight_native(
+    builder: &mut GraphBuilder,
+    manifest: &TensorManifest<'_>,
+    name: &str,
+    shape: Vec<DimExpr>,
+) -> TensorId {
+    let dtype = manifest.dtype_of(name);
+    builder.add_tensor(name, dtype, shape)
+}
+
+/// Widen an already-declared native-dtype weight to the F32 compute type,
+/// inserting the IR's canonical `Cast` only when the stored dtype is narrower.
+/// Returns the weight itself when it is already F32 (the F32 checkpoint path,
+/// where the tied head reuses the embedding weight's single κ-bound tensor).
+fn widen_weight_to_f32(
+    builder: &mut GraphBuilder,
+    weight: TensorId,
+    weight_dtype: DType,
+    name: &str,
+    shape: Vec<DimExpr>,
+) -> TensorId {
+    if weight_dtype == DType::F32 {
+        return weight;
+    }
+    let cast = builder.add_tensor(&format!("{name}.f32"), DType::F32, shape);
+    builder.add_node(AiOp::Cast { to: DType::F32 }, vec![weight], vec![cast]);
+    cast
+}
+
+/// Bytes a dense F32 `[rows, cols]` weight occupies.
+fn f32_weight_bytes(rows: u64, cols: u64) -> u64 {
+    rows.saturating_mul(cols).saturating_mul(4)
+}
+
+/// The largest dense F32 weight the build target's heap can materialize before
+/// the allocator aborts. A 32-bit (wasm) tab traps well short of its 4 GiB
+/// address space; a large-vocabulary LM head at F32 is past this ceiling. A
+/// 64-bit host has no such ceiling — the same weight is unremarkable there.
+const fn f32_materialization_ceiling() -> u64 {
+    if usize::BITS <= 32 {
+        1 << 31 // 2 GiB
+    } else {
+        u64::MAX
+    }
+}
+
+/// The loud-fail message when widening `name` to a dense `[rows, cols]` F32
+/// weight would exceed `ceiling`; `None` when it fits. Split from the guard so
+/// the floor logic is witnessed on a 64-bit host (where the live ceiling is
+/// unbounded) with an explicit ceiling.
+fn f32_head_floor_error(name: &str, rows: u64, cols: u64, ceiling: u64) -> Option<String> {
+    let bytes = f32_weight_bytes(rows, cols);
+    (bytes > ceiling).then(|| {
+        format!(
+            "the language-model head weight `{name}` is [{rows}, {cols}] = {bytes} bytes at \
+             F32, exceeding the {ceiling}-byte heap ceiling of a 32-bit (wasm) target. The \
+             whole-vocabulary F32 head is a genuine floor there: the matmul kernel consults \
+             the weight in full and widens even a narrow-dtype operand to a full F32 panel, \
+             so no storage dtype avoids the allocation. Run this model on a 64-bit host."
+        )
+    })
+}
+
+/// Fail loud — naming the tensor and its byte size — when widening the LM-head
+/// weight to a dense `[rows, cols]` F32 matrix would exceed the build target's
+/// heap ceiling, rather than proceeding to an opaque `RuntimeError: unreachable`
+/// allocation trap. No-op on a 64-bit host.
+fn guard_f32_head_materialization(name: &str, rows: u64, cols: u64) -> Result<()> {
+    match f32_head_floor_error(name, rows, cols, f32_materialization_ceiling()) {
+        Some(msg) => Err(anyhow!(msg)),
+        None => Ok(()),
+    }
 }
 
 /// Shape, naming, and bias parameters for one projection.
@@ -723,10 +815,20 @@ impl<'a> DecoderRecipe<'a> {
     }
 
     /// The embedding front: the `input_ids` graph input, the embedding weight
-    /// (declared at its manifest dtype, widened to F32), and the token gather
-    /// producing `hidden_states`. Returns `(embedding_f32_view, hidden_states)`
-    /// — the monolithic tied head reuses the view; a stage graph outputs the
-    /// hidden states.
+    /// declared at its **native** manifest dtype, and the token gather producing
+    /// `hidden_states`. Returns `(embedding_native_weight, hidden_states)` — the
+    /// monolithic tied head reuses the native weight (widening it once, for the
+    /// head matmul); a stage graph outputs the hidden states.
+    ///
+    /// **Gather first, then cast.** Widening the whole `[vocab, hidden]` table
+    /// to F32 before selecting rows would materialize a `vocab · hidden · 4`
+    /// byte tensor (past the 32-bit wasm heap for a large-vocabulary model — the
+    /// confirmed allocation trap). Row selection is dtype-agnostic (the Gather
+    /// desugars to `Slice`/`Concat`), so the table stays at its native storage
+    /// dtype, the gather yields native-dtype `[batch, seq, hidden]` rows, and a
+    /// single `Cast` widens only that bounded result before the first RmsNorm.
+    /// This is mathematically identical to cast-then-gather for a row-selection
+    /// gather, so numeric parity is unchanged.
     fn emit_embedding(
         &self,
         builder: &mut GraphBuilder,
@@ -737,18 +839,36 @@ impl<'a> DecoderRecipe<'a> {
             DType::INT64,
             vec![dims.batch.clone(), dims.seq.clone()],
         );
-        let embed_weight = add_weight_f32(
+        let embed_dtype = self.manifest.dtype_of("model.embed_tokens.weight");
+        let embed_weight = add_weight_native(
             builder,
             &self.manifest,
             "model.embed_tokens.weight",
             vec![dims.vocab.clone(), dims.hidden.clone()],
         );
-        let hidden = builder.add_tensor("hidden_states", DType::F32, dims.hidden_state());
+
+        if embed_dtype == DType::F32 {
+            // Already the compute type: gather straight into the F32 hidden
+            // states — identical to the previous graph for an F32 checkpoint.
+            let hidden = builder.add_tensor("hidden_states", DType::F32, dims.hidden_state());
+            builder.add_node(
+                AiOp::Gather { axis: 0 },
+                vec![embed_weight, input_ids],
+                vec![hidden],
+            );
+            return (embed_weight, hidden);
+        }
+
+        // Narrow storage: gather the native-dtype rows, then widen ONLY the
+        // `[batch, seq, hidden]` result — never the `[vocab, hidden]` table.
+        let gathered = builder.add_tensor("embedded_tokens", embed_dtype, dims.hidden_state());
         builder.add_node(
             AiOp::Gather { axis: 0 },
             vec![embed_weight, input_ids],
-            vec![hidden],
+            vec![gathered],
         );
+        let hidden = builder.add_tensor("hidden_states", DType::F32, dims.hidden_state());
+        builder.add_node(AiOp::Cast { to: DType::F32 }, vec![gathered], vec![hidden]);
         (embed_weight, hidden)
     }
 
@@ -1214,19 +1334,31 @@ impl<'a> DecoderRecipe<'a> {
     ///
     /// The head is tied when the config says so or when the manifest carries
     /// no separate `lm_head.weight` (the transformers convention for tied
-    /// models). A tied monolithic graph reuses the embedding weight's F32 view
-    /// (`embed_f32 = Some(..)` — the same tensor id, hence the same κ param);
-    /// a tied *head stage* declares `model.embed_tokens.weight` itself
-    /// (`embed_f32 = None`), so its κ-map binds the same κ the embedding stage
-    /// binds — one κ-store blob shared by two stage archives, which is exactly
-    /// the k-form sharing the staged partition witnesses.
+    /// models). A tied monolithic graph reuses the embedding weight
+    /// (`embed_native = Some(..)` — the same κ-bound tensor id, widened once
+    /// here for the matmul); a tied *head stage* declares
+    /// `model.embed_tokens.weight` itself (`embed_native = None`), so its κ-map
+    /// binds the same κ the embedding stage binds — one κ-store blob shared by
+    /// two stage archives, which is exactly the k-form sharing the staged
+    /// partition witnesses.
+    ///
+    /// **The whole-vocabulary head is a genuine F32 floor.** Unlike the
+    /// embedding — which selects a few rows and so stays at native dtype — the
+    /// head is a dense matmul over the entire vocabulary: the weight is
+    /// consulted in full. The hologram matmul kernel takes a single operand
+    /// dtype and widens a narrow (BF16/F16) operand to a whole-matrix F32 panel
+    /// internally, so no storage dtype avoids the F32 image; the dequant-fused
+    /// (tiled-panel) kernel accepts only i8/u8/i4, not BF16. A large-vocabulary
+    /// head's F32 image therefore exceeds a 32-bit heap. Rather than trap
+    /// opaquely, [`guard_f32_head_materialization`] fails loud naming the tensor
+    /// and its byte size.
     fn emit_head(
         &self,
         builder: &mut GraphBuilder,
         dims: &DecoderDims,
         current: TensorId,
-        embed_f32: Option<TensorId>,
-    ) -> TensorId {
+        embed_native: Option<TensorId>,
+    ) -> Result<TensorId> {
         let manifest = &self.manifest;
 
         // Final Norm — ε from the model's own `rms_norm_eps`.
@@ -1248,27 +1380,39 @@ impl<'a> DecoderRecipe<'a> {
         // The tied head is transposed by the shared linear-layer wiring
         // ([vocab, hidden] → [hidden, vocab]) for the matmul orientation.
         let tied = self.cfg.tie_word_embeddings || !manifest.contains("lm_head.weight");
+        let head_shape = vec![dims.vocab.clone(), dims.hidden.clone()];
         let (head_weight, head_weight_name) = if tied {
-            let embed = match embed_f32 {
-                Some(id) => id,
-                None => add_weight_f32(
+            let head_bytes_source = "model.embed_tokens.weight";
+            guard_f32_head_materialization(
+                head_bytes_source,
+                self.cfg.vocab_size,
+                self.cfg.hidden_size,
+            )?;
+            let embed = match embed_native {
+                // Monolithic: widen the native embedding weight to F32 for the
+                // matmul (the head's whole-vocabulary F32 image).
+                Some(id) => widen_weight_to_f32(
                     builder,
-                    manifest,
-                    "model.embed_tokens.weight",
-                    vec![dims.vocab.clone(), dims.hidden.clone()],
+                    id,
+                    manifest.dtype_of(head_bytes_source),
+                    head_bytes_source,
+                    head_shape,
                 ),
+                // Head stage: declare + widen the embedding weight itself, so
+                // its κ-map binds the same κ the embedding stage binds.
+                None => add_weight_f32(builder, manifest, head_bytes_source, head_shape),
             };
             (embed, "lm_head.tied")
         } else {
-            let weight = add_weight_f32(
-                builder,
-                manifest,
+            guard_f32_head_materialization(
                 "lm_head.weight",
-                vec![dims.vocab.clone(), dims.hidden.clone()],
-            );
+                self.cfg.vocab_size,
+                self.cfg.hidden_size,
+            )?;
+            let weight = add_weight_f32(builder, manifest, "lm_head.weight", head_shape);
             (weight, "lm_head.weight")
         };
-        add_linear_layer_from_tensor(
+        Ok(add_linear_layer_from_tensor(
             builder,
             norm_out,
             head_weight,
@@ -1279,7 +1423,7 @@ impl<'a> DecoderRecipe<'a> {
                 output_name: "logits",
                 output_shape: vec![dims.batch.clone(), dims.seq.clone(), dims.vocab.clone()],
             },
-        )
+        ))
     }
 
     /// Stamp the standard parametric metadata (all functions of the config)
@@ -1331,7 +1475,7 @@ pub fn build_parametric_graph_from_manifest(
         let tail = recipe.emit_layer_core(&mut builder, &dims, l, current)?;
         current = recipe.seal_layer(&mut builder, &dims, l, tail);
     }
-    let logits = recipe.emit_head(&mut builder, &dims, current, Some(embed_f32));
+    let logits = recipe.emit_head(&mut builder, &dims, current, Some(embed_f32))?;
     builder.add_output(logits, "logits");
 
     let mut graph = builder.build();
@@ -1471,7 +1615,7 @@ pub fn build_parametric_stage_graphs(
             mlp_down,
         },
     );
-    let logits = recipe.emit_head(&mut builder, &dims, current, None);
+    let logits = recipe.emit_head(&mut builder, &dims, current, None)?;
     builder.add_output(logits, "logits");
     let mut graph = builder.build();
     stage_metadata(&recipe, &mut graph, stage_count - 1, STAGE_ROLE_HEAD);
@@ -1700,16 +1844,40 @@ mod tests {
         let graph = build_parametric_graph_from_manifest(&config, &keys, &dtypes, Some(256))
             .expect("build");
 
-        // Every weight is declared at its manifest storage dtype and widened
-        // to F32 via the IR's canonical Cast — one per manifest tensor.
+        // The embedding table is declared at its BF16 storage dtype and gathered
+        // NATIVELY — no whole-table F32 widening. Only the gathered
+        // [batch, seq, hidden] rows are cast to the F32 compute type.
         let embed_id = tensor_id(&graph, "model.embed_tokens.weight");
         assert_eq!(graph.tensor_info[&embed_id].storage_dtype, DType::BF16);
+        let gather = graph
+            .nodes
+            .iter()
+            .find(|n| matches!(n.op, AiOp::Gather { .. }))
+            .expect("the embedding gather");
+        assert_eq!(
+            gather.inputs.first().copied(),
+            Some(embed_id),
+            "the gather reads the NATIVE embedding table, not an F32 view of it"
+        );
+        let gathered = gather.outputs[0];
+        assert!(
+            graph
+                .nodes
+                .iter()
+                .any(|n| matches!(n.op, AiOp::Cast { to: DType::F32 })
+                    && n.inputs.contains(&gathered)),
+            "only the gathered rows are widened to F32"
+        );
+
+        // Every non-embedding weight is widened to F32 via the canonical Cast
+        // (one per such tensor); the embedding is widened once more, for the
+        // tied head's whole-vocabulary matmul.
         let cast_count = graph
             .nodes
             .iter()
             .filter(|n| matches!(n.op, AiOp::Cast { to: DType::F32 }))
             .count();
-        assert_eq!(cast_count, keys.len());
+        assert_eq!(cast_count, keys.len() + 1);
 
         // Q/K/V biases are consumed as explicit broadcast Add operands.
         let q_bias_f32 = tensor_id(&graph, "model.layers.0.self_attn.q_proj.bias.f32");
@@ -1718,8 +1886,10 @@ mod tests {
             .iter()
             .any(|n| matches!(n.op, AiOp::Add) && n.inputs.contains(&q_bias_f32)));
 
-        // Tied head: no separate `lm_head.weight`; the embedding weight's F32
-        // view feeds both the token Gather and the head Transpose.
+        // Tied head: no separate `lm_head.weight`; the head widens the
+        // embedding weight to F32 (its whole-vocabulary matmul operand) and
+        // transposes THAT view — the token Gather still reads the native table,
+        // so the F32 image is never fed back into the gather.
         assert!(!graph.tensor_names.values().any(|n| n == "lm_head.weight"));
         let embed_f32 = tensor_id(&graph, "model.embed_tokens.weight.f32");
         let consumers: Vec<&AiOp> = graph
@@ -1728,10 +1898,16 @@ mod tests {
             .filter(|n| n.inputs.contains(&embed_f32))
             .map(|n| &n.op)
             .collect();
-        assert!(consumers.iter().any(|op| matches!(op, AiOp::Gather { .. })));
-        assert!(consumers
-            .iter()
-            .any(|op| matches!(op, AiOp::Transpose { .. })));
+        assert!(
+            consumers
+                .iter()
+                .any(|op| matches!(op, AiOp::Transpose { .. })),
+            "the head transposes the embedding's F32 view"
+        );
+        assert!(
+            !consumers.iter().any(|op| matches!(op, AiOp::Gather { .. })),
+            "the F32 view must NOT feed the token gather"
+        );
 
         // θ comes from the config's `rope_theta` (Qwen2.5 convention: 1e6).
         assert!(graph.nodes.iter().any(|n| matches!(
@@ -1858,6 +2034,77 @@ mod tests {
             msg.contains("sliding_window") && msg.contains("1024"),
             "error should name the sliding-window ceiling: {msg}"
         );
+    }
+
+    #[test]
+    fn embedding_gathers_native_then_widens_only_the_result() {
+        // A BF16 embedding table must be gathered at its native dtype (row
+        // selection is dtype-agnostic) and only the [batch, seq, hidden] result
+        // widened to F32 — the whole [vocab, hidden] table is never an F32
+        // tensor (that image is the 32-bit-heap allocation trap).
+        let config = tiny_llama_config();
+        let keys = decoder_keys(2, false, false);
+        let dtypes = vec![DType::BF16; keys.len()];
+        let graph =
+            build_parametric_graph_from_manifest(&config, &keys, &dtypes, None).expect("build");
+
+        let embed_id = tensor_id(&graph, "model.embed_tokens.weight");
+        assert_eq!(graph.tensor_info[&embed_id].storage_dtype, DType::BF16);
+
+        // The embedding table itself is never widened wholesale: no F32 image
+        // of `model.embed_tokens.weight` exists (an untied model gathers it and
+        // nothing else). The head's own `lm_head.weight.f32` is a separate,
+        // acknowledged whole-vocabulary floor.
+        assert!(
+            !graph
+                .tensor_names
+                .values()
+                .any(|n| n == "model.embed_tokens.weight.f32"),
+            "the embedding table must never be widened to a whole [vocab, hidden] F32 tensor"
+        );
+
+        // The gather reads the native table; its output is widened by a Cast.
+        let gather = graph
+            .nodes
+            .iter()
+            .find(|n| matches!(n.op, AiOp::Gather { .. }))
+            .expect("the embedding gather");
+        assert_eq!(gather.inputs.first().copied(), Some(embed_id));
+        let gathered = gather.outputs[0];
+        assert_eq!(graph.tensor_info[&gathered].storage_dtype, DType::BF16);
+        assert!(
+            graph
+                .nodes
+                .iter()
+                .any(|n| matches!(n.op, AiOp::Cast { to: DType::F32 })
+                    && n.inputs.contains(&gathered))
+        );
+    }
+
+    #[test]
+    fn head_f32_floor_fails_loud_naming_the_tensor_and_bytes() {
+        // A whole-vocabulary F32 head past the heap ceiling fails loud (naming
+        // the tensor and its byte size) rather than trapping; a head that fits
+        // returns no error. Uses an explicit ceiling so the floor logic is
+        // witnessed on a 64-bit host, where the live ceiling is unbounded.
+        let (rows, cols) = (100_000u64, 5_000u64);
+        let bytes = f32_weight_bytes(rows, cols);
+        assert_eq!(bytes, rows * cols * 4);
+
+        let err = f32_head_floor_error("lm_head.weight", rows, cols, 1_000_000_000)
+            .expect("a 2 GB F32 head must exceed a 1 GB ceiling");
+        assert!(err.contains("lm_head.weight"), "names the tensor: {err}");
+        assert!(
+            err.contains(&bytes.to_string()),
+            "names the byte size: {err}"
+        );
+
+        assert!(
+            f32_head_floor_error("lm_head.weight", rows, cols, u64::MAX).is_none(),
+            "an unbounded ceiling (64-bit host) admits the head"
+        );
+        // The live guard is a no-op on a 64-bit host.
+        assert!(guard_f32_head_materialization("lm_head.weight", rows, cols).is_ok());
     }
 
     #[test]

@@ -43,7 +43,8 @@ use hologram_ai_core::{
 use hologram_ai_model::{Executor, Model, Tier, UseCaseExpects};
 use hologram_ai_quant::{dequant_q4_0, dequant_q8_0};
 use hologram_ai_safetensors::parametric::{
-    build_parametric_graph_from_manifest, selected_family, supported_families,
+    build_parametric_graph_from_manifest, build_parametric_stage_graphs, selected_family,
+    supported_families,
 };
 use hologram_ai_tokenizer::{NativeTokenizer, Tokenizer};
 use serde::Deserialize;
@@ -735,6 +736,9 @@ struct GoldenVector {
 /// The (inline, materialized) execution outputs of the matmul witness.
 type ExecPair = (Vec<Vec<u8>>, Vec<Vec<u8>>);
 
+/// A (tensor name, shape) k-form manifest for the deterministic-compile witness.
+type DetManifest = Vec<(String, Vec<u64>)>;
+
 /// Streamed manifest metadata (config.json + names/κ/shapes/dtypes).
 struct StreamedMeta {
     config_json: String,
@@ -770,6 +774,10 @@ struct BddWorld {
     /// row `family-registry-support`): must be zero — headers only.
     streamed_weight_bytes: Option<u64>,
     archive: Option<Vec<u8>>,
+    // S2 — deterministic compile (row `deterministic-compile`)
+    det_fixture: Option<(serde_json::Value, DetManifest)>,
+    det_mono: Option<Vec<String>>,
+    det_staged: Option<Vec<Vec<String>>>,
     goldens: Vec<GoldenVector>,
     dequant: Vec<(String, Vec<f32>, Vec<f64>)>,
     fixture: Option<String>,
@@ -792,6 +800,11 @@ struct BddWorld {
     staged_partition: Option<(BTreeSet<String>, Vec<BTreeSet<String>>)>,
     staged_exec: Option<StagedExec>,
     staged_completions: Option<(String, String)>,
+    // S3 — bounded embedding / fused Phi3 (row `bounded-embedding`)
+    bounded_embed: Option<BoundedEmbed>,
+    bounded_embed_compiled: Option<Vec<Vec<u8>>>,
+    fused_phi3_store: Option<StoreDir>,
+    fused_phi3_exec: Option<(Vec<u8>, Vec<u8>)>,
     // S3 — tokenizer parity
     tok_path: Option<PathBuf>,
     tok_encoded: Vec<(String, Vec<u32>, Vec<u32>)>, // text, ours, reference
@@ -1406,6 +1419,129 @@ async fn then_family_fails(w: &mut BddWorld, family: String) {
         err.contains("supported families"),
         "the error must name the supported set: {err}"
     );
+}
+
+// ────────────────── S2 — deterministic compilation ──────────────────────────
+
+/// How many times the deterministic-compile witness recompiles the fixture.
+/// Content addressing demands one stable κ; a HashMap-seeded emission order
+/// would surface as a divergent κ within a handful of repeats.
+const DET_COMPILE_RUNS: usize = 8;
+
+/// Bind each manifest tensor to a content-verified External κ (the κ of its own
+/// name — arbitrary but reproducible), the weightless k-form the downloader
+/// persists. Only names the graph declares are bound.
+fn bind_external_kappas(graph: &mut AiGraph, manifest: &[(String, Vec<u64>)]) {
+    let name_to_id: HashMap<String, u32> = graph
+        .tensor_names
+        .iter()
+        .map(|(id, name)| (name.clone(), *id))
+        .collect();
+    for (name, dims) in manifest {
+        let Some(&id) = name_to_id.get(name) else {
+            continue;
+        };
+        let info = TensorInfo::new(DType::F32, shape_from_concrete(dims));
+        graph.tensor_info.insert(id, info.clone());
+        graph.params.insert(
+            id,
+            AiParam::External {
+                kappa: kappa_of(name.as_bytes()),
+                info,
+            },
+        );
+    }
+}
+
+#[given("the handshake-tiny config and its Llama k-form manifest")]
+async fn given_det_fixture(w: &mut BddWorld) {
+    let (family, e) = handshake_expects();
+    let config = handshake_config(&family, &e, false);
+    let manifest = decoder_manifest(&e, false, false);
+    w.det_fixture = Some((config, manifest));
+}
+
+fn det_fixture(w: &BddWorld) -> &(serde_json::Value, DetManifest) {
+    w.det_fixture
+        .as_ref()
+        .expect("a deterministic-compile fixture")
+}
+
+#[when("the manifest is compiled to a monolithic k-form archive several times")]
+async fn when_det_monolithic(w: &mut BddWorld) {
+    let (config, manifest) = det_fixture(w);
+    let keys: Vec<String> = manifest.iter().map(|(n, _)| n.clone()).collect();
+    let dtypes = vec![DType::F32; keys.len()];
+    let kappas = (0..DET_COMPILE_RUNS)
+        .map(|_| {
+            let mut graph = build_parametric_graph_from_manifest(config, &keys, &dtypes, None)
+                .expect("the k-form graph builds from config + manifest");
+            bind_external_kappas(&mut graph, manifest);
+            let archive = ModelCompiler::default()
+                .compile(ModelSource::AiGraph(graph))
+                .expect("the k-form graph compiles");
+            kappa_of(&archive.bytes)
+        })
+        .collect();
+    w.det_mono = Some(kappas);
+}
+
+#[when("the manifest is compiled to staged k-form archives several times")]
+async fn when_det_staged(w: &mut BddWorld) {
+    let (config, manifest) = det_fixture(w);
+    let keys: Vec<String> = manifest.iter().map(|(n, _)| n.clone()).collect();
+    let kappas: Vec<String> = keys.iter().map(|n| kappa_of(n.as_bytes())).collect();
+    let shapes: Vec<Vec<u64>> = manifest.iter().map(|(_, d)| d.clone()).collect();
+    let dtypes = vec![DType::F32; keys.len()];
+    let config_json = config.to_string();
+    let per_stage = std::num::NonZeroU64::new(1).expect("one layer per stage is non-zero");
+    let runs = (0..DET_COMPILE_RUNS)
+        .map(|_| {
+            let stages = hologram_ai::staged::compile_stages(
+                &config_json,
+                &keys,
+                &kappas,
+                &shapes,
+                &dtypes,
+                None,
+                per_stage,
+            )
+            .expect("the staged k-form partition compiles");
+            stages.iter().map(|s| kappa_of(s)).collect::<Vec<String>>()
+        })
+        .collect();
+    w.det_staged = Some(runs);
+}
+
+#[then("every monolithic archive is byte-identical, a single stable κ")]
+async fn then_det_monolithic_stable(w: &mut BddWorld) {
+    let kappas = w.det_mono.as_ref().expect("the monolithic compiles ran");
+    let distinct: BTreeSet<&String> = kappas.iter().collect();
+    assert_eq!(
+        distinct.len(),
+        1,
+        "the monolithic k-form compile is nondeterministic: {} distinct κ across {} runs: {:?}",
+        distinct.len(),
+        kappas.len(),
+        distinct
+    );
+}
+
+#[then("every stage archive is byte-identical to its first compile, a single stable κ per stage")]
+async fn then_det_staged_stable(w: &mut BddWorld) {
+    let runs = w.det_staged.as_ref().expect("the staged compiles ran");
+    let first = runs.first().expect("at least one staged run");
+    assert!(
+        first.len() >= 2,
+        "a staged partition has at least an embedding and a head stage, got {}",
+        first.len()
+    );
+    for (r, run) in runs.iter().enumerate() {
+        assert_eq!(
+            run, first,
+            "staged run {r} diverges from the first — the staged k-form compile is nondeterministic"
+        );
+    }
 }
 
 // ────────────────── S2 — streamed weightless compilation ────────────────────
@@ -2342,7 +2478,7 @@ async fn when_staged_generated(w: &mut BddWorld) {
     let store = w.staged_store.as_ref().expect("the fixture κ-store");
     let prompt = "3 141 59 26 5";
     let cfg = GenConfig {
-        max_tokens: 8,
+        max_tokens: Some(8),
         temperature: 0.0,
         ..Default::default()
     };
@@ -2380,6 +2516,353 @@ async fn then_staged_completions_equal(w: &mut BddWorld) {
         "the staged completion must equal the monolithic completion"
     );
     println!("[staged-execution] greedy completion (both engines): {mono:?}");
+}
+
+// ───────────────── S3 — bounded embedding (row `bounded-embedding`) ──────────
+
+/// A large-vocabulary decoder fixture whose narrow-dtype embedding table would
+/// be a `vocab · hidden · 4` byte F32 image if cast whole. The gather-then-cast
+/// front leaves the table at its native dtype, so no such image is ever a
+/// tensor — the embedding path is bounded by the token rows, not the vocab.
+const BE_VOCAB: u64 = 200_000;
+const BE_HIDDEN: u64 = 64;
+
+struct BoundedEmbed {
+    config_json: String,
+    keys: Vec<String>,
+    shapes: Vec<Vec<u64>>,
+    dtypes: Vec<DType>,
+    stages: Vec<AiGraph>,
+}
+
+fn bounded_embed_config() -> serde_json::Value {
+    serde_json::json!({
+        "architectures": ["LlamaForCausalLM"],
+        "hidden_size": BE_HIDDEN, "intermediate_size": 128,
+        "num_hidden_layers": 1, "num_attention_heads": 4,
+        "num_key_value_heads": 2, "vocab_size": BE_VOCAB,
+        "rms_norm_eps": 1e-6, "rope_theta": 10000.0,
+        "max_position_embeddings": 64, "tie_word_embeddings": false,
+    })
+}
+
+fn bounded_embed_manifest() -> Vec<(String, Vec<u64>)> {
+    let (h, i, v, kv) = (BE_HIDDEN, 128u64, BE_VOCAB, 32u64);
+    let p = "model.layers.0";
+    vec![
+        ("model.embed_tokens.weight".into(), vec![v, h]),
+        (format!("{p}.input_layernorm.weight"), vec![h]),
+        (format!("{p}.self_attn.q_proj.weight"), vec![h, h]),
+        (format!("{p}.self_attn.k_proj.weight"), vec![kv, h]),
+        (format!("{p}.self_attn.v_proj.weight"), vec![kv, h]),
+        (format!("{p}.self_attn.o_proj.weight"), vec![h, h]),
+        (format!("{p}.post_attention_layernorm.weight"), vec![h]),
+        (format!("{p}.mlp.gate_proj.weight"), vec![i, h]),
+        (format!("{p}.mlp.up_proj.weight"), vec![i, h]),
+        (format!("{p}.mlp.down_proj.weight"), vec![h, i]),
+        ("model.norm.weight".into(), vec![h]),
+        ("lm_head.weight".into(), vec![v, h]),
+    ]
+}
+
+#[given("a large-vocabulary decoder with a narrow-dtype embedding table")]
+async fn given_bounded_embed(w: &mut BddWorld) {
+    let (keys, shapes): (Vec<String>, Vec<Vec<u64>>) = bounded_embed_manifest().into_iter().unzip();
+    let dtypes = vec![DType::BF16; keys.len()];
+    let config = bounded_embed_config();
+    let stages = build_parametric_stage_graphs(
+        &config,
+        &keys,
+        &dtypes,
+        None,
+        std::num::NonZeroU64::new(1).expect("1 is non-zero"),
+    )
+    .expect("the large-vocabulary stage graphs build");
+    w.bounded_embed = Some(BoundedEmbed {
+        config_json: config.to_string(),
+        keys,
+        shapes,
+        dtypes,
+        stages,
+    });
+}
+
+#[when("its embedding stage is compiled")]
+async fn when_bounded_embed_compiled(w: &mut BddWorld) {
+    let be = w
+        .bounded_embed
+        .as_ref()
+        .expect("the large-vocabulary fixture");
+    // Weightless (k-form) compile: synthetic κ labels bind the External
+    // weights, so no [vocab, hidden] tensor bytes are ever allocated — the
+    // compile proves the lowered STRUCTURE carries no whole-vocab F32 image.
+    let kappas: Vec<String> = be.keys.iter().map(|k| kappa_of(k.as_bytes())).collect();
+    let stages = hologram_ai::staged::compile_stages(
+        &be.config_json,
+        &be.keys,
+        &kappas,
+        &be.shapes,
+        &be.dtypes,
+        None,
+        std::num::NonZeroU64::new(1).expect("1 is non-zero"),
+    )
+    .expect("the large-vocabulary staged compile succeeds");
+    w.bounded_embed_compiled = Some(stages);
+}
+
+#[then("the embedding stage compiles with no whole [vocab, hidden] F32 tensor")]
+async fn then_bounded_embed_no_f32_table(w: &mut BddWorld) {
+    let be = w.bounded_embed.as_ref().expect("the fixture");
+    let compiled = w
+        .bounded_embed_compiled
+        .as_ref()
+        .expect("the compiled stages");
+    assert!(!compiled.is_empty(), "the staged compile produced archives");
+    let embed_stage = &be.stages[0];
+    // No tensor in the embedding stage is the whole [vocab, hidden] table at
+    // F32 (the head's own `lm_head.weight.f32` is a separate stage's floor).
+    let table = vec![BE_VOCAB, BE_HIDDEN];
+    for (id, info) in &embed_stage.tensor_info {
+        let dims: Vec<u64> = info.shape.iter().filter_map(|d| d.as_concrete()).collect();
+        let name = embed_stage
+            .tensor_names
+            .get(id)
+            .map(String::as_str)
+            .unwrap_or("");
+        assert!(
+            !(dims == table && info.storage_dtype == DType::F32),
+            "no whole [vocab, hidden] F32 tensor may exist in the embedding stage \
+             (found `{name}`) — the {BE_VOCAB}×{BE_HIDDEN} F32 image is never materialized"
+        );
+    }
+    let embed_id = embed_stage
+        .tensor_names
+        .iter()
+        .find(|(_, n)| n.as_str() == "model.embed_tokens.weight")
+        .map(|(id, _)| *id)
+        .expect("the embedding table");
+    assert_eq!(
+        embed_stage.tensor_info[&embed_id].storage_dtype,
+        DType::BF16,
+        "the embedding table stays at its native BF16 storage dtype"
+    );
+    println!(
+        "[bounded-embedding] {BE_VOCAB}-vocab embedding stage compiled ({} stages total); \
+         no [vocab, hidden] F32 image; table stays BF16",
+        compiled.len()
+    );
+}
+
+#[then(
+    "the embedding table is gathered at its native dtype and only the gathered rows are widened"
+)]
+async fn then_bounded_embed_native_gather(w: &mut BddWorld) {
+    let be = w.bounded_embed.as_ref().expect("the fixture");
+    let embed_stage = &be.stages[0];
+    let embed_id = embed_stage
+        .tensor_names
+        .iter()
+        .find(|(_, n)| n.as_str() == "model.embed_tokens.weight")
+        .map(|(id, _)| *id)
+        .expect("the embedding table");
+    let gather = embed_stage
+        .nodes
+        .iter()
+        .find(|n| matches!(n.op, AiOp::Gather { .. }))
+        .expect("the embedding gather");
+    assert_eq!(
+        gather.inputs.first().copied(),
+        Some(embed_id),
+        "the gather reads the NATIVE embedding table"
+    );
+    let gathered = gather.outputs[0];
+    assert_eq!(
+        embed_stage.tensor_info[&gathered].storage_dtype,
+        DType::BF16,
+        "the gathered rows are the native dtype"
+    );
+    assert!(
+        embed_stage
+            .nodes
+            .iter()
+            .any(|n| matches!(n.op, AiOp::Cast { to: DType::F32 }) && n.inputs.contains(&gathered)),
+        "only the gathered [batch, seq, hidden] rows are widened to F32"
+    );
+    println!(
+        "[bounded-embedding] gather reads native BF16 table; only the gathered rows widened to F32"
+    );
+}
+
+// ───────────── S3 — fused Phi3 execution (row `bounded-embedding`) ───────────
+
+/// A tiny fused Phi3-family decoder (qkv_proj / gate_up_proj carved by
+/// compile-time Slice), compiled monolithically and as one-layer stages from
+/// the same deterministic weights — the memory-bounding fixes must leave the
+/// logits identical across both execution modes.
+fn fused_phi3_config() -> serde_json::Value {
+    serde_json::json!({
+        "architectures": ["Phi3ForCausalLM"],
+        "hidden_size": 64, "intermediate_size": 128,
+        "num_hidden_layers": 2, "num_attention_heads": 4,
+        "num_key_value_heads": 2, "vocab_size": 512,
+        "rms_norm_eps": 1e-5, "rope_theta": 10000.0,
+        "max_position_embeddings": 128, "tie_word_embeddings": false,
+        "rope_scaling": null, "sliding_window": null,
+    })
+}
+
+fn fused_phi3_manifest() -> Vec<(String, Vec<u64>)> {
+    let (h, i, v) = (64u64, 128u64, 512u64);
+    // qkv rows = q(heads·head_dim 64) + k(kv 32) + v(kv 32) = 128;
+    // gate_up rows = 2 · intermediate = 256.
+    let (qkv_rows, gate_up_rows) = (128u64, 256u64);
+    let mut m: Vec<(String, Vec<u64>)> = vec![("model.embed_tokens.weight".into(), vec![v, h])];
+    for l in 0..2 {
+        let p = format!("model.layers.{l}");
+        m.push((format!("{p}.input_layernorm.weight"), vec![h]));
+        m.push((format!("{p}.self_attn.qkv_proj.weight"), vec![qkv_rows, h]));
+        m.push((format!("{p}.self_attn.o_proj.weight"), vec![h, h]));
+        m.push((format!("{p}.post_attention_layernorm.weight"), vec![h]));
+        m.push((
+            format!("{p}.mlp.gate_up_proj.weight"),
+            vec![gate_up_rows, h],
+        ));
+        m.push((format!("{p}.mlp.down_proj.weight"), vec![h, i]));
+    }
+    m.push(("model.norm.weight".into(), vec![h]));
+    m.push(("lm_head.weight".into(), vec![v, h]));
+    m
+}
+
+struct FusedPhi3Kit {
+    monolithic: Vec<u8>,
+    stages: Vec<Vec<u8>>,
+}
+
+fn build_fused_phi3_kit() -> FusedPhi3Kit {
+    let (keys, shapes): (Vec<String>, Vec<Vec<u64>>) = fused_phi3_manifest().into_iter().unzip();
+    let kappas: Vec<String> = keys
+        .iter()
+        .zip(&shapes)
+        .map(|(name, dims)| kappa_of(&staged_tensor_bytes(name, dims)))
+        .collect();
+    let dtypes = vec![DType::F32; keys.len()];
+    let config = fused_phi3_config();
+
+    let mut graph = build_parametric_graph_from_manifest(&config, &keys, &dtypes, None)
+        .expect("the monolithic fused Phi3 graph builds");
+    let name_to_id: HashMap<String, u32> = graph
+        .tensor_names
+        .iter()
+        .map(|(id, name)| (name.clone(), *id))
+        .collect();
+    for (i, key) in keys.iter().enumerate() {
+        let id = *name_to_id.get(key).expect("manifest tensor in the graph");
+        let info = ti(DType::F32, &shapes[i]);
+        graph.tensor_info.insert(id, info.clone());
+        graph.params.insert(
+            id,
+            AiParam::External {
+                kappa: kappas[i].clone(),
+                info,
+            },
+        );
+    }
+    let monolithic = compile_graph(graph);
+
+    let stages = hologram_ai::staged::compile_stages(
+        &config.to_string(),
+        &keys,
+        &kappas,
+        &shapes,
+        &dtypes,
+        None,
+        std::num::NonZeroU64::new(1).expect("1 is non-zero"),
+    )
+    .expect("the staged fused Phi3 fixture compiles");
+
+    FusedPhi3Kit { monolithic, stages }
+}
+
+fn fused_phi3_kit() -> &'static FusedPhi3Kit {
+    static KIT: OnceLock<FusedPhi3Kit> = OnceLock::new();
+    KIT.get_or_init(build_fused_phi3_kit)
+}
+
+fn fused_phi3_store() -> StoreDir {
+    let store = StoreDir::new("fused-phi3");
+    let dir = DirKappaStore::new(&store.path);
+    for (name, dims) in fused_phi3_manifest() {
+        dir.insert(&staged_tensor_bytes(&name, &dims))
+            .expect("persisting a fused Phi3 weight");
+    }
+    store
+}
+
+#[given("the tiny fused Phi3-family decoder fixture with its weights in a κ-store")]
+async fn given_fused_phi3_fixture(w: &mut BddWorld) {
+    w.fused_phi3_store = Some(fused_phi3_store());
+}
+
+#[when("the fused fixture is executed monolithically and through the staged runner")]
+async fn when_fused_phi3_executed(w: &mut BddWorld) {
+    let kit = fused_phi3_kit();
+    let store = w
+        .fused_phi3_store
+        .as_ref()
+        .expect("the fused fixture κ-store");
+    let ids = staged_window_ids();
+
+    let mut dir = DirKappaStore::new(&store.path);
+    let mono = materialize_archive(&kit.monolithic, &mut dir)
+        .expect("the fused monolithic archive materializes");
+    let mut runner = HoloRunner::from_bytes(mono).expect("the fused monolithic archive loads");
+    let mono_out = runner
+        .execute(&[&ids])
+        .expect("the fused monolithic pass executes");
+    let mono_logits = mono_out
+        .into_iter()
+        .next()
+        .expect("the fused monolithic pass produces logits")
+        .bytes;
+
+    let mut staged = StagedRunner::from_archives(
+        kit.stages.clone(),
+        Box::new(DirKappaStore::new(&store.path)),
+    )
+    .expect("the fused staged runner builds");
+    let staged_out =
+        LmSession::execute(&mut staged, &[&ids]).expect("the fused staged pass executes");
+    let staged_logits = staged_out
+        .into_iter()
+        .next()
+        .expect("the fused staged pass produces logits")
+        .bytes;
+
+    w.fused_phi3_exec = Some((mono_logits, staged_logits));
+}
+
+#[then("the fused staged logits are byte-identical to the fused monolithic logits")]
+async fn then_fused_phi3_logits_equal(w: &mut BddWorld) {
+    let (mono, staged) = w
+        .fused_phi3_exec
+        .as_ref()
+        .expect("both fused executions ran");
+    assert_eq!(mono.len(), staged.len(), "fused logits sizes must agree");
+    assert_eq!(
+        mono, staged,
+        "fused staged execution must reproduce the fused monolithic logits byte-for-byte"
+    );
+    let logits = le_f32(staged);
+    assert!(
+        logits.iter().all(|v| v.is_finite()) && logits.iter().any(|v| v.abs() > 1e-6),
+        "the fused logits must be finite and non-trivial"
+    );
+    println!(
+        "[bounded-embedding] fused Phi3 byte-identical logits: {} bytes ({} f32 elements)",
+        staged.len(),
+        logits.len()
+    );
 }
 
 // ───────────────────────── S3 — execution parity ────────────────────────────
@@ -3034,7 +3517,7 @@ mod ort_gated {
             .expect("preparing the pinned model");
         let mut provider = GrowableSession::new(prepared);
         let cfg = GenConfig {
-            max_tokens: n,
+            max_tokens: Some(n),
             temperature: 0.0,
             ..Default::default()
         };

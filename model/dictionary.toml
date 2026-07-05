@@ -171,6 +171,16 @@ executor = "rust"
 feature = "features/suites/s2_compilation/family_registry_support.feature"
 
 [[row]]
+id = "deterministic-compile"
+statement = "The parametric k-form compile is deterministic: identical config + manifest produce a byte-identical archive (a stable κ) — content-addressing requires it, monolithic and staged."
+stage = "S2"
+status = "build"
+oracles = ["journey-reference"]
+tier = "suite"
+executor = "rust"
+feature = "features/suites/s2_compilation/deterministic_compile.feature"
+
+[[row]]
 id = "parametricity"
 statement = "No canonical-instance constant leaks into generic code: an arbitrary use-case instantiates the same pipeline end-to-end, and the anti-hardcode gate holds."
 stage = "S2"
@@ -201,6 +211,16 @@ oracles = ["journey-reference"]
 tier = "suite"
 executor = "rust"
 feature = "features/suites/s3_execution/staged_execution.feature"
+
+[[row]]
+id = "bounded-embedding"
+statement = "A model is bounded by its unavoidable per-row/per-tile work, never whole-matrix F32 materialization: the embedding gathers the token rows at the table's native dtype and widens only the gathered result, so the whole [vocab, hidden] F32 image is never materialized, and a fused Phi3-family model executes monolithically and staged to identical logits."
+stage = "S3"
+status = "build"
+oracles = ["journey-reference"]
+tier = "suite"
+executor = "rust"
+feature = "features/suites/s3_execution/bounded_embedding.feature"
 
 [[row]]
 id = "kappa-provenance-resolution"
@@ -306,7 +326,7 @@ feature = "features/suites/s3_execution/structural_im.feature"
 
 [[row]]
 id = "generation-loop"
-statement = "Autoregressive generation is re-execution of the compiled graph with streamed token emission and config-driven sampling; no KV-cache machinery exists."
+statement = "Autoregressive generation is re-execution of the compiled graph with streamed token emission and config-driven sampling; it is bounded by stop conditions, the remaining context window, and cancellation — never a fixed token cap; no KV-cache machinery exists."
 stage = "S4"
 status = "build"
 oracles = ["journey-reference"]
@@ -343,6 +363,16 @@ oracles = ["journey-reference"]
 tier = "suite"
 executor = "browser"
 feature = "features/suites/s4_application/browser_journey.feature"
+
+[[row]]
+id = "session-window"
+statement = "A chat session is bounded only by the model's own context: the archive compiles at max_position_embeddings (staging absorbs the memory scaling), and a transcript that outgrows the window trims oldest-turn-first so the conversation continues — it never dead-ends."
+stage = "S4"
+status = "build"
+oracles = ["journey-reference"]
+tier = "suite"
+executor = "browser"
+feature = "features/suites/s4_application/session_window.feature"
 
 [[row]]
 id = "chat-handshake"
