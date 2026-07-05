@@ -7,7 +7,7 @@ import init, {
   supported_families as wasmSupportedFamilies,
   compile_safetensors_staged as wasmCompileSafetensorsStaged,
   count_tokens as wasmCountTokens,
-  generate_staged as wasmGenerateStaged,
+  StagedChatSession as WasmStagedChatSession,
   validate_model_config as wasmValidateModelConfig,
   validate_streamed_manifest as wasmValidateStreamedManifest,
   run as wasmRun,
@@ -137,15 +137,12 @@ export async function compileSafetensorsStaged(
   ) as Uint8Array[];
 }
 
-/** Staged generation with a sequence-following window (row
- * `staged-window-growth`): stage k-forms are weightless, so the session
- * recompiles them per geometric window bucket from the streamed-download
- * manifest — per-token compute scales with the actual sequence, never the
- * model's full context. κs resolve ON DEMAND (synchronous callback over OPFS
- * handles / recorded provenance); one stage's weights resident at a time.
- * `onProgress` narrates window compiles and stage materializations so the
- * first token of a large model is visible work, not a silent wait. */
-export async function generateStaged(
+/** A persistent staged chat session (rows `staged-window-growth`,
+ * `stage-residency-cache`, `warm-turn`): the compiled window, resident stage
+ * sessions, verified-κ set, and derived-artifact cache survive across turns,
+ * so a warm turn pays decode — never recompile, never rematerialization.
+ * Construct once per model; call `generate` per turn. */
+export async function createStagedSession(
   configJson: string,
   manifest: { keys: string[]; kappas: string[]; shapes: string[]; dtypes: string[] },
   contextLength: number | undefined,
@@ -159,14 +156,11 @@ export async function generateStaged(
         evaporate: (key: string) => void;
       }
     | undefined,
-  prompt: string,
-  opts: GenOpts,
-  tokenizer?: Uint8Array,
-  callback?: (text: string) => void,
+  tokenizer: Uint8Array,
   onProgress?: (line: string) => void,
-): Promise<string> {
+): Promise<StagedSession> {
   await ensureReady();
-  return wasmGenerateStaged(
+  return new WasmStagedChatSession(
     configJson,
     manifest.keys,
     manifest.kappas,
@@ -179,12 +173,16 @@ export async function generateStaged(
     derived?.load,
     derived?.store,
     derived?.evaporate,
-    tokenizer ?? undefined,
-    prompt,
-    opts,
-    callback,
+    tokenizer,
     onProgress,
   );
+}
+
+export interface StagedSession {
+  generate(prompt: string, opts: GenOpts, callback?: (text: string) => void): string;
+  materialization_count(): bigint;
+  derived_hits(): bigint;
+  free(): void;
 }
 
 /** Token count of `text` under the model's own tokenizer (session trimming). */

@@ -37,6 +37,13 @@ owned by exactly one lever:
 - **Sampler:** pinned state; negligible cost, but on the path and part of the
   derivation key.
 
+The same rule extends to the per-TURN path (row `warm-turn`): the browser's
+staged session — compiled window, resident stages, verified-κ set,
+derived-artifact cache — survives across sends, so a warm turn pays decode
+with zero recompiles and zero rematerializations; the session rebuilds on
+model switch, and a cold turn has identical semantics — warmth is a
+projection, never a meaning.
+
 **A cost on the per-token path that is not decode or sampler is a defect.**
 
 ## Kernel floor (micro-architectural)

@@ -582,11 +582,10 @@ export async function generate(opts: GenerateOpts): Promise<number> {
   emitLine("chat://line", { stream: "stdout", line: "" });
   
   return new Promise((resolve, reject) => {
-    if (activeWorker) {
-      activeWorker.terminate();
-    }
-    
-    activeWorker = new GenerateWorker();
+    // Reuse the live worker: it holds the warm staged session. The worker
+    // itself rebuilds the session when the model changes (its inputs are
+    // the model's), so reuse across sends is always safe.
+    activeWorker ??= new GenerateWorker();
     // A worker script/load failure would otherwise leave generation hanging
     // silently (onmessage never fires); surface it loudly.
     activeWorker.onerror = (ev) => {
@@ -602,7 +601,10 @@ export async function generate(opts: GenerateOpts): Promise<number> {
       } else if (e.data.type === 'progress') {
         // Narration of the honest work behind the first token (window
         // compiles, per-stage materialization) — a status channel, never
-        // part of the completion text.
+        // part of the completion text. Mirrored into a session log so the
+        // hermetic suite can assert warm-turn behavior (row `warm-turn`).
+        const g = globalThis as unknown as { __hologram_status?: string[] };
+        (g.__hologram_status ??= []).push(e.data.line);
         emitLine("chat://status", { stream: "stdout", line: e.data.line });
       } else if (e.data.type === 'done') {
         const g = globalThis as unknown as {
@@ -610,10 +612,9 @@ export async function generate(opts: GenerateOpts): Promise<number> {
         };
         (g.__hologram_completions ??= []).push({ prompt: opts.prompt, text: e.data.text });
         emitLine("chat://line", { stream: "stdout", line: e.data.text });
-        if (activeWorker) {
-          activeWorker.terminate();
-          activeWorker = null;
-        }
+        // The worker stays alive: it holds the warm staged session (row
+        // `warm-turn`) — the next turn reuses the resident window instead
+        // of rebuilding it. Cancel/error still terminate.
         resolve(0);
       } else if (e.data.type === 'error') {
         emitLine("chat://line", { stream: "stderr", line: e.data.error });

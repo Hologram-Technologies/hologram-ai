@@ -425,6 +425,16 @@ executor = "browser"
 feature = "features/suites/s4_application/browser_journey.feature"
 
 [[row]]
+id = "warm-turn"
+statement = "A chat session's later turns run warm: the staged session — compiled window, resident stage sessions, session verified-κ set, derived-artifact cache — survives across sends, so a warm turn pays decode with zero window recompiles and zero stage rematerializations; the session rebuilds itself on model switch and a cold turn has identical semantics."
+stage = "S4"
+status = "build"
+oracles = ["journey-reference"]
+tier = "suite"
+executor = "browser"
+feature = "features/suites/s4_application/warm_turn.feature"
+
+[[row]]
 id = "session-window"
 statement = "A chat session is bounded only by the model's own context: the archive compiles at max_position_embeddings (staging absorbs the memory scaling), and a transcript that outgrows the window trims oldest-turn-first so the conversation continues — it never dead-ends."
 stage = "S4"

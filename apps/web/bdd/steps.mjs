@@ -486,6 +486,42 @@ Then("the staged completion matches reference turn 1", async function () {
   );
 });
 
+// ── S4 — warm turns (row `warm-turn`) ───────────────────────────────────────
+
+/** The generation status log, with the index where each turn began (a
+ * "session warm/cold" line opens every staged turn). */
+async function statusLog(world) {
+  return world.page.evaluate(() => globalThis.__hologram_status ?? []);
+}
+
+Then("the second turn reports a warm session", async function () {
+  const log = await statusLog(this);
+  const sessionLines = log.filter((l) => l.startsWith("session "));
+  assert.equal(sessionLines.length, 2, `two staged turns ran:\n${log.join("\n")}`);
+  assert.ok(
+    sessionLines[0].startsWith("session cold"),
+    `the first turn is cold:\n${log.join("\n")}`,
+  );
+  assert.ok(
+    sessionLines[1].startsWith("session warm"),
+    `the second turn must reuse the warm session:\n${log.join("\n")}`,
+  );
+});
+
+Then("the second turn materializes no stages", async function () {
+  const log = await statusLog(this);
+  const secondTurnStart = log.findIndex(
+    (l, i) => l.startsWith("session ") && log.slice(0, i).some((p) => p.startsWith("session ")),
+  );
+  assert.ok(secondTurnStart > 0, "the second turn's start is in the status log");
+  const secondTurn = log.slice(secondTurnStart);
+  assert.ok(
+    !secondTurn.some((l) => l.includes("materialized") || l.includes("compiling")),
+    `a warm turn pays decode only — no recompile, no rematerialization:\n${secondTurn.join("\n")}`,
+  );
+  console.log(`[warm-turn] turn 2 status: ${JSON.stringify(secondTurn)}`);
+});
+
 // ── S4 — the three-message handshake ────────────────────────────────────────
 
 When("the user sends handshake message {int}", async function (n) {

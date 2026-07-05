@@ -6,7 +6,13 @@
 // `tensors/{κ}.bin` through a sync access handle (worker-only API), re-hashed
 // inside the pipeline, and patched into the archive's constants. A missing or
 // corrupt κ aborts the turn with the label.
-import { generate as wasmGenerate, generateStaged, kappaRequirements, materialize } from "./holo";
+import {
+  generate as wasmGenerate,
+  createStagedSession,
+  kappaRequirements,
+  materialize,
+  type StagedSession,
+} from "./holo";
 
 async function materializeFromOpfs(holoBytes: Uint8Array, modelDir?: string): Promise<Uint8Array> {
   const required = await kappaRequirements(holoBytes);
@@ -226,24 +232,52 @@ function derivedStore(entries: Map<string, DerivedEntry>, modelDir: FileSystemDi
   };
 }
 
-// Staged generation with a sequence-following window (row
-// `staged-window-growth`): the session recompiles the weightless stage
-// k-forms per geometric window bucket from the recorded manifest, so
-// per-token compute scales with the actual sequence — never the model's full
-// context. κs resolve on demand through pre-opened sync handles (falling
-// back to recorded provenance); one stage's weights are resident at a time.
-async function runStaged(
-  staged: { modelDir: string },
-  prompt: string,
-  genOpts: unknown,
-  tokenizerBytes: Uint8Array | undefined,
-  onToken: (text: string) => void,
+// The persistent staged session (row `warm-turn`): the worker outlives a
+// single send, and the session — compiled window, resident stage sessions,
+// verified-κ set, derived-artifact cache — carries across turns. A warm turn
+// pays decode: no window recompile, no stage rematerialization, no
+// re-verification. The session rebuilds on model switch (its inputs are the
+// model's), and dies with the worker on cancel/error — the next send is a
+// cold turn, same semantics.
+let warm: {
+  modelDir: string;
+  session: StagedSession;
+  handles: Map<string, OpenHandle>;
+} | null = null;
+
+function disposeWarm() {
+  if (!warm) return;
+  for (const handle of warm.handles.values()) {
+    try {
+      handle.close();
+    } catch {
+      // already closed by an invalidation — disposal proceeds
+    }
+  }
+  try {
+    warm.session.free();
+  } catch {
+    // wasm object already freed
+  }
+  warm = null;
+}
+
+async function warmStagedSession(
+  modelDirName: string,
+  tokenizerBytes: Uint8Array,
   onProgress: (line: string) => void,
-): Promise<string> {
+): Promise<StagedSession> {
+  if (warm && warm.modelDir === modelDirName) {
+    onProgress("session warm — resident window carries across turns");
+    return warm.session;
+  }
+  disposeWarm();
+  onProgress("session cold — building the staged session");
+
   const root = await navigator.storage.getDirectory();
   const models = await root.getDirectoryHandle("models");
-  const modelDir = await models.getDirectoryHandle(staged.modelDir);
-  const sources = await loadKappaSources(staged.modelDir);
+  const modelDir = await models.getDirectoryHandle(modelDirName);
+  const sources = await loadKappaSources(modelDirName);
 
   const configJson = await readModelText(modelDir, "config.json");
   const manifest = JSON.parse(await readModelText(modelDir, "manifest.json")) as {
@@ -256,37 +290,31 @@ async function runStaged(
     layersPerStage: number;
     contextLength?: number;
   };
-
   const derivedEntries = await loadDerivedEntries(modelDir);
 
   const tensorsDir = await root.getDirectoryHandle("tensors");
   const kappaHandles = new Map<string, OpenHandle>();
-  try {
-    for (const kappa of manifest.kappas) {
-      try {
-        kappaHandles.set(kappa, await openSync(tensorsDir, `${kappa}.bin`));
-      } catch {
-        // Not in the local cache: the resolver falls back to the recorded
-        // provenance; a κ that resolves nowhere aborts naming the label.
-      }
+  for (const kappa of manifest.kappas) {
+    try {
+      kappaHandles.set(kappa, await openSync(tensorsDir, `${kappa}.bin`));
+    } catch {
+      // Not in the local cache: the resolver falls back to the recorded
+      // provenance; a κ that resolves nowhere aborts naming the label.
     }
-    return await generateStaged(
-      configJson,
-      manifest,
-      stagesMeta.contextLength,
-      stagesMeta.layersPerStage,
-      kappaResolver(kappaHandles, sources),
-      kappaInvalidator(kappaHandles, tensorsDir),
-      derivedStore(derivedEntries, modelDir),
-      prompt,
-      genOpts as never,
-      tokenizerBytes,
-      onToken,
-      onProgress,
-    );
-  } finally {
-    for (const handle of kappaHandles.values()) handle.close();
   }
+  const session = await createStagedSession(
+    configJson,
+    manifest,
+    stagesMeta.contextLength,
+    stagesMeta.layersPerStage,
+    kappaResolver(kappaHandles, sources),
+    kappaInvalidator(kappaHandles, tensorsDir),
+    derivedStore(derivedEntries, modelDir),
+    tokenizerBytes,
+    onProgress,
+  );
+  warm = { modelDir: modelDirName, session, handles: kappaHandles };
+  return session;
 }
 
 self.onmessage = async (e) => {
@@ -294,18 +322,15 @@ self.onmessage = async (e) => {
 
   try {
     if (staged) {
-      const result = await runStaged(
-        { modelDir },
-        prompt,
-        genOpts,
-        tokenizerBytes,
-        (text: string) => {
-          self.postMessage({ type: "token", text });
-        },
-        (line: string) => {
-          self.postMessage({ type: "progress", line });
-        },
-      );
+      if (!tokenizerBytes) {
+        throw new Error("staged chat needs the model's tokenizer.json");
+      }
+      const session = await warmStagedSession(modelDir, tokenizerBytes, (line: string) => {
+        self.postMessage({ type: "progress", line });
+      });
+      const result = session.generate(prompt, genOpts as never, (text: string) => {
+        self.postMessage({ type: "token", text });
+      });
       self.postMessage({ type: "done", text: result });
       return;
     }
