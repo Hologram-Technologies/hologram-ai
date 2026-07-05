@@ -213,6 +213,16 @@ executor = "rust"
 feature = "features/suites/s3_execution/staged_execution.feature"
 
 [[row]]
+id = "staged-window-growth"
+statement = "The staged generation window follows the sequence, never the model: stage k-forms are weightless, so the session recompiles them per geometric window bucket up to the model's own context, per-token compute scales with the actual sequence, the regrown pipeline reproduces the fixed-window completion exactly, and a sequence past the model's context fails loud naming both lengths."
+stage = "S3"
+status = "build"
+oracles = ["journey-reference"]
+tier = "suite"
+executor = "rust"
+feature = "features/suites/s3_execution/staged_window_growth.feature"
+
+[[row]]
 id = "bounded-embedding"
 statement = "A model is bounded by its unavoidable per-row/per-tile work, never whole-matrix F32 materialization: the embedding gathers the token rows at the table's native dtype and widens only the gathered result, so the whole [vocab, hidden] F32 image is never materialized, and a fused Phi3-family model executes monolithically and staged to identical logits."
 stage = "S3"

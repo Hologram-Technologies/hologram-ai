@@ -800,6 +800,9 @@ struct BddWorld {
     staged_partition: Option<(BTreeSet<String>, Vec<BTreeSet<String>>)>,
     staged_exec: Option<StagedExec>,
     staged_completions: Option<(String, String)>,
+    // S3 — staged window growth (row `staged-window-growth`)
+    staged_windows: Option<Vec<usize>>,
+    staged_growth_err: Option<String>,
     // S3 — bounded embedding / fused Phi3 (row `bounded-embedding`)
     bounded_embed: Option<BoundedEmbed>,
     bounded_embed_compiled: Option<Vec<Vec<u8>>>,
@@ -2516,6 +2519,175 @@ async fn then_staged_completions_equal(w: &mut BddWorld) {
         "the staged completion must equal the monolithic completion"
     );
     println!("[staged-execution] greedy completion (both engines): {mono:?}");
+}
+
+// ─────────── S3 — staged window growth (row `staged-window-growth`) ──────────
+
+/// A growable staged session over the fixture manifest + κ-store, with a
+/// window observer recording every bucket it compiles.
+fn growable_staged_session(
+    store_path: &std::path::Path,
+    windows: std::sync::Arc<std::sync::Mutex<Vec<usize>>>,
+) -> hologram_ai::staged::GrowableStagedSession {
+    let manifest = staged_manifest(false);
+    let (keys, shapes): (Vec<String>, Vec<Vec<u64>>) = manifest.into_iter().unzip();
+    let kappas: Vec<String> = keys
+        .iter()
+        .zip(&shapes)
+        .map(|(name, dims)| kappa_of(&staged_tensor_bytes(name, dims)))
+        .collect();
+    let dtypes = vec![DType::F32; keys.len()];
+    let mut session = hologram_ai::staged::GrowableStagedSession::new(
+        staged_config(false).to_string(),
+        keys,
+        kappas,
+        shapes,
+        dtypes,
+        None,
+        std::num::NonZeroU64::new(1).expect("1 is non-zero"),
+        Box::new(DirKappaStore::new(store_path)),
+    )
+    .expect("the growable staged session builds");
+    session.set_window_observer(Box::new(move |w| windows.lock().expect("lock").push(w)));
+    session
+}
+
+/// Greedy generation through a growable staged session; returns
+/// (completion, windows compiled, prompt token count).
+fn generate_growable(store_path: &std::path::Path, prompt: &str) -> (String, Vec<usize>, usize) {
+    use hologram_ai::commands::generate::{generate_stream, GenConfig};
+    let windows = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let mut session = growable_staged_session(store_path, std::sync::Arc::clone(&windows));
+    let cfg = GenConfig {
+        max_tokens: Some(8),
+        temperature: 0.0,
+        ..Default::default()
+    };
+    let mut sink = Vec::new();
+    let text = generate_stream(&mut session, &DecimalTok, prompt, &cfg, &mut sink)
+        .expect("growable staged generation completes");
+    let prompt_tokens = DecimalTok.encode(prompt).len();
+    let windows = windows.lock().expect("lock").clone();
+    (text, windows, prompt_tokens)
+}
+
+#[when("a short prompt is generated through the growable staged session")]
+async fn when_growable_short(w: &mut BddWorld) {
+    let store = w.staged_store.as_ref().expect("the fixture κ-store");
+    let (_, windows, _) = generate_growable(&store.path, "3 141 59 26 5");
+    w.staged_windows = Some(windows);
+}
+
+#[then("the served window is the smallest geometric bucket holding the sequence")]
+async fn then_growable_bucket(w: &mut BddWorld) {
+    let windows = w.staged_windows.as_ref().expect("the growth log");
+    // 5 prompt tokens + 8 generated stay inside the first bucket (64):
+    // exactly one window is ever compiled, and it is the geometric bucket.
+    let expect = hologram_ai::engine::geometric_window(5, STG_WINDOW as usize);
+    assert_eq!(
+        windows,
+        &vec![expect],
+        "a short prompt must compile exactly the sequence-sized bucket"
+    );
+    println!("[staged-window-growth] short prompt served by window {expect}");
+}
+
+#[then("the served window is smaller than the model's context length")]
+async fn then_growable_below_context(w: &mut BddWorld) {
+    let windows = w.staged_windows.as_ref().expect("the growth log");
+    assert!(
+        windows.iter().all(|&win| win < STG_WINDOW as usize),
+        "the sequence-sized window ({windows:?}) must be below the model context {STG_WINDOW}"
+    );
+}
+
+#[when("generation pushes the sequence across a window bucket boundary")]
+async fn when_growable_crossing(w: &mut BddWorld) {
+    let store = w.staged_store.as_ref().expect("the fixture κ-store");
+    // A 60-token prompt + 8 generated tokens crosses the 64-token bucket.
+    let prompt: String = (0..60)
+        .map(|i| (i % 9 + 1).to_string())
+        .collect::<Vec<_>>()
+        .join(" ");
+    let (_, windows, prompt_tokens) = generate_growable(&store.path, &prompt);
+    assert_eq!(
+        prompt_tokens, 60,
+        "the crossing prompt must encode to 60 tokens"
+    );
+    w.staged_windows = Some(windows);
+}
+
+#[then("the session recompiles the stages exactly once per crossed bucket")]
+async fn then_growable_once_per_bucket(w: &mut BddWorld) {
+    let windows = w.staged_windows.as_ref().expect("the growth log");
+    assert_eq!(
+        windows,
+        &vec![64, 128],
+        "60 prompt + 8 generated tokens cross exactly one bucket boundary (64 → 128)"
+    );
+    println!("[staged-window-growth] buckets compiled: {windows:?}");
+}
+
+#[then("the window never exceeds the model's context length")]
+async fn then_growable_capped(w: &mut BddWorld) {
+    let windows = w.staged_windows.as_ref().expect("the growth log");
+    assert!(
+        windows.iter().all(|&win| win <= STG_WINDOW as usize),
+        "no bucket ({windows:?}) may exceed the model context {STG_WINDOW}"
+    );
+}
+
+#[when(
+    "the same greedy completion is generated through the growable staged session and the fixed-window staged runner"
+)]
+async fn when_growable_parity(w: &mut BddWorld) {
+    use hologram_ai::commands::generate::{generate_stream, GenConfig};
+    let kit = staged_kit();
+    let store = w.staged_store.as_ref().expect("the fixture κ-store");
+    let prompt = "3 141 59 26 5";
+    let cfg = GenConfig {
+        max_tokens: Some(8),
+        temperature: 0.0,
+        ..Default::default()
+    };
+
+    let mut fixed = StagedRunner::from_archives(
+        kit.stages.clone(),
+        Box::new(DirKappaStore::new(&store.path)),
+    )
+    .expect("the fixed-window staged runner builds");
+    let mut sink = Vec::new();
+    let fixed_text = generate_stream(&mut fixed, &DecimalTok, prompt, &cfg, &mut sink)
+        .expect("fixed-window staged generation completes");
+
+    let (grown_text, _, _) = generate_growable(&store.path, prompt);
+    w.staged_completions = Some((fixed_text, grown_text));
+}
+
+#[when("a growable staged session is asked for a window past the model's context")]
+async fn when_growable_overflow(w: &mut BddWorld) {
+    use hologram_ai::engine::SessionProvider;
+    let store = w.staged_store.as_ref().expect("the fixture κ-store");
+    let windows = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let mut session = growable_staged_session(&store.path, windows);
+    let err = session
+        .session_for(STG_WINDOW as usize + 1)
+        .err()
+        .expect("a window past the model's context must be refused")
+        .to_string();
+    w.staged_growth_err = Some(err);
+}
+
+#[then("the refusal names the requested window and the model's context length")]
+async fn then_growable_overflow_named(w: &mut BddWorld) {
+    let err = w.staged_growth_err.as_ref().expect("the refusal");
+    let want = (STG_WINDOW + 1).to_string();
+    let ctx = STG_WINDOW.to_string();
+    assert!(
+        err.contains(&want) && err.contains(&ctx),
+        "the refusal must name the requested window ({want}) and the context ({ctx}): {err}"
+    );
+    println!("[staged-window-growth] loud refusal: {err}");
 }
 
 // ───────────────── S3 — bounded embedding (row `bounded-embedding`) ──────────

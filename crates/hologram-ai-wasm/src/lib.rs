@@ -679,26 +679,41 @@ pub fn generate(
 }
 
 /// Autoregressive generation over the **staged** pipeline — the same
-/// `generate_stream` loop driven by a [`StagedRunner`](hologram_ai::staged::StagedRunner)
-/// (dictionary row `staged-execution`).
+/// `generate_stream` loop driven by a
+/// [`GrowableStagedSession`](hologram_ai::staged::GrowableStagedSession)
+/// (dictionary rows `staged-execution`, `staged-window-growth`).
 ///
-/// Each forward pass resolves the stage archives ON DEMAND through
-/// `resolve_stage` (`(i: number) => Uint8Array` — the stage's k-form archive
-/// bytes, e.g. an OPFS read), materializes each stage's κs through
-/// `resolve_kappa` (`(κ: string) => Uint8Array`, content-verified), executes
-/// the stage, and drops its session before the next stage materializes —
-/// never holding more than one stage's weights. Stage archives embed no
-/// tokenizer, so `tokenizer_json` is required. Returns the generated text.
+/// The window follows the SEQUENCE: stage k-forms are weightless, so the
+/// session recompiles them per geometric window bucket (64, 128, … up to the
+/// model's own context) from the streamed-download manifest — the same
+/// `config_json`/`keys`/`kappas`/`shapes`/`dtypes` the download compiled
+/// with. Per-token compute therefore scales with the actual sequence, never
+/// the model's full context, while peak weight residency stays one stage:
+/// each stage materializes its κs through `resolve_kappa`
+/// (`(κ: string) => Uint8Array`, content-verified) and drops before the next
+/// stage materializes.
+///
+/// `on_progress` (optional, `(line: string) => void`) receives window
+/// compiles and per-stage materialization — the first token of a large model
+/// is honest work, and the UI shows it instead of a silent wait. Stage
+/// archives embed no tokenizer, so `tokenizer_json` is required. Returns the
+/// generated text.
 #[wasm_bindgen]
 #[allow(clippy::too_many_arguments)]
 pub fn generate_staged(
-    stage_count: u32,
-    resolve_stage: &js_sys::Function,
+    config_json: &str,
+    keys_js: &js_sys::Array,
+    kappas_js: &js_sys::Array,
+    tensor_shapes_js: &js_sys::Array,
+    tensor_dtypes_js: &js_sys::Array,
+    context_length: Option<u32>,
+    layers_per_stage: u32,
     resolve_kappa: &js_sys::Function,
     tokenizer_json: Option<Vec<u8>>,
     prompt: &str,
     opts: JsValue,
     callback: Option<js_sys::Function>,
+    on_progress: Option<js_sys::Function>,
 ) -> Result<String, JsValue> {
     let opts = GenOpts::from_js(opts)?;
     let tokenizer = match tokenizer_json {
@@ -710,15 +725,12 @@ pub fn generate_staged(
         }
     };
 
-    let stage_resolver = Box::new(move |i: usize| -> anyhow::Result<Vec<u8>> {
-        let value = resolve_stage
-            .call1(&JsValue::NULL, &JsValue::from_f64(i as f64))
-            .map_err(|e| anyhow::anyhow!("stage resolver threw for stage {i}: {e:?}"))?;
-        if value.is_null() || value.is_undefined() {
-            anyhow::bail!("stage {i} archive not provided by the resolver");
-        }
-        Ok(js_sys::Uint8Array::new(&value).to_vec())
-    });
+    let rows = parse_manifest(keys_js, tensor_shapes_js, tensor_dtypes_js)?;
+    let kappas = parse_kappas(&rows.keys, kappas_js)?;
+    let layers_per_stage = std::num::NonZeroU64::new(u64::from(layers_per_stage))
+        .ok_or_else(|| err("layers_per_stage must be at least 1"))?;
+
+    let resolve_kappa = resolve_kappa.clone();
     let store = Box::new(move |kappa: &str| -> anyhow::Result<Vec<u8>> {
         let value = resolve_kappa
             .call1(&JsValue::NULL, &JsValue::from_str(kappa))
@@ -729,9 +741,37 @@ pub fn generate_staged(
         Ok(js_sys::Uint8Array::new(&value).to_vec())
     });
 
-    let mut session =
-        hologram_ai::staged::StagedRunner::new(stage_count as usize, stage_resolver, store)
-            .map_err(|e| err(format!("generate_staged: {e:#}")))?;
+    let mut session = hologram_ai::staged::GrowableStagedSession::new(
+        config_json.to_string(),
+        rows.keys,
+        kappas,
+        rows.shapes,
+        rows.dtypes,
+        context_length.map(u64::from),
+        layers_per_stage,
+        store,
+    )
+    .map_err(|e| err(format!("generate_staged: {e:#}")))?;
+
+    if let Some(progress) = on_progress {
+        let for_window = progress.clone();
+        session.set_window_observer(Box::new(move |window| {
+            let _ = for_window.call1(
+                &JsValue::NULL,
+                &JsValue::from_str(&format!("compiling a {window}-token window")),
+            );
+        }));
+        session.set_stage_observer(Box::new(move |stage, count, bytes| {
+            let mb = bytes as f64 / (1024.0 * 1024.0);
+            let _ = progress.call1(
+                &JsValue::NULL,
+                &JsValue::from_str(&format!(
+                    "stage {}/{count} materialized ({mb:.0} MB)",
+                    stage + 1
+                )),
+            );
+        }));
+    }
 
     let cfg = opts.config();
     let templated = apply_template(opts.prompt_template.as_deref(), prompt);

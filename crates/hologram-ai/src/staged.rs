@@ -134,6 +134,14 @@ impl KappaStore for CountingStore<'_> {
 /// k-forms (structure + κ-bindings), so resolving one moves no parameters.
 pub type StageResolver<'a> = Box<dyn FnMut(usize) -> Result<Vec<u8>> + 'a>;
 
+/// Per-stage observer: `(stage, stage_count, materialized_weight_bytes)`,
+/// called after a stage materializes and before it executes.
+pub type StageObserver<'a> = Box<dyn FnMut(usize, usize, u64) + 'a>;
+
+/// A [`StageObserver`] shared across the regrown runners of a
+/// [`GrowableStagedSession`].
+type SharedStageObserver = std::rc::Rc<std::cell::RefCell<dyn FnMut(usize, usize, u64)>>;
+
 /// Windowed execution over the stage archives of [`compile_stages`].
 ///
 /// One token-window forward pass runs the stages in order: resolve the
@@ -162,6 +170,10 @@ pub struct StagedRunner<'a> {
     stage_weight_bytes: Vec<u64>,
     /// The largest single-stage weight residency observed across executions.
     peak_resident_weight_bytes: u64,
+    /// Observer called after each stage materializes, before it executes:
+    /// `(stage, stage_count, materialized_weight_bytes)`. Lets a UI surface
+    /// per-stage progress instead of a silent first-token wait.
+    on_stage: Option<StageObserver<'a>>,
 }
 
 impl<'a> StagedRunner<'a> {
@@ -220,7 +232,14 @@ impl<'a> StagedRunner<'a> {
             window,
             stage_weight_bytes: vec![0; stage_count],
             peak_resident_weight_bytes: 0,
+            on_stage: None,
         })
+    }
+
+    /// Install a per-stage observer: called after each stage materializes
+    /// (before it executes) with `(stage, stage_count, weight_bytes)`.
+    pub fn set_stage_observer(&mut self, f: StageObserver<'a>) {
+        self.on_stage = Some(f);
     }
 
     /// Convenience over an in-memory list of stage archives (the native path:
@@ -275,6 +294,9 @@ impl<'a> StagedRunner<'a> {
             drop(archive);
             self.stage_weight_bytes[stage] = counting.bytes;
             self.peak_resident_weight_bytes = self.peak_resident_weight_bytes.max(counting.bytes);
+            if let Some(f) = self.on_stage.as_mut() {
+                f(stage, self.stage_count, counting.bytes);
+            }
 
             let mut runner = HoloRunner::from_bytes(material)
                 .with_context(|| format!("loading stage {stage}"))?;
@@ -359,4 +381,153 @@ fn archive_ports(archive: &[u8], kind: SectionKind) -> Result<Vec<PortInfo>> {
             shape: p.shape.iter().map(|&d| d as usize).collect(),
         })
         .collect())
+}
+
+/// A shared-store adapter so a [`GrowableStagedSession`] can hand each
+/// regrown [`StagedRunner`] the same underlying κ-store without moving it.
+struct SharedStore(std::rc::Rc<std::cell::RefCell<Box<dyn KappaStore>>>);
+
+impl KappaStore for SharedStore {
+    fn resolve(&mut self, kappa: &str) -> Result<Vec<u8>> {
+        self.0.borrow_mut().resolve(kappa)
+    }
+}
+
+/// A length-adaptive staged provider: the window follows the SEQUENCE, never
+/// the model (journey S4 / dictionary row `staged-window-growth`).
+///
+/// [`StagedRunner`] alone serves one fixed window — the window its stage
+/// archives were compiled at. Compiling stages at the model's own context and
+/// executing every token against that full window makes the first token of a
+/// short prompt cost a full-context forward pass (O(context²) attention per
+/// layer): a 10-token chat message against a 32k-context model is a
+/// months-long "hang" in a browser tab. But stage archives are weightless
+/// k-forms — recompiling them at a smaller window moves no weights and costs
+/// well under a second — so the window can track the sequence the way the
+/// monolithic [`GrowableSession`](crate::engine::GrowableSession) already
+/// does: geometric buckets from the shared
+/// [`geometric_window`](crate::engine::geometric_window) policy, capped at
+/// the model's own context. Peak weight residency stays one stage; per-token
+/// compute scales with the actual sequence, not the model.
+pub struct GrowableStagedSession {
+    config_json: String,
+    keys: Vec<String>,
+    kappas: Vec<String>,
+    shapes: Vec<Vec<u64>>,
+    dtypes: Vec<DType>,
+    layers_per_stage: NonZeroU64,
+    /// The window ceiling — the model's own context (or the validated
+    /// download-time choice).
+    max_window: usize,
+    store: std::rc::Rc<std::cell::RefCell<Box<dyn KappaStore>>>,
+    on_stage: Option<SharedStageObserver>,
+    on_window: Option<Box<dyn FnMut(usize)>>,
+    current: Option<(usize, StagedRunner<'static>)>,
+}
+
+impl GrowableStagedSession {
+    /// Build from the streamed-download manifest (the same inputs as
+    /// [`compile_stages`]) plus the κ-store the stages materialize against.
+    /// `max_window` follows the monolithic rule: `Some(n)` is the validated
+    /// download-time context, `None` means the model's own trained context
+    /// (read from the config by the stage compiler on first growth).
+    #[allow(clippy::too_many_arguments)] // the streamed-download manifest is parallel slices
+    pub fn new(
+        config_json: String,
+        keys: Vec<String>,
+        kappas: Vec<String>,
+        shapes: Vec<Vec<u64>>,
+        dtypes: Vec<DType>,
+        context_length: Option<u64>,
+        layers_per_stage: NonZeroU64,
+        store: Box<dyn KappaStore>,
+    ) -> Result<Self> {
+        let config: serde_json::Value =
+            serde_json::from_str(&config_json).context("parsing config.json")?;
+        let model_context = config
+            .get("max_position_embeddings")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(u64::MAX);
+        let max_window = context_length.unwrap_or(model_context).min(model_context) as usize;
+        ensure!(max_window >= 1, "the model declares no usable context");
+        Ok(Self {
+            config_json,
+            keys,
+            kappas,
+            shapes,
+            dtypes,
+            layers_per_stage,
+            max_window,
+            store: std::rc::Rc::new(std::cell::RefCell::new(store)),
+            on_stage: None,
+            on_window: None,
+            current: None,
+        })
+    }
+
+    /// Install a per-stage observer forwarded into every regrown runner:
+    /// `(stage, stage_count, weight_bytes)` after each stage materializes.
+    pub fn set_stage_observer(&mut self, f: Box<dyn FnMut(usize, usize, u64)>) {
+        self.on_stage = Some(std::rc::Rc::from(std::cell::RefCell::new(f)));
+    }
+
+    /// Install a window observer: called with the bucket size at the start of
+    /// each window (re)compile — the other honest wait in a staged turn.
+    pub fn set_window_observer(&mut self, f: Box<dyn FnMut(usize)>) {
+        self.on_window = Some(f);
+    }
+
+    /// The stage count of the currently-resident window (0 before the first).
+    pub fn stage_count(&self) -> usize {
+        self.current.as_ref().map_or(0, |(_, r)| r.stage_count())
+    }
+}
+
+impl SessionProvider for GrowableStagedSession {
+    fn session_for(&mut self, want: usize) -> Result<&mut dyn LmSession> {
+        if want > self.max_window {
+            bail!(
+                "the sequence needs a window of {want} tokens but the model's context length \
+                 is {}",
+                self.max_window
+            );
+        }
+        let fits = matches!(&self.current, Some((cur, _)) if *cur >= want);
+        if !fits {
+            let window = crate::engine::geometric_window(want, self.max_window);
+            tracing::info!(window, want, "compiling staged generation window");
+            if let Some(f) = self.on_window.as_mut() {
+                f(window);
+            }
+            // Drop the previous window first: peak residency stays one stage.
+            self.current = None;
+            let archives = compile_stages(
+                &self.config_json,
+                &self.keys,
+                &self.kappas,
+                &self.shapes,
+                &self.dtypes,
+                Some(window as u64),
+                self.layers_per_stage,
+            )
+            .with_context(|| format!("compiling a {window}-token staged window"))?;
+            let mut runner = StagedRunner::from_archives(
+                archives,
+                Box::new(SharedStore(std::rc::Rc::clone(&self.store))),
+            )
+            .with_context(|| format!("loading the {window}-token staged window"))?;
+            if let Some(hook) = &self.on_stage {
+                let hook = std::rc::Rc::clone(hook);
+                runner.set_stage_observer(Box::new(move |s, n, b| {
+                    (hook.borrow_mut())(s, n, b);
+                }));
+            }
+            self.current = Some((window, runner));
+        }
+        Ok(&mut self.current.as_mut().expect("window just ensured").1)
+    }
+
+    fn max_window(&self) -> usize {
+        self.max_window
+    }
 }

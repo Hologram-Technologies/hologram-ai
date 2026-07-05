@@ -32,9 +32,24 @@ use hologram_exec::OutputBuffer;
 use crate::compiler::PreparedModel;
 use crate::runner::{HoloRunner, PortInfo};
 
-/// Smallest window a [`GrowableSession`] compiles — avoids tiny graphs and gives
+/// Smallest window a growable provider compiles — avoids tiny graphs and gives
 /// short prompts room to generate a few tokens before the first regrow.
 const MIN_WINDOW: usize = 64;
+
+/// The smallest window ≥ `want`: geometric doubling from `MIN_WINDOW` (64),
+/// capped at `max_window` (the model's own context). Doubling keeps regrows
+/// to O(log N) over a long generation, so the per-length compile cost is
+/// paid a few times, not per token — the shared bucket policy of every
+/// growable provider ([`GrowableSession`], the staged
+/// [`GrowableStagedSession`](crate::staged::GrowableStagedSession)).
+pub fn geometric_window(want: usize, max_window: usize) -> usize {
+    let want = want.clamp(1, max_window.max(1));
+    let mut w = MIN_WINDOW;
+    while w < want {
+        w = w.saturating_mul(2);
+    }
+    w.min(max_window.max(1))
+}
 
 /// One executable LM surface — the named ports plus the forward pass the
 /// generation loop drives. Two realizations:
@@ -183,17 +198,9 @@ impl GrowableSession {
         }
     }
 
-    /// The smallest window ≥ `want`: geometric doubling from [`MIN_WINDOW`],
-    /// capped at the model's context. Doubling keeps regrows to O(log N) over a
-    /// long generation, so the ~per-length compile cost is paid a few times, not
-    /// per token.
+    /// The smallest window ≥ `want` — the shared [`geometric_window`] policy.
     fn window_for(&self, want: usize) -> usize {
-        let want = want.clamp(1, self.max_window);
-        let mut w = MIN_WINDOW;
-        while w < want {
-            w = w.saturating_mul(2);
-        }
-        w.min(self.max_window)
+        geometric_window(want, self.max_window)
     }
 }
 
