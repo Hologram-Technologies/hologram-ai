@@ -109,6 +109,10 @@ pub struct KappaRequirement {
     pub constant: u32,
     /// The κ-label (`blake3:<hex>`) of the weight content.
     pub kappa: String,
+    /// Optional byte range (offset, length) of the addressed content this
+    /// constant binds — sub-tensor κ-resolution (a chunked stage holds one
+    /// slice; the κ names, and verification covers, the WHOLE content).
+    pub range: Option<(u64, u64)>,
 }
 
 /// Parse the `holospaces.kappa_map` extension of `archive`. Returns an empty
@@ -143,9 +147,30 @@ fn parse_kappa_map(bytes: &[u8]) -> Result<Vec<KappaRequirement>> {
         let constant: u32 = id
             .parse()
             .with_context(|| format!("malformed constant id in κ-map line `{line}`"))?;
+        // `<κ>` binds the whole content; `<κ>@<offset>+<len>` binds a slice
+        // of it (sub-tensor κ-resolution).
+        let (kappa, range) = match kappa.split_once('@') {
+            Some((kappa, range)) => {
+                let (offset, len) = range
+                    .split_once('+')
+                    .with_context(|| format!("malformed κ-map range in `{line}`"))?;
+                (
+                    kappa,
+                    Some((
+                        offset
+                            .parse()
+                            .with_context(|| format!("malformed range offset in `{line}`"))?,
+                        len.parse()
+                            .with_context(|| format!("malformed range length in `{line}`"))?,
+                    )),
+                )
+            }
+            None => (kappa, None),
+        };
         reqs.push(KappaRequirement {
             constant,
             kappa: kappa.to_string(),
+            range,
         });
     }
     Ok(reqs)
@@ -244,7 +269,9 @@ fn patch_constants(
             .resolve(&req.kappa)
             .with_context(|| format!("resolving κ `{}`", req.kappa))?;
         // Verify at the trust-boundary crossing — once per session per κ.
-        // Re-materialization of a session-verified κ is read-only I/O.
+        // Re-materialization of a session-verified κ is read-only I/O. The
+        // κ names (and verification covers) the WHOLE content even when the
+        // constant binds only a range of it.
         if !verified.contains(&req.kappa) {
             let derived = kappa_of(&bytes);
             if derived != req.kappa {
@@ -272,7 +299,23 @@ fn patch_constants(
             }
             verified.insert(req.kappa.clone());
         }
-        entry.bytes = bytes;
+        entry.bytes = match req.range {
+            // Sub-tensor binding: the constant holds one verified slice.
+            Some((offset, len)) => {
+                let (start, end) = (offset as usize, (offset + len) as usize);
+                if end > bytes.len() || start > end {
+                    bail!(
+                        "κ-map range {offset}+{len} for ConstantId({}) exceeds the {}-byte \
+                         content of `{}`",
+                        req.constant,
+                        bytes.len(),
+                        req.kappa
+                    );
+                }
+                bytes[start..end].to_vec()
+            }
+            None => bytes,
+        };
     }
     Ok(())
 }

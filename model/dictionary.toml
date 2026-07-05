@@ -293,6 +293,16 @@ executor = "rust"
 feature = "features/suites/s3_execution/idle_derivation.feature"
 
 [[row]]
+id = "chunked-head"
+statement = "No head is too large to execute: the LM head partitions into vocab-row chunks at the pipeline's own stage granularity via κ-range bindings (a chunk binds a byte range of the whole tensor's κ; verification covers the whole content once), the concatenated chunk logits agree with the whole-head logits within kernel reduction-order tolerance with exact greedy-decode parity, no whole-vocabulary image is ever materialized, and a single-chunk head is exactly the classic head stage."
+stage = "S3"
+status = "build"
+oracles = ["journey-reference"]
+tier = "suite"
+executor = "rust"
+feature = "features/suites/s3_execution/chunked_head.feature"
+
+[[row]]
 id = "bounded-embedding"
 statement = "A model is bounded by its unavoidable per-row/per-tile work, never whole-matrix F32 materialization: the embedding gathers the token rows at the table's native dtype and widens only the gathered result, so the whole [vocab, hidden] F32 image is never materialized, and a fused Phi3-family model executes monolithically and staged to identical logits."
 stage = "S3"

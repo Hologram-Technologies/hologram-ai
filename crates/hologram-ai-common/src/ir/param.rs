@@ -24,8 +24,16 @@ pub enum AiParam {
         len: u64,
         info: TensorInfo,
     },
-    /// External weight stored in holospaces. The runtime will resolve it by Kappa hash.
-    External { kappa: String, info: TensorInfo },
+    /// External weight stored in holospaces. The runtime will resolve it by
+    /// Kappa hash; an optional `range` (byte offset, length) binds a SLICE of
+    /// the addressed content — sub-tensor κ-resolution, so no tensor is
+    /// atomic: a stage may hold one vocab chunk of a head weight while the
+    /// κ-store holds (and verifies) the whole tensor exactly once.
+    External {
+        kappa: String,
+        info: TensorInfo,
+        range: Option<(u64, u64)>,
+    },
 }
 
 impl AiParam {
@@ -47,9 +55,23 @@ impl AiParam {
         }
     }
 
-    /// Construct an external parameter reference.
+    /// Construct an external parameter reference (whole content).
     pub fn external(kappa: String, info: TensorInfo) -> Self {
-        Self::External { kappa, info }
+        Self::External {
+            kappa,
+            info,
+            range: None,
+        }
+    }
+
+    /// Construct an external reference to a byte RANGE of the addressed
+    /// content (offset, length) — the sub-tensor binding of a chunked stage.
+    pub fn external_range(kappa: String, info: TensorInfo, offset: u64, len: u64) -> Self {
+        Self::External {
+            kappa,
+            info,
+            range: Some((offset, len)),
+        }
     }
 
     /// Metadata for this parameter.

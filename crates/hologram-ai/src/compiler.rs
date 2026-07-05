@@ -387,6 +387,7 @@ impl ModelCompiler {
                         hologram_ai_common::AiParam::External {
                             kappa: kappas[i].clone(),
                             info,
+                            range: None,
                         },
                     );
                 }

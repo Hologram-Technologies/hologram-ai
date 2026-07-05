@@ -87,13 +87,33 @@ pub fn compile_stages(
             let Some(&id) = name_to_id.get(key) else {
                 continue;
             };
-            let info = TensorInfo::new(dtypes[i], shape_from_concrete(&shapes[i]));
+            // A chunked stage binds a RANGE of the tensor: the builder
+            // recorded `kappa_range:<name>` metadata and declared the CHUNK
+            // shape itself — honor both; the κ stays the whole tensor's.
+            let range = graph
+                .metadata
+                .get(&format!("kappa_range:{key}"))
+                .and_then(|v| match v {
+                    hologram_ai_common::MetaValue::Str(s) => {
+                        let (off, len) = s.split_once('+')?;
+                        Some((off.parse().ok()?, len.parse().ok()?))
+                    }
+                    _ => None,
+                });
+            let info =
+                match range {
+                    Some(_) => graph.tensor_info.get(&id).cloned().unwrap_or_else(|| {
+                        TensorInfo::new(dtypes[i], shape_from_concrete(&shapes[i]))
+                    }),
+                    None => TensorInfo::new(dtypes[i], shape_from_concrete(&shapes[i])),
+                };
             graph.tensor_info.insert(id, info.clone());
             graph.params.insert(
                 id,
                 AiParam::External {
                     kappa: kappas[i].clone(),
                     info,
+                    range,
                 },
             );
             bound[i] = true;
@@ -662,7 +682,19 @@ impl GrowableStagedSession {
                 crate::materialize::kappa_requirements(archive)
                     .map(|reqs| {
                         reqs.iter()
-                            .map(|r| size_of.get(r.kappa.as_str()).copied().unwrap_or((0, 0)))
+                            .map(|r| {
+                                let (bytes, elems) =
+                                    size_of.get(r.kappa.as_str()).copied().unwrap_or((0, 0));
+                                match r.range {
+                                    // A ranged binding materializes only its
+                                    // slice — the chunk, not the tensor.
+                                    Some((_, len)) => {
+                                        let elem_size = bytes.checked_div(elems).unwrap_or(1);
+                                        (len, len / elem_size.max(1))
+                                    }
+                                    None => (bytes, elems),
+                                }
+                            })
                             .fold((0u64, 0u64), |(b, e), (rb, re)| (b + rb, e + re))
                     })
                     .unwrap_or((0, 0))
@@ -872,7 +904,7 @@ impl GrowableStagedSession {
     /// input change is a different key, never a reinterpretation.
     fn derivation_key(&self, window: usize) -> String {
         let mut ingest = format!(
-            "stage-archives:v1:window={window}:layers_per_stage={}:context={}:config=",
+            "stage-archives:v2:window={window}:layers_per_stage={}:context={}:config=",
             self.layers_per_stage, self.max_window
         )
         .into_bytes();

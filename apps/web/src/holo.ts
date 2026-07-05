@@ -115,9 +115,10 @@ export async function validateStreamedManifest(
   shapes: string[],
   dtypes: string[],
   contextLength?: number,
+  layersPerStage?: number,
 ): Promise<void> {
   await ensureReady();
-  wasmValidateStreamedManifest(configJson, keys, shapes, dtypes, contextLength);
+  wasmValidateStreamedManifest(configJson, keys, shapes, dtypes, contextLength, layersPerStage);
 }
 
 /** Staged compile (windowed execution over k): one k-form archive per stage

@@ -13,7 +13,7 @@ only.
 | Rest | corpus entropy / addressing quotient | coarsen the quotient (canonical form) | `kappa-addressing`; candidate S0 canonical rows (open) |
 | Transit | set-difference(remote, known) under the quotient; known = provenance-recorded κ, not cached bytes | κ-prior: provenance (exact repeat, under the shard's content pin — build, row `network-skip`), κ-manifest (cross-model — declared); coalesced ranges | `kappa-provenance-resolution`, `network-skip` |
 | Structure | O(config) graph + 32B·#tensors(config) identity data | parametric generation; minimal rep = (family id, config, κ-manifest) | `parametric-graph`, `parametricity` |
-| Residency | max stage + context window + resident prefix labels O(L·seq·d_kv), per environment | stage granularity; measured-headroom residency — admission leaves the model's own largest-stage transient bound free (a MODEL-derived margin, computed from the manifest before any byte moves; a fixed margin crashed a 1.5B head stage while smaller stages held the room); one stage is the floor; fallback to strict windowing, never refusal | `staged-execution`, `stage-residency-cache`, `memory-guard` |
+| Residency | max stage + context window + resident prefix labels O(L·seq·d_kv), per environment | stage granularity — down to SUB-TENSOR: no tensor is atomic; the head partitions into vocab-row chunks via κ-range bindings (`chunked-head`); measured-headroom residency — admission leaves the model's own largest-stage transient bound free (a MODEL-derived margin, computed from the manifest before any byte moves); one stage is the floor; fallback to strict windowing, never refusal | `staged-execution`, `chunked-head`, `stage-residency-cache`, `memory-guard` |
 | Generation | novel suffix cone only | window follows the sequence (geometric buckets, model context as ceiling); recursion through the known: resident labels re-derived, not re-executed (CE) | `staged-window-growth`, `decode-elision`, `structural-ce` |
 
 ## Critical path (in-browser)
@@ -359,18 +359,26 @@ its own measured cost; no aggregate canonicalization claim.
 
 ## Measured (2026-07-05, addendum — Qwen2.5-1.5B bf16, headless Chromium)
 
-The 1.5B staged journey drove three fixes, each measured against a real
+The 1.5B staged journey drove four fixes, each measured against a real
 trap: the fixed admission margin crashed its head stage (fixed:
 model-derived margins); the codespace's REAL quota (enforced at the write
 while estimate() reported 6.4 GB — the projection-vs-write distinction,
-observed) killed the download (fixed: fail-soft + σ-eviction); and the head
+observed) killed the download (fixed: fail-soft + σ-eviction); the head
 EXECUTION working set — two whole-vocabulary F32 images plus material
-copies, 3.27 GB — structurally exceeds the 2.15 GB working ceiling of a
-32-bit tab even fully strict (measured: 30/30 stages materialized, the
-matmul trapped). The head floor now bounds the execution working set and
-rejects AT PREFLIGHT, zero bytes moved, naming the numbers and the path:
-a quantized (i8/i4) or vocab-chunked head. Qwen2.5-0.5B's tied head
-(1.91 GB working set) passes the same bound and measurably runs.
+copies, 3.27 GB measured — structurally exceeded a 32-bit tab even fully
+strict. The whole-vocabulary head was the last residency ASSUMPTION, and
+it is now removed the same way whole-model residency was: the head
+partitions into vocab-row chunks at the pipeline's own stage granularity
+via **κ-range bindings** (row `chunked-head` — sub-tensor κ-resolution: a
+chunk binds a byte range of the whole tensor's κ; verification covers the
+whole content once; no whole-vocabulary image ever materializes). Chunked
+logits agree with the whole head within kernel reduction-order tolerance
+(measured ≤ 4e-7 — the substrate's matmul tiling varies with output width)
+with EXACT greedy-decode parity. A head within layer granularity is one
+chunk: the classic head stage, byte-identical archives. The execution
+working-set floor guard remains only where it is true: the MONOLITHIC
+plan, which small models take; staged preflight validates the stage graphs
+the plan will actually build.
 
 ## Measured (2026-07-05 — Qwen2.5-0.5B-Instruct bf16, headless Chromium, codespace)
 

@@ -254,7 +254,18 @@ export async function handleSafetensorsDownload(
       }
     }
     emitProgressFn(`Preflight: validating ${modelId} (${allKeys.length} tensors) against the parametric family registry...`);
-    await validateStreamedManifest(configText, allKeys, allShapes, allDtypes, contextLength);
+    // A staged plan validates its stage graphs (the head chunks at the
+    // pipeline's own granularity); only a monolithic plan validates the
+    // monolithic graph and its whole-head working set.
+    const stagedPlan = stageCount && stageCount > 1 ? layersPerStage : undefined;
+    await validateStreamedManifest(
+      configText,
+      allKeys,
+      allShapes,
+      allDtypes,
+      contextLength,
+      stagedPlan,
+    );
     emitProgressFn("Preflight passed: the model is valid; streaming weights.");
 
     // ── Phase 2: stream over k ─────────────────────────────────────────────

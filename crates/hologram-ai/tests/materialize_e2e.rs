@@ -79,6 +79,7 @@ fn materialized_kform_matches_inline_compile_exactly() {
     let kform_holo = compile(matmul_graph(AiParam::External {
         kappa: kappa.clone(),
         info: ti(DType::F32, &[4, 4]),
+        range: None,
     }));
 
     // The k-form archive declares exactly its one requirement; the inline
@@ -136,6 +137,7 @@ fn missing_kappa_aborts_naming_the_label() {
     let kform_holo = compile(matmul_graph(AiParam::External {
         kappa: kappa.clone(),
         info: ti(DType::F32, &[4, 4]),
+        range: None,
     }));
 
     let dir = store_dir("missing");
@@ -153,6 +155,7 @@ fn corrupt_store_content_fails_integrity() {
     let kform_holo = compile(matmul_graph(AiParam::External {
         kappa: kappa.clone(),
         info: ti(DType::F32, &[4, 4]),
+        range: None,
     }));
 
     // Plant WRONG bytes under the expected κ filename.

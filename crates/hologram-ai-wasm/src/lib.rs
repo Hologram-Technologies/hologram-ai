@@ -167,17 +167,36 @@ pub fn validate_streamed_manifest(
     tensor_shapes_js: &js_sys::Array,
     tensor_dtypes_js: &js_sys::Array,
     context_length: Option<u32>,
+    layers_per_stage: Option<u32>,
 ) -> Result<(), JsValue> {
     let rows = parse_manifest(keys_js, tensor_shapes_js, tensor_dtypes_js)?;
     let config: serde_json::Value =
         serde_json::from_str(config_json).map_err(|e| err(format!("config.json: {e}")))?;
-    hologram_ai_safetensors::parametric::build_parametric_graph_from_manifest(
-        &config,
-        &rows.keys,
-        &rows.dtypes,
-        context_length.map(u64::from),
-    )
-    .map_err(|e| err(format!("{e:#}")))?;
+    // Validate the graphs the PLAN will build: a staged plan builds stage
+    // graphs (whose head chunks at the pipeline's own granularity — no head
+    // is too large to execute); only a monolithic plan builds the monolithic
+    // graph, whose whole-head working set the floor guard checks.
+    match layers_per_stage.and_then(|n| std::num::NonZeroU64::new(u64::from(n))) {
+        Some(block) => {
+            hologram_ai_safetensors::parametric::build_parametric_stage_graphs(
+                &config,
+                &rows.keys,
+                &rows.dtypes,
+                context_length.map(u64::from),
+                block,
+            )
+            .map_err(|e| err(format!("{e:#}")))?;
+        }
+        None => {
+            hologram_ai_safetensors::parametric::build_parametric_graph_from_manifest(
+                &config,
+                &rows.keys,
+                &rows.dtypes,
+                context_length.map(u64::from),
+            )
+            .map_err(|e| err(format!("{e:#}")))?;
+        }
+    }
     Ok(())
 }
 
@@ -246,6 +265,7 @@ pub fn compile_safetensors_streamed(
             hologram_ai_common::AiParam::External {
                 kappa: kappas[i].clone(),
                 info,
+                range: None,
             },
         );
     }

@@ -222,6 +222,7 @@ fn compile_kform(
             AiParam::External {
                 kappa: kappa_of(bytes),
                 info,
+                range: None,
             },
         );
     }

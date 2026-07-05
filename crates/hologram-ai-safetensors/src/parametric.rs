@@ -1372,19 +1372,42 @@ impl<'a> DecoderRecipe<'a> {
     /// head's F32 image therefore exceeds a 32-bit heap. Rather than trap
     /// opaquely, [`guard_f32_head_materialization`] fails loud naming the tensor
     /// and its byte size.
-    fn emit_head(
+    /// One decoder layer's parameter elements — the granularity unit the
+    /// head chunk plan matches (uniform stage sizing: no stage, head
+    /// included, outweighs a layer stage).
+    fn layer_param_elements(&self) -> u64 {
+        let h = self.cfg.hidden_size;
+        let kv = self.cfg.num_key_value_heads * self.cfg.head_dim;
+        let i = self.cfg.intermediate_size;
+        // q + o: h·h each; k + v: kv·h each; gate + up: i·h each; down: h·i;
+        // two norms: h each.
+        2 * h * h + 2 * kv * h + 3 * i * h + 2 * h
+    }
+
+    /// Head chunk rows at the pipeline's own stage granularity: the head
+    /// partitions into vocab-row chunks whose element count does not exceed
+    /// the largest decoder-layer stage's — the whole-vocabulary head is a
+    /// residency assumption, not a law, and this removes it the same way
+    /// layer staging removed whole-model residency. Returns the rows per
+    /// chunk (≥ 1, ≤ vocab); `rows ≥ vocab` means one chunk — the classic
+    /// single head stage.
+    fn head_chunk_rows(&self, layers_per_stage: u64) -> u64 {
+        let stage_elems = self.layer_param_elements() * layers_per_stage.max(1);
+        (stage_elems / self.cfg.hidden_size.max(1))
+            .max(1)
+            .min(self.cfg.vocab_size)
+    }
+
+    /// The final RMS norm (ε from the model's own `rms_norm_eps`).
+    fn emit_final_norm(
         &self,
         builder: &mut GraphBuilder,
         dims: &DecoderDims,
         current: TensorId,
-        embed_native: Option<TensorId>,
-    ) -> Result<TensorId> {
-        let manifest = &self.manifest;
-
-        // Final Norm — ε from the model's own `rms_norm_eps`.
+    ) -> TensorId {
         let norm_weight = add_weight_f32(
             builder,
-            manifest,
+            &self.manifest,
             "model.norm.weight",
             vec![dims.hidden.clone()],
         );
@@ -1396,6 +1419,72 @@ impl<'a> DecoderRecipe<'a> {
             vec![current, norm_weight],
             vec![norm_out],
         );
+        norm_out
+    }
+
+    /// The manifest tensor the LM head reads (tied → the embedding table).
+    fn head_source(&self) -> &'static str {
+        let tied = self.cfg.tie_word_embeddings || !self.manifest.contains("lm_head.weight");
+        if tied {
+            "model.embed_tokens.weight"
+        } else {
+            "lm_head.weight"
+        }
+    }
+
+    /// One head CHUNK: rows `[row_start, row_start+rows)` of the head weight,
+    /// declared at the chunk shape under the manifest name (the κ-range
+    /// binding — sub-tensor κ-resolution), matmul'd against the normed
+    /// hidden states. Returns the chunk logits `[batch, seq, rows]` and the
+    /// byte range the caller records as `kappa_range:<name>` graph metadata.
+    /// No head floor guard: the chunk's working set is bounded by the layer
+    /// stage granularity BY CONSTRUCTION.
+    fn emit_head_chunk(
+        &self,
+        builder: &mut GraphBuilder,
+        dims: &DecoderDims,
+        normed: TensorId,
+        chunk: usize,
+        row_start: u64,
+        rows: u64,
+    ) -> Result<(TensorId, (u64, u64))> {
+        let manifest = &self.manifest;
+        let name = self.head_source();
+        let elem_bytes = manifest.dtype_of(name).byte_size().unwrap_or(4) as u64;
+        let offset = row_start * self.cfg.hidden_size * elem_bytes;
+        let len = rows * self.cfg.hidden_size * elem_bytes;
+
+        let chunk_shape = vec![DimExpr::Concrete(rows), dims.hidden.clone()];
+        let weight = add_weight_f32(builder, manifest, name, chunk_shape);
+        let logits = add_linear_layer_from_tensor(
+            builder,
+            normed,
+            weight,
+            LinearLayerParams {
+                weight_name: "lm_head.chunk",
+                in_features: dims.hidden.clone(),
+                out_features: DimExpr::Concrete(rows),
+                output_name: &format!("logits_chunk_{chunk}"),
+                output_shape: vec![
+                    dims.batch.clone(),
+                    dims.seq.clone(),
+                    DimExpr::Concrete(rows),
+                ],
+            },
+        );
+        Ok((logits, (offset, len)))
+    }
+
+    fn emit_head(
+        &self,
+        builder: &mut GraphBuilder,
+        dims: &DecoderDims,
+        current: TensorId,
+        embed_native: Option<TensorId>,
+    ) -> Result<TensorId> {
+        let manifest = &self.manifest;
+
+        let norm_out = self.emit_final_norm(builder, dims, current);
 
         // The tied head is transposed by the shared linear-layer wiring
         // ([vocab, hidden] → [hidden, vocab]) for the matmul orientation.
@@ -1562,7 +1651,13 @@ pub fn build_parametric_stage_graphs(
     let layers = recipe.cfg.num_hidden_layers;
     let block = layers_per_stage.get();
     let layer_stages = layers.div_ceil(block);
-    let stage_count = layer_stages + 2;
+    // The head partitions at the pipeline's own stage granularity: chunks of
+    // vocab rows no heavier than a layer stage (one chunk = the classic
+    // single head stage; larger vocabularies chunk — no whole-vocabulary
+    // image ever materializes, so no head is too large to execute).
+    let chunk_rows = recipe.head_chunk_rows(block);
+    let head_chunks = recipe.cfg.vocab_size.div_ceil(chunk_rows).max(1);
+    let stage_count = layer_stages + 1 + head_chunks;
     let mut graphs: Vec<AiGraph> = Vec::with_capacity(stage_count as usize);
 
     let stage_metadata =
@@ -1626,25 +1721,114 @@ pub fn build_parametric_stage_graphs(
         graphs.push(graph);
     }
 
-    // Head stage — the final layer's residual add + final norm + LM head.
-    let mut builder = GraphBuilder::new("parametric_stage_head".to_string());
-    let dims = DecoderDims::register(&mut builder, &recipe.cfg);
-    let attn_residual = builder.add_input("hidden_states", DType::F32, dims.hidden_state());
-    let mlp_down = builder.add_input("hidden_residual", DType::F32, dims.hidden_state());
-    let current = recipe.seal_layer(
-        &mut builder,
-        &dims,
-        layers - 1,
-        LayerTail {
-            attn_residual,
-            mlp_down,
-        },
-    );
-    let logits = recipe.emit_head(&mut builder, &dims, current, None)?;
-    builder.add_output(logits, "logits");
-    let mut graph = builder.build();
-    stage_metadata(&recipe, &mut graph, stage_count - 1, STAGE_ROLE_HEAD);
-    graphs.push(graph);
+    if head_chunks == 1 {
+        // Head stage — the final layer's residual add + final norm + LM head.
+        let mut builder = GraphBuilder::new("parametric_stage_head".to_string());
+        let dims = DecoderDims::register(&mut builder, &recipe.cfg);
+        let attn_residual = builder.add_input("hidden_states", DType::F32, dims.hidden_state());
+        let mlp_down = builder.add_input("hidden_residual", DType::F32, dims.hidden_state());
+        let current = recipe.seal_layer(
+            &mut builder,
+            &dims,
+            layers - 1,
+            LayerTail {
+                attn_residual,
+                mlp_down,
+            },
+        );
+        let logits = recipe.emit_head(&mut builder, &dims, current, None)?;
+        builder.add_output(logits, "logits");
+        let mut graph = builder.build();
+        stage_metadata(&recipe, &mut graph, stage_count - 1, STAGE_ROLE_HEAD);
+        graphs.push(graph);
+        return Ok(graphs);
+    }
+
+    // Chunked head — the same kernels in the same order (norm once, then the
+    // row-partitioned matmul whose concatenation IS the whole-head matmul),
+    // one vocab chunk resident at a time. Chunk 0 carries the final layer's
+    // residual add + final norm; every chunk appends its logits slice; the
+    // last chunk emits the complete `logits`.
+    let vocab = recipe.cfg.vocab_size;
+    for chunk in 0..head_chunks {
+        let row_start = chunk * chunk_rows;
+        let rows = chunk_rows.min(vocab - row_start);
+        let mut builder = GraphBuilder::new(format!("parametric_stage_head_chunk_{chunk}"));
+        let dims = DecoderDims::register(&mut builder, &recipe.cfg);
+
+        let (normed, acc) = if chunk == 0 {
+            let attn_residual = builder.add_input("hidden_states", DType::F32, dims.hidden_state());
+            let mlp_down = builder.add_input("hidden_residual", DType::F32, dims.hidden_state());
+            let current = recipe.seal_layer(
+                &mut builder,
+                &dims,
+                layers - 1,
+                LayerTail {
+                    attn_residual,
+                    mlp_down,
+                },
+            );
+            (recipe.emit_final_norm(&mut builder, &dims, current), None)
+        } else {
+            let normed = builder.add_input("normed_states", DType::F32, dims.hidden_state());
+            let acc = builder.add_input(
+                "logits_acc",
+                DType::F32,
+                vec![
+                    dims.batch.clone(),
+                    dims.seq.clone(),
+                    DimExpr::Concrete(row_start),
+                ],
+            );
+            (normed, Some(acc))
+        };
+
+        let (chunk_logits, range) =
+            recipe.emit_head_chunk(&mut builder, &dims, normed, chunk as usize, row_start, rows)?;
+        let out = match acc {
+            Some(acc) => {
+                let joined = builder.add_tensor(
+                    &format!("logits_acc_{chunk}"),
+                    DType::F32,
+                    vec![
+                        dims.batch.clone(),
+                        dims.seq.clone(),
+                        DimExpr::Concrete(row_start + rows),
+                    ],
+                );
+                builder.add_node(
+                    AiOp::Concat { axis: -1 },
+                    vec![acc, chunk_logits],
+                    vec![joined],
+                );
+                joined
+            }
+            None => chunk_logits,
+        };
+
+        if chunk + 1 == head_chunks {
+            builder.add_output(out, "logits");
+        } else {
+            builder.add_output(normed, "normed_states");
+            builder.add_output(out, "logits_acc");
+        }
+
+        let mut graph = builder.build();
+        stage_metadata(
+            &recipe,
+            &mut graph,
+            layer_stages + 1 + chunk,
+            STAGE_ROLE_HEAD,
+        );
+        graph
+            .metadata
+            .insert("head_chunk".to_string(), MetaValue::Int(chunk as i64));
+        graph.metadata.insert(
+            format!("kappa_range:{}", recipe.head_source()),
+            MetaValue::Str(format!("{}+{}", range.0, range.1)),
+        );
+        graphs.push(graph);
+    }
 
     Ok(graphs)
 }

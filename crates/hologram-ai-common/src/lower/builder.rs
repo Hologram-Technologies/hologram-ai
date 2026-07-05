@@ -238,8 +238,15 @@ impl<'a> Ctx<'a> {
             });
             self.tid_to_src.insert(tid, InputSource::Constant(cid));
 
-            if let AiParam::External { kappa, .. } = param {
-                kappa_map.push_str(&format!("{:?}:{kappa}\n", cid));
+            if let AiParam::External { kappa, range, .. } = param {
+                match range {
+                    // Sub-tensor binding: the constant holds bytes
+                    // [offset, offset+len) of the addressed content.
+                    Some((offset, len)) => {
+                        kappa_map.push_str(&format!("{:?}:{kappa}@{offset}+{len}\n", cid))
+                    }
+                    None => kappa_map.push_str(&format!("{:?}:{kappa}\n", cid)),
+                }
             }
         }
 

@@ -263,6 +263,7 @@ fn build_graph(inline: bool) -> AiGraph {
             AiParam::External {
                 kappa: kappa_of(bytes),
                 info,
+                range: None,
             }
         };
         graph.params.insert(id, param);

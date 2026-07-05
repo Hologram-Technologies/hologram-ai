@@ -198,6 +198,7 @@ fn mat_witness() -> MatWitness {
     let kform = compile_graph(matmul_graph(AiParam::External {
         kappa: kappa.clone(),
         info: ti(DType::F32, &[4, 4]),
+        range: None,
     }));
     let inline_holo = compile_graph(matmul_graph(AiParam::inline(
         weight.clone(),
@@ -811,6 +812,10 @@ struct BddWorld {
     verified_second_pass: Option<anyhow::Result<Vec<u8>>>,
     verified_fresh_err: Option<String>,
     verified_corrupt_kappa: Option<String>,
+    // S3 — chunked head (row `chunked-head`)
+    chunked: Option<ChunkedKit>,
+    chunked_logits: Option<(Vec<u8>, Vec<u8>)>,
+    chunked_completion: Option<(String, u64)>,
     // S3 — idle derivation (row `idle-derivation`)
     idle_state: Option<IdleDeriveState>,
     // S3 — admission margin (row `stage-residency-cache`)
@@ -1473,6 +1478,7 @@ fn bind_external_kappas(graph: &mut AiGraph, manifest: &[(String, Vec<u64>)]) {
             AiParam::External {
                 kappa: kappa_of(name.as_bytes()),
                 info,
+                range: None,
             },
         );
     }
@@ -2140,6 +2146,7 @@ fn build_staged_kit(tied: bool) -> StagedKit {
             AiParam::External {
                 kappa: kappas[i].clone(),
                 info,
+                range: None,
             },
         );
     }
@@ -2943,6 +2950,332 @@ async fn then_cross_turn(w: &mut BddWorld) {
         "[stage-residency-cache] turn two over {} resident stages: zero rematerializations",
         run.stage_count
     );
+}
+
+// ─────────────── S3 — chunked head (row `chunked-head`) ──────────────────────
+
+/// A fixture whose vocabulary outweighs a layer stage, forcing the head to
+/// partition into κ-range chunk stages.
+const CH_VOCAB: u64 = 4096;
+
+fn chunked_config() -> serde_json::Value {
+    let mut config = staged_config(false);
+    config["vocab_size"] = serde_json::json!(CH_VOCAB);
+    config
+}
+
+/// Fixture weights with NO duplicate head rows: the shared generator's
+/// period-13 pattern makes vocab rows bit-identical 13 apart, and exact
+/// argmax ties then break on kernel reduction-order drift. A tiny
+/// index-linear term keeps every element (and so every row) distinct while
+/// preserving magnitudes.
+fn chunked_tensor_bytes(name: &str, dims: &[u64]) -> Vec<u8> {
+    let n: u64 = dims.iter().product();
+    let norm = name.contains("layernorm") || name.ends_with(".norm.weight");
+    (0..n)
+        .flat_map(|k| {
+            let v: f32 = if norm {
+                1.0
+            } else {
+                ((k % 13) as f32 - 6.0) * 0.01 + (k as f32) * 1e-7
+            };
+            v.to_le_bytes()
+        })
+        .collect()
+}
+
+fn chunked_manifest() -> Vec<(String, Vec<u64>)> {
+    staged_manifest(false)
+        .into_iter()
+        .map(|(name, dims)| {
+            if name == "model.embed_tokens.weight" || name == "lm_head.weight" {
+                (name, vec![CH_VOCAB, STG_HIDDEN])
+            } else {
+                (name, dims)
+            }
+        })
+        .collect()
+}
+
+struct ChunkedKit {
+    monolithic: Vec<u8>,
+    stages: Vec<Vec<u8>>,
+    store: StoreDir,
+    keys: Vec<String>,
+    kappas: Vec<String>,
+    shapes: Vec<Vec<u64>>,
+}
+
+fn chunked_kit() -> ChunkedKit {
+    let manifest = chunked_manifest();
+    let (keys, shapes): (Vec<String>, Vec<Vec<u64>>) = manifest.into_iter().unzip();
+    let kappas: Vec<String> = keys
+        .iter()
+        .zip(&shapes)
+        .map(|(name, dims)| kappa_of(&chunked_tensor_bytes(name, dims)))
+        .collect();
+    let dtypes = vec![DType::F32; keys.len()];
+    let config = chunked_config();
+
+    let store = StoreDir::new("chunked-head");
+    let dir = DirKappaStore::new(&store.path);
+    for (name, dims) in chunked_manifest() {
+        dir.insert(&chunked_tensor_bytes(&name, &dims))
+            .expect("persisting a fixture weight");
+    }
+
+    // Monolithic k-form (whole head), the parity oracle.
+    let mut graph = build_parametric_graph_from_manifest(&config, &keys, &dtypes, None)
+        .expect("the wide-vocab fixture graph builds");
+    let name_to_id: HashMap<String, u32> = graph
+        .tensor_names
+        .iter()
+        .map(|(id, name)| (name.clone(), *id))
+        .collect();
+    for (i, key) in keys.iter().enumerate() {
+        let id = *name_to_id.get(key).expect("manifest tensor in the graph");
+        let info = ti(DType::F32, &shapes[i]);
+        graph.tensor_info.insert(id, info.clone());
+        graph.params.insert(
+            id,
+            AiParam::External {
+                kappa: kappas[i].clone(),
+                info,
+                range: None,
+            },
+        );
+    }
+    let monolithic = compile_graph(graph);
+
+    let stages = hologram_ai::staged::compile_stages(
+        &config.to_string(),
+        &keys,
+        &kappas,
+        &shapes,
+        &dtypes,
+        None,
+        std::num::NonZeroU64::new(1).expect("1 is non-zero"),
+    )
+    .expect("the chunked staged fixture compiles");
+
+    ChunkedKit {
+        monolithic,
+        stages,
+        store,
+        keys,
+        kappas,
+        shapes,
+    }
+}
+
+#[given("a wide-vocabulary decoder fixture with its weights in a κ-store")]
+async fn given_chunked_fixture(w: &mut BddWorld) {
+    w.chunked = Some(chunked_kit());
+}
+
+#[when("the wide-vocabulary fixture is compiled as stages")]
+async fn when_chunked_compiled(_w: &mut BddWorld) {
+    // Compilation happened in the Given; the Thens inspect it.
+}
+
+#[then("the head partitions into multiple chunk stages bound by κ-ranges")]
+async fn then_chunked_partition(w: &mut BddWorld) {
+    let kit = w.chunked.as_ref().expect("the chunked kit");
+    // Base pipeline: embedding + 2 one-layer stages; anything beyond is head
+    // chunks — there must be more than one.
+    let head_stages = kit.stages.len() - 3;
+    assert!(
+        head_stages > 1,
+        "a vocabulary heavier than a layer stage must chunk (got {head_stages} head stage(s))"
+    );
+    // Every chunk binds the head tensor via a RANGE of the same κ; the
+    // ranges tile the tensor exactly.
+    let head_kappa = kit
+        .keys
+        .iter()
+        .zip(&kit.kappas)
+        .find(|(k, _)| *k == "model.embed_tokens.weight")
+        .map(|(_, kappa)| kappa.clone())
+        .expect("the head source is in the manifest");
+    let mut covered = 0u64;
+    let mut ranged = 0usize;
+    for archive in &kit.stages[3..] {
+        for req in kappa_requirements(archive).expect("the κ-map parses") {
+            if req.kappa == head_kappa {
+                if let Some((offset, len)) = req.range {
+                    assert_eq!(offset, covered, "chunk ranges tile in order");
+                    covered += len;
+                    ranged += 1;
+                }
+            }
+        }
+    }
+    assert_eq!(ranged, head_stages, "every chunk stage binds one κ-range");
+    assert_eq!(
+        covered,
+        CH_VOCAB * STG_HIDDEN * 4,
+        "the chunk ranges tile the whole head tensor exactly"
+    );
+    println!("[chunked-head] {head_stages} chunk stages tile the head κ by ranges");
+}
+
+#[then("every chunk stage stays within the layer-stage granularity")]
+async fn then_chunked_granularity(w: &mut BddWorld) {
+    let kit = w.chunked.as_ref().expect("the chunked kit");
+    let size_of: HashMap<String, u64> = kit
+        .keys
+        .iter()
+        .zip(&kit.shapes)
+        .zip(&kit.kappas)
+        .map(|((_, dims), kappa)| (kappa.clone(), dims.iter().product::<u64>() * 4))
+        .collect();
+    let stage_bytes = |archive: &Vec<u8>| -> u64 {
+        kappa_requirements(archive)
+            .expect("the κ-map parses")
+            .iter()
+            .map(|r| match r.range {
+                Some((_, len)) => len,
+                None => size_of.get(&r.kappa).copied().unwrap_or(0),
+            })
+            .sum()
+    };
+    let layer_max = kit.stages[1..3]
+        .iter()
+        .map(stage_bytes)
+        .max()
+        .expect("layer stages");
+    for (i, archive) in kit.stages[3..].iter().enumerate() {
+        let bytes = stage_bytes(archive);
+        assert!(
+            bytes <= layer_max + STG_HIDDEN * 4,
+            "chunk stage {i} ({bytes} B) must stay within layer granularity ({layer_max} B)"
+        );
+    }
+}
+
+#[when("the same token window runs through the chunked stages and the monolithic archive")]
+async fn when_chunked_parity(w: &mut BddWorld) {
+    let kit = w.chunked.as_ref().expect("the chunked kit");
+    let ids = staged_window_ids();
+
+    let mut dir = DirKappaStore::new(&kit.store.path);
+    let mono = materialize_archive(&kit.monolithic, &mut dir)
+        .expect("the monolithic archive materializes");
+    let mut mono_runner = HoloRunner::from_bytes(mono).expect("the archive loads");
+    let refs: Vec<&[u8]> = vec![&ids];
+    let mono_out = mono_runner
+        .execute(&refs)
+        .expect("the monolithic pass runs");
+    let mono_logits = mono_out[mono_runner
+        .output_index_by_name("logits")
+        .expect("a logits port")]
+    .bytes
+    .clone();
+
+    let mut staged = StagedRunner::from_archives(
+        kit.stages.clone(),
+        Box::new(DirKappaStore::new(&kit.store.path)),
+    )
+    .expect("the chunked staged runner builds");
+    use hologram_ai::engine::LmSession;
+    let staged_out = staged.execute(&[&ids]).expect("the chunked pass runs");
+    let idx = staged
+        .output_index_by_name("logits")
+        .expect("a logits port");
+    let staged_logits = staged_out[idx].bytes.clone();
+
+    w.chunked_logits = Some((mono_logits, staged_logits));
+}
+
+#[then("the chunked logits match the monolithic logits within reduction-order tolerance")]
+async fn then_chunked_tolerance(w: &mut BddWorld) {
+    let (mono, chunked) = w.chunked_logits.as_ref().expect("both passes ran");
+    assert_eq!(mono.len(), chunked.len(), "logit buffers agree in size");
+    let m: Vec<f32> = le_f32(mono);
+    let c: Vec<f32> = le_f32(chunked);
+    // The substrate's matmul reduction tiling varies with output width;
+    // the measured cross-width drift is ≤ 4e-7 (1–2 ulp at logit scale).
+    let max_abs = m
+        .iter()
+        .zip(&c)
+        .map(|(a, b)| (a - b).abs())
+        .fold(0f32, f32::max);
+    assert!(
+        max_abs <= 1e-6,
+        "chunked-vs-whole drift must stay at reduction-order scale, got {max_abs:e}"
+    );
+    println!(
+        "[chunked-head] {} logits agree within {max_abs:e} (kernel reduction-order tolerance)",
+        m.len()
+    );
+}
+
+#[then("the greedy choice at every position is identical")]
+async fn then_chunked_argmax(w: &mut BddWorld) {
+    let (mono, chunked) = w.chunked_logits.as_ref().expect("both passes ran");
+    let m = le_f32(mono);
+    let c = le_f32(chunked);
+    let vocab = CH_VOCAB as usize;
+    for (pos, (mr, cr)) in m.chunks(vocab).zip(c.chunks(vocab)).enumerate() {
+        assert_eq!(
+            argmax(mr),
+            argmax(cr),
+            "greedy decode must be invariant to the head partition (position {pos})"
+        );
+    }
+    println!("[chunked-head] greedy choice identical at every position");
+}
+
+#[when("a greedy completion is generated through the chunked staged session")]
+async fn when_chunked_generation(w: &mut BddWorld) {
+    use hologram_ai::commands::generate::{generate_stream, GenConfig};
+    let kit = w.chunked.as_ref().expect("the chunked kit");
+    let mut runner = StagedRunner::from_archives(
+        kit.stages.clone(),
+        Box::new(DirKappaStore::new(&kit.store.path)),
+    )
+    .expect("the chunked staged runner builds");
+    let cfg = GenConfig {
+        max_tokens: Some(6),
+        temperature: 0.0,
+        ..Default::default()
+    };
+    let mut sink = Vec::new();
+    let text = generate_stream(&mut runner, &DecimalTok, "3 141 59 26 5", &cfg, &mut sink)
+        .expect("chunked staged generation completes");
+
+    // The monolithic completion over the same store — the parity oracle.
+    let mut dir = DirKappaStore::new(&kit.store.path);
+    let mono = materialize_archive(&kit.monolithic, &mut dir)
+        .expect("the monolithic archive materializes");
+    let mut fixed =
+        hologram_ai::FixedSession::new(HoloRunner::from_bytes(mono).expect("the archive loads"));
+    let mut sink = Vec::new();
+    let mono_text = generate_stream(&mut fixed, &DecimalTok, "3 141 59 26 5", &cfg, &mut sink)
+        .expect("monolithic generation completes");
+    assert_eq!(
+        text, mono_text,
+        "chunked greedy generation must equal the monolithic completion"
+    );
+    let ranged: u64 = kit.stages[3..]
+        .iter()
+        .map(|a| {
+            kappa_requirements(a)
+                .expect("the κ-map parses")
+                .iter()
+                .filter(|r| r.range.is_some())
+                .count() as u64
+        })
+        .sum();
+    w.chunked_completion = Some((text, ranged));
+}
+
+#[then("the chunked completion equals the monolithic completion and every chunk resolved through its κ-range")]
+async fn then_chunked_generation(w: &mut BddWorld) {
+    let (text, ranged) = w.chunked_completion.as_ref().expect("the generation ran");
+    assert!(!text.is_empty(), "the chunked pipeline must generate");
+    assert!(*ranged > 1, "the chunks resolved via κ-ranges");
+    println!("[chunked-head] completion {text:?} over {ranged} κ-range bindings");
 }
 
 // ──────────── S3 — idle derivation (row `idle-derivation`) ───────────────────
@@ -3754,6 +4087,7 @@ fn build_fused_phi3_kit() -> FusedPhi3Kit {
             AiParam::External {
                 kappa: kappas[i].clone(),
                 info,
+                range: None,
             },
         );
     }
