@@ -233,21 +233,31 @@ fn rebuild_archive(
     sections: &[hologram_archive::format::SectionRef],
     new_constants: &[u8],
 ) -> Result<Vec<u8>> {
-    let mut payloads: Vec<(SectionKind, &[u8])> = Vec::with_capacity(sections.len());
+    reassemble(archive, sections, |kind, body| match kind {
+        SectionKind::Constants => Ok(Some(new_constants.to_vec())),
+        // Folded over 0-byte placeholders at compile time; stale now.
+        SectionKind::WarmStart => Ok(None),
+        _ => Ok(Some(body.to_vec())),
+    })
+}
+
+/// Re-emit `archive` section-by-section. `rewrite(kind, body)` returns the new
+/// body for a section, or `None` to drop it. The footer is re-fingerprinted.
+fn reassemble(
+    archive: &[u8],
+    sections: &[hologram_archive::format::SectionRef],
+    mut rewrite: impl FnMut(SectionKind, &[u8]) -> Result<Option<Vec<u8>>>,
+) -> Result<Vec<u8>> {
+    let mut payloads: Vec<(SectionKind, Vec<u8>)> = Vec::with_capacity(sections.len());
     for s in sections {
-        let body: &[u8] = match s.kind {
-            SectionKind::Constants => new_constants,
-            // Folded over 0-byte placeholders at compile time; stale now.
-            SectionKind::WarmStart => continue,
-            _ => {
-                let start = s.offset as usize;
-                let end = start + s.length as usize;
-                archive
-                    .get(start..end)
-                    .context("section range exceeds archive bytes")?
-            }
-        };
-        payloads.push((s.kind, body));
+        let start = s.offset as usize;
+        let end = start + s.length as usize;
+        let body = archive
+            .get(start..end)
+            .context("section range exceeds archive bytes")?;
+        if let Some(new_body) = rewrite(s.kind, body)? {
+            payloads.push((s.kind, new_body));
+        }
     }
 
     let header_size = 4 + 2 + 2 + 2;
@@ -279,6 +289,68 @@ fn rebuild_archive(
     Ok(out)
 }
 
+/// Canonicalize an archive so identical models yield a byte-identical `.holo`
+/// (a stable κ) — content-addressing requires it. The archive's `Weights`
+/// section is emitted by the substrate in `hashbrown` iteration order (a
+/// per-process random seed), so two compiles of the same graph produce the
+/// same *content* in a different byte order. Constants resolve weights **by
+/// fingerprint**, never by position, so re-emitting the section sorted by
+/// fingerprint changes nothing executable — only stabilizes the bytes.
+///
+/// Idempotent, and a no-op for archives without a `Weights` section.
+pub fn canonicalize_archive(archive: &[u8]) -> Result<Vec<u8>> {
+    let plan = HoloLoader::from_bytes(archive)
+        .map_err(|e| anyhow::anyhow!("loading archive: {e:?}"))?
+        .into_plan()
+        .map_err(|e| anyhow::anyhow!("decoding archive sections: {e:?}"))?;
+    reassemble(archive, plan.sections(), |kind, body| match kind {
+        SectionKind::Weights => sort_weights_section(body).map(Some),
+        _ => Ok(Some(body.to_vec())),
+    })
+}
+
+/// Re-encode a `Weights` section (`[u32 count] (fp[32] · len[u64] · bytes)*`)
+/// with its entries sorted by fingerprint — a deterministic, content-preserving
+/// permutation.
+fn sort_weights_section(body: &[u8]) -> Result<Vec<u8>> {
+    let count = u32::from_le_bytes(
+        body.get(0..4)
+            .context("weights section too short")?
+            .try_into()
+            .expect("4 bytes"),
+    ) as usize;
+    let mut cur = 4usize;
+    let mut entries: Vec<(&[u8], &[u8])> = Vec::with_capacity(count);
+    for _ in 0..count {
+        let fp = body
+            .get(cur..cur + 32)
+            .context("weights section truncated at fingerprint")?;
+        cur += 32;
+        let len = u64::from_le_bytes(
+            body.get(cur..cur + 8)
+                .context("weights section truncated at length")?
+                .try_into()
+                .expect("8 bytes"),
+        ) as usize;
+        cur += 8;
+        let bytes = body
+            .get(cur..cur + len)
+            .context("weights section truncated at body")?;
+        cur += len;
+        entries.push((fp, bytes));
+    }
+    entries.sort_unstable_by(|a, b| a.0.cmp(b.0));
+
+    let mut out = Vec::with_capacity(body.len());
+    out.extend_from_slice(&(count as u32).to_le_bytes());
+    for (fp, bytes) in entries {
+        out.extend_from_slice(fp);
+        out.extend_from_slice(&(bytes.len() as u64).to_le_bytes());
+        out.extend_from_slice(bytes);
+    }
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -290,6 +362,30 @@ mod tests {
         assert_eq!(k.len(), 7 + 64);
         assert_eq!(k, kappa_of(b"hologram"), "κ is deterministic");
         assert_ne!(k, kappa_of(b"holospace"), "κ separates content");
+    }
+
+    #[test]
+    fn sort_weights_section_normalizes_any_order() {
+        // Two entries in the wire form `[count][fp32·len8·bytes]*`. Encode them
+        // in both orders; canonicalization must yield the same bytes (κ), since
+        // constants resolve weights by fingerprint, not position.
+        let encode = |entries: &[([u8; 32], &[u8])]| {
+            let mut out = Vec::new();
+            out.extend_from_slice(&(entries.len() as u32).to_le_bytes());
+            for (fp, b) in entries {
+                out.extend_from_slice(fp);
+                out.extend_from_slice(&(b.len() as u64).to_le_bytes());
+                out.extend_from_slice(b);
+            }
+            out
+        };
+        let a = ([0xAAu8; 32], &b"first-weight"[..]);
+        let b = ([0x11u8; 32], &b"second"[..]);
+        let ab = sort_weights_section(&encode(&[a, b])).expect("sort ab");
+        let ba = sort_weights_section(&encode(&[b, a])).expect("sort ba");
+        assert_eq!(ab, ba, "canonical Weights bytes are order-independent");
+        // Sorted: fingerprint 0x11… precedes 0xAA…, so `b` comes first.
+        assert_eq!(&ab[4..36], &[0x11u8; 32], "entries sorted by fingerprint");
     }
 
     #[test]

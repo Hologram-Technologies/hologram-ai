@@ -12,7 +12,7 @@
 
 use hologram_ai::commands::generate::{apply_template, generate_stream, GenConfig};
 use hologram_ai::{FixedSession, HoloRunner, ModelCompiler, ModelSource};
-use hologram_ai_tokenizer::NativeTokenizer;
+use hologram_ai_tokenizer::{NativeTokenizer, Tokenizer};
 use serde::{Deserialize, Serialize};
 use wasm_bindgen::prelude::*;
 
@@ -254,7 +254,11 @@ pub fn compile_safetensors_streamed(
         .compile(ModelSource::AiGraph(graph))
         .map_err(|e| err(format!("compile_safetensors_streamed: {e:#}")))?;
 
-    Ok(archive.bytes)
+    // Canonicalize so the same model yields a byte-identical k-form archive
+    // (a stable κ) across processes/platforms — content-addressing requires it
+    // (the substrate emits the Weights section in per-process hashbrown order).
+    hologram_ai::materialize::canonicalize_archive(&archive.bytes)
+        .map_err(|e| err(format!("canonicalize: {e:#}")))
 }
 
 /// Staged (windowed) compilation — dictionary row `staged-execution`.
@@ -296,7 +300,10 @@ pub fn compile_safetensors_staged(
 
     let out = js_sys::Array::new();
     for stage in stages {
-        out.push(&js_sys::Uint8Array::from(stage.as_slice()).into());
+        // Canonical per-stage κ (see compile_safetensors_streamed).
+        let canonical = hologram_ai::materialize::canonicalize_archive(&stage)
+            .map_err(|e| err(format!("canonicalize stage: {e:#}")))?;
+        out.push(&js_sys::Uint8Array::from(canonical.as_slice()).into());
     }
     Ok(out)
 }
@@ -556,6 +563,20 @@ pub fn run(holo: &[u8], inputs: JsValue, fill: Option<f64>) -> Result<JsValue, J
     serde_wasm_bindgen::to_value(&results).map_err(err)
 }
 
+// ── tokenize ──────────────────────────────────────────────────────────────────
+
+/// Token count of `text` under a HuggingFace `tokenizer.json` (bytes) — the
+/// same `NativeTokenizer::encode` the generation loop runs, so the count is
+/// exact, specials included. The browser uses it for template-aware session
+/// trimming: the templated prompt must fit the model's context (the same
+/// `prompt_tokens ≤ context` bound [`generate`] enforces).
+#[wasm_bindgen]
+pub fn count_tokens(tokenizer_json: &[u8], text: &str) -> Result<u32, JsValue> {
+    let tokenizer = NativeTokenizer::from_tokenizer_json_bytes(tokenizer_json).map_err(err)?;
+    let count = tokenizer.encode(text).len();
+    u32::try_from(count).map_err(|_| err(format!("token count {count} exceeds u32::MAX")))
+}
+
 // ── generate (autoregressive) ─────────────────────────────────────────────────
 
 /// Generation options (all optional; sensible defaults applied).
@@ -580,10 +601,13 @@ impl GenOpts {
         serde_wasm_bindgen::from_value(opts).map_err(err)
     }
 
-    /// The [`GenConfig`] these options select (defaults applied).
+    /// The [`GenConfig`] these options select (defaults applied). An absent
+    /// `max_tokens` stays `None`: generation is bounded by the model's stop
+    /// conditions and the remaining context window, never a fixed token cap
+    /// (journey S4).
     fn config(&self) -> GenConfig {
         GenConfig {
-            max_tokens: self.max_tokens.unwrap_or(64),
+            max_tokens: self.max_tokens,
             temperature: self.temperature.unwrap_or(0.0),
             top_k: self.top_k,
             stop: self.stop.clone(),

@@ -6,7 +6,8 @@ use super::{
     shape::{ConstraintStore, DimVarTable},
 };
 use hologram_ai_quant::QuantDescriptor;
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::cmp::Reverse;
+use std::collections::{BinaryHeap, HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
 /// Semantic classification of tensor content.
@@ -307,52 +308,64 @@ impl AiGraph {
     }
 
     /// Compute topological order from scratch (Kahn's algorithm).
+    ///
+    /// The result is a **pure function of the `nodes` vector** — never of a
+    /// `HashMap`/`HashSet` iteration seed. A DAG admits many valid topological
+    /// orders, and the one chosen here fixes the compiled archive's node and
+    /// buffer layout, hence its content address κ. Seeding the ready set and
+    /// draining successors in ascending `nodes`-vector position makes that
+    /// choice deterministic across processes and platforms: content addressing
+    /// (a model must have a stable κ) and κ-dedup both require it, and the
+    /// per-map seed can no longer select a different — previously
+    /// executor-hostile — ordering across a rebuild. When `nodes` is already a
+    /// valid topological order (the invariant importers and opt passes
+    /// maintain), this reproduces the vector order exactly.
     fn compute_topo_order(&self) -> Vec<NodeId> {
-        // Build producer map: TensorId → NodeId that produces it.
-        let mut producer: HashMap<TensorId, NodeId> = HashMap::new();
-        for node in &self.nodes {
+        let n = self.nodes.len();
+
+        // Producer of each TensorId: the position (in the stable `nodes`
+        // vector) of the node that emits it. A keyed lookup whose own
+        // iteration order is never observed.
+        let mut producer: HashMap<TensorId, usize> = HashMap::with_capacity(n);
+        for (pos, node) in self.nodes.iter().enumerate() {
             for &tid in &node.outputs {
-                producer.insert(tid, node.id);
+                producer.insert(tid, pos);
             }
         }
 
-        // Build adjacency: NodeId → set of NodeIds that depend on it.
-        let mut adj: HashMap<NodeId, HashSet<NodeId>> = HashMap::new();
-        for node in &self.nodes {
+        // Dependency edges as node-vector positions, deduplicated per
+        // (producer, consumer) exactly as the original adjacency `HashSet` did.
+        // `successors[p]` holds the positions of nodes consuming an output of
+        // `self.nodes[p]`; `in_degree[c]` counts c's distinct producers. A
+        // self-referencing edge keeps `in_degree` above zero, so a cycle is
+        // still surfaced by a short order (see `has_cycle`).
+        let mut successors: Vec<Vec<usize>> = vec![Vec::new(); n];
+        let mut in_degree: Vec<usize> = vec![0; n];
+        let mut seen_edges: HashSet<(usize, usize)> = HashSet::new();
+        for (consumer, node) in self.nodes.iter().enumerate() {
             for &tid in &node.inputs {
                 if let Some(&prod) = producer.get(&tid) {
-                    adj.entry(prod).or_default().insert(node.id);
+                    if seen_edges.insert((prod, consumer)) {
+                        successors[prod].push(consumer);
+                        in_degree[consumer] += 1;
+                    }
                 }
             }
         }
-        // Derive in-degree from adj to stay consistent with the deduplicated edges.
-        let mut in_degree: HashMap<NodeId, usize> = HashMap::new();
-        for node in &self.nodes {
-            in_degree.entry(node.id).or_insert(0);
-        }
-        for succs in adj.values() {
-            for &succ in succs {
-                *in_degree.entry(succ).or_insert(0) += 1;
-            }
-        }
 
-        let mut queue: VecDeque<NodeId> = in_degree
-            .iter()
-            .filter_map(|(&id, &deg)| if deg == 0 { Some(id) } else { None })
+        // Kahn's algorithm with the ready set ordered by ascending position (a
+        // min-heap over positions), the deterministic tiebreak.
+        let mut ready: BinaryHeap<Reverse<usize>> = (0..n)
+            .filter(|&pos| in_degree[pos] == 0)
+            .map(Reverse)
             .collect();
-        let mut order = Vec::with_capacity(self.nodes.len());
-
-        while let Some(nid) = queue.pop_front() {
-            order.push(nid);
-            if let Some(succs) = adj.get(&nid) {
-                for &succ in succs {
-                    let deg = in_degree
-                        .get_mut(&succ)
-                        .expect("in_degree missing for successor");
-                    *deg -= 1;
-                    if *deg == 0 {
-                        queue.push_back(succ);
-                    }
+        let mut order = Vec::with_capacity(n);
+        while let Some(Reverse(pos)) = ready.pop() {
+            order.push(self.nodes[pos].id);
+            for &succ in &successors[pos] {
+                in_degree[succ] -= 1;
+                if in_degree[succ] == 0 {
+                    ready.push(Reverse(succ));
                 }
             }
         }
