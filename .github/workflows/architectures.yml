@@ -157,39 +157,41 @@ jobs:
       # `HF_READ_TOKEN` (org secret) is still forwarded as Bearer auth so
       # the preflight + download work even if the repo is later gated.
 
-      # Pre-flight: verify HF_READ_TOKEN is present and authenticates.
-      # If this fails we want the loud, specific error rather than a
-      # later 401/403 on the model download.
-      - name: Verify HF auth (preflight)
+      # Pre-flight: probe model access before the download so a failure is
+      # the loud, specific error rather than a later 401/403 mid-transfer.
+      # The pinned repo is public, so the token is optional (forwarded when
+      # present, exactly like the SmolLM2 job) — a missing org secret must
+      # not fail the matrix. If the token IS present, validate it first so
+      # a stale secret is named as such.
+      - name: Verify model access (preflight)
         env:
           HF_READ_TOKEN: ${{ secrets.HF_READ_TOKEN }}
         run: |
           set -euo pipefail
-          if [ -z "${HF_READ_TOKEN:-}" ]; then
-            echo "::error::HF_READ_TOKEN secret is empty or not set." >&2
-            exit 1
-          fi
-          echo "HF_READ_TOKEN length: ${#HF_READ_TOKEN}"
-          # whoami-v2 returns 200 + JSON identity on a valid token,
-          # 401 on missing/bad, 403 on token without scope. Surface
-          # the actual response code so failures are diagnosable.
-          status=$(curl --silent --output /tmp/whoami.json --write-out '%{http_code}' \
-            --header "Authorization: Bearer $HF_READ_TOKEN" \
-            "https://huggingface.co/api/whoami-v2")
-          echo "whoami-v2 HTTP status: $status"
-          if [ "$status" != "200" ]; then
-            echo "::error::HF token failed whoami-v2 (status $status). Body:" >&2
-            cat /tmp/whoami.json >&2
-            exit 1
+          if [ -n "${HF_READ_TOKEN:-}" ]; then
+            # whoami-v2 returns 200 + JSON identity on a valid token,
+            # 401 on missing/bad, 403 on token without scope. Surface
+            # the actual response code so failures are diagnosable.
+            status=$(curl --silent --output /tmp/whoami.json --write-out '%{http_code}' \
+              --header "Authorization: Bearer $HF_READ_TOKEN" \
+              "https://huggingface.co/api/whoami-v2")
+            echo "whoami-v2 HTTP status: $status"
+            if [ "$status" != "200" ]; then
+              echo "::error::HF token failed whoami-v2 (status $status). Body:" >&2
+              cat /tmp/whoami.json >&2
+              exit 1
+            fi
+          else
+            echo "HF_READ_TOKEN not set; probing anonymously (the pinned repo is public)."
           fi
           # Probe model access without downloading the body.
           probe=$(curl --silent --output /tmp/probe.txt --write-out '%{http_code}' \
             --head --location \
-            --header "Authorization: Bearer $HF_READ_TOKEN" \
+            ${HF_READ_TOKEN:+--header "Authorization: Bearer $HF_READ_TOKEN"} \
             "https://huggingface.co/onnx-community/Qwen2.5-0.5B-Instruct/resolve/main/config.json")
           echo "Qwen2.5 config.json HEAD status: $probe"
           if [ "$probe" != "200" ] && [ "$probe" != "302" ]; then
-            echo "::error::HF token cannot read onnx-community/Qwen2.5-0.5B-Instruct (status $probe)." >&2
+            echo "::error::cannot read onnx-community/Qwen2.5-0.5B-Instruct (status $probe)." >&2
             cat /tmp/probe.txt >&2
             exit 1
           fi
@@ -204,7 +206,7 @@ jobs:
           fetch() {
             local dest="$1" url="$2"
             curl --silent --show-error --fail --location \
-              --header "Authorization: Bearer $HF_READ_TOKEN" \
+              ${HF_READ_TOKEN:+--header "Authorization: Bearer $HF_READ_TOKEN"} \
               --output "$dest" "$url"
           }
           fetch models/Qwen2.5-0.5B-Instruct/model.onnx       "$BASE/onnx/model.onnx"

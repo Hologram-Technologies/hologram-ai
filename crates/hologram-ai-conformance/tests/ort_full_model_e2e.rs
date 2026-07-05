@@ -96,3 +96,51 @@ fn mini_transformer_matches_ort() {
         holo.len()
     );
 }
+
+/// The parity harness feeds first-pass `past.*` KV ports as zero-length
+/// tensors (`[batch, heads, 0, head_dim]`). ORT's raw-data constructor
+/// rejects zero-sized dimensions, so the runner must route zero-element
+/// inputs through the allocator path. Regression for the model-lane
+/// execution-parity row failing before any model work began.
+#[test]
+fn ort_runner_accepts_zero_length_past_input() {
+    use hologram_ai_conformance::ort_runner::onnx_builder::{
+        build_multi_node_model_dyn, AttrVal, Node,
+    };
+
+    // Concat(past[1, 0, 4], X[1, 2, 4]) along axis 1 — the KV-append shape.
+    let model = build_multi_node_model_dyn(
+        &[Node::with_attrs(
+            "Concat",
+            &["past", "X"],
+            &["Y"],
+            &[("axis", AttrVal::Int(1))],
+        )],
+        &[
+            ("past", &[Some(1), None, Some(4)]),
+            ("X", &[Some(1), Some(2), Some(4)]),
+        ],
+        &[("Y", &[1, 2, 4])],
+        &[],
+    );
+
+    let x: Vec<f32> = (0..8).map(|i| i as f32).collect();
+    let outs = run_onnx_typed(
+        &model,
+        vec![
+            OrtInputTyped::F32 {
+                name: "past".into(),
+                shape: vec![1, 0, 4],
+                data: Vec::new(),
+            },
+            OrtInputTyped::F32 {
+                name: "X".into(),
+                shape: vec![1, 2, 4],
+                data: x.clone(),
+            },
+        ],
+    )
+    .expect("a zero-length past input must be accepted");
+    assert_eq!(outs[0].shape, vec![1, 2, 4]);
+    assert_eq!(outs[0].data, x, "concat with an empty past is the identity");
+}

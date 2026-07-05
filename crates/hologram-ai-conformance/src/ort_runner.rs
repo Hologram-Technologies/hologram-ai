@@ -123,14 +123,27 @@ pub mod runner {
             match inp {
                 OrtInputTyped::F32 { name, shape, data } => {
                     let shape_i64: Vec<i64> = shape.iter().map(|&d| d as i64).collect();
-                    let tensor = Tensor::<f32>::from_array((shape_i64, data.clone()))
-                        .context("creating f32 ORT input")?;
+                    // Zero-element inputs (e.g. first-pass `past.*` KV ports at
+                    // sequence length 0) must take the allocator path: ORT's
+                    // raw-data constructor rejects any zero-sized dimension.
+                    let tensor = if shape.iter().product::<usize>() == 0 {
+                        Tensor::<f32>::new(session.allocator(), shape_i64)
+                            .context("creating empty f32 ORT input")?
+                    } else {
+                        Tensor::<f32>::from_array((shape_i64, data.clone()))
+                            .context("creating f32 ORT input")?
+                    };
                     ort_inputs.push((name.clone(), tensor.into_dyn()));
                 }
                 OrtInputTyped::I64 { name, shape, data } => {
                     let shape_i64: Vec<i64> = shape.iter().map(|&d| d as i64).collect();
-                    let tensor = Tensor::<i64>::from_array((shape_i64, data.clone()))
-                        .context("creating i64 ORT input")?;
+                    let tensor = if shape.iter().product::<usize>() == 0 {
+                        Tensor::<i64>::new(session.allocator(), shape_i64)
+                            .context("creating empty i64 ORT input")?
+                    } else {
+                        Tensor::<i64>::from_array((shape_i64, data.clone()))
+                            .context("creating i64 ORT input")?
+                    };
                     ort_inputs.push((name.clone(), tensor.into_dyn()));
                 }
             }
