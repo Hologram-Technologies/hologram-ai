@@ -58,7 +58,7 @@ fn smollm2_generates_coherent_text() {
 
     // Greedy (temperature 0) ⇒ deterministic, so the output is a stable witness.
     let cfg = GenConfig {
-        max_tokens: 10,
+        max_tokens: Some(10),
         temperature: 0.0,
         ..Default::default()
     };

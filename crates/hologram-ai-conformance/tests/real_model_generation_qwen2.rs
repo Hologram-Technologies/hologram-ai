@@ -63,7 +63,7 @@ fn qwen2_generates_coherent_text() {
     let tok = NativeTokenizer::from_tokenizer_json(&tok_path).expect("load tokenizer");
 
     let cfg = GenConfig {
-        max_tokens: 20,
+        max_tokens: Some(20),
         temperature: 0.0,
         ..Default::default()
     };

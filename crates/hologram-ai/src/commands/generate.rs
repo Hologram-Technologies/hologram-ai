@@ -9,8 +9,10 @@
 //! asks for a window at least as long as the running sequence, and the provider
 //! supplies (growing/recompiling) a session that can run it — up to the model's
 //! real context length. So the prompt and the generated continuation are bounded
-//! only by the model, never by an archive's baked `seq_len`. A sequence longer
-//! than the model's context slides within it (the model's genuine finite window).
+//! only by the model, never by an archive's baked `seq_len` or a fixed token
+//! cap: generation is bounded by the model's stop conditions and the remaining
+//! context (journey S4). An explicit `max_tokens` is a caller-imposed cap
+//! within that structural bound, never a way past it.
 //!
 //! The LM contract is taken by convention from the session's named ports:
 //!
@@ -34,8 +36,14 @@ use crate::engine::{LmSession, SessionProvider};
 /// Sampling / stopping configuration for one generation request.
 #[derive(Debug, Clone)]
 pub struct GenConfig {
-    /// Maximum number of new tokens to generate.
-    pub max_tokens: usize,
+    /// Maximum number of new tokens to generate. `None` (the default) means
+    /// the remaining context window — the model's context length minus the
+    /// encoded prompt (journey S4: generation is bounded by the model's stop
+    /// conditions and the remaining context, never a fixed token cap). An
+    /// explicit `Some(n)` is additionally clamped by that same remaining
+    /// window; a remaining window of zero is the empty completion, not an
+    /// error.
+    pub max_tokens: Option<usize>,
     /// Softmax temperature. `0.0` (or negative) ⇒ greedy argmax (deterministic).
     pub temperature: f32,
     /// If set, restrict sampling to the `k` highest-probability tokens.
@@ -51,7 +59,7 @@ pub struct GenConfig {
 impl Default for GenConfig {
     fn default() -> Self {
         Self {
-            max_tokens: 64,
+            max_tokens: None,
             temperature: 0.0,
             top_k: None,
             stop: Vec::new(),
@@ -282,12 +290,13 @@ fn sample(logits: &[f32], temperature: f32, top_k: Option<usize>, rng: &mut u64)
 /// Run autoregressive generation, streaming each decoded delta to `out`.
 /// Returns the full generated text (excluding the prompt).
 ///
-/// `prompt` is the already-templated text. Generation stops at `max_tokens`,
-/// the eos token, or the first `stop` string in the decoded suffix.
+/// `prompt` is the already-templated text. Generation stops at the eos token,
+/// the first `stop` string in the decoded suffix, or when the remaining
+/// context window (the model's context length minus the encoded prompt) is
+/// exhausted; an explicit `max_tokens` caps it earlier, never later.
 ///
 /// The window grows with the sequence via the [`SessionProvider`], so the
-/// prompt and continuation are bounded only by the model's context length — a
-/// sequence beyond it slides within the model's finite window.
+/// prompt and continuation are bounded only by the model's context length.
 pub fn generate_stream(
     provider: &mut dyn SessionProvider,
     tokenizer: &dyn Tokenizer,
@@ -311,18 +320,28 @@ pub fn generate_stream(
         );
     }
 
+    // The structural bound (journey S4): the context remaining after the
+    // prompt. `None` means exactly this bound; an explicit cap is clamped by
+    // it. Zero remaining context ends generation immediately with the empty
+    // completion — the prompt filled the window, which is not an error.
+    let remaining = max_window - prompt_tokens.len();
+    let budget = cfg.max_tokens.map_or(remaining, |n| n.min(remaining));
+
     let mut sequence: Vec<u32> = prompt_tokens;
     let mut generated: Vec<u32> = Vec::new();
     let mut emitted = 0usize; // chars of `generated` text already streamed
     let mut rng = cfg.seed;
 
-    for _ in 0..cfg.max_tokens {
-        // The window is the running sequence, capped at the model's context: a
-        // longer sequence slides to its last `max_window` tokens (the model's
-        // genuine finite window). The provider yields a session whose compiled
-        // window is at least this long.
-        let cur_len = sequence.len().min(max_window);
-        let window = &sequence[sequence.len() - cur_len..];
+    for _ in 0..budget {
+        // The window is the running sequence — the budget keeps it within the
+        // model's context. The provider yields a session whose compiled window
+        // is at least this long.
+        let cur_len = sequence.len();
+        debug_assert!(
+            cur_len <= max_window,
+            "the remaining-context budget must keep the sequence within the model's window"
+        );
+        let window = sequence.as_slice();
 
         let runner = provider.session_for(cur_len)?;
         let lm = LmContract::resolve(runner)?;

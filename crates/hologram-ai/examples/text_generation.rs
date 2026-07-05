@@ -145,7 +145,7 @@ fn main() -> anyhow::Result<()> {
         eos: vocab as u32 - 1,
     };
     let cfg = GenConfig {
-        max_tokens: 8,
+        max_tokens: Some(8),
         temperature: 0.0,
         ..Default::default()
     };

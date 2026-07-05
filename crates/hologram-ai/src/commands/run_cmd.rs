@@ -56,9 +56,10 @@ pub struct RunArgs {
     /// Prompt template with a `{prompt}` placeholder (e.g. a chat template).
     #[arg(long, value_name = "TEMPLATE")]
     pub prompt_template: Option<String>,
-    /// Maximum number of new tokens to generate.
-    #[arg(long, default_value_t = 64)]
-    pub max_tokens: usize,
+    /// Maximum number of new tokens to generate. Defaults to the remaining
+    /// context — the model's context length minus the prompt.
+    #[arg(long, value_name = "N")]
+    pub max_tokens: Option<usize>,
     /// Sampling temperature; `0.0` is greedy/deterministic argmax.
     #[arg(long, default_value_t = 0.0)]
     pub temperature: f32,

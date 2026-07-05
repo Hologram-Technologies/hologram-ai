@@ -93,13 +93,14 @@ impl LmSession for HoloRunner {
 /// length; the provider returns a session that can run it (growing/recompiling
 /// if needed). [`Self::max_window`] is the ceiling the window may reach — the
 /// model's trained context for a growable provider, or the baked `seq_len` for a
-/// fixed one — beyond which the caller slides the window.
+/// fixed one — the remaining-context bound the generation loop honors.
 pub trait SessionProvider {
     /// A session whose `input_ids` length (the compiled window) is ≥ `want`.
     fn session_for(&mut self, want: usize) -> Result<&mut dyn LmSession>;
 
     /// The largest window this provider can serve. Generation never requests
-    /// more than this; longer sequences slide within it.
+    /// more than this: its remaining-context budget keeps the running
+    /// sequence within it (journey S4).
     fn max_window(&self) -> usize;
 }
 

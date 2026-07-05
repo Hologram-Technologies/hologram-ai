@@ -137,7 +137,7 @@ fn greedy_generation_predicts_successor_sequence() {
     let tok = IntTok { vocab, eos: 999 }; // eos out of range — never sampled
 
     let cfg = GenConfig {
-        max_tokens: 5,
+        max_tokens: Some(5),
         temperature: 0.0,
         ..Default::default()
     };
@@ -158,7 +158,7 @@ fn eos_token_halts_generation() {
     let tok = IntTok { vocab, eos: 8 };
 
     let cfg = GenConfig {
-        max_tokens: 10,
+        max_tokens: Some(10),
         temperature: 0.0,
         ..Default::default()
     };
@@ -175,7 +175,7 @@ fn stop_string_halts_generation() {
 
     // Stop once the decoded suffix contains "9": 5 → 6,7,8,9 then halt.
     let cfg = GenConfig {
-        max_tokens: 20,
+        max_tokens: Some(20),
         temperature: 0.0,
         stop: vec!["9".into()],
         ..Default::default()
@@ -193,7 +193,7 @@ fn temperature_sampling_with_top_k_one_is_deterministic_successor() {
 
     // top_k=1 collapses any temperature to the argmax → same successor sequence.
     let cfg = GenConfig {
-        max_tokens: 4,
+        max_tokens: Some(4),
         temperature: 1.5,
         top_k: Some(1),
         seed: 12345,
@@ -205,24 +205,63 @@ fn temperature_sampling_with_top_k_one_is_deterministic_successor() {
 }
 
 #[test]
-fn prompt_equal_to_context_slides_not_errors() {
-    // A prompt exactly as long as the window is valid: predict from the last
-    // position, then the window slides (the model's genuine finite context).
+fn prompt_equal_to_context_is_the_empty_completion_not_an_error() {
+    // A prompt exactly as long as the window is valid, but the remaining
+    // context is zero (journey S4: generation is bounded by the remaining
+    // context) — generation ends immediately with the empty completion; an
+    // explicit cap cannot buy tokens past the window.
     let (seq_len, vocab) = (4usize, 16usize);
     let mut runner = compile_runner(seq_len, vocab);
     let tok = IntTok { vocab, eos: 99 };
     let cfg = GenConfig {
-        max_tokens: 3,
+        max_tokens: Some(3),
         temperature: 0.0,
         ..Default::default()
     };
     let mut sink = Vec::new();
-    // 4 prompt tokens == window. Successor LM: from "…4" → 5, then window slides
-    // to [2,3,4,5] → 6, → 7. No error, deterministic successor sequence.
+    // 4 prompt tokens == window ⇒ zero remaining context.
     let out = generate_stream(&mut runner, &tok, "1 2 3 4", &cfg, &mut sink).unwrap();
     assert_eq!(
-        out, "5 6 7",
-        "prompt == window must slide and predict successors"
+        out, "",
+        "zero remaining context must end generation at once"
+    );
+    assert!(sink.is_empty(), "nothing may be streamed either");
+}
+
+#[test]
+fn default_bound_is_the_remaining_context() {
+    // No explicit cap (`max_tokens: None`, the default): generation fills the
+    // remaining context — window 8 minus the 1-token prompt = 7 successors —
+    // and stops there (journey S4: never a fixed token cap).
+    let (seq_len, vocab) = (8usize, 32usize);
+    let mut runner = compile_runner(seq_len, vocab);
+    let tok = IntTok { vocab, eos: 99 };
+    let cfg = GenConfig::default();
+    let mut sink = Vec::new();
+    let out = generate_stream(&mut runner, &tok, "5", &cfg, &mut sink).unwrap();
+    assert_eq!(
+        out, "6 7 8 9 10 11 12",
+        "the default bound is the remaining context window"
+    );
+}
+
+#[test]
+fn explicit_cap_is_clamped_by_the_remaining_context() {
+    // An explicit cap far beyond the window is clamped to the remaining
+    // context — the structural bound always wins.
+    let (seq_len, vocab) = (8usize, 32usize);
+    let mut runner = compile_runner(seq_len, vocab);
+    let tok = IntTok { vocab, eos: 99 };
+    let cfg = GenConfig {
+        max_tokens: Some(1000),
+        temperature: 0.0,
+        ..Default::default()
+    };
+    let mut sink = Vec::new();
+    let out = generate_stream(&mut runner, &tok, "5", &cfg, &mut sink).unwrap();
+    assert_eq!(
+        out, "6 7 8 9 10 11 12",
+        "an explicit cap must be clamped by the remaining context"
     );
 }
 

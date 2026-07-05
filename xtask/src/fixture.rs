@@ -252,7 +252,9 @@ fn handshake(
     // catalogue stop string, eos derived from the tokenizer (both sides run
     // the same `generate_stream`, so derivation is shared code).
     let cfg = GenConfig {
-        max_tokens: MAX_TOKENS,
+        // Explicit: the committed reference transcript is recorded at exactly
+        // 8 new tokens per turn — never the remaining-context default.
+        max_tokens: Some(MAX_TOKENS),
         temperature: 0.0,
         top_k: None,
         stop: vec!["\nUser:".to_string()],
