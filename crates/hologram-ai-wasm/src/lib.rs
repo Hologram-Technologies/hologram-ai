@@ -753,6 +753,25 @@ pub fn generate_staged(
     )
     .map_err(|e| err(format!("generate_staged: {e:#}")))?;
 
+    // Residency admission — an environment MEASUREMENT, never a preference:
+    // the wasm32 address space is a structural 4 GiB ceiling, and a stage
+    // session may join the resident set only while the heap has measurably
+    // claimed less than half of it (the other half is the working margin
+    // for materialization transients and activations — the same halving the
+    // download planner documents). Raw κ-byte budgets under-count a live
+    // session's true footprint, so admission asks the environment directly.
+    // Stages that fit stay resident across tokens — κ-store bandwidth is
+    // paid once per window; a model past the headroom falls back to strict
+    // one-stage windowing, never refused.
+    #[cfg(target_arch = "wasm32")]
+    {
+        const STRUCTURAL_CEILING: u64 = 4 << 30;
+        session.set_residency_budget(u64::MAX);
+        session.set_admission_probe(std::rc::Rc::new(|| {
+            (core::arch::wasm32::memory_size(0) as u64) * 65536 < STRUCTURAL_CEILING / 2
+        }));
+    }
+
     if let Some(progress) = on_progress {
         let for_window = progress.clone();
         session.set_window_observer(Box::new(move |window| {

@@ -223,6 +223,26 @@ executor = "rust"
 feature = "features/suites/s3_execution/staged_window_growth.feature"
 
 [[row]]
+id = "stage-residency-cache"
+statement = "κ-store bandwidth is paid per window, never per token, within the environment's measured headroom: materialized stage sessions stay resident across forward passes while they fit the residency budget, each stage materializes once per window, the resident set never exceeds the budget (one stage is the floor), and a zero budget is exactly the strict one-stage window; cached and strict execution produce identical completions."
+stage = "S3"
+status = "build"
+oracles = ["journey-reference"]
+tier = "suite"
+executor = "rust"
+feature = "features/suites/s3_execution/stage_residency_cache.feature"
+
+[[row]]
+id = "session-verified-kappa"
+statement = "Verification is placed at the trust boundary, once per crossing, never per traversal: a κ verifies (re-hashes) at its first materialization in a session and later rematerializations are read-only I/O; the verified set is session-scoped, so a fresh session re-verifies at first touch and rejects corrupted content naming the label."
+stage = "S3"
+status = "build"
+oracles = ["journey-reference"]
+tier = "suite"
+executor = "rust"
+feature = "features/suites/s3_execution/session_verified_kappa.feature"
+
+[[row]]
 id = "bounded-embedding"
 statement = "A model is bounded by its unavoidable per-row/per-tile work, never whole-matrix F32 materialization: the embedding gathers the token rows at the table's native dtype and widens only the gathered result, so the whole [vocab, hidden] F32 image is never materialized, and a fused Phi3-family model executes monolithically and staged to identical logits."
 stage = "S3"

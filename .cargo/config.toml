@@ -12,3 +12,9 @@ git-fetch-with-cli = true
 # Prevents ORT from downloading a copy on every `cargo test`.
 # Requires ORT to be installed (e.g. via Homebrew: brew install onnxruntime).
 ORT_STRATEGY = "system"
+
+# wasm32 builds target the browsers the app already requires (OPFS sync
+# access handles), all of which ship SIMD128 — scalar-only wasm kernels
+# would leave a multiple of the decode throughput on the table.
+[target.wasm32-unknown-unknown]
+rustflags = ["-C", "target-feature=+simd128"]

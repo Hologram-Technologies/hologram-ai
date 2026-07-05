@@ -28,7 +28,7 @@ use hologram_archive::{decode_ports, HoloLoader, SectionKind};
 use hologram_exec::OutputBuffer;
 
 use crate::engine::{LmSession, SessionProvider};
-use crate::materialize::{materialize_archive, KappaStore};
+use crate::materialize::{materialize_archive_with, KappaStore};
 use crate::runner::{HoloRunner, PortInfo};
 use crate::{ModelCompiler, ModelSource};
 
@@ -142,6 +142,13 @@ pub type StageObserver<'a> = Box<dyn FnMut(usize, usize, u64) + 'a>;
 /// [`GrowableStagedSession`].
 type SharedStageObserver = std::rc::Rc<std::cell::RefCell<dyn FnMut(usize, usize, u64)>>;
 
+/// Admission probe: consulted before a stage session is kept resident.
+/// `false` means the environment measurably lacks headroom — the session
+/// drops (strict windowing) instead of risking the heap. Raw κ-byte budgets
+/// under-count a live session's true footprint; only the environment can
+/// answer whether it has room, so admission asks it directly.
+pub type AdmissionProbe<'a> = Box<dyn Fn() -> bool + 'a>;
+
 /// Windowed execution over the stage archives of [`compile_stages`].
 ///
 /// One token-window forward pass runs the stages in order: resolve the
@@ -174,6 +181,26 @@ pub struct StagedRunner<'a> {
     /// `(stage, stage_count, materialized_weight_bytes)`. Lets a UI surface
     /// per-stage progress instead of a silent first-token wait.
     on_stage: Option<StageObserver<'a>>,
+    /// Residency budget (bytes) for keeping materialized stage sessions
+    /// across forward passes — `0` (the default) is strict windowing: every
+    /// pass rematerializes every stage. See [`Self::set_residency_budget`].
+    residency_budget: u64,
+    /// Materialized stage sessions held under the budget, with their weight
+    /// bytes. `None` = not resident (drops after its pass).
+    resident: Vec<Option<(HoloRunner, u64)>>,
+    /// Weight bytes currently held by `resident`.
+    resident_bytes: u64,
+    /// Stage materializations performed over this runner's lifetime — the
+    /// bandwidth instrument (`resident` hits don't count).
+    materialization_count: u64,
+    /// Environment headroom probe consulted at admission (see
+    /// [`AdmissionProbe`]). `None` = admission by byte budget alone.
+    admission_probe: Option<AdmissionProbe<'a>>,
+    /// The session verified-κ set (row `session-verified-kappa`): a κ
+    /// verifies at its first materialization this session; later
+    /// rematerializations are read-only I/O. Shared across regrows of a
+    /// growable session — the session, not the window, is the trust scope.
+    verified: std::rc::Rc<std::cell::RefCell<std::collections::HashSet<String>>>,
 }
 
 impl<'a> StagedRunner<'a> {
@@ -233,7 +260,53 @@ impl<'a> StagedRunner<'a> {
             stage_weight_bytes: vec![0; stage_count],
             peak_resident_weight_bytes: 0,
             on_stage: None,
+            residency_budget: 0,
+            resident: (0..stage_count).map(|_| None).collect(),
+            resident_bytes: 0,
+            materialization_count: 0,
+            admission_probe: None,
+            verified: std::rc::Rc::new(std::cell::RefCell::new(std::collections::HashSet::new())),
         })
+    }
+
+    /// Adopt a shared session verified-κ set (a growable session forwards
+    /// one across window regrows — same session, same trust scope).
+    pub fn share_verified_set(
+        &mut self,
+        set: std::rc::Rc<std::cell::RefCell<std::collections::HashSet<String>>>,
+    ) {
+        self.verified = set;
+    }
+
+    /// Install an environment headroom probe consulted at every admission —
+    /// a resident set can only grow while the environment measurably has
+    /// room (see [`AdmissionProbe`]).
+    pub fn set_admission_probe(&mut self, p: AdmissionProbe<'a>) {
+        self.admission_probe = Some(p);
+    }
+
+    /// Set the residency budget: materialized stage sessions stay resident
+    /// across forward passes while their cumulative weight bytes fit, so the
+    /// κ-store bandwidth of a stage is paid once per window instead of once
+    /// per token (row `stage-residency-cache`). `0` is strict windowing —
+    /// peak weight residency is exactly one stage, the original contract.
+    /// The budget is an environment measurement (heap ceiling minus working
+    /// margin), never a preference: a model whose stages fit runs at
+    /// resident-session speed, one that doesn't falls back to the window.
+    pub fn set_residency_budget(&mut self, bytes: u64) {
+        self.residency_budget = bytes;
+        if bytes == 0 {
+            for slot in self.resident.iter_mut() {
+                *slot = None;
+            }
+            self.resident_bytes = 0;
+        }
+    }
+
+    /// Stage materializations performed so far — κ-store bandwidth in units
+    /// of stage loads (resident-session hits don't rematerialize).
+    pub fn materialization_count(&self) -> u64 {
+        self.materialization_count
     }
 
     /// Install a per-stage observer: called after each stage materializes
@@ -283,23 +356,36 @@ impl<'a> StagedRunner<'a> {
     fn execute_window(&mut self, inputs: &[&[u8]]) -> Result<Vec<OutputBuffer>> {
         let mut carried: Vec<Vec<u8>> = Vec::new();
         for stage in 0..self.stage_count {
-            let archive = (self.resolve_stage)(stage)
-                .with_context(|| format!("resolving the stage {stage} archive"))?;
-            let mut counting = CountingStore {
-                inner: self.store.as_mut(),
-                bytes: 0,
-            };
-            let material = materialize_archive(&archive, &mut counting)
-                .with_context(|| format!("materializing stage {stage}"))?;
-            drop(archive);
-            self.stage_weight_bytes[stage] = counting.bytes;
-            self.peak_resident_weight_bytes = self.peak_resident_weight_bytes.max(counting.bytes);
-            if let Some(f) = self.on_stage.as_mut() {
-                f(stage, self.stage_count, counting.bytes);
+            // Resident hit: the session's weights are already materialized —
+            // no κ-store traffic for this stage. Taking the slot removes its
+            // bytes from the held tally until (re-)admission below.
+            let taken = self.resident[stage].take();
+            if let Some((_, b)) = &taken {
+                self.resident_bytes -= b;
             }
+            let mut runner = if let Some((runner, _)) = taken {
+                runner
+            } else {
+                let archive = (self.resolve_stage)(stage)
+                    .with_context(|| format!("resolving the stage {stage} archive"))?;
+                let mut counting = CountingStore {
+                    inner: self.store.as_mut(),
+                    bytes: 0,
+                };
+                let verified = std::rc::Rc::clone(&self.verified);
+                let material =
+                    materialize_archive_with(&archive, &mut counting, &mut verified.borrow_mut())
+                        .with_context(|| format!("materializing stage {stage}"))?;
+                drop(archive);
+                self.stage_weight_bytes[stage] = counting.bytes;
+                self.materialization_count += 1;
+                if let Some(f) = self.on_stage.as_mut() {
+                    f(stage, self.stage_count, counting.bytes);
+                }
+                HoloRunner::from_bytes(material)
+                    .with_context(|| format!("loading stage {stage}"))?
+            };
 
-            let mut runner = HoloRunner::from_bytes(material)
-                .with_context(|| format!("loading stage {stage}"))?;
             let refs: Vec<&[u8]> = if stage == 0 {
                 inputs.to_vec()
             } else {
@@ -308,12 +394,27 @@ impl<'a> StagedRunner<'a> {
             let outputs = runner
                 .execute(&refs)
                 .with_context(|| format!("executing stage {stage}"))?;
+
+            // Keep the session resident while it fits the budget; otherwise
+            // it drops here, before the next stage materializes — the
+            // residency window. `resident[stage]` was `take`n above, so
+            // `resident_bytes` counts it at most once.
+            let bytes = self.stage_weight_bytes[stage];
+            let admissible = bytes > 0
+                && self.resident_bytes + bytes <= self.residency_budget
+                && self.admission_probe.as_ref().is_none_or(|p| p());
+            if admissible {
+                self.resident[stage] = Some((runner, bytes));
+                self.resident_bytes += bytes;
+            }
+            self.peak_resident_weight_bytes = self
+                .peak_resident_weight_bytes
+                .max(self.resident_bytes.max(bytes));
+
             if stage + 1 == self.stage_count {
                 return Ok(outputs);
             }
             carried = outputs.into_iter().map(|o| o.bytes).collect();
-            // `runner` — this stage's materialized weights — drops here,
-            // before the next stage materializes: the residency window.
         }
         bail!("the staged pipeline executed no stages")
     }
@@ -422,6 +523,9 @@ pub struct GrowableStagedSession {
     store: std::rc::Rc<std::cell::RefCell<Box<dyn KappaStore>>>,
     on_stage: Option<SharedStageObserver>,
     on_window: Option<Box<dyn FnMut(usize)>>,
+    residency_budget: u64,
+    admission_probe: Option<std::rc::Rc<dyn Fn() -> bool>>,
+    verified: std::rc::Rc<std::cell::RefCell<std::collections::HashSet<String>>>,
     current: Option<(usize, StagedRunner<'static>)>,
 }
 
@@ -461,8 +565,28 @@ impl GrowableStagedSession {
             store: std::rc::Rc::new(std::cell::RefCell::new(store)),
             on_stage: None,
             on_window: None,
+            residency_budget: 0,
+            admission_probe: None,
+            verified: std::rc::Rc::new(std::cell::RefCell::new(std::collections::HashSet::new())),
             current: None,
         })
+    }
+
+    /// Install an environment headroom probe forwarded to every regrown
+    /// runner (see [`AdmissionProbe`]).
+    pub fn set_admission_probe(&mut self, p: std::rc::Rc<dyn Fn() -> bool>) {
+        self.admission_probe = Some(p);
+    }
+
+    /// Forward a residency budget (bytes) to every regrown runner: stages
+    /// whose materialized sessions fit stay resident across tokens (row
+    /// `stage-residency-cache`), so κ-store bandwidth is paid per window
+    /// instead of per token. `0` (the default) is strict one-stage windowing.
+    pub fn set_residency_budget(&mut self, bytes: u64) {
+        self.residency_budget = bytes;
+        if let Some((_, runner)) = self.current.as_mut() {
+            runner.set_residency_budget(bytes);
+        }
     }
 
     /// Install a per-stage observer forwarded into every regrown runner:
@@ -521,6 +645,12 @@ impl SessionProvider for GrowableStagedSession {
                 runner.set_stage_observer(Box::new(move |s, n, b| {
                     (hook.borrow_mut())(s, n, b);
                 }));
+            }
+            runner.set_residency_budget(self.residency_budget);
+            runner.share_verified_set(std::rc::Rc::clone(&self.verified));
+            if let Some(probe) = &self.admission_probe {
+                let probe = std::rc::Rc::clone(probe);
+                runner.set_admission_probe(Box::new(move || probe()));
             }
             self.current = Some((window, runner));
         }

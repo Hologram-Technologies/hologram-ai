@@ -144,6 +144,22 @@ fn parse_kappa_map(bytes: &[u8]) -> Result<Vec<KappaRequirement>> {
 /// re-emits the archive (footer re-fingerprinted). An archive without a κ-map
 /// is already material and is returned unchanged.
 pub fn materialize_archive(archive: &[u8], store: &mut dyn KappaStore) -> Result<Vec<u8>> {
+    materialize_archive_with(archive, store, &mut std::collections::HashSet::new())
+}
+
+/// [`materialize_archive`] with a caller-owned session verified-κ set:
+/// verification happens at the trust-boundary crossing — the FIRST time a κ's
+/// content enters the session — and never per traversal. A κ already in
+/// `verified` materializes as read-only I/O (no re-hash); every κ verified
+/// here is added. Staged execution re-materializes stages every window and
+/// across every token outside the residency budget — it must not re-verify
+/// (row `session-verified-kappa`). Session-scoped by construction: the set
+/// never outlives the runner that owns it.
+pub fn materialize_archive_with(
+    archive: &[u8],
+    store: &mut dyn KappaStore,
+    verified: &mut std::collections::HashSet<String>,
+) -> Result<Vec<u8>> {
     let requirements = kappa_requirements(archive)?;
     if requirements.is_empty() {
         return Ok(archive.to_vec());
@@ -161,7 +177,7 @@ pub fn materialize_archive(archive: &[u8], store: &mut dyn KappaStore) -> Result
     let mut entries = constant_codec::decode(constants_bytes)
         .map_err(|e| anyhow::anyhow!("decoding constants section: {e:?}"))?;
 
-    patch_constants(&mut entries, &requirements, store)?;
+    patch_constants(&mut entries, &requirements, store, verified)?;
 
     let new_constants = constant_codec::encode(&entries);
     rebuild_archive(archive, plan.sections(), &new_constants)
@@ -172,6 +188,7 @@ fn patch_constants(
     entries: &mut [ConstantEntry],
     requirements: &[KappaRequirement],
     store: &mut dyn KappaStore,
+    verified: &mut std::collections::HashSet<String>,
 ) -> Result<()> {
     // The compiler emits the graph's constants first, in `ConstantId` order
     // (slot = node_count + id); trailing entries (constant *nodes*) follow.
@@ -212,13 +229,18 @@ fn patch_constants(
         let bytes = store
             .resolve(&req.kappa)
             .with_context(|| format!("resolving κ `{}`", req.kappa))?;
-        let derived = kappa_of(&bytes);
-        if derived != req.kappa {
-            bail!(
-                "κ integrity failure for ConstantId({}): store content hashes to `{derived}`, expected `{}`",
-                req.constant,
-                req.kappa
-            );
+        // Verify at the trust-boundary crossing — once per session per κ.
+        // Re-materialization of a session-verified κ is read-only I/O.
+        if !verified.contains(&req.kappa) {
+            let derived = kappa_of(&bytes);
+            if derived != req.kappa {
+                bail!(
+                    "κ integrity failure for ConstantId({}): store content hashes to `{derived}`, expected `{}`",
+                    req.constant,
+                    req.kappa
+                );
+            }
+            verified.insert(req.kappa.clone());
         }
         entry.bytes = bytes;
     }

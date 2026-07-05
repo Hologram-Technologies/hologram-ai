@@ -803,6 +803,12 @@ struct BddWorld {
     // S3 — staged window growth (row `staged-window-growth`)
     staged_windows: Option<Vec<usize>>,
     staged_growth_err: Option<String>,
+    // S3 — stage residency cache (row `stage-residency-cache`)
+    residency_run: Option<ResidencyRun>,
+    // S3 — session verified-κ (row `session-verified-kappa`)
+    verified_second_pass: Option<anyhow::Result<Vec<u8>>>,
+    verified_fresh_err: Option<String>,
+    verified_corrupt_kappa: Option<String>,
     // S3 — bounded embedding / fused Phi3 (row `bounded-embedding`)
     bounded_embed: Option<BoundedEmbed>,
     bounded_embed_compiled: Option<Vec<Vec<u8>>>,
@@ -2688,6 +2694,228 @@ async fn then_growable_overflow_named(w: &mut BddWorld) {
         "the refusal must name the requested window ({want}) and the context ({ctx}): {err}"
     );
     println!("[staged-window-growth] loud refusal: {err}");
+}
+
+// ─────────── S3 — stage residency cache (row `stage-residency-cache`) ────────
+
+/// One instrumented staged generation: the completion plus the runner's
+/// bandwidth/residency measurements.
+struct ResidencyRun {
+    completion: String,
+    materializations: u64,
+    peak_resident_bytes: u64,
+    stage_count: usize,
+    passes: usize,
+    budget: u64,
+    largest_stage_bytes: u64,
+}
+
+/// Greedy 8-token generation over the fixture stages at `budget` residency.
+fn run_with_residency(store_path: &std::path::Path, budget: u64) -> ResidencyRun {
+    use hologram_ai::commands::generate::{generate_stream, GenConfig};
+    let kit = staged_kit();
+    let mut runner =
+        StagedRunner::from_archives(kit.stages.clone(), Box::new(DirKappaStore::new(store_path)))
+            .expect("the staged runner builds");
+    runner.set_residency_budget(budget);
+    let cfg = GenConfig {
+        max_tokens: Some(8),
+        temperature: 0.0,
+        ..Default::default()
+    };
+    let mut sink = Vec::new();
+    let completion = generate_stream(&mut runner, &DecimalTok, "3 141 59 26 5", &cfg, &mut sink)
+        .expect("staged generation completes");
+    let passes = DecimalTok.encode(&completion).len();
+    let largest_stage_bytes = runner
+        .stage_weight_bytes()
+        .iter()
+        .copied()
+        .max()
+        .expect("at least one stage");
+    ResidencyRun {
+        completion,
+        materializations: runner.materialization_count(),
+        peak_resident_bytes: runner.peak_resident_weight_bytes(),
+        stage_count: runner.stage_count(),
+        passes,
+        budget,
+        largest_stage_bytes,
+    }
+}
+
+#[when("a completion is generated with a residency budget that holds the whole model")]
+async fn when_residency_full(w: &mut BddWorld) {
+    let store = w.staged_store.as_ref().expect("the fixture κ-store");
+    let kit = staged_kit();
+    w.residency_run = Some(run_with_residency(&store.path, kit.total_weight_bytes * 2));
+}
+
+#[then("each stage materialized exactly once across the whole generation")]
+async fn then_residency_once(w: &mut BddWorld) {
+    let run = w.residency_run.as_ref().expect("the instrumented run");
+    assert!(run.passes > 1, "the witness needs a multi-pass generation");
+    assert_eq!(
+        run.materializations, run.stage_count as u64,
+        "within the budget, κ-store bandwidth is once per stage per window          ({} passes ran)",
+        run.passes
+    );
+    println!(
+        "[stage-residency-cache] {} stages materialized once across {} passes",
+        run.stage_count, run.passes
+    );
+}
+
+#[when("a completion is generated with a zero residency budget")]
+async fn when_residency_zero(w: &mut BddWorld) {
+    let store = w.staged_store.as_ref().expect("the fixture κ-store");
+    w.residency_run = Some(run_with_residency(&store.path, 0));
+}
+
+#[then("every forward pass rematerialized every stage")]
+async fn then_residency_strict(w: &mut BddWorld) {
+    let run = w.residency_run.as_ref().expect("the instrumented run");
+    assert!(run.passes > 1, "the witness needs a multi-pass generation");
+    assert_eq!(
+        run.materializations,
+        (run.stage_count * run.passes) as u64,
+        "a zero budget must rematerialize every stage every pass"
+    );
+}
+
+#[then("the strict window's peak residency stays within one stage")]
+async fn then_residency_zero_window(w: &mut BddWorld) {
+    let run = w.residency_run.as_ref().expect("the instrumented run");
+    assert!(
+        run.peak_resident_bytes <= run.largest_stage_bytes,
+        "strict windowing must keep peak residency ({}) within one stage ({})",
+        run.peak_resident_bytes,
+        run.largest_stage_bytes
+    );
+}
+
+#[when("a completion is generated with a residency budget of two stages")]
+async fn when_residency_partial(w: &mut BddWorld) {
+    let store = w.staged_store.as_ref().expect("the fixture κ-store");
+    // Measure real stage sizes with a strict run, then budget exactly two.
+    let probe = run_with_residency(&store.path, 0);
+    let budget = probe.largest_stage_bytes * 2;
+    w.residency_run = Some(run_with_residency(&store.path, budget));
+}
+
+#[then("the peak resident weight bytes never exceed the budget or the single-stage floor")]
+async fn then_residency_bounded(w: &mut BddWorld) {
+    let run = w.residency_run.as_ref().expect("the instrumented run");
+    let bound = run.budget.max(run.largest_stage_bytes);
+    assert!(
+        run.peak_resident_bytes <= bound,
+        "peak residency ({}) must stay within max(budget {}, single stage {})",
+        run.peak_resident_bytes,
+        run.budget,
+        run.largest_stage_bytes
+    );
+    assert!(
+        run.materializations < (run.stage_count * run.passes) as u64,
+        "a partial budget must save at least some rematerialization"
+    );
+    println!(
+        "[stage-residency-cache] budget {} → {} materializations over {} passes × {} stages",
+        run.budget, run.materializations, run.passes, run.stage_count
+    );
+}
+
+#[when("the same greedy completion is generated with and without a residency budget")]
+async fn when_residency_parity(w: &mut BddWorld) {
+    let store = w.staged_store.as_ref().expect("the fixture κ-store");
+    let kit = staged_kit();
+    let strict = run_with_residency(&store.path, 0);
+    let cached = run_with_residency(&store.path, kit.total_weight_bytes * 2);
+    w.staged_completions = Some((strict.completion, cached.completion));
+}
+
+// ─────────── S3 — session verified-κ (row `session-verified-kappa`) ──────────
+
+/// Corrupt the store entry of a κ the given archive actually consumes (flip
+/// a byte, same length) and return the corrupted label. The file name IS the
+/// κ, so the content no longer reproduces its label.
+fn corrupt_one_kappa(store_path: &std::path::Path, archive: &[u8]) -> String {
+    let kappa = kappa_set(archive)
+        .into_iter()
+        .next()
+        .expect("the archive requires at least one κ");
+    let path = store_path.join(format!("{kappa}.bin"));
+    let mut bytes = std::fs::read(&path).expect("the κ content reads");
+    bytes[0] ^= 0xFF;
+    std::fs::write(&path, bytes).expect("the corruption writes");
+    kappa
+}
+
+#[when("a stage materializes twice in one session over a store corrupted between the passes")]
+async fn when_verified_skip(w: &mut BddWorld) {
+    use hologram_ai::materialize::materialize_archive_with;
+    // A private store copy: this scenario mutates it.
+    let store = staged_store("verified-skip");
+    let kit = staged_kit();
+    let archive = &kit.stages[0];
+    let mut verified = std::collections::HashSet::new();
+
+    let mut dir = DirKappaStore::new(&store.path);
+    materialize_archive_with(archive, &mut dir, &mut verified)
+        .expect("the first materialization verifies at first touch");
+
+    let corrupted = corrupt_one_kappa(&store.path, archive);
+    let mut dir = DirKappaStore::new(&store.path);
+    w.verified_second_pass = Some(materialize_archive_with(archive, &mut dir, &mut verified));
+    w.verified_corrupt_kappa = Some(corrupted);
+    w.staged_store = Some(store);
+}
+
+#[then("the second pass succeeds without re-hashing the session-verified content")]
+async fn then_verified_skip(w: &mut BddWorld) {
+    let second = w
+        .verified_second_pass
+        .as_ref()
+        .expect("the second pass ran");
+    assert!(
+        second.is_ok(),
+        "a session-verified κ must rematerialize as read-only I/O (no re-hash): {:?}",
+        second.as_ref().err()
+    );
+    println!("[session-verified-kappa] second pass was read-only resolution");
+}
+
+#[when(
+    "a fresh session materializes a stage over a store corrupted after another session verified it"
+)]
+async fn when_verified_fresh(w: &mut BddWorld) {
+    use hologram_ai::materialize::materialize_archive_with;
+    // Self-contained: a first session verifies the store, the store is
+    // corrupted, then a FRESH session (empty verified set) must reject.
+    let store = staged_store("verified-fresh");
+    let kit = staged_kit();
+    let mut first = std::collections::HashSet::new();
+    let mut dir = DirKappaStore::new(&store.path);
+    materialize_archive_with(&kit.stages[0], &mut dir, &mut first)
+        .expect("the first session verifies at first touch");
+    let corrupted = corrupt_one_kappa(&store.path, &kit.stages[0]);
+
+    let mut fresh = std::collections::HashSet::new();
+    let mut dir = DirKappaStore::new(&store.path);
+    let err = materialize_archive_with(&kit.stages[0], &mut dir, &mut fresh)
+        .expect_err("a fresh session must verify at first touch and reject");
+    w.verified_fresh_err = Some(format!("{err:#}"));
+    w.verified_corrupt_kappa = Some(corrupted);
+}
+
+#[then("materialization is rejected naming the corrupted label")]
+async fn then_verified_fresh(w: &mut BddWorld) {
+    let err = w.verified_fresh_err.as_ref().expect("the rejection");
+    let kappa = w.verified_corrupt_kappa.as_ref().expect("the corrupted κ");
+    assert!(
+        err.contains("integrity") && err.contains(kappa.trim_start_matches("blake3:")),
+        "the rejection must name the corrupted label `{kappa}`: {err}"
+    );
+    println!("[session-verified-kappa] fresh session rejected loud: {err}");
 }
 
 // ───────────────── S3 — bounded embedding (row `bounded-embedding`) ──────────
