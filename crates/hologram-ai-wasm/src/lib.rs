@@ -269,7 +269,7 @@ pub fn compile_safetensors_streamed(
 /// monolithic streamed compile. Returns the stage archives in execution
 /// order as a JS `Array` of `Uint8Array`. The model's weights stay in the
 /// κ-store; execution materializes one stage at a time
-/// ([`generate_staged`]), so peak weight residency is the largest stage —
+/// ([`StagedChatSession`]), so peak weight residency is the largest stage —
 /// the window — never the model.
 #[wasm_bindgen]
 #[allow(clippy::too_many_arguments)]
@@ -705,7 +705,7 @@ impl GenOpts {
 
 /// A `Write` sink that accumulates the generated text and streams the running
 /// string to an optional JS callback — shared by [`generate`] and
-/// [`generate_staged`].
+/// [`StagedChatSession::generate`].
 struct CallbackSink<'a> {
     buffer: Vec<u8>,
     callback: Option<&'a js_sys::Function>,

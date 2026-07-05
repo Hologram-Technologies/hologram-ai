@@ -310,6 +310,39 @@ export function Chat() {
         stop: stopStrings,
         promptTemplate: selectedKnown?.promptTemplate ?? undefined,
       });
+      // Commit the final streamed text SYNCHRONOUSLY: the token stream's
+      // debounced flush may still be pending, and the next turn's history
+      // is built from `messages` — a turn sent inside that 50 ms window
+      // would otherwise assemble its prompt one flush short (CI caught
+      // turn-3 prompts missing the last characters of turn 2).
+      setMessages((prev) => {
+        const last = prev[prev.length - 1];
+        if (last && last.role === "assistant" && last.text !== streamingRef.current) {
+          const updated = [...prev];
+          updated[updated.length - 1] = { role: "assistant", text: streamingRef.current };
+          return updated;
+        }
+        if (last && last.role === "assistant") return prev;
+        return [...prev, { role: "assistant", text: streamingRef.current }];
+      });
+      // Commit the final completion SYNCHRONOUSLY before the composer
+      // re-enables: the streaming path batches transcript updates behind a
+      // debounce, and a send that lands before the last flush would build
+      // the next prompt from a truncated assistant turn (a real one-token
+      // loss caught by the handshake reference gate in CI). The debounced
+      // flush that follows writes identical content — idempotent.
+      const finalText = streamingRef.current;
+      if (finalText) {
+        setMessages((prev) => {
+          const last = prev[prev.length - 1];
+          if (last && last.role === "assistant") {
+            const updated = [...prev];
+            updated[updated.length - 1] = { role: "assistant", text: finalText };
+            return updated;
+          }
+          return [...prev, { role: "assistant", text: finalText }];
+        });
+      }
     } catch (e) {
       setMessages((prev) => [
         ...prev,
