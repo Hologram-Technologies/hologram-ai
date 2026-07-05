@@ -1,4 +1,4 @@
-import { computeKappa, validateModelConfig } from "./holo";
+import { computeKappa, countTokens, validateModelConfig } from "./holo";
 import { type GenOpts } from "./holo";
 import GenerateWorker from "./generate.worker?worker";
 import { cacheBudgetFromHeadroom, environmentBudgetBytes, estimateResources, formatBytes, measuredStorageHeadroomBytes } from "./resources";
@@ -436,6 +436,83 @@ export async function compileKnownModel(_id: string, _specificOnnx?: string): Pr
   return 0;
 }
 
+// The session window of a compiled model (from its model-meta), plus the
+// tokenizer bytes for template-aware counting. Cached per model dir (row
+// `session-window`).
+const sessionInfoCache = new Map<string, { contextLength: number | null; tokenizer?: Uint8Array }>();
+
+async function readModelFile(dirName: string, fileName: string): Promise<Uint8Array | null> {
+  try {
+    const root = await getOpfsDir();
+    const models = await root.getDirectoryHandle("models");
+    const dir = await models.getDirectoryHandle(dirName);
+    async function find(
+      handle: FileSystemDirectoryHandle,
+      target: string,
+    ): Promise<FileSystemFileHandle | null> {
+      for await (const [n, h] of (handle as any).entries()) {
+        if (h.kind === "file" && n === target) return h as FileSystemFileHandle;
+        if (h.kind === "directory") {
+          const found = await find(h as FileSystemDirectoryHandle, target);
+          if (found) return found;
+        }
+      }
+      return null;
+    }
+    const fh = await find(dir, fileName);
+    if (!fh) return null;
+    return new Uint8Array(await (await fh.getFile()).arrayBuffer());
+  } catch {
+    return null;
+  }
+}
+
+/** Load a model's session bounds once (context window + its own tokenizer) for
+ * template-aware trimming — the model's own limits are the only limits (row
+ * `session-window`). Read off the hot path (a load-time effect), never per send. */
+export async function loadSessionMeta(
+  archivePath: string,
+): Promise<{ contextLength: number | null; tokenizer?: Uint8Array }> {
+  const dirName = archivePath.split("/")[1];
+  const { contextLength } = await sessionInfo(archivePath);
+  const tokenizer = (await readModelFile(dirName, "tokenizer.json")) ?? undefined;
+  return { contextLength, tokenizer };
+}
+
+/** The compiled model's own context window (from model-meta.json / stages.json). */
+export async function sessionInfo(archivePath: string): Promise<{ contextLength: number | null }> {
+  const dirName = archivePath.split("/")[1];
+  const cached = sessionInfoCache.get(dirName);
+  if (cached) return { contextLength: cached.contextLength };
+  let contextLength: number | null = null;
+  const meta = await readModelFile(dirName, "model-meta.json");
+  if (meta) {
+    contextLength = JSON.parse(new TextDecoder().decode(meta)).contextLength ?? null;
+  } else {
+    const stages = await readModelFile(dirName, "stages.json");
+    if (stages) contextLength = JSON.parse(new TextDecoder().decode(stages)).contextLength ?? null;
+  }
+  sessionInfoCache.set(dirName, { contextLength });
+  return { contextLength };
+}
+
+/** Token count of `text` under the model's own tokenizer — the model's own
+ * limits are the only limits (session trimming, row `session-window`). */
+export async function countPromptTokens(archivePath: string, text: string): Promise<number> {
+  const dirName = archivePath.split("/")[1];
+  let entry = sessionInfoCache.get(dirName);
+  if (!entry) {
+    await sessionInfo(archivePath);
+    entry = sessionInfoCache.get(dirName)!;
+  }
+  if (!entry.tokenizer) {
+    const bytes = await readModelFile(dirName, "tokenizer.json");
+    if (!bytes) throw new Error(`no tokenizer.json under models/${dirName} — cannot count tokens`);
+    entry.tokenizer = bytes;
+  }
+  return countTokens(entry.tokenizer, text);
+}
+
 export interface GenerateOpts {
   archive: string;
   prompt: string;
@@ -510,6 +587,14 @@ export async function generate(opts: GenerateOpts): Promise<number> {
     }
     
     activeWorker = new GenerateWorker();
+    // A worker script/load failure would otherwise leave generation hanging
+    // silently (onmessage never fires); surface it loudly.
+    activeWorker.onerror = (ev) => {
+      const msg = `generate worker failed: ${(ev as ErrorEvent).message ?? ev}`;
+      emitLine("chat://line", { stream: "stderr", line: msg });
+      if (activeWorker) { activeWorker.terminate(); activeWorker = null; }
+      reject(new Error(msg));
+    };
     
     activeWorker.onmessage = (e) => {
       if (e.data.type === 'token') {

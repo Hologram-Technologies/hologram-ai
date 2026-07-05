@@ -503,6 +503,37 @@ Then("the transcript matches the committed reference transcript", async function
   });
 });
 
+// ── S4 — the session window ─────────────────────────────────────────────────
+
+const OVERFLOW_MESSAGE = "please keep talking about the weather today ".repeat(2).trim();
+
+When("the user sends a message that overflows the context window", async function () {
+  // The fixture tokenizes per character (context 128): the accumulated
+  // three-turn history plus this message exceeds the window, forcing the
+  // oldest-turn trim; the message alone still fits the model's own context.
+  await this.sendChat(OVERFLOW_MESSAGE);
+});
+
+Then("the overflow turn completes without error", async function () {
+  const completions = await this.page.evaluate(() => globalThis.__hologram_completions ?? []);
+  assert.equal(completions.length, 4, "the overflow turn must complete (no dead-end)");
+  const bubbles = await this.page.locator(".bubble.assistant").allInnerTexts();
+  assert.ok(
+    !bubbles.some((b) => b.includes("error:")),
+    `no turn may error:\n${JSON.stringify(bubbles)}`,
+  );
+});
+
+Then("the overflow prompt omits the oldest turn", async function () {
+  const completions = await this.page.evaluate(() => globalThis.__hologram_completions ?? []);
+  const overflowPrompt = completions[3].prompt;
+  assert.ok(overflowPrompt.includes(OVERFLOW_MESSAGE), "the pending message must survive trimming");
+  assert.ok(
+    !overflowPrompt.includes(HANDSHAKE[0]),
+    `the oldest turn must be trimmed from the prompt:\n${overflowPrompt}`,
+  );
+});
+
 // ── S4 — the live journey (@live) ───────────────────────────────────────────
 
 When("the pinned SmolLM2 model is downloaded", async function () {

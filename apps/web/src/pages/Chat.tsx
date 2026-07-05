@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   CompiledArchive,
+  loadSessionMeta,
   KnownModelStatus,
   cancelGeneration,
   generate,
@@ -8,6 +9,7 @@ import {
   listKnownModels,
   onProcessLine,
 } from "../ipc";
+import { countTokens } from "../holo";
 import { MessageBody } from "../components/MessageBody";
 
 interface Message {
@@ -146,6 +148,7 @@ export function Chat() {
   const [temperature, setTemperature] = useState(0.7);
   const [running, setRunning] = useState(false);
   const [messages, setMessages] = useState<Message[]>([]);
+  const [sessionMeta, setSessionMeta] = useState<{ contextLength: number | null; tokenizer?: Uint8Array } | null>(null);
   const transcriptRef = useRef<HTMLDivElement>(null);
   const streamingRef = useRef<string>("");
 
@@ -156,6 +159,26 @@ export function Chat() {
     });
     listKnownModels().then(setKnownModels);
   }, []);
+
+  // Load the model's own context window + tokenizer once per archive (never in
+  // the send hot path). This is what bounds the session — the model's limits.
+  useEffect(() => {
+    if (!archive) {
+      setSessionMeta(null);
+      return;
+    }
+    let live = true;
+    loadSessionMeta(archive)
+      .then((m) => {
+        if (live) setSessionMeta(m);
+      })
+      .catch(() => {
+        if (live) setSessionMeta(null);
+      });
+    return () => {
+      live = false;
+    };
+  }, [archive]);
 
   const selectedKnown = useMemo(
     () => (archive ? findKnownModel(archive, knownModels) : undefined),
@@ -226,7 +249,30 @@ export function Chat() {
       ),
       { role: "user", text: userText },
     ];
-    const promptForModel = buildMultiTurnPrompt(history, turnSeparator);
+    // Session trimming (row session-window): the model's own context is the
+    // only limit — a transcript that outgrows it drops oldest turn pairs so
+    // the conversation continues rather than dead-ending. Uses the model's
+    // own context + tokenizer, loaded once when the archive is selected
+    // (`sessionMeta`) — never OPFS/wasm in the click hot path.
+    let workingHistory = history;
+    let promptForModel = buildMultiTurnPrompt(workingHistory, turnSeparator);
+    const ctx = sessionMeta?.contextLength ?? null;
+    const tok = sessionMeta?.tokenizer;
+    if (ctx && tok) {
+      const applyTemplate = (t: string | null | undefined, slot: string) =>
+        t ? (t.includes("{prompt}") ? t.replace("{prompt}", slot) : t + slot) : slot;
+      try {
+        let tokens = await countTokens(tok, applyTemplate(selectedKnown?.promptTemplate, promptForModel));
+        while (tokens > ctx && workingHistory.length > 2) {
+          workingHistory = workingHistory.slice(2); // oldest user+assistant pair
+          promptForModel = buildMultiTurnPrompt(workingHistory, turnSeparator);
+          tokens = await countTokens(tok, applyTemplate(selectedKnown?.promptTemplate, promptForModel));
+        }
+      } catch {
+        // Counting unavailable: send untrimmed — the engine still fails loud
+        // if the prompt exceeds the model's context.
+      }
+    }
 
     setMessages((prev) => [...prev, { role: "user", text: userText }]);
     setPrompt("");
@@ -247,7 +293,9 @@ export function Chat() {
       await generate({
         archive,
         prompt: promptForModel,
-        maxTokens: selectedKnown?.maxTokens ?? 8192,
+        // No fixed cap: absent an explicit per-model setting, generation is
+        // bounded by stop conditions, the remaining context, and Cancel.
+        maxTokens: selectedKnown?.maxTokens,
         temperature,
         stop: stopStrings,
         promptTemplate: selectedKnown?.promptTemplate ?? undefined,

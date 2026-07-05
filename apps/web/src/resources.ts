@@ -92,6 +92,34 @@ function requireNumeric(config: Record<string, unknown>, keys: string[]): void {
  * transient archive copy). The window bounds the STAGE, never the model —
  * the k-representation carries the rest in the OPFS κ-store.
  */
+/** The F32 weight-byte decomposition of a model: per decoder layer, and the
+ * embedding/head structural floors (a single tensor cannot be subdivided). */
+export function weightDecomposition(
+  config: {
+    hidden_size: number;
+    num_hidden_layers: number;
+    vocab_size?: number;
+    tie_word_embeddings?: boolean;
+    torch_dtype?: string;
+  },
+  shardBytes: number,
+): { layerBytes: number; embedBytes: number; headBytes: number; totalBytes: number } {
+  requireNumeric(config as Record<string, unknown>, ["hidden_size", "num_hidden_layers"]);
+  const paramsTotal = shardBytes / dtypeBytes(config.torch_dtype ?? "F32");
+  const embedParams = (config.vocab_size ?? 0) * config.hidden_size;
+  const headParams = config.tie_word_embeddings ? 0 : embedParams;
+  const layerParams = Math.max(
+    1,
+    (paramsTotal - embedParams - headParams) / config.num_hidden_layers,
+  );
+  return {
+    layerBytes: layerParams * 4,
+    embedBytes: embedParams * 4,
+    headBytes: headParams * 4,
+    totalBytes: paramsTotal * 4,
+  };
+}
+
 export function planStages(
   config: {
     hidden_size: number;
@@ -103,23 +131,16 @@ export function planStages(
   shardBytes: number,
   windowBudgetBytes: number,
 ): { layersPerStage: number; stageCount: number; stageWeightBytes: number } {
-  requireNumeric(config as Record<string, unknown>, ["hidden_size", "num_hidden_layers"]);
-  const paramsTotal = shardBytes / dtypeBytes(config.torch_dtype ?? "F32");
-  const embedParams = (config.vocab_size ?? 0) * config.hidden_size;
-  const headParams = config.tie_word_embeddings ? 0 : embedParams;
-  const layerParams = Math.max(
-    1,
-    (paramsTotal - embedParams - headParams) / config.num_hidden_layers,
-  );
-  const layerBytesF32 = layerParams * 4;
+  const w = weightDecomposition(config, shardBytes);
   const half = windowBudgetBytes / 2;
-  let layersPerStage = Math.max(1, Math.floor(half / layerBytesF32));
+  let layersPerStage = Math.max(1, Math.floor(half / w.layerBytes));
   layersPerStage = Math.min(layersPerStage, config.num_hidden_layers);
   const layerStages = Math.ceil(config.num_hidden_layers / layersPerStage);
-  const monolithic = layersPerStage >= config.num_hidden_layers && layerBytesF32 * config.num_hidden_layers + (embedParams + headParams) * 4 <= half;
+  const monolithic =
+    layersPerStage >= config.num_hidden_layers && w.totalBytes <= half;
   const stageCount = monolithic ? 1 : layerStages + 2; // embedding + blocks + head
   const stageWeightBytes = Math.round(
-    Math.max(layersPerStage * layerBytesF32, embedParams * 4, headParams * 4),
+    Math.max(layersPerStage * w.layerBytes, w.embedBytes, w.headBytes),
   );
   return { layersPerStage, stageCount, stageWeightBytes };
 }
@@ -137,19 +158,37 @@ export function estimateResources(
   windowBudgetBytes: number,
   stagePlanBudgetBytes: number = windowBudgetBytes,
 ): ResourceEstimate {
-  requireNumeric(config as Record<string, unknown>, ["hidden_size", "num_hidden_layers"]);
-  const plan = planStages(config, shardBytes, stagePlanBudgetBytes);
-  // Windowed over k: only a stage is ever resident, so the activation term
-  // scales with the RESIDENT depth (layers per stage), never the model depth.
-  const residentDepth = { ...config, num_hidden_layers: plan.layersPerStage };
-  const contextLength = chooseContextLength(residentDepth, windowBudgetBytes);
-  const activations = contextLength * config.hidden_size * plan.layersPerStage * 8 * 4;
+  // CONTEXT FIRST: the model's own max_position_embeddings is the invariant —
+  // an artificially shortened context is an unexpected session limit. Staging
+  // absorbs the memory scaling: layers-per-stage shrinks until a stage
+  // (weights + activations at the model's own context) fits half the plan
+  // budget (materialization holds a transient archive copy). The context
+  // halves only when even a SINGLE-layer stage cannot carry its activations —
+  // the structural floor, never a preference.
+  const w = weightDecomposition(config, shardBytes);
+  const half = stagePlanBudgetBytes / 2;
+  const perLayerActivation = (ctx: number) => ctx * config.hidden_size * 8 * 4;
+
+  let contextLength = config.max_position_embeddings ?? 64;
+  while (contextLength > 64 && w.layerBytes + perLayerActivation(contextLength) > half) {
+    contextLength = Math.floor(contextLength / 2);
+  }
+  const perLayer = w.layerBytes + perLayerActivation(contextLength);
+  let layersPerStage = Math.max(1, Math.floor(half / perLayer));
+  layersPerStage = Math.min(layersPerStage, config.num_hidden_layers);
+
+  const monolithic =
+    layersPerStage >= config.num_hidden_layers &&
+    w.totalBytes + perLayerActivation(contextLength) * config.num_hidden_layers <= half;
+  const stageCount = monolithic ? 1 : Math.ceil(config.num_hidden_layers / layersPerStage) + 2;
+  const stageWeightBytes = Math.max(layersPerStage * w.layerBytes, w.embedBytes, w.headBytes);
+  const activations = perLayerActivation(contextLength) * (monolithic ? config.num_hidden_layers : layersPerStage);
   return {
     storageBytes: shardBytes,
-    windowBytes: Math.round(plan.stageWeightBytes * 2 + activations),
+    windowBytes: Math.round(stageWeightBytes * 2 + activations),
     contextLength,
-    layersPerStage: plan.layersPerStage,
-    stageCount: plan.stageCount,
+    layersPerStage,
+    stageCount,
   };
 }
 

@@ -283,8 +283,8 @@ export async function handleSafetensorsDownload(
       emitProgressFn(`Finished streaming ${manifest.rfilename}.`);
     }
 
-    // Record κ-provenance under the model directory: the run-time resolver's
-    // network tier.
+    // Record κ-provenance + model metadata (the session's context window)
+    // under the model directory.
     if (localName) {
       const modelsDir = await root.getDirectoryHandle("models", { create: true });
       const localDir = await modelsDir.getDirectoryHandle(localName, { create: true });
@@ -292,6 +292,10 @@ export async function handleSafetensorsDownload(
       const writable = await srcHandle.createWritable();
       await writable.write(JSON.stringify(kappaSources));
       await writable.close();
+      const metaHandle = await localDir.getFileHandle("model-meta.json", { create: true });
+      const metaWritable = await metaHandle.createWritable();
+      await metaWritable.write(JSON.stringify({ contextLength }));
+      await metaWritable.close();
     }
 
     // Mechanical: the graph was validated in preflight; this binds the

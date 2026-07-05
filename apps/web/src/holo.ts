@@ -6,6 +6,7 @@ import init, {
   describe as wasmDescribe,
   supported_families as wasmSupportedFamilies,
   compile_safetensors_staged as wasmCompileSafetensorsStaged,
+  count_tokens as wasmCountTokens,
   generate_staged as wasmGenerateStaged,
   validate_model_config as wasmValidateModelConfig,
   validate_streamed_manifest as wasmValidateStreamedManifest,
@@ -149,6 +150,12 @@ export async function generateStaged(
 ): Promise<string> {
   await ensureReady();
   return wasmGenerateStaged(stageCount, resolveStage, resolveKappa, tokenizer ?? undefined, prompt, opts, callback);
+}
+
+/** Token count of `text` under the model's own tokenizer (session trimming). */
+export async function countTokens(tokenizer: Uint8Array, text: string): Promise<number> {
+  await ensureReady();
+  return wasmCountTokens(tokenizer, text);
 }
 
 /** The κ-labels a k-form archive requires (empty for a material archive). */

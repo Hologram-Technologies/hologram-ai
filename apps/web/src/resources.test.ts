@@ -72,6 +72,22 @@ describe("estimateResources — the window bounds the stage, never the model", (
     expect(est.layersPerStage).toBeGreaterThanOrEqual(1);
     void budget;
   });
+  it("the model's own context is the invariant — staging absorbs, context survives", () => {
+    // A SmolLM2-shaped model (hidden 576, 30 layers, native context 8192):
+    // the plan must keep the FULL native context, staging as needed, rather
+    // than shrinking the session window to fit monolithic residency.
+    const cfg = {
+      hidden_size: 576,
+      num_hidden_layers: 30,
+      max_position_embeddings: 8192,
+      vocab_size: 49152,
+      tie_word_embeddings: true,
+      torch_dtype: "bfloat16",
+    };
+    const est = estimateResources(cfg, 270 * 1024 ** 2, environmentBudgetBytes(8));
+    expect(est.contextLength).toBe(8192);
+    expect(est.layersPerStage).toBeGreaterThanOrEqual(1);
+  });
   it("size never rejects: the plan exists for any model that names its keys", () => {
     const est = estimateResources(
       { ...HUGE, vocab_size: 128000 },
