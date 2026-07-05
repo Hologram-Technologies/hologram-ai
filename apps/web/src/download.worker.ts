@@ -296,6 +296,14 @@ export async function handleSafetensorsDownload(
       const metaWritable = await metaHandle.createWritable();
       await metaWritable.write(JSON.stringify({ contextLength }));
       await metaWritable.close();
+      // The streamed manifest (name → κ/shape/dtype): chat recompiles stage
+      // windows from it, so the generation window can follow the sequence.
+      const manifestHandle = await localDir.getFileHandle("manifest.json", { create: true });
+      const manifestWritable = await manifestHandle.createWritable();
+      await manifestWritable.write(
+        JSON.stringify({ keys: allKeys, kappas: allKappas, shapes: allShapes, dtypes: allDtypes }),
+      );
+      await manifestWritable.close();
     }
 
     // Mechanical: the graph was validated in preflight; this binds the

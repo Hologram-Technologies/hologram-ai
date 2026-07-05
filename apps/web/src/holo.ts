@@ -137,19 +137,42 @@ export async function compileSafetensorsStaged(
   ) as Uint8Array[];
 }
 
-/** Staged generation: stage archives and κs resolve ON DEMAND (synchronous
- * callbacks over OPFS handles); one stage's weights resident at a time. */
+/** Staged generation with a sequence-following window (row
+ * `staged-window-growth`): stage k-forms are weightless, so the session
+ * recompiles them per geometric window bucket from the streamed-download
+ * manifest — per-token compute scales with the actual sequence, never the
+ * model's full context. κs resolve ON DEMAND (synchronous callback over OPFS
+ * handles / recorded provenance); one stage's weights resident at a time.
+ * `onProgress` narrates window compiles and stage materializations so the
+ * first token of a large model is visible work, not a silent wait. */
 export async function generateStaged(
-  stageCount: number,
-  resolveStage: (i: number) => Uint8Array,
+  configJson: string,
+  manifest: { keys: string[]; kappas: string[]; shapes: string[]; dtypes: string[] },
+  contextLength: number | undefined,
+  layersPerStage: number,
   resolveKappa: (kappa: string) => Uint8Array | undefined,
   prompt: string,
   opts: GenOpts,
   tokenizer?: Uint8Array,
   callback?: (text: string) => void,
+  onProgress?: (line: string) => void,
 ): Promise<string> {
   await ensureReady();
-  return wasmGenerateStaged(stageCount, resolveStage, resolveKappa, tokenizer ?? undefined, prompt, opts, callback);
+  return wasmGenerateStaged(
+    configJson,
+    manifest.keys,
+    manifest.kappas,
+    manifest.shapes,
+    manifest.dtypes,
+    contextLength,
+    layersPerStage,
+    resolveKappa,
+    tokenizer ?? undefined,
+    prompt,
+    opts,
+    callback,
+    onProgress,
+  );
 }
 
 /** Token count of `text` under the model's own tokenizer (session trimming). */

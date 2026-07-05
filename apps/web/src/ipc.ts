@@ -599,6 +599,11 @@ export async function generate(opts: GenerateOpts): Promise<number> {
     activeWorker.onmessage = (e) => {
       if (e.data.type === 'token') {
         emitLine("chat://line", { stream: "stdout", line: e.data.text });
+      } else if (e.data.type === 'progress') {
+        // Narration of the honest work behind the first token (window
+        // compiles, per-stage materialization) — a status channel, never
+        // part of the completion text.
+        emitLine("chat://status", { stream: "stdout", line: e.data.line });
       } else if (e.data.type === 'done') {
         const g = globalThis as unknown as {
           __hologram_completions?: { prompt: string; text: string }[];

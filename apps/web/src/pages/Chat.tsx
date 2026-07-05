@@ -149,6 +149,10 @@ export function Chat() {
   const [running, setRunning] = useState(false);
   const [messages, setMessages] = useState<Message[]>([]);
   const [sessionMeta, setSessionMeta] = useState<{ contextLength: number | null; tokenizer?: Uint8Array } | null>(null);
+  // Narration of the work behind the first token (window compiles, stage
+  // materialization) — shown in the streaming placeholder so a large model's
+  // honest startup is visible, never a silent hang.
+  const [genStatus, setGenStatus] = useState("");
   const transcriptRef = useRef<HTMLDivElement>(null);
   const streamingRef = useRef<string>("");
 
@@ -207,8 +211,13 @@ export function Chat() {
       });
     };
 
+    const unlistenStatus = onProcessLine("chat://status", (l) => {
+      if (l.stream === "stderr") return;
+      setGenStatus(l.line);
+    });
     const unlisten = onProcessLine("chat://line", (l) => {
       if (l.stream === "stderr") return;
+      if (l.line) setGenStatus("");
       // Each event is a cumulative SNAPSHOT of the whole completion so far
       // (the generation loop re-decodes the full token sequence each step for
       // correct BPE spacing) — replace, never append: appending garbles the
@@ -223,6 +232,7 @@ export function Chat() {
     
     return () => {
       unlisten.then((un) => un());
+      unlistenStatus.then((un) => un());
       if (timeoutId !== null) window.clearTimeout(timeoutId);
     };
   }, []);
@@ -307,6 +317,7 @@ export function Chat() {
       ]);
     } finally {
       setRunning(false);
+      setGenStatus("");
     }
   }
 
@@ -372,7 +383,7 @@ export function Chat() {
               <div key={i} className={`bubble ${m.role}`}>
                 <div className="role">{m.role}</div>
                 {isStreamingPlaceholder ? (
-                  <div className="md">…</div>
+                  <div className="md">{genStatus ? `${genStatus} …` : "…"}</div>
                 ) : (
                   <MessageBody text={text} />
                 )}

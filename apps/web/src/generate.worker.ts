@@ -112,37 +112,48 @@ function readAll(handle: OpenHandle): Uint8Array {
   return buf;
 }
 
-// Staged generation (windowed execution over k): stage archives are read
-// upfront (small k-forms — no weights); κs resolve on demand through
-// pre-opened sync handles, re-readable per stage per pass. One stage's
-// weights are resident at a time.
+/** Read a small JSON/text file from the model dir (async read is fine here —
+ * these run before the synchronous generation loop starts). */
+async function readModelText(dir: FileSystemDirectoryHandle, name: string): Promise<string> {
+  const handle = await dir.getFileHandle(name);
+  return (await handle.getFile()).text();
+}
+
+// Staged generation with a sequence-following window (row
+// `staged-window-growth`): the session recompiles the weightless stage
+// k-forms per geometric window bucket from the recorded manifest, so
+// per-token compute scales with the actual sequence — never the model's full
+// context. κs resolve on demand through pre-opened sync handles (falling
+// back to recorded provenance); one stage's weights are resident at a time.
 async function runStaged(
-  staged: { modelDir: string; stageCount: number },
+  staged: { modelDir: string },
   prompt: string,
   genOpts: unknown,
   tokenizerBytes: Uint8Array | undefined,
   onToken: (text: string) => void,
+  onProgress: (line: string) => void,
 ): Promise<string> {
   const root = await navigator.storage.getDirectory();
   const models = await root.getDirectoryHandle("models");
   const modelDir = await models.getDirectoryHandle(staged.modelDir);
-  const stagesDir = await modelDir.getDirectoryHandle("stages");
   const sources = await loadKappaSources(staged.modelDir);
 
-  const stageArchives: Uint8Array[] = [];
-  const required = new Set<string>();
-  for (let i = 0; i < staged.stageCount; i++) {
-    const handle = await openSync(stagesDir, `${i}.holo`);
-    const bytes = readAll(handle);
-    handle.close();
-    stageArchives.push(bytes);
-    for (const kappa of await kappaRequirements(bytes)) required.add(kappa);
-  }
+  const configJson = await readModelText(modelDir, "config.json");
+  const manifest = JSON.parse(await readModelText(modelDir, "manifest.json")) as {
+    keys: string[];
+    kappas: string[];
+    shapes: string[];
+    dtypes: string[];
+  };
+  const stagesMeta = JSON.parse(await readModelText(modelDir, "stages.json")) as {
+    layersPerStage: number;
+    contextLength?: number;
+  };
 
   const tensorsDir = await root.getDirectoryHandle("tensors");
   const kappaHandles = new Map<string, OpenHandle>();
   try {
-    for (const kappa of required) {
+    for (const kappa of manifest.kappas) {
       try {
         kappaHandles.set(kappa, await openSync(tensorsDir, `${kappa}.bin`));
       } catch {
@@ -151,13 +162,16 @@ async function runStaged(
       }
     }
     return await generateStaged(
-      staged.stageCount,
-      (i: number) => stageArchives[i],
+      configJson,
+      manifest,
+      stagesMeta.contextLength,
+      stagesMeta.layersPerStage,
       kappaResolver(kappaHandles, sources),
       prompt,
       genOpts as never,
       tokenizerBytes,
       onToken,
+      onProgress,
     );
   } finally {
     for (const handle of kappaHandles.values()) handle.close();
@@ -170,12 +184,15 @@ self.onmessage = async (e) => {
   try {
     if (staged) {
       const result = await runStaged(
-        { modelDir, stageCount: staged.stageCount },
+        { modelDir },
         prompt,
         genOpts,
         tokenizerBytes,
         (text: string) => {
           self.postMessage({ type: "token", text });
+        },
+        (line: string) => {
+          self.postMessage({ type: "progress", line });
         },
       );
       self.postMessage({ type: "done", text: result });
