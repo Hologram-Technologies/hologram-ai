@@ -330,16 +330,44 @@ pub fn kappa_requirements(holo: &[u8]) -> Result<js_sys::Array, JsValue> {
 /// handle (worker context). Every resolved buffer is re-hashed and must
 /// reproduce its κ (content addressing is the integrity check); a missing or
 /// corrupt κ aborts naming the label. Returns the executable archive bytes.
-#[wasm_bindgen]
-pub fn materialize(holo: &[u8], resolve: &js_sys::Function) -> Result<Vec<u8>, JsValue> {
-    let mut store = |kappa: &str| -> anyhow::Result<Vec<u8>> {
-        let value = resolve
+/// A κ-store backed by JS callbacks. `resolve` returns the bytes for a κ (or
+/// null/undefined for "not present"); the optional `invalidate` is the
+/// UNPIN hook (row `saturation-residency`): called when resolved content
+/// fails verification, it must evict the cache tier's entry so the next
+/// `resolve` falls through to recorded provenance.
+struct JsKappaStore {
+    resolve: js_sys::Function,
+    invalidate: Option<js_sys::Function>,
+}
+
+impl hologram_ai::materialize::KappaStore for JsKappaStore {
+    fn resolve(&mut self, kappa: &str) -> anyhow::Result<Vec<u8>> {
+        let value = self
+            .resolve
             .call1(&JsValue::NULL, &JsValue::from_str(kappa))
             .map_err(|e| anyhow::anyhow!("κ resolver threw for `{kappa}`: {e:?}"))?;
         if value.is_null() || value.is_undefined() {
             anyhow::bail!("κ `{kappa}` not present in store");
         }
         Ok(js_sys::Uint8Array::new(&value).to_vec())
+    }
+
+    fn invalidate(&mut self, kappa: &str) {
+        if let Some(f) = &self.invalidate {
+            let _ = f.call1(&JsValue::NULL, &JsValue::from_str(kappa));
+        }
+    }
+}
+
+#[wasm_bindgen]
+pub fn materialize(
+    holo: &[u8],
+    resolve: &js_sys::Function,
+    invalidate: Option<js_sys::Function>,
+) -> Result<Vec<u8>, JsValue> {
+    let mut store = JsKappaStore {
+        resolve: resolve.clone(),
+        invalidate,
     };
     hologram_ai::materialize::materialize_archive(holo, &mut store)
         .map_err(|e| err(format!("materialize: {e:#}")))
@@ -709,6 +737,7 @@ pub fn generate_staged(
     context_length: Option<u32>,
     layers_per_stage: u32,
     resolve_kappa: &js_sys::Function,
+    invalidate_kappa: Option<js_sys::Function>,
     tokenizer_json: Option<Vec<u8>>,
     prompt: &str,
     opts: JsValue,
@@ -730,15 +759,9 @@ pub fn generate_staged(
     let layers_per_stage = std::num::NonZeroU64::new(u64::from(layers_per_stage))
         .ok_or_else(|| err("layers_per_stage must be at least 1"))?;
 
-    let resolve_kappa = resolve_kappa.clone();
-    let store = Box::new(move |kappa: &str| -> anyhow::Result<Vec<u8>> {
-        let value = resolve_kappa
-            .call1(&JsValue::NULL, &JsValue::from_str(kappa))
-            .map_err(|e| anyhow::anyhow!("κ resolver threw for `{kappa}`: {e:?}"))?;
-        if value.is_null() || value.is_undefined() {
-            anyhow::bail!("κ `{kappa}` not present in store");
-        }
-        Ok(js_sys::Uint8Array::new(&value).to_vec())
+    let store = Box::new(JsKappaStore {
+        resolve: resolve_kappa.clone(),
+        invalidate: invalidate_kappa,
     });
 
     let mut session = hologram_ai::staged::GrowableStagedSession::new(

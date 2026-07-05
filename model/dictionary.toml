@@ -253,6 +253,16 @@ executor = "rust"
 feature = "features/suites/s3_execution/total_algebraic_path.feature"
 
 [[row]]
+id = "saturation-residency"
+statement = "A failed verification UNPINS: the corrupted cache entry evaporates and resolution re-resolves once through the deeper tier (recorded provenance), so cache corruption degrades to a stream instead of dead-ending the journey; only the failing entry is evicted — every other cached κ (bound content) is untouched; without a deeper tier the failure stays loud naming the label, and recovered bytes must reproduce the κ before anything executes."
+stage = "S3"
+status = "build"
+oracles = ["journey-reference"]
+tier = "suite"
+executor = "rust"
+feature = "features/suites/s3_execution/saturation_residency.feature"
+
+[[row]]
 id = "bounded-embedding"
 statement = "A model is bounded by its unavoidable per-row/per-tile work, never whole-matrix F32 materialization: the embedding gathers the token rows at the table's native dtype and widens only the gathered result, so the whole [vocab, hidden] F32 image is never materialized, and a fused Phi3-family model executes monolithically and staged to identical logits."
 stage = "S3"

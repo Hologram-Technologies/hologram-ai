@@ -116,6 +116,47 @@ path. Arbitrary input: totality holds per tier by finiteness (any byte
 stream is Q0-valid; higher tiers reached by carry), so novel input executes
 on the same path as known input; reuse varies, semantics never.
 
+## Lifecycle: saturation-derived residency (UOR-Framework #2)
+
+Retention is derived from resolution state, not assigned by policy:
+λ_eff = λ_base · T_ctx, where T_ctx falls to zero as an object's fibers pin;
+σ = 1 means no decay. The pinning events are exactly the trust-boundary
+crossings this model already defines — no new runtime work, only counters
+off the hot path:
+
+| Event (already occurring) | Pin weight | Tier affected |
+|---|---|---|
+| κ bound in the active compiled archive | σ = 1 (ground state) | κ-store: never evict while bound |
+| First-touch verification (session set) | high | κ-store, session memo |
+| Label recurs as operand in a derivation (CE reuse) | medium | session memo: prefix cone crystallizes |
+| Materialization / read | low | κ-store |
+| Verification failure / prior mismatch | unpin + T spike | evaporates, re-resolves from provenance |
+
+**Build (row `saturation-residency`)** — the one mandatory eviction event,
+the inverse of admission: a failed verification UNPINS. The corrupted cache
+entry evaporates (`KappaStore::invalidate` — the OPFS entry and its open
+handle in the browser, the `{κ}.bin` file natively) and resolution
+re-resolves once through the deeper tier (recorded provenance),
+re-verifying before anything executes. A wrong cache degrades to a stream,
+never a dead end; without a deeper tier the failure stays loud, naming the
+label. Only the failing entry is unpinned — bound content is never evicted
+by another entry's failure. Witnessed natively (two-tier store: recovery,
+evaporation, neighbors untouched, unverifiable-recovery rejection) and in
+the hermetic browser journey (a corrupted κ-store tensor: the handshake
+still matches the reference and the entry has evaporated).
+
+**Declared, open** — the graded remainder: σ-ordered pressure eviction of
+the κ-store (unbound gas-phase content of unloaded models evaporates first;
+the active binding is crystalline by construction), λ_base pressure-scaling
+generalizing the residency admission probe from binary to graded, and
+session-memo decay derivation (prefix-cone labels re-pin every token).
+These need an eviction-pressure mechanism that does not yet exist in-repo —
+today the κ-store budget is write-time only and nothing else evicts. Policy
+quality (hit rate vs an LRU baseline) is measured when they land, never
+asserted. Discipline: hologram-ai needs only the eviction ordering σ
+induces, not the thermodynamic vocabulary; FiberBudget/T_ctx stay upstream
+primitives.
+
 ## Verification placement
 
 Verify at trust-boundary crossings, once per crossing, never per traversal.

@@ -811,6 +811,11 @@ struct BddWorld {
     verified_second_pass: Option<anyhow::Result<Vec<u8>>>,
     verified_fresh_err: Option<String>,
     verified_corrupt_kappa: Option<String>,
+    // S3 — saturation residency (row `saturation-residency`)
+    unpin_result: Option<anyhow::Result<Vec<u8>>>,
+    unpin_corrupt_kappa: Option<String>,
+    unpin_store: Option<StoreDir>,
+    unpin_other_entries: Option<usize>,
     // S3 — bounded embedding / fused Phi3 (row `bounded-embedding`)
     bounded_embed: Option<BoundedEmbed>,
     bounded_embed_compiled: Option<Vec<Vec<u8>>>,
@@ -2879,6 +2884,123 @@ async fn then_float_tally(w: &mut BddWorld) {
         total,
         100.0 * float_nodes as f64 / total as f64
     );
+}
+
+// ─────────── S3 — saturation residency (row `saturation-residency`) ──────────
+
+/// A two-tier κ-store: a [`DirKappaStore`] cache over an in-memory
+/// provenance tier — the native mirror of the browser's OPFS-over-recorded-
+/// provenance resolver. `invalidate` evicts the cache entry only; resolution
+/// then falls through to provenance.
+struct TieredStore {
+    cache: DirKappaStore,
+    cache_root: std::path::PathBuf,
+    provenance: std::collections::HashMap<String, Vec<u8>>,
+}
+
+impl hologram_ai::materialize::KappaStore for TieredStore {
+    fn resolve(&mut self, kappa: &str) -> anyhow::Result<Vec<u8>> {
+        if let Ok(bytes) = self.cache.resolve(kappa) {
+            return Ok(bytes);
+        }
+        self.provenance
+            .get(kappa)
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("κ `{kappa}` not present in any tier"))
+    }
+
+    fn invalidate(&mut self, kappa: &str) {
+        let _ = std::fs::remove_file(self.cache_root.join(format!("{kappa}.bin")));
+    }
+}
+
+#[when("a stage materializes over a corrupted cache backed by a provenance tier")]
+async fn when_unpin_recovers(w: &mut BddWorld) {
+    use hologram_ai::materialize::materialize_archive_with;
+    let store_dir = staged_store("unpin-recover");
+    let kit = staged_kit();
+    let corrupted = corrupt_one_kappa(&store_dir.path, &kit.stages[0]);
+    let provenance: std::collections::HashMap<String, Vec<u8>> = staged_manifest(false)
+        .into_iter()
+        .map(|(name, dims)| {
+            let bytes = staged_tensor_bytes(&name, &dims);
+            (kappa_of(&bytes), bytes)
+        })
+        .collect();
+    let others = std::fs::read_dir(&store_dir.path)
+        .expect("the cache dir lists")
+        .count()
+        - 1; // the corrupted entry evaporates; the rest must not
+    let mut store = TieredStore {
+        cache: DirKappaStore::new(&store_dir.path),
+        cache_root: store_dir.path.clone(),
+        provenance,
+    };
+    let mut fresh = std::collections::HashSet::new();
+    w.unpin_result = Some(materialize_archive_with(
+        &kit.stages[0],
+        &mut store,
+        &mut fresh,
+    ));
+    w.unpin_corrupt_kappa = Some(corrupted);
+    w.unpin_other_entries = Some(others);
+    w.unpin_store = Some(store_dir);
+}
+
+#[then("materialization succeeds on content re-verified from the deeper tier")]
+async fn then_unpin_recovered(w: &mut BddWorld) {
+    let result = w.unpin_result.as_ref().expect("the recovery ran");
+    assert!(
+        result.is_ok(),
+        "cache corruption must degrade to a stream, never a dead end: {:?}",
+        result.as_ref().err()
+    );
+    println!("[saturation-residency] corrupted cache recovered through provenance");
+}
+
+#[then("the corrupted cache entry has evaporated")]
+async fn then_unpin_evaporated(w: &mut BddWorld) {
+    let store = w.unpin_store.as_ref().expect("the cache dir");
+    let kappa = w.unpin_corrupt_kappa.as_ref().expect("the corrupted κ");
+    assert!(
+        !store.path.join(format!("{kappa}.bin")).exists(),
+        "the failed entry must leave the cache by the law that admitted it"
+    );
+}
+
+#[then("every other cached entry is untouched")]
+async fn then_unpin_others_intact(w: &mut BddWorld) {
+    let store = w.unpin_store.as_ref().expect("the cache dir");
+    let expected = w.unpin_other_entries.expect("the pre-count");
+    let remaining = std::fs::read_dir(&store.path)
+        .expect("the cache dir lists")
+        .count();
+    assert_eq!(
+        remaining, expected,
+        "only the failing entry is unpinned — bound content is never evicted"
+    );
+    println!("[saturation-residency] {remaining} bound entries untouched");
+}
+
+#[when("the provenance tier itself serves corrupted content")]
+async fn when_unpin_bad_provenance(w: &mut BddWorld) {
+    use hologram_ai::materialize::materialize_archive_with;
+    let store_dir = staged_store("unpin-bad-prov");
+    let kit = staged_kit();
+    let corrupted = corrupt_one_kappa(&store_dir.path, &kit.stages[0]);
+    // The deeper tier serves the SAME corrupted bytes: recovery must reject.
+    let bad = std::fs::read(store_dir.path.join(format!("{corrupted}.bin")))
+        .expect("the corrupted content reads");
+    let mut store = TieredStore {
+        cache: DirKappaStore::new(&store_dir.path),
+        cache_root: store_dir.path.clone(),
+        provenance: std::collections::HashMap::from([(corrupted.clone(), bad)]),
+    };
+    let mut fresh = std::collections::HashSet::new();
+    let err = materialize_archive_with(&kit.stages[0], &mut store, &mut fresh)
+        .expect_err("unverifiable recovery must stay loud");
+    w.verified_fresh_err = Some(format!("{err:#}"));
+    w.verified_corrupt_kappa = Some(corrupted);
 }
 
 // ─────────── S3 — session verified-κ (row `session-verified-kappa`) ──────────

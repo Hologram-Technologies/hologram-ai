@@ -309,6 +309,35 @@ Given("a zero local cache budget", async function () {
   });
 });
 
+When("one cached fixture tensor is corrupted in the κ-store", async function () {
+  // Flip a byte in one cached tensor (same length — the label no longer
+  // reproduces). The journey must recover through recorded provenance and
+  // evaporate the entry (row `saturation-residency`).
+  this.corruptedKappa = await this.retryOpfs(() => this.page.evaluate(async () => {
+    const root = await navigator.storage.getDirectory();
+    const tensors = await root.getDirectoryHandle("tensors");
+    for await (const [name, handle] of tensors.entries()) {
+      if (handle.kind !== "file" || !name.endsWith(".bin")) continue;
+      const bytes = new Uint8Array(await (await handle.getFile()).arrayBuffer());
+      bytes[0] ^= 0xff;
+      const writable = await handle.createWritable();
+      await writable.write(bytes);
+      await writable.close();
+      return name.replace(/\.bin$/, "");
+    }
+    throw new Error("NotFoundError: no cached tensors to corrupt");
+  }));
+});
+
+Then("the corrupted κ-store entry has evaporated", async function () {
+  assert.ok(this.corruptedKappa, "a tensor was corrupted earlier in the scenario");
+  const names = await this.opfsTensorNames();
+  assert.ok(
+    !names.includes(`${this.corruptedKappa}.bin`),
+    `the failed entry must leave the cache: ${this.corruptedKappa} still present`,
+  );
+});
+
 Then("the local κ-store holds no fixture tensors", async function () {
   const names = await this.opfsTensorNames();
   assert.deepEqual(names, [], `a zero budget must cache nothing, found: ${names}`);

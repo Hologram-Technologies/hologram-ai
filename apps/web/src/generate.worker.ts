@@ -38,7 +38,11 @@ async function materializeFromOpfs(holoBytes: Uint8Array, modelDir?: string): Pr
         // provenance; a κ that resolves nowhere aborts naming the label.
       }
     }
-    return await materialize(holoBytes, kappaResolver(handles, sources));
+    return await materialize(
+      holoBytes,
+      kappaResolver(handles, sources),
+      kappaInvalidator(handles, tensorsDir),
+    );
   } finally {
     for (const handle of handles.values()) handle.close();
   }
@@ -98,6 +102,32 @@ function kappaResolver(
     const source = sources[kappa];
     if (!source) return undefined;
     return syncFetchRange(source.url, source.start, source.end);
+  };
+}
+
+/** The UNPIN hook (row `saturation-residency`): a κ whose cached content
+ * failed verification is evicted — the open handle drops (so the resolver's
+ * next call falls through to the recorded provenance) and the OPFS entry
+ * evaporates (fire-and-forget: sync-context callers cannot await, and the
+ * handle removal alone already redirects resolution). Corrupted content
+ * leaves the cache by the same law that admitted it. */
+function kappaInvalidator(
+  handles: Map<string, OpenHandle>,
+  tensorsDir: FileSystemDirectoryHandle,
+): (kappa: string) => void {
+  return (kappa: string) => {
+    const handle = handles.get(kappa);
+    if (handle) {
+      try {
+        handle.close();
+      } catch {
+        // already closed — eviction proceeds regardless
+      }
+      handles.delete(kappa);
+    }
+    void tensorsDir.removeEntry(`${kappa}.bin`).catch(() => {
+      // nothing to evaporate — the redirect to provenance already happened
+    });
   };
 }
 
@@ -167,6 +197,7 @@ async function runStaged(
       stagesMeta.contextLength,
       stagesMeta.layersPerStage,
       kappaResolver(kappaHandles, sources),
+      kappaInvalidator(kappaHandles, tensorsDir),
       prompt,
       genOpts as never,
       tokenizerBytes,

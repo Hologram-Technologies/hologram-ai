@@ -151,6 +151,7 @@ export async function generateStaged(
   contextLength: number | undefined,
   layersPerStage: number,
   resolveKappa: (kappa: string) => Uint8Array | undefined,
+  invalidateKappa: ((kappa: string) => void) | undefined,
   prompt: string,
   opts: GenOpts,
   tokenizer?: Uint8Array,
@@ -167,6 +168,7 @@ export async function generateStaged(
     contextLength,
     layersPerStage,
     resolveKappa,
+    invalidateKappa,
     tokenizer ?? undefined,
     prompt,
     opts,
@@ -195,9 +197,10 @@ export async function kappaRequirements(holo: Uint8Array): Promise<string[]> {
 export async function materialize(
   holo: Uint8Array,
   resolve: (kappa: string) => Uint8Array | undefined,
+  invalidate?: (kappa: string) => void,
 ): Promise<Uint8Array> {
   await ensureReady();
-  return wasmMaterialize(holo, resolve);
+  return wasmMaterialize(holo, resolve, invalidate);
 }
 
 export { KappaHasher };

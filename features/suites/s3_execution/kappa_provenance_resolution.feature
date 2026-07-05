@@ -16,3 +16,11 @@ Feature: κ-provenance resolution — the local store is a cache, not a mirror
     When the user sends handshake message 1
     Then assistant turn 1 streams a non-empty completion
     And the completion matches reference turn 1
+
+  Scenario: a corrupted cache entry recovers through recorded provenance
+    When the fixture model is downloaded
+    And one cached fixture tensor is corrupted in the κ-store
+    When the user sends handshake message 1
+    Then assistant turn 1 streams a non-empty completion
+    And the completion matches reference turn 1
+    And the corrupted κ-store entry has evaporated

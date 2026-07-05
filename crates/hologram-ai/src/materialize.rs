@@ -29,6 +29,14 @@ pub const KAPPA_MAP_EXTENSION: &str = "holospaces.kappa_map";
 pub trait KappaStore {
     /// Return the content addressed by `kappa`, or fail naming the label.
     fn resolve(&mut self, kappa: &str) -> Result<Vec<u8>>;
+
+    /// A verification failure UNPINS: the store evicts its cached entry for
+    /// `kappa` so the next [`Self::resolve`] falls through to a deeper tier
+    /// (recorded provenance) instead of re-serving the corrupted bytes.
+    /// Corrupted content leaves the cache by the same law that admitted it
+    /// (row `saturation-residency`). Stores with no cache tier need do
+    /// nothing — the default is a no-op.
+    fn invalidate(&mut self, _kappa: &str) {}
 }
 
 impl<F> KappaStore for F
@@ -68,6 +76,12 @@ impl KappaStore for DirKappaStore {
     fn resolve(&mut self, kappa: &str) -> Result<Vec<u8>> {
         let path = self.root.join(format!("{kappa}.bin"));
         std::fs::read(&path).with_context(|| format!("κ `{kappa}` not present in store"))
+    }
+
+    fn invalidate(&mut self, kappa: &str) {
+        // Evaporate the corrupted entry; a directory store has no deeper
+        // tier, so the retry then fails loud — fail closed, by construction.
+        let _ = std::fs::remove_file(self.root.join(format!("{kappa}.bin")));
     }
 }
 
@@ -226,7 +240,7 @@ fn patch_constants(
                 entry.bytes.len()
             );
         }
-        let bytes = store
+        let mut bytes = store
             .resolve(&req.kappa)
             .with_context(|| format!("resolving κ `{}`", req.kappa))?;
         // Verify at the trust-boundary crossing — once per session per κ.
@@ -234,11 +248,27 @@ fn patch_constants(
         if !verified.contains(&req.kappa) {
             let derived = kappa_of(&bytes);
             if derived != req.kappa {
-                bail!(
-                    "κ integrity failure for ConstantId({}): store content hashes to `{derived}`, expected `{}`",
-                    req.constant,
-                    req.kappa
-                );
+                // A failed verification UNPINS: evict the corrupted cache
+                // entry and re-resolve once — the store's deeper tier
+                // (recorded provenance) recovers the content, so cache
+                // corruption degrades to a stream instead of dead-ending
+                // the journey (row `saturation-residency`). If no deeper
+                // tier answers, or the recovered bytes still do not
+                // reproduce the label, the failure stays loud — fail
+                // closed; the retry never executes unverified content.
+                store.invalidate(&req.kappa);
+                let recovered = store
+                    .resolve(&req.kappa)
+                    .ok()
+                    .filter(|b| kappa_of(b) == req.kappa);
+                match recovered {
+                    Some(b) => bytes = b,
+                    None => bail!(
+                        "κ integrity failure for ConstantId({}): store content hashes to `{derived}`, expected `{}`",
+                        req.constant,
+                        req.kappa
+                    ),
+                }
             }
             verified.insert(req.kappa.clone());
         }
