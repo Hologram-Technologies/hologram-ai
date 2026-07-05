@@ -80,26 +80,46 @@ impl Pass for ConstantEvaluation {
                 continue; // not all inputs are constants
             }
 
-            // Get input shapes from tensor_info (prefer) or param info.
-            let input_shapes: Vec<Vec<usize>> = node
+            // Get input shapes from tensor_info (prefer) or param info — but
+            // only a shape whose element count matches the inline data is the
+            // data's shape. A disagreement means the graph carries a stale or
+            // aliased constant under this id; folding would compute garbage
+            // (and indexing by the wrong shape panics), so skip the node and
+            // leave it to the runtime, which binds the real producer's output.
+            let input_shapes: Option<Vec<Vec<usize>>> = node
                 .inputs
                 .iter()
                 .zip(inputs.iter())
-                .map(|(tid, (_data, param_info))| {
+                .map(|(tid, (data, param_info))| {
+                    let elem_sz = param_info.logical_dtype.byte_size().unwrap_or(1).max(1);
+                    let n_elems = data.len() / elem_sz;
+                    let fits = |s: &Vec<usize>| s.iter().product::<usize>() == n_elems;
                     graph
                         .tensor_info
                         .get(tid)
                         .and_then(|ti| concrete_shape(&ti.shape))
-                        .or_else(|| concrete_shape(&param_info.shape))
-                        .unwrap_or_else(|| {
-                            let elem_sz = param_info.logical_dtype.byte_size().unwrap_or(1);
-                            match _data.len().checked_div(elem_sz) {
-                                Some(n) => vec![n],
-                                None => vec![_data.len()],
-                            }
+                        .filter(fits)
+                        .or_else(|| concrete_shape(&param_info.shape).filter(fits))
+                        .or_else(|| {
+                            // Neither metadata shape is concrete: 1-D over the
+                            // data is always self-consistent.
+                            let no_meta = graph
+                                .tensor_info
+                                .get(tid)
+                                .and_then(|ti| concrete_shape(&ti.shape))
+                                .is_none()
+                                && concrete_shape(&param_info.shape).is_none();
+                            no_meta.then(|| vec![n_elems])
                         })
                 })
                 .collect();
+            let Some(input_shapes) = input_shapes else {
+                tracing::warn!(
+                    node = ?node.op,
+                    "ConstEval: inline constant contradicts its recorded shape; skipping fold"
+                );
+                continue;
+            };
 
             // Try to evaluate.
             if let Some((result_bytes, result_dtype, result_shape)) =
@@ -225,6 +245,13 @@ fn eval_node(
         // Where(cond, x, y) with N-D broadcast.
         AiOp::Where => eval_where(inputs, input_shapes),
 
+        // ScatterND over constant inputs (attention-mask construction in
+        // inference exports). Only the plain write folds; a reduction
+        // variant stays for the runtime path.
+        AiOp::ScatterND {
+            reduce: crate::ir::ScatterReduce::None,
+        } => eval_scatter_nd(inputs, input_shapes),
+
         // Cast to different dtype.
         AiOp::Cast { to } => eval_cast(inputs, *to),
 
@@ -302,6 +329,70 @@ mod tests {
             tensor_names: HashMap::new(),
             topo_cache: Default::default(),
         }
+    }
+
+    #[test]
+    fn scatter_nd_folds_constant_mask_write() {
+        // ScatterND(data[2,3], indices[2,1], updates[2,3]) — row writes, the
+        // attention-mask construction shape. All inputs constant → must fold.
+        let data: Vec<u8> = (0..6).flat_map(|_| 0f32.to_le_bytes()).collect();
+        let indices: Vec<u8> = [1i64, 0].iter().flat_map(|v| v.to_le_bytes()).collect();
+        let updates: Vec<u8> = (1..=6).flat_map(|v| (v as f32).to_le_bytes()).collect();
+        let params = HashMap::from([
+            (0, AiParam::inline(data, make_ti(DType::F32, &[2, 3]))),
+            (1, AiParam::inline(indices, make_ti(DType::INT64, &[2, 1]))),
+            (2, AiParam::inline(updates, make_ti(DType::F32, &[2, 3]))),
+        ]);
+        let tensor_info = HashMap::from([
+            (0, make_ti(DType::F32, &[2, 3])),
+            (1, make_ti(DType::INT64, &[2, 1])),
+            (2, make_ti(DType::F32, &[2, 3])),
+            (3, make_ti(DType::F32, &[2, 3])),
+        ]);
+        let nodes = vec![AiNode::new(
+            0,
+            AiOp::ScatterND {
+                reduce: crate::ir::ScatterReduce::None,
+            },
+            vec![0, 1, 2],
+            vec![3],
+        )];
+        let g = make_graph_with_params(nodes, params, tensor_info, vec![3]);
+        let g = ConstantEvaluation.run(g).expect("pass runs");
+        let AiParam::Inline { data, .. } = g.params.get(&3).expect("the scatter folded") else {
+            panic!("expected an inline fold");
+        };
+        let vals: Vec<f32> = data
+            .chunks_exact(4)
+            .map(|c| f32::from_le_bytes(c.try_into().unwrap()))
+            .collect();
+        // Row 1 ← updates row 0, row 0 ← updates row 1.
+        assert_eq!(vals, vec![4.0, 5.0, 6.0, 1.0, 2.0, 3.0]);
+    }
+
+    #[test]
+    fn stale_shape_metadata_skips_the_fold_instead_of_panicking() {
+        // An Add whose second input's tensor_info claims 6 elements while the
+        // inline data holds 2 (the aliased-constant corruption class): the
+        // node must be left to the runtime, never folded or panicked on.
+        let a: Vec<u8> = (0..6).flat_map(|v| (v as f32).to_le_bytes()).collect();
+        let b: Vec<u8> = [7i64, 8].iter().flat_map(|v| v.to_le_bytes()).collect();
+        let params = HashMap::from([
+            (0, AiParam::inline(a, make_ti(DType::F32, &[2, 3]))),
+            (1, AiParam::inline(b, make_ti(DType::INT64, &[2]))),
+        ]);
+        let tensor_info = HashMap::from([
+            (0, make_ti(DType::F32, &[2, 3])),
+            (1, make_ti(DType::INT64, &[6, 1])), // contradicts the 2-element data
+            (2, make_ti(DType::F32, &[2, 3])),
+        ]);
+        let nodes = vec![AiNode::new(0, AiOp::Add, vec![0, 1], vec![2])];
+        let g = make_graph_with_params(nodes, params, tensor_info, vec![2]);
+        let g = ConstantEvaluation.run(g).expect("pass must not panic");
+        assert!(
+            !g.params.contains_key(&2),
+            "a contradictory constant must not fold"
+        );
     }
 
     #[test]

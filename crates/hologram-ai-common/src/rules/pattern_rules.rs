@@ -544,7 +544,16 @@ fn slice_to_gather_rewrite(
     let indices: Vec<i64> = (s..e).collect();
     let num_indices = indices.len();
 
-    let mut next_tid = graph.tensor_info.keys().copied().max().unwrap_or(0) + 1;
+    // tensor_info and params share the TensorId namespace — scan both so a
+    // freshly-minted id can never alias a params-only constant.
+    let mut next_tid = graph
+        .tensor_info
+        .keys()
+        .chain(graph.params.keys())
+        .copied()
+        .max()
+        .unwrap_or(0)
+        + 1;
     let indices_tid = next_tid;
     next_tid += 1;
     let _ = next_tid; // silence unused
@@ -692,7 +701,14 @@ fn position_ids_inject(
         // graph.inputs[i] is the matching tid.
         *graph.inputs.get(i)?
     } else {
-        let next_tid = graph.tensor_info.keys().copied().max().unwrap_or(0) + 1;
+        let next_tid = graph
+            .tensor_info
+            .keys()
+            .chain(graph.params.keys())
+            .copied()
+            .max()
+            .unwrap_or(0)
+            + 1;
         graph.tensor_names.insert(next_tid, "position_ids".into());
         graph.inputs.push(next_tid);
         graph.input_names.push("position_ids".into());

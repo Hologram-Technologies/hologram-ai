@@ -123,9 +123,15 @@ impl Pass for DataPropagation {
         //
         // IMPORTANT: Multiple Reshape nodes may share the same shape tensor (e.g.,
         // Q/K/V in GQA attention). The -1 resolves to DIFFERENT values depending on
-        // the data tensor (Q=32, K/V=4 for head count). We must resolve per-consumer
-        // and store the result in each Reshape's OUTPUT tensor, not mutate the shared
-        // shape tensor.
+        // the data tensor (Q=32, K/V=4 for head count). Resolution is therefore
+        // per-consumer and applied to the consuming Reshape's OUTPUT SHAPE in
+        // tensor_info — never to `known` and never to the shared shape tensor.
+        // `known` carries the runtime VALUES flowing through a tensor; a Reshape's
+        // output carries the reshaped DATA, not its own target shape. Writing the
+        // target shape into the output's value channel corrupted integer data
+        // tensors (e.g. position ids): the materializer inlined a rank-N tensor as
+        // a tiny "shape vector" param and downstream constant folding computed with
+        // garbage (Qwen2.5 regression — caught by the architecture matrix).
         for &nid in order.iter() {
             let idx = match node_idx.get(&nid) {
                 Some(&i) => i,
@@ -190,10 +196,32 @@ impl Pass for DataPropagation {
                                     break;
                                 }
                             }
-                            // Store the resolved shape as the Reshape output's known values.
-                            // This feeds into shape_prop for the compiled output shape.
-                            known.insert(out_tid, resolved_vals);
-                            computed_tids.insert(out_tid);
+                            // Strengthen the Reshape output's SHAPE (the correct
+                            // channel for a target shape): concretize dims the
+                            // resolution pinned, leave the rest untouched. An
+                            // empty (unknown-rank) shape is replaced wholesale,
+                            // with Dynamic holding unresolved positions.
+                            if let Some(info) = graph.tensor_info.get_mut(&out_tid) {
+                                if info.shape.is_empty() {
+                                    info.shape = resolved_vals
+                                        .iter()
+                                        .map(|v| match v {
+                                            Some(n) if *n > 0 => {
+                                                crate::ir::Dim::Concrete(*n as u64)
+                                            }
+                                            _ => crate::ir::Dim::Dynamic,
+                                        })
+                                        .collect();
+                                } else if info.shape.len() == resolved_vals.len() {
+                                    for (dim, v) in info.shape.iter_mut().zip(&resolved_vals) {
+                                        if let Some(v) = v {
+                                            if *v > 0 && dim.as_concrete().is_none() {
+                                                *dim = crate::ir::Dim::Concrete(*v as u64);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
                         }
                     }
                 }
@@ -264,6 +292,26 @@ impl Pass for DataPropagation {
                 let preserve_dtype = existing.map(|ti| ti.logical_dtype).filter(|dt| {
                     matches!(dt, DType::INT64 | DType::INT32 | DType::INT8 | DType::U8)
                 });
+                // A fully-concrete tensor_info shape whose element count
+                // disagrees with the value count means these are NOT the
+                // tensor's runtime values (e.g. a stale or smuggled shape
+                // vector on a data tensor). Materializing would inline
+                // garbage data under a real tensor's id — skip loudly.
+                let contradicts = existing.is_some_and(|ti| {
+                    let dims: Vec<u64> = ti.shape.iter().filter_map(|d| d.as_concrete()).collect();
+                    dims.len() == ti.shape.len()
+                        && !ti.shape.is_empty()
+                        && dims.iter().product::<u64>() as usize != concrete.len()
+                });
+                if contradicts {
+                    tracing::warn!(
+                        tid,
+                        vals = concrete.len(),
+                        shape = ?existing.map(|ti| ti.shape.clone()),
+                        "DataProp: known values contradict the tensor's concrete shape; not materializing"
+                    );
+                    continue;
+                }
                 if let (Some(shape), Some(dtype)) = (preserve_shape, preserve_dtype) {
                     // Re-encode in the tensor's native dtype so byte counts
                     // and downstream interpretation stay consistent.
@@ -763,9 +811,28 @@ mod tests {
         let concat_vals = g2.tensor_info[&9].known_i64_values.as_ref().unwrap();
         assert_eq!(concat_vals, &[None, None, Some(-1), Some(64)]);
 
-        // Reshape output (per-consumer resolved): -1 → 2048/64 = 32
-        let reshape_vals = g2.tensor_info[&10].known_i64_values.as_ref().unwrap();
-        assert_eq!(reshape_vals, &[None, None, Some(32), Some(64)]);
+        // Reshape output (per-consumer resolved): -1 → 2048/64 = 32. The
+        // resolution lands in the output's SHAPE — the value channel stays
+        // untouched (the output carries reshaped DATA, not its target shape),
+        // and no param may be materialized for it.
+        let out_info = &g2.tensor_info[&10];
+        assert_eq!(
+            out_info
+                .shape
+                .iter()
+                .map(|d| d.as_concrete())
+                .collect::<Vec<_>>(),
+            vec![None, None, Some(32), Some(64)],
+            "resolved -1 concretizes the output shape per-consumer"
+        );
+        assert!(
+            out_info.known_i64_values.is_none(),
+            "a Reshape output's value channel must not carry its target shape"
+        );
+        assert!(
+            !g2.params.contains_key(&10),
+            "no inline param may be materialized for a data-carrying output"
+        );
     }
 
     /// Test arithmetic: Mul on known i64 values.

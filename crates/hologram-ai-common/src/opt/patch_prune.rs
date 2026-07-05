@@ -134,7 +134,13 @@ impl Pass for PatchPruneInjection {
         );
 
         // Step 5: Allocate new TensorIds and NodeIds.
-        let max_tid = graph.tensor_info.keys().copied().max().unwrap_or(0);
+        let max_tid = graph
+            .tensor_info
+            .keys()
+            .chain(graph.params.keys())
+            .copied()
+            .max()
+            .unwrap_or(0);
         let max_nid = graph.nodes.iter().map(|n| n.id).max().unwrap_or(0);
 
         let kept_indices_tid = max_tid + 1;

@@ -941,3 +941,74 @@ pub(crate) fn broadcast_expand_bytes(
     }
     Some(output)
 }
+
+/// ScatterND (`reduce: None`): `output = data` with `updates` written at the
+/// N-D `indices` (ONNX semantics). Moves element bytes without interpreting
+/// them, so any dtype folds. Inference-graph exports use ScatterND with
+/// constant inputs to build attention masks; the substrate has no scatter
+/// kernel, so a fold here is what lets those graphs lower.
+pub(crate) fn eval_scatter_nd(
+    inputs: &[(&[u8], &TensorInfo)],
+    input_shapes: &[Vec<usize>],
+) -> Option<(Vec<u8>, DType, Vec<usize>)> {
+    if inputs.len() < 3 {
+        return None;
+    }
+    let (data, data_info) = inputs[0];
+    let (indices_bytes, indices_info) = inputs[1];
+    let (updates, _) = inputs[2];
+    let data_shape = &input_shapes[0];
+    let indices_shape = &input_shapes[1];
+
+    let out_elems: usize = data_shape.iter().product();
+    if out_elems == 0 || out_elems > MAX_OUTPUT_ELEMS {
+        return None;
+    }
+    let elem_size = data_info.logical_dtype.byte_size()?;
+    if data.len() != out_elems * elem_size {
+        return None;
+    }
+
+    // indices: [..., k] — k indexes the first k dims of data; each update
+    // slice covers the remaining data dims.
+    let k = *indices_shape.last()?;
+    if k == 0 || k > data_shape.len() {
+        return None;
+    }
+    let n_updates: usize = indices_shape[..indices_shape.len() - 1].iter().product();
+    let slice_elems: usize = data_shape[k..].iter().product();
+    let slice_bytes = slice_elems * elem_size;
+    if updates.len() != n_updates * slice_bytes {
+        return None;
+    }
+    let indices = read_as_f64(indices_bytes, indices_info.logical_dtype)?;
+    if indices.len() != n_updates * k {
+        return None;
+    }
+
+    // Row strides over the first k dims, in slices.
+    let mut strides = vec![1usize; k];
+    for d in (0..k - 1).rev() {
+        strides[d] = strides[d + 1] * data_shape[d + 1];
+    }
+
+    let mut out = data.to_vec();
+    for u in 0..n_updates {
+        let mut offset = 0usize;
+        for d in 0..k {
+            let dim = data_shape[d] as i64;
+            let mut idx = indices[u * k + d] as i64;
+            if idx < 0 {
+                idx += dim;
+            }
+            if idx < 0 || idx >= dim {
+                return None; // out-of-range constant index: leave to the runtime error path
+            }
+            offset += idx as usize * strides[d];
+        }
+        let dst = offset * slice_bytes;
+        out[dst..dst + slice_bytes]
+            .copy_from_slice(&updates[u * slice_bytes..(u + 1) * slice_bytes]);
+    }
+    Some((out, data_info.logical_dtype, data_shape.clone()))
+}
