@@ -442,6 +442,23 @@ The attribution names the structure of the excess:
   unchanged prefix elides structurally) or sub-kernel elision
   (substrate-owned, like `total-algebraic-path`). This is the decode
   frontier, now measured rather than suspected.
+
+  Feasibility, source-confirmed for the tractable realization — a DECODE
+  PLAN beside the prefill plan: K and V are ordinary graph tensors (the
+  `GroupedQueryAttention` op consumes them as inputs; nothing is locked
+  inside a fused kernel), and for a single last-position query causal
+  masking is vacuous, so a decode step needs only existing ops — seq-1
+  projections, RoPE at the absolute position (rotated K/V carried, so the
+  fused kernel's index-relative RoPE moves out of the decode path), Concat
+  of the carried prefix K/V with the new position's K/V, GQA with q=1
+  against the full carried span, MLP at one position, the
+  single-position head with no gather. The carried K/V are not a mutable
+  cache: each step's K/V output is DERIVED CONTENT of the realized tokens,
+  flowing through named ports exactly as stage activations do — the
+  "resident prefix labels" of the Generation axis, made explicit. Per-step
+  compute drops from a window-sized forward to the decode floor's own
+  O(L·d²) + attention reads. Prefill (the whole-window pass that seeds the
+  carried K/V) remains the existing plan with per-layer K/V outputs.
 - **The head was window-multiplied for a one-row read** — fixed: row
   `single-position-head` (build). The pipeline gathers the consumed
   position's hidden state after the final norm (`last_pos`, a runtime
