@@ -331,6 +331,9 @@ async function ensureQuantArtifacts(
         `re-derived artifact κ \`${kappa}\` does not reproduce the recorded \`${entry.artifact}\``,
       );
     }
+    // Crystallize before writing: a lingering wide blob is gas-phase and
+    // must not hold the quota against its own artifact.
+    await tensorsDir.removeEntry(`${entry.wide}.bin`).catch(() => {});
     const handle = await tensorsDir.getFileHandle(`${entry.artifact}.bin`, { create: true });
     const writable = await handle.createWritable();
     await writable.write(artifact as unknown as ArrayBufferView<ArrayBuffer>);

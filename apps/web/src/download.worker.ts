@@ -540,19 +540,25 @@ export async function handleSafetensorsDownload(
           if (!eligible.has(wideKappa) || quantEntries.some((e) => e.wide === wideKappa)) continue;
           const dims = JSON.parse(allShapes[i]) as number[];
           const wide = await readTensorBytes(tensorsDir, wideKappa, kappaSources);
+          // The wide bytes are in hand: the blob is gas-phase NOW. Evaporate
+          // it BEFORE the artifact writes — under a quota the wide download
+          // already saturated, this keeps occupancy monotonically shrinking
+          // (each artifact is strictly smaller than the wide it replaces).
+          // At real 1.5B scale the reverse order evaporated freshly written
+          // artifacts while consumed wide blobs held the quota.
+          await tensorsDir.removeEntry(`${wideKappa}.bin`).catch(() => {});
+          const wideIdx = cachedKappas.indexOf(wideKappa);
+          if (wideIdx >= 0) cachedKappas.splice(wideIdx, 1);
           const artifact = await deriveQuantizedArtifact(wide, allDtypes[i], dims[0], dims[1]);
           const artifactKappa = await computeKappa(artifact);
+          // Artifacts are the crystallizing product of this download — never
+          // on its own evictable list; remaining wide blobs evaporate first.
           await writeEssential(tensorsDir, cachedKappas, emitProgressFn, async () => {
             const handle = await tensorsDir.getFileHandle(`${artifactKappa}.bin`, { create: true });
             const writable = await handle.createWritable();
             await writable.write(artifact as unknown as ArrayBufferView<ArrayBuffer>);
             await writable.close();
           });
-          // Crystallized: the wide blob is gas-phase — evaporate it now.
-          await tensorsDir.removeEntry(`${wideKappa}.bin`).catch(() => {});
-          const wideIdx = cachedKappas.indexOf(wideKappa);
-          if (wideIdx >= 0) cachedKappas.splice(wideIdx, 1);
-          cachedKappas.push(artifactKappa);
           wideTotal += wide.length;
           quantTotal += artifact.length;
           quantEntries.push({ wide: wideKappa, artifact: artifactKappa, out: dims[0], in: dims[1] });
