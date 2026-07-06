@@ -579,6 +579,18 @@ Then("the κ-store holds every quantized artifact and no gas-phase wide blob", a
   }
 });
 
+Then("the download narrated the quantized tier without erroring", async function () {
+  const body = await this.page.locator("body").innerText();
+  assert.ok(
+    body.includes("Quantized tier"),
+    `the download must state its tier under quota pressure:\n${body.slice(-600)}`,
+  );
+  assert.ok(
+    !/\berror:\s/i.test(body),
+    `a saturated quota must degrade the tier, never the journey:\n${body.slice(-600)}`,
+  );
+});
+
 Then("the session narration states the quantized tier", async function () {
   const log = await statusLog(this);
   assert.ok(

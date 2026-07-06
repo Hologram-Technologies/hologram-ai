@@ -136,6 +136,29 @@ function kappaRangeResolver(
   };
 }
 
+/** Overlay an in-memory content tier (session-held artifacts a saturated
+ * quota refused to persist) over the base resolver. */
+function overlayResolver(
+  overlay: Map<string, Uint8Array>,
+  base: (kappa: string) => Uint8Array | undefined,
+): (kappa: string) => Uint8Array | undefined {
+  if (overlay.size === 0) return base;
+  return (kappa: string) => overlay.get(kappa) ?? base(kappa);
+}
+
+/** Ranged reads over the same in-memory overlay. */
+function overlayRangeResolver(
+  overlay: Map<string, Uint8Array>,
+  base: (kappa: string, offset: number, len: number) => Uint8Array | undefined,
+): (kappa: string, offset: number, len: number) => Uint8Array | undefined {
+  if (overlay.size === 0) return base;
+  return (kappa: string, offset: number, len: number) => {
+    const bytes = overlay.get(kappa);
+    if (bytes) return bytes.subarray(offset, offset + len);
+    return base(kappa, offset, len);
+  };
+}
+
 /** The UNPIN hook (row `saturation-residency`): a κ whose cached content
  * failed verification is evicted — the open handle drops (so the resolver's
  * next call falls through to the recorded provenance) and the OPFS entry
@@ -296,7 +319,10 @@ async function ensureQuantArtifacts(
   manifest: { keys: string[]; kappas: string[]; shapes: string[]; dtypes: string[] },
   sources: KappaSources,
   onProgress: (line: string) => void,
-): Promise<void> {
+): Promise<Map<string, Uint8Array>> {
+  // Artifacts a saturated quota refuses to persist ride in memory for the
+  // session (the resolver's first tier) — the journey never dead-ends.
+  const inMemory = new Map<string, Uint8Array>();
   for (const entry of quant) {
     try {
       await tensorsDir.getFileHandle(`${entry.artifact}.bin`);
@@ -334,12 +360,22 @@ async function ensureQuantArtifacts(
     // Crystallize before writing: a lingering wide blob is gas-phase and
     // must not hold the quota against its own artifact.
     await tensorsDir.removeEntry(`${entry.wide}.bin`).catch(() => {});
-    const handle = await tensorsDir.getFileHandle(`${entry.artifact}.bin`, { create: true });
-    const writable = await handle.createWritable();
-    await writable.write(artifact as unknown as ArrayBufferView<ArrayBuffer>);
-    await writable.close();
+    try {
+      const handle = await tensorsDir.getFileHandle(`${entry.artifact}.bin`, { create: true });
+      const writable = await handle.createWritable();
+      await writable.write(artifact as unknown as ArrayBufferView<ArrayBuffer>);
+      await writable.close();
+    } catch {
+      await tensorsDir.removeEntry(`${entry.artifact}.bin`).catch(() => {});
+      inMemory.set(entry.artifact, artifact);
+      onProgress(
+        `quantized artifact held in memory (quota refused the write): ${entry.artifact.slice(0, 24)}…`,
+      );
+      continue;
+    }
     onProgress(`quantized artifact re-derived (derive-as-recovery): ${entry.artifact.slice(0, 24)}…`);
   }
+  return inMemory;
 }
 
 async function warmStagedSession(
@@ -378,8 +414,9 @@ async function warmStagedSession(
   // opens sync handles — a missing artifact re-derives from the wide form
   // through recorded provenance (derive-as-recovery, fail-closed on its κ).
   const quant = stagesMeta.quant ?? [];
+  let inMemoryArtifacts = new Map<string, Uint8Array>();
   if (quant.length) {
-    await ensureQuantArtifacts(tensorsDir, quant, manifest, sources, onProgress);
+    inMemoryArtifacts = await ensureQuantArtifacts(tensorsDir, quant, manifest, sources, onProgress);
     onProgress(`quantized tier (int8): ${quant.length} projection artifact(s) bound`);
   }
   const kappaHandles = new Map<string, OpenHandle>();
@@ -397,9 +434,9 @@ async function warmStagedSession(
     manifest,
     stagesMeta.contextLength,
     stagesMeta.layersPerStage,
-    kappaResolver(kappaHandles, sources),
+    overlayResolver(inMemoryArtifacts, kappaResolver(kappaHandles, sources)),
     kappaInvalidator(kappaHandles, tensorsDir),
-    kappaRangeResolver(kappaHandles, sources),
+    overlayRangeResolver(inMemoryArtifacts, kappaRangeResolver(kappaHandles, sources)),
     quant.length ? quant : undefined,
     derivedStore(derivedEntries, modelDir),
     tokenizerBytes,

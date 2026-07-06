@@ -24,3 +24,11 @@ Feature: A quant-tiered model rests quantized
     When a single-turn prompt is sent
     Then a non-empty completion streams back
     And the session narration states the quantized tier
+
+  Scenario: a saturated quota degrades the tier, never the journey
+    Given the origin's storage quota is capped below the model's size
+    And the fixture model is downloaded
+    Then the download narrated the quantized tier without erroring
+    When a single-turn prompt is sent
+    Then a non-empty completion streams back
+    And the session narration states the quantized tier

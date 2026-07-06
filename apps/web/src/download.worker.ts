@@ -535,6 +535,7 @@ export async function handleSafetensorsDownload(
         );
         let wideTotal = 0;
         let quantTotal = 0;
+        const artifactKappas: string[] = [];
         for (let i = 0; i < allKappas.length; i++) {
           const wideKappa = allKappas[i];
           if (!eligible.has(wideKappa) || quantEntries.some((e) => e.wide === wideKappa)) continue;
@@ -543,9 +544,9 @@ export async function handleSafetensorsDownload(
           // The wide bytes are in hand: the blob is gas-phase NOW. Evaporate
           // it BEFORE the artifact writes — under a quota the wide download
           // already saturated, this keeps occupancy monotonically shrinking
-          // (each artifact is strictly smaller than the wide it replaces).
-          // At real 1.5B scale the reverse order evaporated freshly written
-          // artifacts while consumed wide blobs held the quota.
+          // for cached tensors. At real 1.5B scale the reverse order
+          // evaporated freshly written artifacts while consumed wide blobs
+          // held the quota.
           await tensorsDir.removeEntry(`${wideKappa}.bin`).catch(() => {});
           const wideIdx = cachedKappas.indexOf(wideKappa);
           if (wideIdx >= 0) cachedKappas.splice(wideIdx, 1);
@@ -553,12 +554,24 @@ export async function handleSafetensorsDownload(
           const artifactKappa = await computeKappa(artifact);
           // Artifacts are the crystallizing product of this download — never
           // on its own evictable list; remaining wide blobs evaporate first.
-          await writeEssential(tensorsDir, cachedKappas, emitProgressFn, async () => {
-            const handle = await tensorsDir.getFileHandle(`${artifactKappa}.bin`, { create: true });
-            const writable = await handle.createWritable();
-            await writable.write(artifact as unknown as ArrayBufferView<ArrayBuffer>);
-            await writable.close();
-          });
+          // A refused write SATURATES the tier, never the journey (the
+          // memory-guard law): this and every remaining projection stay on
+          // the wide tier through recorded provenance, stated in narration.
+          try {
+            await writeEssential(tensorsDir, cachedKappas, emitProgressFn, async () => {
+              const handle = await tensorsDir.getFileHandle(`${artifactKappa}.bin`, { create: true });
+              const writable = await handle.createWritable();
+              await writable.write(artifact as unknown as ArrayBufferView<ArrayBuffer>);
+              await writable.close();
+            });
+          } catch {
+            emitProgressFn(
+              `Quantized tier saturated by the storage quota: ${quantEntries.length} projection(s) ` +
+                `crystallized; the remaining weights stay on the wide tier via recorded provenance.`,
+            );
+            break;
+          }
+          artifactKappas.push(artifactKappa);
           wideTotal += wide.length;
           quantTotal += artifact.length;
           quantEntries.push({ wide: wideKappa, artifact: artifactKappa, out: dims[0], in: dims[1] });
@@ -567,6 +580,10 @@ export async function handleSafetensorsDownload(
           `Quantized tier: ${quantEntries.length} artifact(s), ${(quantTotal / 1024 / 1024).toFixed(1)}MB ` +
             `derived; ${(wideTotal / 1024 / 1024).toFixed(1)}MB of wide forms gas-phase.`,
         );
+        // Artifacts join the evictable set BEHIND every wide blob (σ-order:
+        // re-derivable, but dearer than provenance-recoverable wide) so a
+        // later structure write never dead-ends while gas remains.
+        cachedKappas.unshift(...artifactKappas);
       }
 
       emitProgressFn(
