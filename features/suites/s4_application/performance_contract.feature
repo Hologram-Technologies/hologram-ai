@@ -11,3 +11,8 @@ Feature: Performance contract, measured
     Given a tiny compiled language model whose logits depend on the input tokens
     When 32 decode steps are timed
     Then the compile time, tokens per second, and reuse counters are reported
+
+  Scenario: the staged decode ratio is measured against the calibrated floor
+    Given a staged decoder fixture in a κ-store for the performance probe
+    When the environment stream bandwidth is calibrated and 8 staged decode steps are timed
+    Then the per-token decode ratio and its attribution are reported

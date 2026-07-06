@@ -349,6 +349,11 @@ pub struct StagedRunner<'a> {
     /// Stage materializations performed over this runner's lifetime — the
     /// bandwidth instrument (`resident` hits don't count).
     materialization_count: u64,
+    /// Kernels dispatched / elided across all stages of the most recent
+    /// forward pass (class CE, summed per stage) — the decode attribution
+    /// instrument of the `performance-contract` row.
+    last_dispatched: u64,
+    last_skipped: u64,
     /// Environment headroom probe consulted at admission (see
     /// [`AdmissionProbe`]). `None` = admission by byte budget alone.
     admission_probe: Option<AdmissionProbe<'a>>,
@@ -424,6 +429,8 @@ impl<'a> StagedRunner<'a> {
             residency_budget: 0,
             resident: (0..stage_count).map(|_| None).collect(),
             resident_bytes: 0,
+            last_dispatched: 0,
+            last_skipped: 0,
             materialization_count: 0,
             admission_probe: None,
             expected_stage_bytes: Vec::new(),
@@ -498,6 +505,18 @@ impl<'a> StagedRunner<'a> {
         self.materialization_count
     }
 
+    /// Kernels dispatched across all stages of the most recent forward pass
+    /// (class CE — content-addressed elision; see `HoloRunner`).
+    pub fn last_dispatched(&self) -> u64 {
+        self.last_dispatched
+    }
+
+    /// Kernels elided (memo hits on the unchanged prefix cone) across all
+    /// stages of the most recent forward pass.
+    pub fn last_skipped(&self) -> u64 {
+        self.last_skipped
+    }
+
     /// Install a per-stage observer: called after each stage materializes
     /// (before it executes) with `(stage, stage_count, weight_bytes)`.
     pub fn set_stage_observer(&mut self, f: StageObserver<'a>) {
@@ -544,6 +563,8 @@ impl<'a> StagedRunner<'a> {
     /// the next stage's inputs, one materialized session resident at a time.
     fn execute_window(&mut self, inputs: &[&[u8]]) -> Result<Vec<OutputBuffer>> {
         let mut carried: Vec<Vec<u8>> = Vec::new();
+        self.last_dispatched = 0;
+        self.last_skipped = 0;
         for stage in 0..self.stage_count {
             // Resident hit: the session's weights are already materialized —
             // no κ-store traffic for this stage. Taking the slot removes its
@@ -583,6 +604,8 @@ impl<'a> StagedRunner<'a> {
             let outputs = runner
                 .execute(&refs)
                 .with_context(|| format!("executing stage {stage}"))?;
+            self.last_dispatched += runner.last_dispatched() as u64;
+            self.last_skipped += runner.last_skipped() as u64;
 
             // Keep the session resident while it fits the budget; otherwise
             // it drops here, before the next stage materializes — the

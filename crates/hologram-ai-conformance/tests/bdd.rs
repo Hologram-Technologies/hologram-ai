@@ -817,6 +817,9 @@ struct BddWorld {
     chunked_logits: Option<(Vec<u8>, Vec<u8>)>,
     chunked_completion: Option<(String, u64)>,
     chunked_traffic: Option<ChunkedTraffic>,
+    // S4 — performance contract (row `performance-contract`)
+    perf: Option<PerfReport>,
+    perf_kit: Option<PerfKit>,
     // S3 — quantized transit (row `quantized-transit`)
     quant: Option<QuantKit>,
     quant_derive: Option<(usize, u64, u64)>,
@@ -3407,6 +3410,176 @@ async fn then_chunked_range_traffic(w: &mut BddWorld) {
         "[chunked-head] verified rematerialization moves {now} B of the head κ \
          (whole-resolve-and-slice would move {old} B)"
     );
+}
+
+// ─────────── S4 — performance contract (row `performance-contract`) ──────────
+
+/// One attributed decode step: seconds, kernels dispatched, kernels elided,
+/// cumulative stage materializations after the step.
+struct PerfStep {
+    secs: f64,
+    dispatched: u64,
+    skipped: u64,
+    materializations: u64,
+}
+
+struct PerfReport {
+    /// Calibrated sequential stream bandwidth, bytes/second.
+    bandwidth: f64,
+    /// Raw weight bytes the pipeline streams per forward pass.
+    weight_bytes: u64,
+    window: usize,
+    stages: usize,
+    steps: Vec<PerfStep>,
+}
+
+struct PerfKit {
+    store: StoreDir,
+    stages: Vec<Vec<u8>>,
+}
+
+#[given("a staged decoder fixture in a κ-store for the performance probe")]
+async fn given_perf_fixture(w: &mut BddWorld) {
+    let manifest = staged_manifest(false);
+    let (keys, shapes): (Vec<String>, Vec<Vec<u64>>) = manifest.into_iter().unzip();
+    let kappas: Vec<String> = keys
+        .iter()
+        .zip(&shapes)
+        .map(|(name, dims)| kappa_of(&staged_tensor_bytes(name, dims)))
+        .collect();
+    let dtypes = vec![DType::F32; keys.len()];
+    let store = StoreDir::new("perf-contract");
+    let dir = DirKappaStore::new(&store.path);
+    for (name, dims) in keys.iter().zip(&shapes) {
+        dir.insert(&staged_tensor_bytes(name, dims))
+            .expect("persisting a fixture weight");
+    }
+    let stages = hologram_ai::staged::compile_stages(
+        &staged_config(false).to_string(),
+        &keys,
+        &kappas,
+        &shapes,
+        &dtypes,
+        None,
+        std::num::NonZeroU64::new(1).expect("1 is non-zero"),
+    )
+    .expect("the staged fixture compiles");
+    w.perf_kit = Some(PerfKit { store, stages });
+}
+
+/// Calibrate sequential stream bandwidth: the best of three timed passes
+/// summing a 64 MB buffer in u64 words — the floor's unit, measured in this
+/// environment, per the Benchmark section of the resource model.
+fn calibrate_stream_bandwidth() -> f64 {
+    const BYTES: usize = 64 << 20;
+    let buf: Vec<u64> = (0..BYTES / 8).map(|i| i as u64).collect();
+    let mut best = f64::INFINITY;
+    for _ in 0..3 {
+        let t = std::time::Instant::now();
+        let mut acc = 0u64;
+        for &v in &buf {
+            acc = acc.wrapping_add(v);
+        }
+        std::hint::black_box(acc);
+        let secs = t.elapsed().as_secs_f64();
+        if secs < best {
+            best = secs;
+        }
+    }
+    BYTES as f64 / best
+}
+
+#[when(
+    expr = "the environment stream bandwidth is calibrated and {int} staged decode steps are timed"
+)]
+async fn when_perf_staged_decode(w: &mut BddWorld, steps: usize) {
+    use hologram_ai::engine::LmSession;
+    let kit = w.perf_kit.as_ref().expect("the perf kit");
+    let bandwidth = calibrate_stream_bandwidth();
+
+    let mut runner = StagedRunner::from_archives(
+        kit.stages.clone(),
+        Box::new(DirKappaStore::new(&kit.store.path)),
+    )
+    .expect("the staged runner builds");
+    runner.set_residency_budget(u64::MAX);
+    let window = runner.window();
+    let stages = runner.stage_count();
+
+    let mut toks: Vec<i64> = vec![1];
+    let mut recorded = Vec::new();
+    for _ in 0..steps {
+        let ids: Vec<u8> = (0..window)
+            .map(|i| toks.get(i).copied().unwrap_or(0))
+            .flat_map(|t| t.to_le_bytes())
+            .collect();
+        let t = std::time::Instant::now();
+        let outs = runner.execute(&[&ids]).expect("a staged decode step");
+        let secs = t.elapsed().as_secs_f64();
+        let idx = runner
+            .output_index_by_name("logits")
+            .expect("a logits port");
+        let logits = le_f32(&outs[idx].bytes);
+        let vocab = logits.len() / window;
+        let row = &logits[(toks.len() - 1) * vocab..toks.len() * vocab];
+        toks.push(argmax(row) as i64);
+        recorded.push(PerfStep {
+            secs,
+            dispatched: runner.last_dispatched(),
+            skipped: runner.last_skipped(),
+            materializations: runner.materialization_count(),
+        });
+    }
+    let weight_bytes: u64 = runner.stage_weight_bytes().iter().sum();
+    w.perf = Some(PerfReport {
+        bandwidth,
+        weight_bytes,
+        window,
+        stages,
+        steps: recorded,
+    });
+}
+
+#[then("the per-token decode ratio and its attribution are reported")]
+async fn then_perf_report(w: &mut BddWorld) {
+    let r = w.perf.as_ref().expect("the perf probe ran");
+    // Structural checks only — ratios are REPORTED, never asserted.
+    assert!(!r.steps.is_empty(), "steps were timed");
+    for (i, s) in r.steps.iter().enumerate() {
+        assert!(
+            s.dispatched + s.skipped > 0,
+            "step {i}: the walk reports its kernels"
+        );
+    }
+    let first_mat = r.steps[0].materializations;
+    assert_eq!(
+        r.steps.last().expect("steps").materializations,
+        first_mat,
+        "residency holds: no rematerialization after the first pass"
+    );
+    let floor = r.weight_bytes as f64 / r.bandwidth;
+    println!(
+        "[performance-contract] calibrated stream bandwidth {:.2} GB/s; staged fixture: \
+         {} stages, window {}, {:.2} MB weights/pass; decode floor {:.3} ms/token",
+        r.bandwidth / 1e9,
+        r.stages,
+        r.window,
+        r.weight_bytes as f64 / 1e6,
+        floor * 1e3
+    );
+    for (i, s) in r.steps.iter().enumerate() {
+        println!(
+            "[performance-contract] step {}: {:.1} ms/token, ratio {:.1}x floor, \
+             dispatched {}, elided {} ({:.0}%), materializations {}",
+            i + 1,
+            s.secs * 1e3,
+            s.secs / floor,
+            s.dispatched,
+            s.skipped,
+            100.0 * s.skipped as f64 / (s.dispatched + s.skipped) as f64,
+            s.materializations
+        );
+    }
 }
 
 // ──────────── S3 — quantized transit (row `quantized-transit`) ───────────────
