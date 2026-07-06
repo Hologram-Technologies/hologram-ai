@@ -448,8 +448,11 @@ The attribution names the structure of the excess:
   `GroupedQueryAttention` op consumes them as inputs; nothing is locked
   inside a fused kernel), and for a single last-position query causal
   masking is vacuous, so a decode step needs only existing ops — seq-1
-  projections, RoPE at the absolute position (rotated K/V carried, so the
-  fused kernel's index-relative RoPE moves out of the decode path), Concat
+  projections, rotation at the absolute position as DATA — the canonical
+  RoPE lowering bakes relative-position tables at compile time, so the
+  decode plan takes cos/sin at the consumed position as runtime inputs
+  (synthesized from the config's own rope base and head_dim, like every
+  auxiliary) and rotates with plain arithmetic — Concat
   of the carried prefix K/V with the new position's K/V, GQA with q=1
   against the full carried span, MLP at one position, the
   single-position head with no gather. The carried K/V are not a mutable
