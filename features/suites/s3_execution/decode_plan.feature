@@ -23,3 +23,13 @@ Feature: The per-token pass computes one position
     When the fixture tokens replay through the decode plan one position at a time
     Then every decode step's logit row matches the whole-window plan at its position
     And the bucket regrew geometrically while the carried rows stayed intact
+
+  Scenario: the staged decode pipeline equals the monolithic decode plan
+    Given a staged decode pipeline over the staged fixture with a bucket of 8 rows
+    When the fixture tokens replay through both decode plans one position at a time
+    Then every staged decode step is byte-identical to the monolithic decode step
+
+  Scenario: greedy completions are identical across the decode and whole-window plans
+    Given a staged decode pipeline over the staged fixture with a bucket of 64 rows
+    When the same greedy completion is generated through the decode plan and the whole-window plan
+    Then both plans emit the identical completion

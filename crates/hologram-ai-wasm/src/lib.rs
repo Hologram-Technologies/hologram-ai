@@ -10,7 +10,9 @@
 //! Verbs (over byte buffers): `compile` (ONNX → `.holo`), `describe` (ports),
 //! `run` (arbitrary forward pass, `--fill`-style), `generate` (autoregressive).
 
-use hologram_ai::commands::generate::{apply_template, generate_stream, GenConfig};
+use hologram_ai::commands::generate::{
+    apply_template, generate_stream, generate_stream_decode, GenConfig,
+};
 use hologram_ai::{FixedSession, HoloRunner, ModelCompiler, ModelSource};
 use hologram_ai_tokenizer::{NativeTokenizer, Tokenizer};
 use serde::{Deserialize, Serialize};
@@ -964,6 +966,113 @@ pub fn generate(
 /// own context); κs resolve through `resolve_kappa` (content-verified at
 /// first touch, invalidate-and-recover on failure); stage archives resolve
 /// from the derived store when present.
+/// The shared growable-session builder behind [`StagedChatSession`] and
+/// [`DecodeChatSession`]: manifest parsing, the JS κ-store, the quant tier,
+/// the derived-artifact store, wasm heap admission, and progress narration.
+#[allow(clippy::too_many_arguments)]
+fn build_growable_session(
+    config_json: &str,
+    keys_js: &js_sys::Array,
+    kappas_js: &js_sys::Array,
+    tensor_shapes_js: &js_sys::Array,
+    tensor_dtypes_js: &js_sys::Array,
+    context_length: Option<u32>,
+    layers_per_stage: u32,
+    resolve_kappa: &js_sys::Function,
+    invalidate_kappa: Option<js_sys::Function>,
+    resolve_kappa_range: Option<js_sys::Function>,
+    quant_json: Option<String>,
+    derived_load: Option<js_sys::Function>,
+    derived_store: Option<js_sys::Function>,
+    derived_evaporate: Option<js_sys::Function>,
+    on_progress: Option<js_sys::Function>,
+) -> Result<hologram_ai::staged::GrowableStagedSession, JsValue> {
+    let rows = parse_manifest(keys_js, tensor_shapes_js, tensor_dtypes_js)?;
+    let kappas = parse_kappas(&rows.keys, kappas_js)?;
+    let layers_per_stage = std::num::NonZeroU64::new(u64::from(layers_per_stage))
+        .ok_or_else(|| err("layers_per_stage must be at least 1"))?;
+
+    let store = Box::new(JsKappaStore {
+        resolve: resolve_kappa.clone(),
+        invalidate: invalidate_kappa,
+        resolve_range: resolve_kappa_range,
+    });
+
+    let mut session = hologram_ai::staged::GrowableStagedSession::new(
+        config_json.to_string(),
+        rows.keys,
+        kappas,
+        rows.shapes,
+        rows.dtypes,
+        context_length.map(u64::from),
+        layers_per_stage,
+        store,
+    )
+    .map_err(|e| err(format!("staged session: {e:#}")))?;
+
+    if let Some(quant) = parse_quant_json(quant_json)? {
+        session.set_quant_map(quant);
+    }
+
+    if let (Some(load), Some(store), Some(evaporate)) =
+        (derived_load, derived_store, derived_evaporate)
+    {
+        session.set_derived_store(Box::new(JsDerivedStore {
+            load,
+            store,
+            evaporate,
+        }));
+    }
+
+    // Residency admission — an environment MEASUREMENT against a
+    // MODEL-DERIVED margin, never a preference: the wasm32 address space
+    // is a structural 4 GiB ceiling, and a stage session may join the
+    // resident set only while the heap measurably leaves the pipeline's
+    // largest-stage transient bound free (the probe's `margin` argument
+    // — a fixed half-ceiling margin crashed a 1.5B model at its head
+    // stage while smaller stages held the room). Raw κ-byte budgets
+    // under-count a live session's true footprint, so admission asks
+    // the environment directly. Stages that fit stay resident across
+    // tokens AND turns — κ-store bandwidth is paid once per window; a
+    // model past the headroom falls back to strict one-stage windowing,
+    // never refused.
+    #[cfg(target_arch = "wasm32")]
+    {
+        const STRUCTURAL_CEILING: u64 = 4 << 30;
+        session.set_residency_budget(u64::MAX);
+        session.set_admission_probe(std::rc::Rc::new(|margin: u64| {
+            (core::arch::wasm32::memory_size(0) as u64) * 65536 + margin < STRUCTURAL_CEILING
+        }));
+    }
+
+    if let Some(progress) = on_progress {
+        let for_window = progress.clone();
+        session.set_window_observer(Box::new(move |window, resolved| {
+            let verb = if resolved {
+                "resolving (derived κ)"
+            } else {
+                "compiling"
+            };
+            let _ = for_window.call1(
+                &JsValue::NULL,
+                &JsValue::from_str(&format!("{verb} a {window}-token window")),
+            );
+        }));
+        session.set_stage_observer(Box::new(move |stage, count, bytes| {
+            let mb = bytes as f64 / (1024.0 * 1024.0);
+            let _ = progress.call1(
+                &JsValue::NULL,
+                &JsValue::from_str(&format!(
+                    "stage {}/{count} materialized ({mb:.0} MB)",
+                    stage + 1
+                )),
+            );
+        }));
+    }
+
+    Ok(session)
+}
+
 #[wasm_bindgen]
 pub struct StagedChatSession {
     session: hologram_ai::staged::GrowableStagedSession,
@@ -998,89 +1107,23 @@ impl StagedChatSession {
         on_progress: Option<js_sys::Function>,
     ) -> Result<StagedChatSession, JsValue> {
         let tokenizer = NativeTokenizer::from_tokenizer_json_bytes(&tokenizer_json).map_err(err)?;
-        let rows = parse_manifest(keys_js, tensor_shapes_js, tensor_dtypes_js)?;
-        let kappas = parse_kappas(&rows.keys, kappas_js)?;
-        let layers_per_stage = std::num::NonZeroU64::new(u64::from(layers_per_stage))
-            .ok_or_else(|| err("layers_per_stage must be at least 1"))?;
-
-        let store = Box::new(JsKappaStore {
-            resolve: resolve_kappa.clone(),
-            invalidate: invalidate_kappa,
-            resolve_range: resolve_kappa_range,
-        });
-
-        let mut session = hologram_ai::staged::GrowableStagedSession::new(
-            config_json.to_string(),
-            rows.keys,
-            kappas,
-            rows.shapes,
-            rows.dtypes,
-            context_length.map(u64::from),
+        let session = build_growable_session(
+            config_json,
+            keys_js,
+            kappas_js,
+            tensor_shapes_js,
+            tensor_dtypes_js,
+            context_length,
             layers_per_stage,
-            store,
-        )
-        .map_err(|e| err(format!("staged session: {e:#}")))?;
-
-        if let Some(quant) = parse_quant_json(quant_json)? {
-            session.set_quant_map(quant);
-        }
-
-        if let (Some(load), Some(store), Some(evaporate)) =
-            (derived_load, derived_store, derived_evaporate)
-        {
-            session.set_derived_store(Box::new(JsDerivedStore {
-                load,
-                store,
-                evaporate,
-            }));
-        }
-
-        // Residency admission — an environment MEASUREMENT against a
-        // MODEL-DERIVED margin, never a preference: the wasm32 address space
-        // is a structural 4 GiB ceiling, and a stage session may join the
-        // resident set only while the heap measurably leaves the pipeline's
-        // largest-stage transient bound free (the probe's `margin` argument
-        // — a fixed half-ceiling margin crashed a 1.5B model at its head
-        // stage while smaller stages held the room). Raw κ-byte budgets
-        // under-count a live session's true footprint, so admission asks
-        // the environment directly. Stages that fit stay resident across
-        // tokens AND turns — κ-store bandwidth is paid once per window; a
-        // model past the headroom falls back to strict one-stage windowing,
-        // never refused.
-        #[cfg(target_arch = "wasm32")]
-        {
-            const STRUCTURAL_CEILING: u64 = 4 << 30;
-            session.set_residency_budget(u64::MAX);
-            session.set_admission_probe(std::rc::Rc::new(|margin: u64| {
-                (core::arch::wasm32::memory_size(0) as u64) * 65536 + margin < STRUCTURAL_CEILING
-            }));
-        }
-
-        if let Some(progress) = on_progress {
-            let for_window = progress.clone();
-            session.set_window_observer(Box::new(move |window, resolved| {
-                let verb = if resolved {
-                    "resolving (derived κ)"
-                } else {
-                    "compiling"
-                };
-                let _ = for_window.call1(
-                    &JsValue::NULL,
-                    &JsValue::from_str(&format!("{verb} a {window}-token window")),
-                );
-            }));
-            session.set_stage_observer(Box::new(move |stage, count, bytes| {
-                let mb = bytes as f64 / (1024.0 * 1024.0);
-                let _ = progress.call1(
-                    &JsValue::NULL,
-                    &JsValue::from_str(&format!(
-                        "stage {}/{count} materialized ({mb:.0} MB)",
-                        stage + 1
-                    )),
-                );
-            }));
-        }
-
+            resolve_kappa,
+            invalidate_kappa,
+            resolve_kappa_range,
+            quant_json,
+            derived_load,
+            derived_store,
+            derived_evaporate,
+            on_progress,
+        )?;
         Ok(StagedChatSession { session, tokenizer })
     }
 
@@ -1130,6 +1173,167 @@ impl StagedChatSession {
     pub fn prederive_next_window(&mut self) -> Result<Option<u32>, JsValue> {
         self.session
             .prederive_next_window()
+            .map(|w| w.map(|w| w as u32))
+            .map_err(|e| err(format!("prederive: {e:#}")))
+    }
+}
+
+/// A persistent **decode-plan** chat session (row `decode-plan`, browser
+/// realization): every token — prompt prefill included — is one
+/// single-position pass over the staged decode pipeline, never a
+/// window-sized forward. Carried K/V lives in the engine's buffers and moves
+/// through the pipeline's named ports; positions are runtime data the engine
+/// synthesizes per step. The session survives across turns: the materialized
+/// pipeline, the verified-κ set, and the derived-store hits all carry; each
+/// turn rewinds the position and replays the templated transcript through
+/// decode steps (elision recognizes the unchanged prefix). Bucket exhaustion
+/// regrows geometrically through the same derived-artifact store the
+/// whole-window plan uses — under a decode-specific derivation key.
+#[wasm_bindgen]
+pub struct DecodeChatSession {
+    growable: std::rc::Rc<std::cell::RefCell<hologram_ai::staged::GrowableStagedSession>>,
+    session: Option<hologram_ai::decode::DecodeSession<hologram_ai::staged::StagedRunner<'static>>>,
+    tokenizer: NativeTokenizer,
+    rope_theta: f32,
+    context_length: u64,
+}
+
+#[wasm_bindgen]
+impl DecodeChatSession {
+    /// Build from the streamed-download manifest — the same inputs (and the
+    /// same κ-store/derived-store/progress wiring) as [`StagedChatSession`].
+    #[wasm_bindgen(constructor)]
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        config_json: &str,
+        keys_js: &js_sys::Array,
+        kappas_js: &js_sys::Array,
+        tensor_shapes_js: &js_sys::Array,
+        tensor_dtypes_js: &js_sys::Array,
+        context_length: Option<u32>,
+        layers_per_stage: u32,
+        resolve_kappa: &js_sys::Function,
+        invalidate_kappa: Option<js_sys::Function>,
+        resolve_kappa_range: Option<js_sys::Function>,
+        quant_json: Option<String>,
+        derived_load: Option<js_sys::Function>,
+        derived_store: Option<js_sys::Function>,
+        derived_evaporate: Option<js_sys::Function>,
+        tokenizer_json: Vec<u8>,
+        on_progress: Option<js_sys::Function>,
+    ) -> Result<DecodeChatSession, JsValue> {
+        let tokenizer = NativeTokenizer::from_tokenizer_json_bytes(&tokenizer_json).map_err(err)?;
+        let growable = build_growable_session(
+            config_json,
+            keys_js,
+            kappas_js,
+            tensor_shapes_js,
+            tensor_dtypes_js,
+            context_length,
+            layers_per_stage,
+            resolve_kappa,
+            invalidate_kappa,
+            resolve_kappa_range,
+            quant_json,
+            derived_load,
+            derived_store,
+            derived_evaporate,
+            on_progress,
+        )?;
+        let context_length = hologram_ai::SessionProvider::max_window(&growable) as u64;
+        // Rope tables are runtime data the ENGINE synthesizes; the base comes
+        // from the model's own config (absent = the RoPE-paper default the
+        // parametric recipe also assumes for a config without the key).
+        let config: serde_json::Value = serde_json::from_str(config_json).map_err(err)?;
+        let rope_theta = config
+            .get("rope_theta")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(10000.0) as f32;
+        Ok(DecodeChatSession {
+            growable: std::rc::Rc::new(std::cell::RefCell::new(growable)),
+            session: None,
+            tokenizer,
+            rope_theta,
+            context_length,
+        })
+    }
+
+    /// One chat turn: rewind to position 0 and run the decode loop — prompt
+    /// prefill as decode steps, one step per generated token — streaming the
+    /// running completion to `callback`. Returns the generated text.
+    pub fn generate(
+        &mut self,
+        prompt: &str,
+        opts: JsValue,
+        callback: Option<js_sys::Function>,
+    ) -> Result<String, JsValue> {
+        let opts = GenOpts::from_js(opts)?;
+        let cfg = opts.config();
+        let templated = apply_template(opts.prompt_template.as_deref(), prompt);
+
+        // Size the bucket to the prompt up front — one compile instead of a
+        // geometric ladder of them; generation growth regrows as needed.
+        let want = self.tokenizer.encode(&templated).len().max(1);
+        let need = match &self.session {
+            None => true,
+            Some(s) => s.geometry().bucket < want.min(self.context_length as usize),
+        };
+        if need {
+            let runner = self
+                .growable
+                .borrow_mut()
+                .decode_runner_for(want.min(self.context_length as usize))
+                .map_err(|e| err(format!("decode pipeline: {e:#}")))?;
+            let g = std::rc::Rc::clone(&self.growable);
+            let session = hologram_ai::decode::DecodeSession::new(
+                runner,
+                self.rope_theta,
+                self.context_length,
+            )
+            .map_err(|e| err(format!("decode session: {e:#}")))?
+            .with_rebuild(Box::new(move |bucket| {
+                g.borrow_mut().decode_runner_for(bucket as usize)
+            }));
+            self.session = Some(session);
+        }
+
+        let session = self.session.as_mut().expect("session just ensured");
+        session.reset();
+        let mut sink = CallbackSink {
+            buffer: Vec::new(),
+            callback: callback.as_ref(),
+        };
+        generate_stream_decode(session, &self.tokenizer, &templated, &cfg, &mut sink)
+            .map_err(|e| err(format!("decode generate: {e:#}")))?;
+        String::from_utf8(sink.buffer).map_err(err)
+    }
+
+    /// Stage materializations performed by the resident decode pipeline so
+    /// far — the cross-turn bandwidth instrument a warm turn leaves
+    /// unchanged.
+    pub fn materialization_count(&self) -> u64 {
+        self.session
+            .as_ref()
+            .map_or(0, |s| s.runner().materialization_count())
+    }
+
+    /// Bucket builds resolved from the derived store instead of compiled.
+    pub fn derived_hits(&self) -> u64 {
+        self.growable.borrow().derived_hits()
+    }
+
+    /// Idle pre-derivation (row `idle-derivation`, decode plan): derive the
+    /// next geometric bucket's decode archives into the derived store, off
+    /// the per-token path. Returns the pre-derived bucket, or undefined at
+    /// the ceiling (or before the first turn sizes the pipeline).
+    pub fn prederive_next_window(&mut self) -> Result<Option<u32>, JsValue> {
+        let Some(session) = &self.session else {
+            return Ok(None);
+        };
+        let current = session.geometry().bucket;
+        self.growable
+            .borrow_mut()
+            .prederive_next_decode_bucket(current)
             .map(|w| w.map(|w| w as u32))
             .map_err(|e| err(format!("prederive: {e:#}")))
     }

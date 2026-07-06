@@ -78,6 +78,17 @@ pub trait LmSession {
     /// Execute one forward pass. `inputs[i]` is the little-endian byte image
     /// of graph input `i`; returns the output buffers in graph-output order.
     fn execute(&mut self, inputs: &[&[u8]]) -> Result<Vec<OutputBuffer>>;
+
+    /// Kernels dispatched by the most recent forward pass (class CE — the
+    /// decode attribution instrument). `0` when the session doesn't count.
+    fn pass_dispatched(&self) -> u64 {
+        0
+    }
+
+    /// Kernels elided by the most recent forward pass.
+    fn pass_skipped(&self) -> u64 {
+        0
+    }
 }
 
 impl LmSession for HoloRunner {
@@ -99,6 +110,14 @@ impl LmSession for HoloRunner {
 
     fn execute(&mut self, inputs: &[&[u8]]) -> Result<Vec<OutputBuffer>> {
         HoloRunner::execute(self, inputs)
+    }
+
+    fn pass_dispatched(&self) -> u64 {
+        HoloRunner::last_dispatched(self) as u64
+    }
+
+    fn pass_skipped(&self) -> u64 {
+        HoloRunner::last_skipped(self) as u64
     }
 }
 

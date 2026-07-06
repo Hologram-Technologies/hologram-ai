@@ -11,6 +11,7 @@ import init, {
   derive_quantized_artifact as wasmDeriveQuantizedArtifact,
   count_tokens as wasmCountTokens,
   StagedChatSession as WasmStagedChatSession,
+  DecodeChatSession as WasmDecodeChatSession,
   validate_model_config as wasmValidateModelConfig,
   validate_streamed_manifest as wasmValidateStreamedManifest,
   run as wasmRun,
@@ -233,6 +234,49 @@ export async function createStagedSession(
 ): Promise<StagedSession> {
   await ensureReady();
   return new WasmStagedChatSession(
+    configJson,
+    manifest.keys,
+    manifest.kappas,
+    manifest.shapes,
+    manifest.dtypes,
+    contextLength,
+    layersPerStage,
+    resolveKappa,
+    invalidateKappa,
+    resolveKappaRange,
+    quant && quant.length ? JSON.stringify(quant) : undefined,
+    derived?.load,
+    derived?.store,
+    derived?.evaporate,
+    tokenizer,
+    onProgress,
+  );
+}
+
+/** The decode-plan twin of {@link createStagedSession} (row `decode-plan`):
+ * same manifest, κ-store, quant tier, and derived-store wiring; every token
+ * is one single-position pass instead of a window-sized forward. */
+export async function createDecodeSession(
+  configJson: string,
+  manifest: { keys: string[]; kappas: string[]; shapes: string[]; dtypes: string[] },
+  contextLength: number | undefined,
+  layersPerStage: number,
+  resolveKappa: (kappa: string) => Uint8Array | undefined,
+  invalidateKappa: ((kappa: string) => void) | undefined,
+  resolveKappaRange: ((kappa: string, offset: number, len: number) => Uint8Array | undefined) | undefined,
+  quant: QuantEntry[] | undefined,
+  derived:
+    | {
+        load: (key: string) => { stages: Uint8Array[]; kappas: string[] } | undefined;
+        store: (key: string, stages: Uint8Array[], kappas: string[]) => void;
+        evaporate: (key: string) => void;
+      }
+    | undefined,
+  tokenizer: Uint8Array,
+  onProgress?: (line: string) => void,
+): Promise<StagedSession> {
+  await ensureReady();
+  return new WasmDecodeChatSession(
     configJson,
     manifest.keys,
     manifest.kappas,

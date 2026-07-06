@@ -661,6 +661,10 @@ export async function generate(opts: GenerateOpts): Promise<number> {
       prompt: opts.prompt,
       genOpts,
       tokenizerBytes,
+      // The decode plan (row `decode-plan`) is the default per-token path —
+      // one position per step, never a window-sized forward. The knob
+      // reverts to the whole-window plan for witnesses and diagnosis.
+      decodePlan: localStorage.getItem("hologram_decode_plan") !== "0",
     });
   });
 }

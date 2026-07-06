@@ -9,6 +9,7 @@
 import {
   generate as wasmGenerate,
   computeKappa,
+  createDecodeSession,
   createStagedSession,
   deriveQuantizedArtifact,
   kappaRequirements,
@@ -289,6 +290,7 @@ function derivedStore(entries: Map<string, DerivedEntry>, modelDir: FileSystemDi
 // cold turn, same semantics.
 let warm: {
   modelDir: string;
+  plan: "decode" | "window";
   session: StagedSession;
   handles: Map<string, OpenHandle>;
 } | null = null;
@@ -382,13 +384,18 @@ async function warmStagedSession(
   modelDirName: string,
   tokenizerBytes: Uint8Array,
   onProgress: (line: string) => void,
+  plan: "decode" | "window",
 ): Promise<StagedSession> {
-  if (warm && warm.modelDir === modelDirName) {
+  if (warm && warm.modelDir === modelDirName && warm.plan === plan) {
     onProgress("session warm — resident window carries across turns");
     return warm.session;
   }
   disposeWarm();
-  onProgress("session cold — building the staged session");
+  onProgress(
+    plan === "decode"
+      ? "session cold — building the decode-plan session (one position per token)"
+      : "session cold — building the staged session",
+  );
 
   const root = await navigator.storage.getDirectory();
   const models = await root.getDirectoryHandle("models");
@@ -429,7 +436,8 @@ async function warmStagedSession(
       // provenance; a κ that resolves nowhere aborts naming the label.
     }
   }
-  const session = await createStagedSession(
+  const create = plan === "decode" ? createDecodeSession : createStagedSession;
+  const session = await create(
     configJson,
     manifest,
     stagesMeta.contextLength,
@@ -442,21 +450,26 @@ async function warmStagedSession(
     tokenizerBytes,
     onProgress,
   );
-  warm = { modelDir: modelDirName, session, handles: kappaHandles };
+  warm = { modelDir: modelDirName, plan, session, handles: kappaHandles };
   return session;
 }
 
 self.onmessage = async (e) => {
-  const { holoBytes, modelDir, staged, prompt, genOpts, tokenizerBytes } = e.data;
+  const { holoBytes, modelDir, staged, prompt, genOpts, tokenizerBytes, decodePlan } = e.data;
 
   try {
     if (staged) {
       if (!tokenizerBytes) {
         throw new Error("staged chat needs the model's tokenizer.json");
       }
-      const session = await warmStagedSession(modelDir, tokenizerBytes, (line: string) => {
-        self.postMessage({ type: "progress", line });
-      });
+      const session = await warmStagedSession(
+        modelDir,
+        tokenizerBytes,
+        (line: string) => {
+          self.postMessage({ type: "progress", line });
+        },
+        decodePlan === false ? "window" : "decode",
+      );
       const result = session.generate(prompt, genOpts as never, (text: string) => {
         self.postMessage({ type: "token", text });
       });

@@ -1778,6 +1778,39 @@ pub fn build_parametric_stage_graphs(
     layers_per_stage: NonZeroU64,
 ) -> Result<Vec<AiGraph>> {
     let recipe = DecoderRecipe::prepare(config, keys, dtypes, context_length)?;
+    assemble_stage_graphs(&recipe, layers_per_stage, None)
+}
+
+/// Partition the **decode-step** plan into stage graphs (row `decode-plan`,
+/// staged realization): the same partition contract as
+/// [`build_parametric_stage_graphs`] — identical cut points, identical
+/// κ-map coverage — assembled at `batch = seq = 1` with every layer stage's
+/// fused attention decomposed by [`rewrite_decode_attention`] over a fixed
+/// `bucket`-row past window. Each layer stage gains its layers' carried-K/V
+/// ports (`past_k_l`/`past_v_l` in, `k_new_l`/`v_new_l` out, absolute layer
+/// indices from the stage's own `stage_layer_start`) plus the shared runtime
+/// position ports; the embedding and head stages are the whole-window
+/// stages at seq = 1 (the head's `last_pos` gather no-ops — the pipeline is
+/// already at the sampler's position).
+pub fn build_parametric_decode_stage_graphs(
+    config: &Value,
+    keys: &[String],
+    dtypes: &[DType],
+    bucket: u64,
+    layers_per_stage: NonZeroU64,
+) -> Result<Vec<AiGraph>> {
+    let recipe = DecoderRecipe::prepare(config, keys, dtypes, None)?;
+    ensure!(bucket > 0, "decode bucket must be non-empty");
+    assemble_stage_graphs(&recipe, layers_per_stage, Some(bucket))
+}
+
+/// The shared stage assembler: `decode_bucket = None` emits the
+/// whole-window plan, `Some(bucket)` the decode-step plan.
+fn assemble_stage_graphs(
+    recipe: &DecoderRecipe<'_>,
+    layers_per_stage: NonZeroU64,
+    decode_bucket: Option<u64>,
+) -> Result<Vec<AiGraph>> {
     let layers = recipe.cfg.num_hidden_layers;
     let block = layers_per_stage.get();
     let layer_stages = layers.div_ceil(block);
@@ -1803,15 +1836,30 @@ pub fn build_parametric_stage_graphs(
             graph
                 .metadata
                 .insert("stage_role".to_string(), MetaValue::Str(role.to_string()));
+            if let Some(bucket) = decode_bucket {
+                graph
+                    .metadata
+                    .insert("decode_bucket".to_string(), MetaValue::Int(bucket as i64));
+                graph.metadata.insert(
+                    "rope_theta".to_string(),
+                    MetaValue::Float(recipe.cfg.rope_theta as f64),
+                );
+            }
         };
+    // The decode plan is fully concrete (batch = seq = 1); the whole-window
+    // plan interns its batch/seq dim vars per stage builder.
+    let stage_dims = |builder: &mut GraphBuilder| match decode_bucket {
+        None => DecoderDims::register(builder, &recipe.cfg),
+        Some(_) => DecoderDims::decode_step(&recipe.cfg),
+    };
 
     // Stage 0 — embedding.
     let mut builder = GraphBuilder::new("parametric_stage_embedding".to_string());
-    let dims = DecoderDims::register(&mut builder, &recipe.cfg);
+    let dims = stage_dims(&mut builder);
     let (_embed_f32, hidden) = recipe.emit_embedding(&mut builder, &dims);
     builder.add_output(hidden, "hidden_states");
     let mut graph = builder.build();
-    stage_metadata(&recipe, &mut graph, 0, STAGE_ROLE_EMBEDDING);
+    stage_metadata(recipe, &mut graph, 0, STAGE_ROLE_EMBEDDING);
     graphs.push(graph);
 
     // Decoder-layer stages.
@@ -1819,7 +1867,7 @@ pub fn build_parametric_stage_graphs(
         let start = s * block;
         let end = (start + block).min(layers);
         let mut builder = GraphBuilder::new(format!("parametric_stage_layers_{start}_{end}"));
-        let dims = DecoderDims::register(&mut builder, &recipe.cfg);
+        let dims = stage_dims(&mut builder);
         let mut current = builder.add_input("hidden_states", DType::F32, dims.hidden_state());
         let mut deferred: Option<LayerTail> = None;
         for l in start..end {
@@ -1840,7 +1888,19 @@ pub fn build_parametric_stage_graphs(
             None => builder.add_output(current, "hidden_states"),
         }
         let mut graph = builder.build();
-        stage_metadata(&recipe, &mut graph, 1 + s, STAGE_ROLE_LAYERS);
+        if let Some(bucket) = decode_bucket {
+            // Decompose this stage's fused attention over the carried past —
+            // absolute layer indices, so the pipeline's K/V port names are
+            // the model's layer numbers regardless of the partition.
+            let rewrite = rewrite_decode_attention(&mut graph, bucket, start as usize)?;
+            ensure!(
+                rewrite.layers as u64 == end - start,
+                "decode rewrite touched {} attention nodes in stage {s}, expected {}",
+                rewrite.layers,
+                end - start
+            );
+        }
+        stage_metadata(recipe, &mut graph, 1 + s, STAGE_ROLE_LAYERS);
         graph.metadata.insert(
             "stage_layer_start".to_string(),
             MetaValue::Int(start as i64),
@@ -1854,7 +1914,7 @@ pub fn build_parametric_stage_graphs(
     if head_chunks == 1 {
         // Head stage — the final layer's residual add + final norm + LM head.
         let mut builder = GraphBuilder::new("parametric_stage_head".to_string());
-        let dims = DecoderDims::register(&mut builder, &recipe.cfg);
+        let dims = stage_dims(&mut builder);
         let attn_residual = builder.add_input("hidden_states", DType::F32, dims.hidden_state());
         let mlp_down = builder.add_input("hidden_residual", DType::F32, dims.hidden_state());
         let current = recipe.seal_layer(
@@ -1869,7 +1929,7 @@ pub fn build_parametric_stage_graphs(
         let logits = recipe.emit_head(&mut builder, &dims, current, None)?;
         builder.add_output(logits, "logits");
         let mut graph = builder.build();
-        stage_metadata(&recipe, &mut graph, stage_count - 1, STAGE_ROLE_HEAD);
+        stage_metadata(recipe, &mut graph, stage_count - 1, STAGE_ROLE_HEAD);
         graphs.push(graph);
         return Ok(graphs);
     }
@@ -1884,7 +1944,7 @@ pub fn build_parametric_stage_graphs(
         let row_start = chunk * chunk_rows;
         let rows = chunk_rows.min(vocab - row_start);
         let mut builder = GraphBuilder::new(format!("parametric_stage_head_chunk_{chunk}"));
-        let dims = DecoderDims::register(&mut builder, &recipe.cfg);
+        let dims = stage_dims(&mut builder);
 
         let (normed, acc) = if chunk == 0 {
             let attn_residual = builder.add_input("hidden_states", DType::F32, dims.hidden_state());
@@ -1946,7 +2006,7 @@ pub fn build_parametric_stage_graphs(
 
         let mut graph = builder.build();
         stage_metadata(
-            &recipe,
+            recipe,
             &mut graph,
             layer_stages + 1 + chunk,
             STAGE_ROLE_HEAD,

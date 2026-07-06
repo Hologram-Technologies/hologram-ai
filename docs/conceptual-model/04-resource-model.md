@@ -507,8 +507,24 @@ multiplier is gone from the step, and the decode-plan cost is
 window-INDEPENDENT: it stays flat as context grows while the whole-window
 step scales with it. The residual multiplier at fixture scale is per-step
 dispatch overhead (~145 tiny kernels); at real scale the matmuls dominate
-and the ratio compresses toward the floor's own terms. Prefill currently
-replays the prompt through decode steps (O(prompt) single-position
-passes); the staged/browser realization and the prefill-seeded variant are
-the next slice (`decode-plan` stays honest at "build" until the deployed
-instance runs it).
+and the ratio compresses toward the floor's own terms.
+
+The staged/browser realization is built on the same partition contract:
+the decode stage graphs cut at the whole-window plan's own boundaries
+(identical κ-map coverage; each layer stage carries its layers' K/V ports
+at absolute indices), the staged pipeline routes ports by NAME (the
+archives' own port sections are the contract — shared position ports feed
+every layer stage from one pipeline port, carried K/V surfaces as
+trailing pipeline outputs), and the staged decode pipeline is
+**byte-identical** to the monolithic decode plan per position. Greedy
+completions are identical across the decode and whole-window plans
+(witnessed), so the plan switch is invisible to the transcript. In the
+browser, `DecodeChatSession` is the default chat path (knob
+`hologram_decode_plan=0` reverts): every token — prompt prefill included —
+is one single-position pass; buckets grow geometrically through the same
+derived-artifact store under a decode-specific derivation key; each turn
+rewinds the position and replays the templated transcript (elision
+recognizes the unchanged prefix). Prefill seeding from a whole-window
+pass and cross-turn K/V prefix retention are the remaining levers
+(`decode-plan` stays honest at "build" until the deployed instance runs
+it).

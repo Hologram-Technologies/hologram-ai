@@ -31,6 +31,7 @@ use std::io::Write;
 use anyhow::{bail, Context, Result};
 use hologram_ai_tokenizer::Tokenizer;
 
+use crate::decode::DecodeSession;
 use crate::engine::{LmSession, SessionProvider};
 
 /// Sampling / stopping configuration for one generation request.
@@ -421,6 +422,82 @@ pub fn generate_stream(
             .any(|s| !s.is_empty() && text.contains(s.as_str()))
         {
             break;
+        }
+    }
+
+    Ok(tokenizer.decode(&generated))
+}
+
+/// [`generate_stream`] over the decode-step plan (row `decode-plan`): the
+/// prompt prefills as decode steps (each token one single-position pass) and
+/// every generated token costs exactly one step — never a window-sized
+/// forward. Sampling, streaming, and stop conditions are the same code as the
+/// whole-window loop; the plans differ only in how a logit row is produced.
+pub fn generate_stream_decode<S: LmSession>(
+    session: &mut DecodeSession<S>,
+    tokenizer: &dyn Tokenizer,
+    prompt: &str,
+    cfg: &GenConfig,
+    out: &mut dyn Write,
+) -> Result<String> {
+    let eos = cfg.eos.unwrap_or_else(|| tokenizer.eos_token_id());
+    let max_window = session.context_len() as usize;
+
+    let prompt_tokens = tokenizer.encode(prompt);
+    if prompt_tokens.is_empty() {
+        bail!("prompt encoded to zero tokens");
+    }
+    if prompt_tokens.len() > max_window {
+        bail!(
+            "prompt is {} tokens but the model's context length is {}; the model cannot attend \
+             to a prompt longer than its trained context",
+            prompt_tokens.len(),
+            max_window
+        );
+    }
+
+    // Prefill: replay the prompt through decode steps. Only the last step's
+    // row feeds the sampler (causality makes the earlier rows byproducts).
+    let mut row: Vec<f32> = Vec::new();
+    for &t in &prompt_tokens {
+        row = session
+            .step(t as i64)
+            .context("decode prefill step failed")?;
+    }
+
+    let remaining = max_window - prompt_tokens.len();
+    let budget = cfg.max_tokens.map_or(remaining, |n| n.min(remaining));
+    let mut generated: Vec<u32> = Vec::new();
+    let mut emitted = 0usize;
+    let mut rng = cfg.seed;
+
+    for step in 0..budget {
+        let next = sample(&row, cfg.temperature, cfg.top_k, &mut rng);
+        if next == eos {
+            break;
+        }
+        generated.push(next);
+
+        let text = tokenizer.decode(&generated);
+        if let Some(delta) = text.get(emitted..) {
+            if !delta.is_empty() {
+                out.write_all(delta.as_bytes()).ok();
+                out.flush().ok();
+                emitted = text.len();
+            }
+        }
+        if cfg
+            .stop
+            .iter()
+            .any(|s| !s.is_empty() && text.contains(s.as_str()))
+        {
+            break;
+        }
+
+        // The final sampled token needs no step after it — a step only
+        // produces the NEXT row.
+        if step + 1 < budget {
+            row = session.step(next as i64).context("decode step failed")?;
         }
     }
 

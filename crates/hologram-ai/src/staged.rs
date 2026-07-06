@@ -108,6 +108,46 @@ pub fn compile_stages_with(
     Ok(archives)
 }
 
+/// [`compile_stages_with`] for the **decode-step** plan (row `decode-plan`,
+/// staged realization): the same partition, cut points, and κ-map coverage,
+/// assembled at seq = 1 with each layer stage's attention decomposed over a
+/// fixed `bucket`-row carried past. One archive set serves every step;
+/// growing past the bucket is a recompile at a larger bucket.
+#[allow(clippy::too_many_arguments)]
+pub fn compile_decode_stages(
+    config_json: &str,
+    keys: &[String],
+    kappas: &[String],
+    shapes: &[Vec<u64>],
+    dtypes: &[DType],
+    bucket: u64,
+    layers_per_stage: NonZeroU64,
+    quant: Option<&hologram_ai_common::lower::QuantMap>,
+) -> Result<Vec<Vec<u8>>> {
+    let config: serde_json::Value =
+        serde_json::from_str(config_json).context("parsing config.json")?;
+    let graphs = hologram_ai_safetensors::parametric::build_parametric_decode_stage_graphs(
+        &config,
+        keys,
+        dtypes,
+        bucket,
+        layers_per_stage,
+    )?;
+    let graphs = bind_manifest_kappas(graphs, keys, kappas, shapes, dtypes)?;
+    let mut archives = Vec::with_capacity(graphs.len());
+    for (stage, mut graph) in graphs.into_iter().enumerate() {
+        if let Some(quant) = quant {
+            hologram_ai_common::lower::quantize_external_matmul_weights(&mut graph, quant)
+                .with_context(|| format!("quantizing decode stage {stage} onto artifacts"))?;
+        }
+        let archive = ModelCompiler::default()
+            .compile(ModelSource::AiGraph(graph))
+            .with_context(|| format!("compiling decode stage {stage}"))?;
+        archives.push(archive.bytes);
+    }
+    Ok(archives)
+}
+
 /// The stage graphs of the staged plan with every manifest κ bound — the
 /// shared front half of [`compile_stages_with`] and [`quantizable_weights`].
 /// Fails loud if any manifest tensor is consumed by no stage.
@@ -121,6 +161,27 @@ fn bound_stage_graphs(
     context_length: Option<u64>,
     layers_per_stage: NonZeroU64,
 ) -> Result<Vec<hologram_ai_common::AiGraph>> {
+    let config: serde_json::Value =
+        serde_json::from_str(config_json).context("parsing config.json")?;
+    let graphs = hologram_ai_safetensors::parametric::build_parametric_stage_graphs(
+        &config,
+        keys,
+        dtypes,
+        context_length,
+        layers_per_stage,
+    )?;
+    bind_manifest_kappas(graphs, keys, kappas, shapes, dtypes)
+}
+
+/// Bind the κ of every manifest tensor each stage declares; fail loud if any
+/// manifest tensor is consumed by no stage.
+fn bind_manifest_kappas(
+    mut graphs: Vec<hologram_ai_common::AiGraph>,
+    keys: &[String],
+    kappas: &[String],
+    shapes: &[Vec<u64>],
+    dtypes: &[DType],
+) -> Result<Vec<hologram_ai_common::AiGraph>> {
     ensure!(
         keys.len() == kappas.len() && keys.len() == shapes.len() && keys.len() == dtypes.len(),
         "manifest slices disagree: {} keys, {} κs, {} shapes, {} dtypes",
@@ -129,16 +190,6 @@ fn bound_stage_graphs(
         shapes.len(),
         dtypes.len()
     );
-    let config: serde_json::Value =
-        serde_json::from_str(config_json).context("parsing config.json")?;
-    let mut graphs = hologram_ai_safetensors::parametric::build_parametric_stage_graphs(
-        &config,
-        keys,
-        dtypes,
-        context_length,
-        layers_per_stage,
-    )?;
-
     let mut bound = vec![false; keys.len()];
     for graph in graphs.iter_mut() {
         // Bind the κ of every manifest tensor this stage declares. Only
@@ -349,10 +400,14 @@ pub struct StagedRunner<'a> {
     /// Stage materializations performed over this runner's lifetime — the
     /// bandwidth instrument (`resident` hits don't count).
     materialization_count: u64,
-    /// The stage index declaring a `last_pos` input port (the head's
-    /// single-position gather, row `single-position-head`), if any. The
-    /// pipeline exposes the port at the top level and routes it here.
-    last_pos_stage: Option<usize>,
+    /// Per stage, per input port: where its bytes come from. Built once at
+    /// construction from the archives' own port names (see [`Feed`]).
+    feeds: Vec<Vec<Feed>>,
+    /// Per non-final stage, per output port: where its bytes go (see [`Sink`]).
+    sinks: Vec<Vec<Sink>>,
+    /// Number of intermediate-stage outputs surfaced as trailing pipeline
+    /// outputs (after the final stage's own outputs).
+    surfaced_count: usize,
     /// Kernels dispatched / elided across all stages of the most recent
     /// forward pass (class CE, summed per stage) — the decode attribution
     /// instrument of the `performance-contract` row.
@@ -373,12 +428,33 @@ pub struct StagedRunner<'a> {
     verified: std::rc::Rc<std::cell::RefCell<std::collections::HashSet<String>>>,
 }
 
+/// Where a stage input's bytes come from, resolved once at construction by
+/// port NAME: an input the immediately previous stage produces is a carried
+/// activation; anything else is a pipeline-level input (auxiliaries like
+/// `last_pos`, and the decode plan's `rope_cos`/`rope_sin`/`decode_mask`/
+/// `past_k_l`/`past_v_l`), deduplicated by name — one pipeline port may feed
+/// many stages.
+enum Feed {
+    Pipeline(usize),
+    Carried(String),
+}
+
+/// Where a non-final stage output's bytes go: into the next stage (an input
+/// there shares its name) or surfaced as a trailing pipeline output (the
+/// decode plan's `k_new_l`/`v_new_l`).
+enum Sink {
+    Carry(String),
+    Surface(usize),
+}
+
 impl<'a> StagedRunner<'a> {
     /// Build a runner over `stage_count` stages resolved on demand through
     /// `resolve_stage`, materializing κs against `store`. Reads the LM port
     /// contract from the k-form archives' port sections (weight-free): stage
     /// 0 must declare an `input_ids` input and the final stage a `logits`
-    /// output.
+    /// output. Routing between stages is by port NAME (see [`Feed`]/[`Sink`]):
+    /// the archives' own ports are the pipeline's contract, never positional
+    /// guessing.
     pub fn new(
         stage_count: usize,
         mut resolve_stage: StageResolver<'a>,
@@ -389,29 +465,68 @@ impl<'a> StagedRunner<'a> {
             "a staged pipeline needs at least one stage"
         );
 
-        let first = resolve_stage(0).context("resolving the stage 0 archive")?;
-        let mut input_ports =
-            archive_ports(&first, SectionKind::Inputs).context("reading stage 0 input ports")?;
-        drop(first);
-        // Single-position head (row `single-position-head`): the stage that
-        // gathers the consumed position declares a `last_pos` input; the
-        // pipeline exposes it as its own trailing port and routes it there.
-        let mut last_pos_stage = None;
-        for stage in 1..stage_count {
+        let stage_ports = |resolve_stage: &mut StageResolver<'a>,
+                           stage: usize,
+                           kind: SectionKind|
+         -> Result<Vec<PortInfo>> {
             let archive = resolve_stage(stage)
                 .with_context(|| format!("resolving the stage {stage} archive"))?;
-            let ports = archive_ports(&archive, SectionKind::Inputs)
-                .with_context(|| format!("reading stage {stage} input ports"))?;
-            if let Some(p) = ports.into_iter().find(|p| p.name == "last_pos") {
-                last_pos_stage = Some(stage);
-                input_ports.push(p);
-                break;
-            }
+            archive_ports(&archive, kind).with_context(|| format!("reading stage {stage} ports"))
+        };
+
+        // Stage 0's inputs are pipeline inputs verbatim.
+        let mut input_ports = stage_ports(&mut resolve_stage, 0, SectionKind::Inputs)?;
+        let mut feeds: Vec<Vec<Feed>> = vec![(0..input_ports.len()).map(Feed::Pipeline).collect()];
+        let mut sinks: Vec<Vec<Sink>> = Vec::new();
+        let mut surfaced_ports: Vec<PortInfo> = Vec::new();
+        let mut prev_outputs = stage_ports(&mut resolve_stage, 0, SectionKind::Outputs)?;
+
+        for stage in 1..stage_count {
+            let ins = stage_ports(&mut resolve_stage, stage, SectionKind::Inputs)?;
+            feeds.push(
+                ins.iter()
+                    .map(|p| {
+                        if prev_outputs.iter().any(|o| o.name == p.name) {
+                            Feed::Carried(p.name.clone())
+                        } else {
+                            // Pipeline-level input, deduplicated by name (the
+                            // decode plan's shared position ports feed every
+                            // layer stage from one pipeline port).
+                            let idx = input_ports
+                                .iter()
+                                .position(|q| q.name == p.name)
+                                .unwrap_or_else(|| {
+                                    input_ports.push(p.clone());
+                                    input_ports.len() - 1
+                                });
+                            Feed::Pipeline(idx)
+                        }
+                    })
+                    .collect(),
+            );
+            // The previous stage's outputs either carry into this stage or
+            // surface as trailing pipeline outputs.
+            sinks.push(
+                prev_outputs
+                    .iter()
+                    .map(|o| {
+                        if ins.iter().any(|p| p.name == o.name) {
+                            Sink::Carry(o.name.clone())
+                        } else {
+                            surfaced_ports.push(o.clone());
+                            Sink::Surface(surfaced_ports.len() - 1)
+                        }
+                    })
+                    .collect(),
+            );
+            prev_outputs = stage_ports(&mut resolve_stage, stage, SectionKind::Outputs)?;
         }
-        let last = resolve_stage(stage_count - 1).context("resolving the final stage archive")?;
-        let output_ports = archive_ports(&last, SectionKind::Outputs)
-            .context("reading final stage output ports")?;
-        drop(last);
+
+        // Pipeline outputs: the final stage's outputs first (`logits` stays
+        // the leading contract), then the surfaced intermediates.
+        let mut output_ports = prev_outputs;
+        let surfaced_count = surfaced_ports.len();
+        output_ports.extend(surfaced_ports);
 
         let window = input_ports
             .iter()
@@ -439,7 +554,9 @@ impl<'a> StagedRunner<'a> {
             resolve_stage,
             store,
             stage_count,
-            last_pos_stage,
+            feeds,
+            sinks,
+            surfaced_count,
             input_ports,
             output_ports,
             window,
@@ -582,7 +699,8 @@ impl<'a> StagedRunner<'a> {
     /// One windowed forward pass: stages in order, previous outputs feeding
     /// the next stage's inputs, one materialized session resident at a time.
     fn execute_window(&mut self, inputs: &[&[u8]]) -> Result<Vec<OutputBuffer>> {
-        let mut carried: Vec<Vec<u8>> = Vec::new();
+        let mut carried: HashMap<String, Vec<u8>> = HashMap::new();
+        let mut surfaced: Vec<Option<Vec<u8>>> = (0..self.surfaced_count).map(|_| None).collect();
         self.last_dispatched = 0;
         self.last_skipped = 0;
         for stage in 0..self.stage_count {
@@ -616,21 +734,25 @@ impl<'a> StagedRunner<'a> {
                     .with_context(|| format!("loading stage {stage}"))?
             };
 
-            // Stage 0 takes the pipeline inputs minus the routed trailing
-            // `last_pos`; later stages take the carried activations, plus
-            // `last_pos` at the stage that declares it.
-            let stage0_n = self.input_ports.len() - usize::from(self.last_pos_stage.is_some());
-            let mut refs: Vec<&[u8]> = if stage == 0 {
-                inputs[..stage0_n.min(inputs.len())].to_vec()
-            } else {
-                carried.iter().map(Vec::as_slice).collect()
-            };
-            if self.last_pos_stage == Some(stage) {
-                let last = inputs.last().with_context(|| {
-                    format!("stage {stage} needs the `last_pos` input but none was passed")
-                })?;
-                refs.push(last);
-            }
+            // Each input port draws from its resolved source: a pipeline
+            // input by index, or the previous stage's same-named output.
+            let refs: Vec<&[u8]> = self.feeds[stage]
+                .iter()
+                .map(|feed| match feed {
+                    Feed::Pipeline(i) => inputs.get(*i).copied().with_context(|| {
+                        format!(
+                            "stage {stage} needs pipeline input `{}` but only {} inputs were passed",
+                            self.input_ports[*i].name,
+                            inputs.len()
+                        )
+                    }),
+                    Feed::Carried(name) => {
+                        carried.get(name).map(Vec::as_slice).with_context(|| {
+                            format!("stage {stage} expects `{name}` from the previous stage")
+                        })
+                    }
+                })
+                .collect::<Result<_>>()?;
             let outputs = runner
                 .execute(&refs)
                 .with_context(|| format!("executing stage {stage}"))?;
@@ -661,9 +783,29 @@ impl<'a> StagedRunner<'a> {
                 .max(self.resident_bytes.max(bytes));
 
             if stage + 1 == self.stage_count {
-                return Ok(outputs);
+                // Pipeline outputs: the final stage's own outputs, then the
+                // surfaced intermediates (every stage ran, so all are filled).
+                let final_n = self.output_ports.len() - self.surfaced_count;
+                let mut result = outputs;
+                for (k, slot) in surfaced.into_iter().enumerate() {
+                    let bytes = slot.with_context(|| {
+                        format!(
+                            "surfaced output `{}` was never produced",
+                            self.output_ports[final_n + k].name
+                        )
+                    })?;
+                    result.push(OutputBuffer { bytes });
+                }
+                return Ok(result);
             }
-            carried = outputs.into_iter().map(|o| o.bytes).collect();
+            for (port, out) in outputs.into_iter().enumerate() {
+                match &self.sinks[stage][port] {
+                    Sink::Carry(name) => {
+                        carried.insert(name.clone(), out.bytes);
+                    }
+                    Sink::Surface(k) => surfaced[*k] = Some(out.bytes),
+                }
+            }
         }
         bail!("the staged pipeline executed no stages")
     }
@@ -688,6 +830,14 @@ impl LmSession for StagedRunner<'_> {
 
     fn execute(&mut self, inputs: &[&[u8]]) -> Result<Vec<OutputBuffer>> {
         self.execute_window(inputs)
+    }
+
+    fn pass_dispatched(&self) -> u64 {
+        self.last_dispatched
+    }
+
+    fn pass_skipped(&self) -> u64 {
+        self.last_skipped
     }
 }
 
@@ -940,6 +1090,75 @@ impl GrowableStagedSession {
     pub fn stage_count(&self) -> usize {
         self.current.as_ref().map_or(0, |(_, r)| r.stage_count())
     }
+
+    /// The decode-plan twin of [`Self::prederive_next_window`]: derive the
+    /// next geometric decode BUCKET's archives into the derived store, off
+    /// the per-token path. `current` is the caller's resident bucket (the
+    /// decode runner lives with its [`crate::decode::DecodeSession`], not
+    /// here). Returns the pre-derived bucket, or `None` at the ceiling.
+    pub fn prederive_next_decode_bucket(&mut self, current: usize) -> Result<Option<usize>> {
+        if current >= self.max_window {
+            return Ok(None);
+        }
+        let next =
+            crate::engine::geometric_window(current.saturating_mul(2).max(1), self.max_window);
+        if next <= current {
+            return Ok(None);
+        }
+        let _ = self.decode_stages_for_bucket(next)?;
+        Ok(Some(next))
+    }
+}
+
+impl GrowableStagedSession {
+    /// Load `archives` into a runner wired with the session's store,
+    /// observers, budget, admission probe, and verified-κ set — the shared
+    /// back half of the whole-window and decode-plan providers.
+    fn wire_runner(&mut self, archives: Vec<Vec<u8>>) -> Result<StagedRunner<'static>> {
+        let expected = self.expected_stage_bytes(&archives);
+        let mut runner = StagedRunner::from_archives(
+            archives,
+            Box::new(SharedStore(std::rc::Rc::clone(&self.store))),
+        )
+        .context("loading the staged pipeline")?;
+        if let Some(hook) = &self.on_stage {
+            let hook = std::rc::Rc::clone(hook);
+            runner.set_stage_observer(Box::new(move |s, n, b| {
+                (hook.borrow_mut())(s, n, b);
+            }));
+        }
+        runner.set_residency_budget(self.residency_budget);
+        runner.share_verified_set(std::rc::Rc::clone(&self.verified));
+        runner.set_expected_stage_bytes(expected);
+        if let Some(probe) = &self.admission_probe {
+            let probe = std::rc::Rc::clone(probe);
+            runner.set_admission_probe(Box::new(move |margin| probe(margin)));
+        }
+        Ok(runner)
+    }
+
+    /// A **decode-plan** pipeline runner over a bucket ≥ `want` (geometric,
+    /// ceilinged by the model's context) — the decode twin of
+    /// [`SessionProvider::session_for`]. The caller owns the runner (a
+    /// [`crate::decode::DecodeSession`] holds it together with its carried
+    /// K/V buffers); this session stays the archive factory across regrows,
+    /// so derived-store hits, the verified-κ set, and observers all carry.
+    pub fn decode_runner_for(&mut self, want: usize) -> Result<StagedRunner<'static>> {
+        ensure!(
+            want <= self.max_window,
+            "the sequence needs a decode bucket of {want} rows but the model's context length \
+             is {}",
+            self.max_window
+        );
+        let bucket = crate::engine::geometric_window(want.max(1), self.max_window);
+        tracing::info!(bucket, want, "building decode-plan bucket");
+        let (archives, resolved) = self.decode_stages_for_bucket(bucket)?;
+        if let Some(f) = self.on_window.as_mut() {
+            f(bucket, resolved);
+        }
+        self.wire_runner(archives)
+            .with_context(|| format!("loading the {bucket}-row decode pipeline"))
+    }
 }
 
 impl SessionProvider for GrowableStagedSession {
@@ -961,25 +1180,9 @@ impl SessionProvider for GrowableStagedSession {
             if let Some(f) = self.on_window.as_mut() {
                 f(window, resolved);
             }
-            let expected = self.expected_stage_bytes(&archives);
-            let mut runner = StagedRunner::from_archives(
-                archives,
-                Box::new(SharedStore(std::rc::Rc::clone(&self.store))),
-            )
-            .with_context(|| format!("loading the {window}-token staged window"))?;
-            if let Some(hook) = &self.on_stage {
-                let hook = std::rc::Rc::clone(hook);
-                runner.set_stage_observer(Box::new(move |s, n, b| {
-                    (hook.borrow_mut())(s, n, b);
-                }));
-            }
-            runner.set_residency_budget(self.residency_budget);
-            runner.share_verified_set(std::rc::Rc::clone(&self.verified));
-            runner.set_expected_stage_bytes(expected);
-            if let Some(probe) = &self.admission_probe {
-                let probe = std::rc::Rc::clone(probe);
-                runner.set_admission_probe(Box::new(move |margin| probe(margin)));
-            }
+            let runner = self
+                .wire_runner(archives)
+                .with_context(|| format!("loading the {window}-token staged window"))?;
             self.current = Some((window, runner));
         }
         Ok(&mut self.current.as_mut().expect("window just ensured").1)
@@ -1155,6 +1358,55 @@ impl GrowableStagedSession {
             self.quant.as_ref(),
         )
         .with_context(|| format!("compiling a {window}-token staged window"))?;
+        if let Some(store) = self.derived_store.as_mut() {
+            let kappas: Vec<String> = stages
+                .iter()
+                .map(|s| crate::materialize::kappa_of(s))
+                .collect();
+            store.store(&key, &stages, &kappas);
+        }
+        Ok((stages, false))
+    }
+
+    /// The decode-plan twin of [`Self::stages_for_window`]: resolve or
+    /// compile the `bucket`-row decode pipeline under its OWN derivation key
+    /// — a decode pipeline and a whole-window pipeline are different
+    /// derivations of the same inputs, never reinterpretations.
+    fn decode_stages_for_bucket(&mut self, bucket: usize) -> Result<(Vec<Vec<u8>>, bool)> {
+        let key = crate::materialize::kappa_of(
+            format!(
+                "decode-archives:v1:bucket={bucket}:base={}",
+                self.derivation_key(0)
+            )
+            .as_bytes(),
+        );
+        if let Some(store) = self.derived_store.as_mut() {
+            if let Some((stages, kappas)) = store.load(&key) {
+                let intact = stages.len() == kappas.len()
+                    && !stages.is_empty()
+                    && stages
+                        .iter()
+                        .zip(&kappas)
+                        .all(|(s, k)| crate::materialize::kappa_of(s) == *k);
+                if intact {
+                    self.derived_hits += 1;
+                    tracing::info!(bucket, "decode pipeline resolved from derived κ-store");
+                    return Ok((stages, true));
+                }
+                store.evaporate(&key);
+            }
+        }
+        let stages = compile_decode_stages(
+            &self.config_json,
+            &self.keys,
+            &self.kappas,
+            &self.shapes,
+            &self.dtypes,
+            bucket as u64,
+            self.layers_per_stage,
+            self.quant.as_ref(),
+        )
+        .with_context(|| format!("compiling a {bucket}-row decode pipeline"))?;
         if let Some(store) = self.derived_store.as_mut() {
             let kappas: Vec<String> = stages
                 .iter()

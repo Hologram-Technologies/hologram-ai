@@ -361,7 +361,7 @@ fn build_decode_graph(bucket: u64) -> AiGraph {
     graph
 }
 
-fn decode_session(bucket: u64) -> DecodeSession {
+fn decode_session(bucket: u64) -> DecodeSession<HoloRunner> {
     let runner = HoloRunner::from_bytes(compile(build_decode_graph(bucket))).expect("decode loads");
     DecodeSession::new(runner, THETA as f32, WINDOW as u64)
         .expect("decode session opens")
@@ -372,7 +372,7 @@ fn decode_session(bucket: u64) -> DecodeSession {
 
 /// Feed `tokens` one at a time through a decode session and assert each
 /// step's logit row matches the whole-window plan's row at that position.
-fn assert_decode_matches_window(mut session: DecodeSession, label: &str) {
+fn assert_decode_matches_window(mut session: DecodeSession<HoloRunner>, label: &str) {
     let mut window_runner =
         HoloRunner::from_bytes(compile(build_graph(true))).expect("archive loads");
     let mut max_abs = 0f32;

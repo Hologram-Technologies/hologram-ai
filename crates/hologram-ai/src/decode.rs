@@ -17,7 +17,7 @@
 
 use anyhow::{bail, ensure, Context, Result};
 
-use crate::runner::HoloRunner;
+use crate::engine::LmSession;
 
 /// Geometry recovered from the decode archive's own port shapes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -35,10 +35,12 @@ pub struct DecodeGeometry {
 }
 
 impl DecodeGeometry {
-    /// Read the geometry out of a decode archive's port shapes — the ports
-    /// are the contract, so no side-channel metadata is trusted over them.
-    pub fn discover(runner: &HoloRunner) -> Result<Self> {
-        let inputs = runner.input_port_info();
+    /// Read the geometry out of a decode plan's port shapes — the ports are
+    /// the contract, so no side-channel metadata is trusted over them. Works
+    /// over any [`LmSession`]: a monolithic decode archive and the staged
+    /// decode pipeline expose the same ports.
+    pub fn discover(session: &impl LmSession) -> Result<Self> {
+        let inputs = session.input_port_info();
         let layers = inputs
             .iter()
             .filter(|p| p.name.starts_with("past_k_"))
@@ -57,7 +59,7 @@ impl DecodeGeometry {
             pk.shape
         );
         let (kv_heads, bucket, head_dim) = (pk.shape[0], pk.shape[1], pk.shape[2]);
-        let logits = runner
+        let logits = session
             .output_port_info()
             .into_iter()
             .find(|p| p.name == "logits")
@@ -73,19 +75,22 @@ impl DecodeGeometry {
 }
 
 /// Rebuild source for bucket growth: given a bucket size, compile a fresh
-/// decode archive. `None` pins the session to its initial bucket (exhaustion
+/// decode plan. `None` pins the session to its initial bucket (exhaustion
 /// then fails loud instead of silently truncating context).
-pub type DecodeRebuild = Box<dyn FnMut(u64) -> Result<HoloRunner>>;
+pub type DecodeRebuild<S> = Box<dyn FnMut(u64) -> Result<S>>;
 
-/// A generation session over the decode-step plan.
-pub struct DecodeSession {
-    runner: HoloRunner,
+/// A generation session over the decode-step plan — generic over the
+/// [`LmSession`] executing each step, so the same engine drives a monolithic
+/// decode archive (`HoloRunner`) or the staged decode pipeline
+/// (`StagedRunner`).
+pub struct DecodeSession<S: LmSession> {
+    runner: S,
     geom: DecodeGeometry,
     rope_theta: f32,
     /// The model's trained position ceiling (`context_length` metadata) — the
     /// only semantic bound on generation length.
     context_length: u64,
-    rebuild: Option<DecodeRebuild>,
+    rebuild: Option<DecodeRebuild<S>>,
     /// Per-layer past K/V byte buffers, each `kv · bucket · head_dim` f32s.
     past_k: Vec<Vec<u8>>,
     past_v: Vec<Vec<u8>>,
@@ -93,12 +98,12 @@ pub struct DecodeSession {
     cur_len: usize,
 }
 
-impl DecodeSession {
-    /// Open a session over a compiled decode archive. `rope_theta` comes from
+impl<S: LmSession> DecodeSession<S> {
+    /// Open a session over a compiled decode plan. `rope_theta` comes from
     /// the model's own config (the graph consumes rope as runtime data, so
     /// the table generator lives with the engine); `context_length` is the
     /// model's trained ceiling.
-    pub fn new(runner: HoloRunner, rope_theta: f32, context_length: u64) -> Result<Self> {
+    pub fn new(runner: S, rope_theta: f32, context_length: u64) -> Result<Self> {
         let geom = DecodeGeometry::discover(&runner)?;
         let kv_bytes = geom.kv_heads * geom.bucket * geom.head_dim * 4;
         Ok(Self {
@@ -115,7 +120,7 @@ impl DecodeSession {
 
     /// Attach a rebuild source so bucket exhaustion regrows geometrically
     /// instead of failing.
-    pub fn with_rebuild(mut self, rebuild: DecodeRebuild) -> Self {
+    pub fn with_rebuild(mut self, rebuild: DecodeRebuild<S>) -> Self {
         self.rebuild = Some(rebuild);
         self
     }
@@ -128,13 +133,33 @@ impl DecodeSession {
         self.cur_len
     }
 
-    /// Kernel-dispatch counters for the last step (perf attribution).
-    pub fn last_dispatched(&self) -> usize {
-        self.runner.last_dispatched()
+    /// The model's trained position ceiling — the only semantic bound on
+    /// generation length.
+    pub fn context_len(&self) -> u64 {
+        self.context_length
     }
 
-    pub fn last_skipped(&self) -> usize {
-        self.runner.last_skipped()
+    /// The executing session (e.g. for its residency/bandwidth instruments).
+    pub fn runner(&self) -> &S {
+        &self.runner
+    }
+
+    /// Rewind to position 0 for a fresh sequence. The K/V buffers keep their
+    /// bytes — every unrealized row is erased inside the softmax by the
+    /// decode mask, so stale content is unreachable by construction — and
+    /// the runner keeps its materialized stages (a warm turn pays decode,
+    /// never rematerialization).
+    pub fn reset(&mut self) {
+        self.cur_len = 0;
+    }
+
+    /// Kernel-dispatch counters for the last step (perf attribution).
+    pub fn last_dispatched(&self) -> u64 {
+        self.runner.pass_dispatched()
+    }
+
+    pub fn last_skipped(&self) -> u64 {
+        self.runner.pass_skipped()
     }
 
     /// Standard non-interleaved RoPE tables at absolute position `pos`:

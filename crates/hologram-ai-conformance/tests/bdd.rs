@@ -825,6 +825,9 @@ struct BddWorld {
     decode_kit: Option<DecodeKit>,
     decode_parity: Option<Vec<(Vec<f32>, Vec<f32>)>>,
     decode_buckets: Option<(usize, usize)>, // initial, final
+    decode_staged: Option<DecodeStagedKit>,
+    decode_staged_pairs: Option<Vec<(Vec<f32>, Vec<f32>)>>, // (staged, monolithic) per position
+    decode_completions: Option<(String, String)>,           // (decode plan, whole-window)
     // S3 — quantized transit (row `quantized-transit`)
     quant: Option<QuantKit>,
     quant_derive: Option<(usize, u64, u64)>,
@@ -3650,8 +3653,17 @@ async fn then_sph_row(w: &mut BddWorld) {
 
 struct DecodeKit {
     store: StoreDir,
-    session: DecodeSession,
+    session: DecodeSession<HoloRunner>,
     initial_bucket: usize,
+}
+
+/// The staged-vs-monolithic decode pair over one fixture κ-store (row
+/// `decode-plan`, staged realization).
+struct DecodeStagedKit {
+    #[allow(dead_code)] // holds the κ-store directory both sessions read
+    store: StoreDir,
+    mono: DecodeSession<HoloRunner>,
+    staged: DecodeSession<StagedRunner<'static>>,
 }
 
 /// Compile the decode-step k-form over the staged fixture at `bucket` rows
@@ -3774,6 +3786,120 @@ async fn then_decode_regrow(w: &mut BddWorld) {
     );
 }
 
+#[given(expr = "a staged decode pipeline over the staged fixture with a bucket of {int} rows")]
+async fn given_staged_decode(w: &mut BddWorld, bucket: usize) {
+    let store = staged_store("decode-staged");
+    let theta = staged_config(false)["rope_theta"]
+        .as_f64()
+        .expect("the fixture declares rope_theta") as f32;
+
+    let mono_runner = HoloRunner::from_bytes(decode_archive(&store.path, bucket as u64))
+        .expect("the monolithic decode archive loads");
+    let mono =
+        DecodeSession::new(mono_runner, theta, STG_WINDOW).expect("the monolithic session opens");
+
+    let manifest = staged_manifest(false);
+    let (keys, shapes): (Vec<String>, Vec<Vec<u64>>) = manifest.into_iter().unzip();
+    let kappas: Vec<String> = keys
+        .iter()
+        .zip(&shapes)
+        .map(|(name, dims)| kappa_of(&staged_tensor_bytes(name, dims)))
+        .collect();
+    let dtypes = vec![DType::F32; keys.len()];
+    let archives = hologram_ai::staged::compile_decode_stages(
+        &staged_config(false).to_string(),
+        &keys,
+        &kappas,
+        &shapes,
+        &dtypes,
+        bucket as u64,
+        std::num::NonZeroU64::new(1).expect("1 is non-zero"),
+        None,
+    )
+    .expect("the staged decode pipeline compiles");
+    let runner = StagedRunner::from_archives(archives, Box::new(DirKappaStore::new(&store.path)))
+        .expect("the staged decode runner builds");
+    let staged = DecodeSession::new(runner, theta, STG_WINDOW).expect("the staged session opens");
+
+    w.decode_staged = Some(DecodeStagedKit {
+        store,
+        mono,
+        staged,
+    });
+}
+
+#[when("the fixture tokens replay through both decode plans one position at a time")]
+async fn when_both_decode_replay(w: &mut BddWorld) {
+    let kit = w.decode_staged.as_mut().expect("the staged decode kit");
+    let mut pairs = Vec::new();
+    for &tok in STG_TOKENS.iter() {
+        let s = kit.staged.step(tok).expect("a staged decode step");
+        let m = kit.mono.step(tok).expect("a monolithic decode step");
+        pairs.push((s, m));
+    }
+    w.decode_staged_pairs = Some(pairs);
+}
+
+#[then("every staged decode step is byte-identical to the monolithic decode step")]
+async fn then_staged_decode_equal(w: &mut BddWorld) {
+    let pairs = w.decode_staged_pairs.as_ref().expect("the replay ran");
+    assert_eq!(pairs.len(), STG_TOKENS.len(), "every position was compared");
+    for (t, (s, m)) in pairs.iter().enumerate() {
+        assert_eq!(s.len(), m.len(), "row sizes agree at position {t}");
+        assert!(
+            s.iter().zip(m).all(|(a, b)| a.to_bits() == b.to_bits()),
+            "staged decode diverges from the monolithic decode plan at position {t}"
+        );
+    }
+    println!(
+        "[decode-plan] staged == monolithic decode: {} positions byte-identical \
+         (same recipe, same cut, same kernels)",
+        pairs.len()
+    );
+}
+
+#[when("the same greedy completion is generated through the decode plan and the whole-window plan")]
+async fn when_decode_generated(w: &mut BddWorld) {
+    use hologram_ai::commands::generate::{generate_stream, generate_stream_decode, GenConfig};
+
+    let prompt = "3 141 59 26 5";
+    let cfg = GenConfig {
+        max_tokens: Some(8),
+        temperature: 0.0,
+        ..Default::default()
+    };
+
+    let kit = w.decode_staged.as_mut().expect("the staged decode kit");
+    let mut sink = Vec::new();
+    let decode_text = generate_stream_decode(&mut kit.staged, &DecimalTok, prompt, &cfg, &mut sink)
+        .expect("decode-plan generation completes");
+
+    let mut dir = DirKappaStore::new(&kit.store.path);
+    let mono = materialize_archive(&staged_kit().monolithic, &mut dir)
+        .expect("the monolithic archive materializes");
+    let mut fixed =
+        hologram_ai::FixedSession::new(HoloRunner::from_bytes(mono).expect("the archive loads"));
+    let mut sink = Vec::new();
+    let window_text = generate_stream(&mut fixed, &DecimalTok, prompt, &cfg, &mut sink)
+        .expect("whole-window generation completes");
+
+    w.decode_completions = Some((decode_text, window_text));
+}
+
+#[then("both plans emit the identical completion")]
+async fn then_decode_completions_equal(w: &mut BddWorld) {
+    let (decode, window) = w.decode_completions.as_ref().expect("both generations ran");
+    assert!(
+        !decode.is_empty(),
+        "the decode completion must be non-empty"
+    );
+    assert_eq!(
+        decode, window,
+        "the decode-plan completion must equal the whole-window completion"
+    );
+    println!("[decode-plan] greedy completion (both plans): {decode:?}");
+}
+
 #[when(
     expr = "the environment stream bandwidth is calibrated and {int} decode-plan steps are timed"
 )]
@@ -3789,8 +3915,8 @@ async fn when_perf_decode_plan(w: &mut BddWorld, steps: usize) {
         tok = argmax(&row) as i64;
         recorded.push(PerfStep {
             secs,
-            dispatched: kit.session.last_dispatched() as u64,
-            skipped: kit.session.last_skipped() as u64,
+            dispatched: kit.session.last_dispatched(),
+            skipped: kit.session.last_skipped(),
             materializations: 0, // the decode plan has no staged rematerialization
         });
     }
