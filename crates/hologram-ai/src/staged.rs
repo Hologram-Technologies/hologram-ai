@@ -452,8 +452,8 @@ impl<'a> StagedRunner<'a> {
     /// `resolve_stage`, materializing κs against `store`. Reads the LM port
     /// contract from the k-form archives' port sections (weight-free): stage
     /// 0 must declare an `input_ids` input and the final stage a `logits`
-    /// output. Routing between stages is by port NAME (see [`Feed`]/[`Sink`]):
-    /// the archives' own ports are the pipeline's contract, never positional
+    /// output. Routing between stages is by port NAME (`Feed`/`Sink`): the
+    /// archives' own ports are the pipeline's contract, never positional
     /// guessing.
     pub fn new(
         stage_count: usize,
