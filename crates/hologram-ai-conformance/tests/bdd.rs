@@ -32,7 +32,7 @@ use hologram_ai::materialize::{
 };
 use hologram_ai::runner::HoloRunner;
 use hologram_ai::staged::StagedRunner;
-use hologram_ai::{LmSession, ModelCompiler, ModelSource};
+use hologram_ai::{DecodeSession, LmSession, ModelCompiler, ModelSource};
 use hologram_ai_common::{shape_from_concrete, AiGraph, AiNode, AiOp, AiParam, DType, TensorInfo};
 use hologram_ai_conformance::witness::{parse_streamed_header, split_safetensors};
 use hologram_ai_core::domain::Kappa;
@@ -43,8 +43,8 @@ use hologram_ai_core::{
 use hologram_ai_model::{Executor, Model, Tier, UseCaseExpects};
 use hologram_ai_quant::{dequant_q4_0, dequant_q8_0};
 use hologram_ai_safetensors::parametric::{
-    build_parametric_graph_from_manifest, build_parametric_stage_graphs, selected_family,
-    supported_families,
+    build_parametric_decode_graph_from_manifest, build_parametric_graph_from_manifest,
+    build_parametric_stage_graphs, selected_family, supported_families,
 };
 use hologram_ai_tokenizer::{NativeTokenizer, Tokenizer};
 use serde::Deserialize;
@@ -821,6 +821,10 @@ struct BddWorld {
     perf: Option<PerfReport>,
     perf_kit: Option<PerfKit>,
     sph: Option<(usize, bool)>,
+    // S3 — decode plan (row `decode-plan`)
+    decode_kit: Option<DecodeKit>,
+    decode_parity: Option<Vec<(Vec<f32>, Vec<f32>)>>,
+    decode_buckets: Option<(usize, usize)>, // initial, final
     // S3 — quantized transit (row `quantized-transit`)
     quant: Option<QuantKit>,
     quant_derive: Option<(usize, u64, u64)>,
@@ -3640,6 +3644,199 @@ async fn then_sph_row(w: &mut BddWorld) {
         "the pipeline exposes the `last_pos` port the generation loop synthesizes"
     );
     println!("[single-position-head] logits are one row ({STG_VOCAB} f32) at any window position");
+}
+
+// ───────────────── S3 — decode plan (row `decode-plan`) ─────────────────────
+
+struct DecodeKit {
+    store: StoreDir,
+    session: DecodeSession,
+    initial_bucket: usize,
+}
+
+/// Compile the decode-step k-form over the staged fixture at `bucket` rows
+/// and materialize it from `store` — the decode twin of the staged kit.
+fn decode_archive(store: &Path, bucket: u64) -> Vec<u8> {
+    let manifest = staged_manifest(false);
+    let (keys, shapes): (Vec<String>, Vec<Vec<u64>>) = manifest.into_iter().unzip();
+    let dtypes = vec![DType::F32; keys.len()];
+    let mut graph =
+        build_parametric_decode_graph_from_manifest(&staged_config(false), &keys, &dtypes, bucket)
+            .expect("the decode-step graph builds");
+    let name_to_id: HashMap<String, u32> = graph
+        .tensor_names
+        .iter()
+        .map(|(id, name)| (name.clone(), *id))
+        .collect();
+    for (name, dims) in keys.iter().zip(&shapes) {
+        let id = *name_to_id.get(name).expect("manifest tensor in the graph");
+        let info = ti(DType::F32, dims);
+        graph.tensor_info.insert(id, info.clone());
+        graph.params.insert(
+            id,
+            AiParam::External {
+                kappa: kappa_of(&staged_tensor_bytes(name, dims)),
+                info,
+                range: None,
+            },
+        );
+    }
+    let kform = compile_graph(graph);
+    let mut dir = DirKappaStore::new(store);
+    materialize_archive(&kform, &mut dir).expect("the decode archive materializes")
+}
+
+#[given(expr = "a decode-step archive over the staged fixture with a bucket of {int} rows")]
+async fn given_decode_kit(w: &mut BddWorld, bucket: usize) {
+    let store = staged_store("decode-plan");
+    let runner =
+        HoloRunner::from_bytes(decode_archive(&store.path, bucket as u64)).expect("archive loads");
+    let theta = staged_config(false)["rope_theta"]
+        .as_f64()
+        .expect("the fixture declares rope_theta") as f32;
+    let rebuild_path = store.path.clone();
+    let session = DecodeSession::new(runner, theta, STG_WINDOW)
+        .expect("the decode session opens")
+        .with_rebuild(Box::new(move |b| {
+            HoloRunner::from_bytes(decode_archive(&rebuild_path, b))
+        }));
+    w.decode_kit = Some(DecodeKit {
+        store,
+        session,
+        initial_bucket: bucket,
+    });
+}
+
+#[when("the fixture tokens replay through the decode plan one position at a time")]
+async fn when_decode_replay(w: &mut BddWorld) {
+    let kit = w.decode_kit.as_mut().expect("the decode kit");
+    // The whole-window rows come from the staged fixture's monolithic archive
+    // (single-position head: sweep `last_pos` over the realized positions).
+    let mut dir = DirKappaStore::new(&kit.store.path);
+    let mono = materialize_archive(&staged_kit().monolithic, &mut dir)
+        .expect("the monolithic archive materializes");
+    let mut mono_runner = HoloRunner::from_bytes(mono).expect("the monolithic archive loads");
+    let logits_idx = mono_runner
+        .output_index_by_name("logits")
+        .expect("a logits port");
+    let ids = staged_window_ids();
+
+    let mut pairs = Vec::new();
+    for (t, &tok) in STG_TOKENS.iter().enumerate() {
+        let step_row = kit.session.step(tok).expect("a decode step");
+        let lp = last_pos_buf(t + 1);
+        let outs = mono_runner
+            .execute(&[&ids, &lp])
+            .expect("the whole-window pass");
+        pairs.push((step_row, le_f32(&outs[logits_idx].bytes)));
+    }
+    w.decode_buckets = Some((kit.initial_bucket, kit.session.geometry().bucket));
+    w.decode_parity = Some(pairs);
+}
+
+#[then("every decode step's logit row matches the whole-window plan at its position")]
+async fn then_decode_parity(w: &mut BddWorld) {
+    let pairs = w.decode_parity.as_ref().expect("the replay ran");
+    assert_eq!(pairs.len(), STG_TOKENS.len(), "every position was compared");
+    let mut max_abs = 0f32;
+    for (t, (got_row, want_row)) in pairs.iter().enumerate() {
+        assert_eq!(
+            got_row.len(),
+            want_row.len(),
+            "row sizes agree at position {t}"
+        );
+        for (i, (&got, &want)) in got_row.iter().zip(want_row).enumerate() {
+            let diff = (got - want).abs();
+            max_abs = max_abs.max(diff);
+            assert!(
+                diff <= 1e-4 + 1e-3 * want.abs(),
+                "logits[pos {t}][tok {i}]: decode {got} vs whole-window {want} (|Δ| = {diff})"
+            );
+        }
+    }
+    println!(
+        "[decode-plan] {} positions: decode == whole-window (max |Δ| = {max_abs:e})",
+        pairs.len()
+    );
+}
+
+#[then("the bucket regrew geometrically while the carried rows stayed intact")]
+async fn then_decode_regrow(w: &mut BddWorld) {
+    let (initial, grown) = w.decode_buckets.expect("the replay ran");
+    assert!(
+        grown > initial && grown >= STG_TOKENS.len(),
+        "the bucket regrew to hold every position ({initial} → {grown})"
+    );
+    println!(
+        "[decode-plan] bucket {initial} → {grown} across {} positions; the parity above ran \
+         through every regrowth, so the copied rows are witnessed intact",
+        STG_TOKENS.len()
+    );
+}
+
+#[when(
+    expr = "the environment stream bandwidth is calibrated and {int} decode-plan steps are timed"
+)]
+async fn when_perf_decode_plan(w: &mut BddWorld, steps: usize) {
+    let kit = w.decode_kit.as_mut().expect("the decode kit");
+    let bandwidth = calibrate_stream_bandwidth();
+    let mut tok: i64 = 1;
+    let mut recorded = Vec::new();
+    for _ in 0..steps {
+        let t = Instant::now();
+        let row = kit.session.step(tok).expect("a decode-plan step");
+        let secs = t.elapsed().as_secs_f64();
+        tok = argmax(&row) as i64;
+        recorded.push(PerfStep {
+            secs,
+            dispatched: kit.session.last_dispatched() as u64,
+            skipped: kit.session.last_skipped() as u64,
+            materializations: 0, // the decode plan has no staged rematerialization
+        });
+    }
+    let weight_bytes: u64 = staged_manifest(false)
+        .iter()
+        .map(|(n, d)| staged_tensor_bytes(n, d).len() as u64)
+        .sum();
+    w.perf = Some(PerfReport {
+        bandwidth,
+        weight_bytes,
+        window: kit.session.geometry().bucket,
+        stages: 1,
+        steps: recorded,
+    });
+}
+
+#[then("the decode-plan ratio and its attribution are reported")]
+async fn then_perf_decode_plan(w: &mut BddWorld) {
+    let r = w.perf.as_ref().expect("the perf probe ran");
+    assert!(!r.steps.is_empty(), "steps were timed");
+    for (i, s) in r.steps.iter().enumerate() {
+        assert!(
+            s.dispatched + s.skipped > 0,
+            "step {i}: the walk reports its kernels"
+        );
+    }
+    let floor = r.weight_bytes as f64 / r.bandwidth;
+    println!(
+        "[performance-contract] decode-plan: bucket {}, {:.2} MB weights/pass; \
+         floor {:.3} ms/token (bandwidth {:.2} GB/s)",
+        r.window,
+        r.weight_bytes as f64 / 1e6,
+        floor * 1e3,
+        r.bandwidth / 1e9
+    );
+    for (i, s) in r.steps.iter().enumerate() {
+        println!(
+            "[performance-contract] decode-plan step {}: {:.1} ms/token, ratio {:.1}x floor, \
+             dispatched {}, elided {}",
+            i + 1,
+            s.secs * 1e3,
+            s.secs / floor,
+            s.dispatched,
+            s.skipped,
+        );
+    }
 }
 
 // ──────────── S3 — quantized transit (row `quantized-transit`) ───────────────

@@ -5,6 +5,7 @@ pub mod constant_fold;
 pub mod data_eval_ops;
 pub mod data_prop;
 pub mod dead_node;
+pub mod decode_plan;
 pub mod decompose;
 pub mod graph_utils;
 pub mod oracle;

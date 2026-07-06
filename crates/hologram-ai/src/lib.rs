@@ -9,6 +9,7 @@
 pub mod address;
 pub mod commands;
 pub mod compiler;
+pub mod decode;
 /// Model downloader — native only (HTTP + tokio + local toolchain). Absent from
 /// the wasm build (`--no-default-features`).
 #[cfg(feature = "native")]
@@ -29,6 +30,7 @@ pub use compiler::{
     CompileStats, CompiledModel, DebugMap, HoloArchive, ModelCompiler, ModelMetadata, ModelSource,
     PreparedModel,
 };
+pub use decode::{DecodeGeometry, DecodeSession};
 pub use engine::{FixedSession, GrowableSession, LmSession, SessionProvider};
 pub use hologram_ai_common::{AiGraph, AiNode, AiOp, DType, NodeId, Shape, TensorId, TensorInfo};
 pub use hologram_ai_core::{

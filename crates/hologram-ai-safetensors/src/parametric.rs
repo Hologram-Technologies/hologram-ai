@@ -13,6 +13,7 @@ use anyhow::{anyhow, ensure, Result};
 use hologram_ai_common::ir::{
     dtype::DType, graph::AiGraph, node::TensorId, op::AiOp, shape::DimExpr,
 };
+use hologram_ai_common::opt::decode_plan::rewrite_decode_attention;
 use hologram_ai_common::MetaValue;
 use safetensors::{Dtype as SafeDtype, SafeTensors};
 use serde_json::Value;
@@ -333,6 +334,30 @@ pub fn validate_config(config: &Value) -> Result<()> {
 /// Build the graph directly from safetensors shard bytes: the manifest (keys,
 /// dtypes) is read from the shard headers and the weights are injected inline.
 pub fn build_parametric_graph(config: &Value, safetensors_shards: &[&[u8]]) -> Result<AiGraph> {
+    build_inline_weight_graph(config, safetensors_shards, |c, k, d| {
+        build_parametric_graph_from_manifest(c, k, d, None)
+    })
+}
+
+/// Build the **decode-step** graph directly from safetensors shard bytes —
+/// the inline-weight twin of [`build_parametric_graph`], assembled by
+/// [`build_parametric_decode_graph_from_manifest`].
+pub fn build_parametric_decode_graph(
+    config: &Value,
+    safetensors_shards: &[&[u8]],
+    bucket: u64,
+) -> Result<AiGraph> {
+    build_inline_weight_graph(config, safetensors_shards, |c, k, d| {
+        build_parametric_decode_graph_from_manifest(c, k, d, bucket)
+    })
+}
+
+/// Shared shard walk + inline weight injection around a manifest builder.
+fn build_inline_weight_graph(
+    config: &Value,
+    safetensors_shards: &[&[u8]],
+    build: impl FnOnce(&Value, &[String], &[DType]) -> Result<AiGraph>,
+) -> Result<AiGraph> {
     let mut st_instances = Vec::new();
     for shard in safetensors_shards {
         let st = SafeTensors::deserialize(shard)?;
@@ -359,7 +384,7 @@ pub fn build_parametric_graph(config: &Value, safetensors_shards: &[&[u8]]) -> R
         keys.push(k.clone());
     }
 
-    let mut graph = build_parametric_graph_from_manifest(config, &keys, &dtypes, None)?;
+    let mut graph = build(config, &keys, &dtypes)?;
 
     // Inject the actual safetensors weights into the graph's params, in the same
     // name-sorted order so any tensor the builder did not declare (an unused
@@ -781,6 +806,24 @@ impl DecoderDims {
         }
     }
 
+    /// Dims for the decode-step plan: `batch = seq = 1`, fully concrete — no
+    /// dim vars are interned, so the built graph is a pure function of the
+    /// config with no free window parameter (the past bucket carries it).
+    fn decode_step(cfg: &ModelConfig) -> Self {
+        Self {
+            batch: DimExpr::Concrete(1),
+            seq: DimExpr::Concrete(1),
+            vocab: DimExpr::Concrete(cfg.vocab_size),
+            hidden: DimExpr::Concrete(cfg.hidden_size),
+            ffn_hidden: DimExpr::Concrete(cfg.intermediate_size),
+            n_heads: DimExpr::Concrete(cfg.num_attention_heads),
+            n_kv_heads: DimExpr::Concrete(cfg.num_key_value_heads),
+            head_dim: DimExpr::Concrete(cfg.head_dim),
+            q_out: DimExpr::Concrete(cfg.num_attention_heads * cfg.head_dim),
+            kv_out: DimExpr::Concrete(cfg.num_key_value_heads * cfg.head_dim),
+        }
+    }
+
     /// The `[batch, seq, hidden]` activation shape flowing between layers —
     /// and between stage archives in the staged partition.
     fn hidden_state(&self) -> Vec<DimExpr> {
@@ -809,6 +852,11 @@ fn gather_last_position(
     dims: &DecoderDims,
     normed: TensorId,
 ) -> TensorId {
+    // A seq-1 graph (the decode-step plan) is already at the sampler's
+    // position — there is nothing to gather and no `last_pos` port to feed.
+    if matches!(dims.seq, DimExpr::Concrete(1)) {
+        return normed;
+    }
     let last_pos = builder.add_input("last_pos", DType::INT64, vec![DimExpr::Concrete(1)]);
     let gathered = builder.add_tensor("normed_last", DType::F32, dims.last_state());
     builder.add_node(
@@ -1626,6 +1674,56 @@ pub fn build_parametric_graph_from_manifest(
 
     let mut graph = builder.build();
     recipe.apply_metadata(&mut graph);
+    Ok(graph)
+}
+
+/// Build the **decode-step** graph (dictionary row `decode-plan`): the same
+/// decoder recipe at `batch = seq = 1`, with every fused attention node
+/// decomposed by [`rewrite_decode_attention`] into masked past-attention over
+/// a fixed `bucket`-row K/V window. The per-token forward pass is therefore
+/// single-position — O(weights) per step, never O(window · weights) — and the
+/// engine carries K/V between steps through the rewrite's named ports.
+///
+/// The graph is a pure function of `(config, manifest, bucket)`: positions
+/// arrive at run time (`rope_cos`/`rope_sin`/`decode_mask`), so one compiled
+/// artifact serves every step, and growing past `bucket` is a recompile at a
+/// larger bucket (geometric, like the whole-window plan's buckets) — never a
+/// hard ceiling.
+pub fn build_parametric_decode_graph_from_manifest(
+    config: &Value,
+    keys: &[String],
+    dtypes: &[DType],
+    bucket: u64,
+) -> Result<AiGraph> {
+    let recipe = DecoderRecipe::prepare(config, keys, dtypes, None)?;
+    ensure!(bucket > 0, "decode bucket must be non-empty");
+
+    let mut builder = GraphBuilder::new("parametric_decode_step".to_string());
+    let dims = DecoderDims::decode_step(&recipe.cfg);
+    let (embed_f32, mut current) = recipe.emit_embedding(&mut builder, &dims);
+    for l in 0..recipe.cfg.num_hidden_layers {
+        let tail = recipe.emit_layer_core(&mut builder, &dims, l, current)?;
+        current = recipe.seal_layer(&mut builder, &dims, l, tail);
+    }
+    let logits = recipe.emit_head(&mut builder, &dims, current, Some(embed_f32))?;
+    builder.add_output(logits, "logits");
+
+    let mut graph = builder.build();
+    let rewrite = rewrite_decode_attention(&mut graph, bucket, 0)?;
+    ensure!(
+        rewrite.layers as u64 == recipe.cfg.num_hidden_layers,
+        "decode rewrite touched {} attention nodes, expected {} layers",
+        rewrite.layers,
+        recipe.cfg.num_hidden_layers
+    );
+    recipe.apply_metadata(&mut graph);
+    graph
+        .metadata
+        .insert("decode_bucket".to_string(), MetaValue::Int(bucket as i64));
+    graph.metadata.insert(
+        "rope_theta".to_string(),
+        MetaValue::Float(recipe.cfg.rope_theta as f64),
+    );
     Ok(graph)
 }
 

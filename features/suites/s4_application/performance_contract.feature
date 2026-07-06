@@ -16,3 +16,8 @@ Feature: Performance contract, measured
     Given a staged decoder fixture in a κ-store for the performance probe
     When the environment stream bandwidth is calibrated and 8 staged decode steps are timed
     Then the per-token decode ratio and its attribution are reported
+
+  Scenario: the decode-plan ratio is measured against the same floor
+    Given a decode-step archive over the staged fixture with a bucket of 64 rows
+    When the environment stream bandwidth is calibrated and 8 decode-plan steps are timed
+    Then the decode-plan ratio and its attribution are reported

@@ -11,7 +11,7 @@
 
 use hologram_ai::materialize::{kappa_of, materialize_archive, DirKappaStore};
 use hologram_ai::runner::HoloRunner;
-use hologram_ai::{ModelCompiler, ModelSource};
+use hologram_ai::{DecodeSession, ModelCompiler, ModelSource};
 use hologram_ai_common::{shape_from_concrete, AiGraph, AiParam, DType, TensorInfo};
 use std::collections::HashMap;
 
@@ -329,6 +329,90 @@ fn pipeline_logits_match_naive_reference() {
         }
     }
     eprintln!("reference parity: max |Δ| = {max_abs:e}, max relative = {max_rel:e}");
+}
+
+/// Build the decode-step graph (row `decode-plan`) with inline params — the
+/// same fixture weights the whole-window graph binds, decomposed attention
+/// over a `bucket`-row past window.
+fn build_decode_graph(bucket: u64) -> AiGraph {
+    let tensors = fixture_tensors();
+    let keys: Vec<String> = tensors.iter().map(|(n, _, _)| n.clone()).collect();
+    let dtypes = vec![DType::F32; keys.len()];
+    let mut graph =
+        hologram_ai_safetensors::parametric::build_parametric_decode_graph_from_manifest(
+            &config_json(),
+            &keys,
+            &dtypes,
+            bucket,
+        )
+        .expect("decode graph builds");
+    let mut name_to_id: HashMap<String, u32> = HashMap::new();
+    for (id, name) in &graph.tensor_names {
+        name_to_id.insert(name.clone(), *id);
+    }
+    for (name, dims, bytes) in &tensors {
+        let id = *name_to_id.get(name).expect("manifest tensor in graph");
+        let info = TensorInfo::new(DType::F32, shape_from_concrete(dims));
+        graph.tensor_info.insert(id, info.clone());
+        graph
+            .params
+            .insert(id, AiParam::inline(bytes.clone(), info));
+    }
+    graph
+}
+
+fn decode_session(bucket: u64) -> DecodeSession {
+    let runner = HoloRunner::from_bytes(compile(build_decode_graph(bucket))).expect("decode loads");
+    DecodeSession::new(runner, THETA as f32, WINDOW as u64)
+        .expect("decode session opens")
+        .with_rebuild(Box::new(|b| {
+            HoloRunner::from_bytes(compile(build_decode_graph(b)))
+        }))
+}
+
+/// Feed `tokens` one at a time through a decode session and assert each
+/// step's logit row matches the whole-window plan's row at that position.
+fn assert_decode_matches_window(mut session: DecodeSession, label: &str) {
+    let mut window_runner =
+        HoloRunner::from_bytes(compile(build_graph(true))).expect("archive loads");
+    let mut max_abs = 0f32;
+    for (t, &tok) in TOKENS.iter().enumerate() {
+        let step = session.step(tok as i64).expect("decode step");
+        assert_eq!(step.len(), VOCAB, "decode logits are [1, 1, vocab]");
+        let window_bytes = run_logits_at(&mut window_runner, &TOKENS, t);
+        let window_row: &[f32] = bytemuck::cast_slice(&window_bytes);
+        for (i, (&got, &want)) in step.iter().zip(window_row).enumerate() {
+            let diff = (got - want).abs();
+            max_abs = max_abs.max(diff);
+            assert!(
+                diff <= 1e-4 + 1e-3 * want.abs(),
+                "{label}: logits[pos {t}][tok {i}]: decode {got} vs whole-window {want} (|Δ| = {diff})"
+            );
+        }
+        // The sampler's decision must be interchangeable between plans: the
+        // decode row's maximum equals the window row's maximum (value-level —
+        // the cyclic fixture weights make argmax *indices* tie-degenerate).
+        let dmax = step.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+        let wmax = window_row.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+        assert!(
+            (dmax - wmax).abs() <= 1e-4 + 1e-3 * wmax.abs(),
+            "{label}: max logit at pos {t}: decode {dmax} vs whole-window {wmax}"
+        );
+    }
+    eprintln!("{label}: decode-vs-window parity, max |Δ| = {max_abs:e}");
+}
+
+#[test]
+fn decode_plan_matches_whole_window_per_position() {
+    // Bucket ≥ token count: every step runs in the initial archive.
+    assert_decode_matches_window(decode_session(8), "fixed bucket");
+}
+
+#[test]
+fn decode_plan_bucket_growth_preserves_parity() {
+    // Bucket 2 with 6 tokens: growth (2 → 4 → 8) fires twice mid-sequence;
+    // the recompile + row copy must be invisible in the numbers.
+    assert_decode_matches_window(decode_session(2), "growing bucket");
 }
 
 #[test]

@@ -303,6 +303,16 @@ executor = "rust"
 feature = "features/suites/s3_execution/single_position_head.feature"
 
 [[row]]
+id = "decode-plan"
+statement = "The per-token pass computes one position: the decoder recipe emitted at seq = 1 with every fused attention node decomposed into masked past-attention over a fixed bucket of carried K/V rows — carried K/V is derived content through named ports (past_k/past_v in, k_new/v_new out, the engine splices each step's rows between steps), positions are runtime data (rope tables synthesized at the absolute position, an additive mask erasing unrealized bucket rows), one compiled artifact serves every step, bucket exhaustion is a geometric recompile never a ceiling, and every step's logits match the whole-window plan at that position."
+stage = "S3"
+status = "build"
+oracles = ["journey-reference"]
+tier = "suite"
+executor = "rust"
+feature = "features/suites/s3_execution/decode_plan.feature"
+
+[[row]]
 id = "quantized-rest"
 statement = "A quant-tiered model rests quantized: the download derives each fully-retirable projection's matmul-ready int8 artifact in the browser and evaporates its wide blob — the wide form transits once and rests nowhere (recorded provenance keeps it recoverable; a missing artifact re-derives at session warm, fail-closed on its recorded κ) — the κ-store holds the quantized form, and the chat journey completes on it with the tier stated in the narration, never silently."
 stage = "S1"

@@ -441,7 +441,8 @@ The attribution names the structure of the excess:
   `positional-cones` — the recipe emits decode cones per position so the
   unchanged prefix elides structurally) or sub-kernel elision
   (substrate-owned, like `total-algebraic-path`). This is the decode
-  frontier, now measured rather than suspected.
+  frontier, now measured rather than suspected — and realized as row
+  `decode-plan` (build; measured below).
 
   Feasibility, source-confirmed for the tractable realization — a DECODE
   PLAN beside the prefill plan: K and V are ordinary graph tensors (the
@@ -471,3 +472,43 @@ The attribution names the structure of the excess:
   (0.5B, window 128) of every decode step; the reference-parity witness
   sweeps the gather over every position. Stage-archive derivation keys
   bump to v3 (the recipe is part of the derivation function).
+
+## Measured (2026-07-06 — the window left the step: row `decode-plan`, build)
+
+The decode plan is built and witnessed, native first. The decoder recipe is
+emitted at seq = 1 and every fused attention node is decomposed into masked
+past-attention over a fixed bucket of carried K/V rows — all existing ops,
+strictly 2-D matmuls per kv-head group (the substrate's MatMul kernel is
+2-D; nothing batched is assumed):
+
+- **Carried K/V is derived content through named ports**, not a mutable
+  cache: `past_k_l`/`past_v_l` enter as inputs, `k_new_l`/`v_new_l` leave
+  as outputs, and the ENGINE splices each step's rows into its buffers
+  between steps (`DecodeSession`). No scatter op exists in the graph.
+- **Positions are runtime data.** `rope_cos`/`rope_sin` are synthesized at
+  the token's absolute position from the config's own rope base and
+  head_dim (the canonical RoPE lowering bakes relative tables at compile
+  time, so rotation arrives as data and is applied with plain arithmetic —
+  rotate-half, pair `j ± d/2`); the additive `decode_mask` erases
+  unrealized bucket rows inside the softmax, so garbage bytes past the
+  realized length never touch the numbers.
+- **One compiled artifact serves every step.** Bucket exhaustion is a
+  geometric recompile with a row copy (witnessed mid-sequence: 2 → 4 → 8
+  with parity intact), never a ceiling; the model's own trained context is
+  the only semantic bound.
+- **Parity is the gate.** Per position, the decode plan's logit row equals
+  the whole-window plan's row (reference witness sweeps every position;
+  the BDD scenarios replay the fixture tokens through both plans).
+
+Measured on the fixture (target lane, same calibrated floor as above):
+staged whole-window steps run **3.8–8.4 ms/token (156–344× floor)**; the
+decode plan runs **0.5–1.2 ms/token (20–50× floor)** — the window
+multiplier is gone from the step, and the decode-plan cost is
+window-INDEPENDENT: it stays flat as context grows while the whole-window
+step scales with it. The residual multiplier at fixture scale is per-step
+dispatch overhead (~145 tiny kernels); at real scale the matmuls dominate
+and the ratio compresses toward the floor's own terms. Prefill currently
+replays the prompt through decode steps (O(prompt) single-position
+passes); the staged/browser realization and the prefill-seeded variant are
+the next slice (`decode-plan` stays honest at "build" until the deployed
+instance runs it).
