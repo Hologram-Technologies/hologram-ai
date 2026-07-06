@@ -290,10 +290,13 @@ fn window_ids(tokens: &[u32]) -> Vec<u8> {
     ids.iter().flat_map(|v| v.to_le_bytes()).collect()
 }
 
-fn run_logits(holo: Vec<u8>, tokens: &[u32]) -> Vec<u8> {
-    let mut runner = HoloRunner::from_bytes(holo).expect("archive loads");
+/// One decode pass with the single-position head: the gathered logits row
+/// at `pos` (row `single-position-head` — the pipeline takes a `last_pos`
+/// input and emits exactly the consumed row).
+fn run_logits_at(runner: &mut HoloRunner, tokens: &[u32], pos: usize) -> Vec<u8> {
     let ids = window_ids(tokens);
-    let outputs = runner.execute(&[&ids]).expect("forward pass");
+    let lp = (pos as i64).to_le_bytes();
+    let outputs = runner.execute(&[&ids, &lp]).expect("forward pass");
     assert_eq!(outputs.len(), 1, "one logits output");
     outputs.into_iter().next().expect("logits").bytes
 }
@@ -304,19 +307,17 @@ const TOKENS: [u32; 6] = [3, 141, 59, 26, 5, 35];
 
 #[test]
 fn pipeline_logits_match_naive_reference() {
-    let logits_bytes = run_logits(compile(build_graph(true)), &TOKENS);
-    let logits: &[f32] = bytemuck::cast_slice(&logits_bytes);
-    assert_eq!(
-        logits.len(),
-        WINDOW * VOCAB,
-        "logits are [1, window, vocab]"
-    );
-
+    // The single-position head emits one row per pass: sweep `last_pos`
+    // over every real position — a STRONGER witness than the whole-window
+    // read, since it also verifies the gather indexes every position.
+    let mut runner = HoloRunner::from_bytes(compile(build_graph(true))).expect("archive loads");
     let reference = reference_logits(&TOKENS);
     let mut max_abs = 0f32;
     let mut max_rel = 0f32;
     for (t, ref_row) in reference.iter().enumerate() {
-        let row = &logits[t * VOCAB..(t + 1) * VOCAB];
+        let logits_bytes = run_logits_at(&mut runner, &TOKENS, t);
+        let row: &[f32] = bytemuck::cast_slice(&logits_bytes);
+        assert_eq!(row.len(), VOCAB, "logits are [1, 1, vocab]");
         for (i, (&got, &want)) in row.iter().zip(ref_row).enumerate() {
             let diff = (got - want).abs();
             max_abs = max_abs.max(diff);
@@ -332,7 +333,9 @@ fn pipeline_logits_match_naive_reference() {
 
 #[test]
 fn external_kappa_compile_is_byte_identical_to_inline() {
-    let inline_logits = run_logits(compile(build_graph(true)), &TOKENS);
+    let mut inline_runner =
+        HoloRunner::from_bytes(compile(build_graph(true))).expect("archive loads");
+    let inline_logits = run_logits_at(&mut inline_runner, &TOKENS, TOKENS.len() - 1);
 
     let kform = compile(build_graph(false));
     let dir = std::env::temp_dir().join(format!("hai-parametric-reference-{}", std::process::id()));
@@ -344,7 +347,8 @@ fn external_kappa_compile_is_byte_identical_to_inline() {
     let materialized = materialize_archive(&kform, &mut store).expect("materializes");
     std::fs::remove_dir_all(&dir).ok();
 
-    let material_logits = run_logits(materialized, &TOKENS);
+    let mut material_runner = HoloRunner::from_bytes(materialized).expect("archive loads");
+    let material_logits = run_logits_at(&mut material_runner, &TOKENS, TOKENS.len() - 1);
     assert_eq!(
         inline_logits, material_logits,
         "materialized execution must be byte-identical to the inline compile"

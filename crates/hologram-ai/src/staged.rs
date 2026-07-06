@@ -349,6 +349,10 @@ pub struct StagedRunner<'a> {
     /// Stage materializations performed over this runner's lifetime — the
     /// bandwidth instrument (`resident` hits don't count).
     materialization_count: u64,
+    /// The stage index declaring a `last_pos` input port (the head's
+    /// single-position gather, row `single-position-head`), if any. The
+    /// pipeline exposes the port at the top level and routes it here.
+    last_pos_stage: Option<usize>,
     /// Kernels dispatched / elided across all stages of the most recent
     /// forward pass (class CE, summed per stage) — the decode attribution
     /// instrument of the `performance-contract` row.
@@ -386,9 +390,24 @@ impl<'a> StagedRunner<'a> {
         );
 
         let first = resolve_stage(0).context("resolving the stage 0 archive")?;
-        let input_ports =
+        let mut input_ports =
             archive_ports(&first, SectionKind::Inputs).context("reading stage 0 input ports")?;
         drop(first);
+        // Single-position head (row `single-position-head`): the stage that
+        // gathers the consumed position declares a `last_pos` input; the
+        // pipeline exposes it as its own trailing port and routes it there.
+        let mut last_pos_stage = None;
+        for stage in 1..stage_count {
+            let archive = resolve_stage(stage)
+                .with_context(|| format!("resolving the stage {stage} archive"))?;
+            let ports = archive_ports(&archive, SectionKind::Inputs)
+                .with_context(|| format!("reading stage {stage} input ports"))?;
+            if let Some(p) = ports.into_iter().find(|p| p.name == "last_pos") {
+                last_pos_stage = Some(stage);
+                input_ports.push(p);
+                break;
+            }
+        }
         let last = resolve_stage(stage_count - 1).context("resolving the final stage archive")?;
         let output_ports = archive_ports(&last, SectionKind::Outputs)
             .context("reading final stage output ports")?;
@@ -420,6 +439,7 @@ impl<'a> StagedRunner<'a> {
             resolve_stage,
             store,
             stage_count,
+            last_pos_stage,
             input_ports,
             output_ports,
             window,
@@ -596,11 +616,21 @@ impl<'a> StagedRunner<'a> {
                     .with_context(|| format!("loading stage {stage}"))?
             };
 
-            let refs: Vec<&[u8]> = if stage == 0 {
-                inputs.to_vec()
+            // Stage 0 takes the pipeline inputs minus the routed trailing
+            // `last_pos`; later stages take the carried activations, plus
+            // `last_pos` at the stage that declares it.
+            let stage0_n = self.input_ports.len() - usize::from(self.last_pos_stage.is_some());
+            let mut refs: Vec<&[u8]> = if stage == 0 {
+                inputs[..stage0_n.min(inputs.len())].to_vec()
             } else {
                 carried.iter().map(Vec::as_slice).collect()
             };
+            if self.last_pos_stage == Some(stage) {
+                let last = inputs.last().with_context(|| {
+                    format!("stage {stage} needs the `last_pos` input but none was passed")
+                })?;
+                refs.push(last);
+            }
             let outputs = runner
                 .execute(&refs)
                 .with_context(|| format!("executing stage {stage}"))?;
@@ -1068,7 +1098,7 @@ impl GrowableStagedSession {
     /// input change is a different key, never a reinterpretation.
     fn derivation_key(&self, window: usize) -> String {
         let mut ingest = format!(
-            "stage-archives:v2:window={window}:layers_per_stage={}:context={}:config=",
+            "stage-archives:v3:window={window}:layers_per_stage={}:context={}:config=",
             self.layers_per_stage, self.max_window
         )
         .into_bytes();

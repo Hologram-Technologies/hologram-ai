@@ -421,3 +421,33 @@ Reported, never asserted:
   pass to **~22 ms** (observed once per short generation); making the
   prefix-cone hit rate structural rather than incidental is the largest
   open tokens/sec lever in this repo's control (`decode-elision`).
+
+## Measured (2026-07-06 — the decode ratio is a number)
+
+The `performance-contract` target lane now runs the Benchmark section: it
+calibrates the environment's stream bandwidth (22 GB/s on this codespace),
+computes the fixture's decode floor from weights-per-pass (0.026 ms/token),
+times staged decode steps under residency, and attributes each step. First
+reading: **215–414× floor**; elision fires on the staged resident path
+(51–64% of kernels elided; zero rematerialization after the first pass).
+The attribution names the structure of the excess:
+
+- **The window multiplies everything.** Layer kernels span the whole
+  compiled window, so one changed position dispatches the whole kernel —
+  per-step cost is a window-sized forward regardless of prefix length.
+  Elision at kernel granularity cannot save a kernel whose input changed
+  anywhere. The model's own answer is label-granular prefix-cone reuse,
+  which needs per-position kernel decomposition (candidate row
+  `positional-cones` — the recipe emits decode cones per position so the
+  unchanged prefix elides structurally) or sub-kernel elision
+  (substrate-owned, like `total-algebraic-path`). This is the decode
+  frontier, now measured rather than suspected.
+- **The head was window-multiplied for a one-row read** — fixed: row
+  `single-position-head` (build). The pipeline gathers the consumed
+  position's hidden state after the final norm (`last_pos`, a runtime
+  input the generation loop synthesizes by name like every auxiliary) and
+  the head — whole or chunked — computes O(vocab·d) per step, never
+  O(window·vocab·d). At a 152k vocabulary this removes roughly a quarter
+  (0.5B, window 128) of every decode step; the reference-parity witness
+  sweeps the gather over every position. Stage-archive derivation keys
+  bump to v3 (the recipe is part of the derivation function).

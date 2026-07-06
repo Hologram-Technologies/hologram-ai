@@ -786,6 +786,37 @@ impl DecoderDims {
     fn hidden_state(&self) -> Vec<DimExpr> {
         vec![self.batch.clone(), self.seq.clone(), self.hidden.clone()]
     }
+
+    /// The single consumed position's hidden state (`[batch, 1, hidden]`) —
+    /// what flows into the head after the `last_pos` gather.
+    fn last_state(&self) -> Vec<DimExpr> {
+        vec![
+            self.batch.clone(),
+            DimExpr::Concrete(1),
+            self.hidden.clone(),
+        ]
+    }
+}
+
+/// Gather the sampler's position out of the normed hidden states BEFORE the
+/// head matmul (row `single-position-head`): the generation loop consumes
+/// exactly one logit row per step, so the head computes O(vocab·d), never
+/// O(window·vocab·d). `last_pos` is a runtime `[1]` i64 graph input the
+/// generation loop synthesizes as `cur_len - 1` — an auxiliary like
+/// `position_ids`, named, never guessed.
+fn gather_last_position(
+    builder: &mut GraphBuilder,
+    dims: &DecoderDims,
+    normed: TensorId,
+) -> TensorId {
+    let last_pos = builder.add_input("last_pos", DType::INT64, vec![DimExpr::Concrete(1)]);
+    let gathered = builder.add_tensor("normed_last", DType::F32, dims.last_state());
+    builder.add_node(
+        AiOp::Gather { axis: 1 },
+        vec![normed, last_pos],
+        vec![gathered],
+    );
+    gathered
 }
 
 /// The two dangling operands of a decoder layer whose closing residual add
@@ -1467,7 +1498,7 @@ impl<'a> DecoderRecipe<'a> {
                 output_name: &format!("logits_chunk_{chunk}"),
                 output_shape: vec![
                     dims.batch.clone(),
-                    dims.seq.clone(),
+                    DimExpr::Concrete(1),
                     DimExpr::Concrete(rows),
                 ],
             },
@@ -1485,6 +1516,7 @@ impl<'a> DecoderRecipe<'a> {
         let manifest = &self.manifest;
 
         let norm_out = self.emit_final_norm(builder, dims, current);
+        let norm_out = gather_last_position(builder, dims, norm_out);
 
         // The tied head is transposed by the shared linear-layer wiring
         // ([vocab, hidden] → [hidden, vocab]) for the matmul orientation.
@@ -1535,7 +1567,7 @@ impl<'a> DecoderRecipe<'a> {
                 in_features: dims.hidden.clone(),
                 out_features: dims.vocab.clone(),
                 output_name: "logits",
-                output_shape: vec![dims.batch.clone(), dims.seq.clone(), dims.vocab.clone()],
+                output_shape: vec![dims.batch.clone(), DimExpr::Concrete(1), dims.vocab.clone()],
             },
         ))
     }
@@ -1768,15 +1800,16 @@ pub fn build_parametric_stage_graphs(
                     mlp_down,
                 },
             );
-            (recipe.emit_final_norm(&mut builder, &dims, current), None)
+            let normed = recipe.emit_final_norm(&mut builder, &dims, current);
+            (gather_last_position(&mut builder, &dims, normed), None)
         } else {
-            let normed = builder.add_input("normed_states", DType::F32, dims.hidden_state());
+            let normed = builder.add_input("normed_states", DType::F32, dims.last_state());
             let acc = builder.add_input(
                 "logits_acc",
                 DType::F32,
                 vec![
                     dims.batch.clone(),
-                    dims.seq.clone(),
+                    DimExpr::Concrete(1),
                     DimExpr::Concrete(row_start),
                 ],
             );
@@ -1792,7 +1825,7 @@ pub fn build_parametric_stage_graphs(
                     DType::F32,
                     vec![
                         dims.batch.clone(),
-                        dims.seq.clone(),
+                        DimExpr::Concrete(1),
                         DimExpr::Concrete(row_start + rows),
                     ],
                 );
@@ -2523,11 +2556,12 @@ mod tests {
             vec!["hidden_states", "hidden_residual"]
         );
 
-        // Head stage: (hidden_states, hidden_residual) → logits.
+        // Head stage: (hidden_states, hidden_residual, last_pos) → logits —
+        // the consumed position is a runtime input (single-position-head).
         assert_eq!(meta_str(&stages[3], "stage_role"), Some(STAGE_ROLE_HEAD));
         assert_eq!(
             stages[3].input_names,
-            vec!["hidden_states", "hidden_residual"]
+            vec!["hidden_states", "hidden_residual", "last_pos"]
         );
         assert_eq!(stages[3].output_names, vec!["logits"]);
     }

@@ -84,7 +84,11 @@ enum AuxKind {
     /// `attention_mask`: 1 for real positions, 0 for padding.
     AttentionMask,
     /// `position_ids`: `0..cur_len`, padding 0.
+    /// `last_pos`: the single consumed position `cur_len - 1` (row
+    /// `single-position-head` — the head gathers one row).
     PositionIds,
+    /// The consumed position (`cur_len - 1`) for the single-position head.
+    LastPos,
     /// `past_key_values.*`: an empty (zero-length) past — hologram-ai runs a
     /// with-past decoder export as a full-recompute prefill (no external
     /// KV-cache; reuse is content-addressed κ-label elision). The port is
@@ -112,6 +116,8 @@ struct LmContract {
     id_dtype: u8,
     seq_len: usize,
     logits_index: usize,
+    /// True when the head gathers the consumed position (`last_pos` port).
+    single_position: bool,
     vocab: usize,
     aux: Vec<AuxInput>,
 }
@@ -159,7 +165,14 @@ impl LmContract {
                  the model does not match the [1, seq_len, vocab] causal-LM contract"
             );
         }
-        let vocab = logit_count / seq_len;
+        // A single-position head (a `last_pos` input port) emits ONE logit
+        // row; a whole-window head emits `seq_len` rows.
+        let single_position = ins.iter().any(|p| p.name == "last_pos");
+        let vocab = if single_position {
+            logit_count
+        } else {
+            logit_count / seq_len
+        };
 
         // Any other input must be a recognized auxiliary we can synthesize —
         // otherwise fail loud (no silent zero-fill of an unknown semantic input).
@@ -171,6 +184,7 @@ impl LmContract {
             let kind = match p.name.as_str() {
                 "attention_mask" => AuxKind::AttentionMask,
                 "position_ids" => AuxKind::PositionIds,
+                "last_pos" => AuxKind::LastPos,
                 name if name.starts_with("past_key_values") || name.starts_with("past.") => {
                     AuxKind::EmptyPast
                 }
@@ -195,6 +209,7 @@ impl LmContract {
             seq_len,
             logits_index,
             vocab,
+            single_position,
             aux,
         })
     }
@@ -369,14 +384,16 @@ pub fn generate_stream(
                     let vals: Vec<f64> = (0..cur_len).map(|p| p as f64).collect();
                     encode_vals(&vals, a.element_count, a.dtype)
                 }
+                AuxKind::LastPos => encode_vals(&[(cur_len - 1) as f64], a.element_count, a.dtype),
             };
         }
         let refs: Vec<&[u8]> = bufs.iter().map(|b| b.as_slice()).collect();
         let outputs = runner.execute(&refs).context("forward pass failed")?;
         let logits: &[f32] = bytemuck::cast_slice(&outputs[lm.logits_index].bytes);
 
-        // Next-token distribution is the logit row at the last real position.
-        let pos = cur_len - 1;
+        // Next-token distribution: the single gathered row, or the row at
+        // the last real position of a whole-window head.
+        let pos = if lm.single_position { 0 } else { cur_len - 1 };
         let row = &logits[pos * lm.vocab..(pos + 1) * lm.vocab];
         let next = sample(row, cfg.temperature, cfg.top_k, &mut rng);
 

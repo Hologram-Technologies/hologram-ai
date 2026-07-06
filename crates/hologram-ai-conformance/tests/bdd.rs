@@ -820,6 +820,7 @@ struct BddWorld {
     // S4 — performance contract (row `performance-contract`)
     perf: Option<PerfReport>,
     perf_kit: Option<PerfKit>,
+    sph: Option<(usize, bool)>,
     // S3 — quantized transit (row `quantized-transit`)
     quant: Option<QuantKit>,
     quant_derive: Option<(usize, u64, u64)>,
@@ -1807,7 +1808,10 @@ fn forward_pass(materialized: &[u8]) -> Vec<Vec<u8>> {
     let mut runner =
         HoloRunner::from_bytes(materialized.to_vec()).expect("loading the materialized archive");
     let ids = i64s_le(&[1, 2, 3, 4]);
-    let outs = runner.execute(&[&ids]).expect("the forward pass executes");
+    let lp = last_pos_buf(4);
+    let outs = runner
+        .execute(&[&ids, &lp])
+        .expect("the forward pass executes");
     outs.into_iter().map(|o| o.bytes).collect()
 }
 
@@ -2249,6 +2253,12 @@ fn staged_store(tag: &str) -> StoreDir {
     store
 }
 
+/// The `last_pos` auxiliary of the single-position head: the consumed
+/// position as an i64 `[1]` buffer (row `single-position-head`).
+fn last_pos_buf(realized_len: usize) -> Vec<u8> {
+    ((realized_len - 1) as i64).to_le_bytes().to_vec()
+}
+
 /// The fixed-window `input_ids` buffer: the fixture tokens left-aligned,
 /// zero-padded to the compiled window (causal attention makes the padding
 /// irrelevant at real positions).
@@ -2400,13 +2410,14 @@ async fn when_staged_executed(w: &mut BddWorld) {
     let kit = staged_kit();
     let store = w.staged_store.as_ref().expect("the fixture κ-store");
     let ids = staged_window_ids();
+    let lp = last_pos_buf(STG_TOKENS.len());
 
     let mut dir = DirKappaStore::new(&store.path);
     let mono = materialize_archive(&kit.monolithic, &mut dir)
         .expect("the monolithic archive materializes");
     let mut runner = HoloRunner::from_bytes(mono).expect("the monolithic archive loads");
     let mono_out = runner
-        .execute(&[&ids])
+        .execute(&[&ids, &lp])
         .expect("the monolithic pass executes");
     let mono_logits = mono_out
         .into_iter()
@@ -2419,7 +2430,8 @@ async fn when_staged_executed(w: &mut BddWorld) {
         Box::new(DirKappaStore::new(&store.path)),
     )
     .expect("the staged runner builds");
-    let staged_out = LmSession::execute(&mut staged, &[&ids]).expect("the staged pass executes");
+    let staged_out =
+        LmSession::execute(&mut staged, &[&ids, &lp]).expect("the staged pass executes");
     let staged_logits = staged_out
         .into_iter()
         .next()
@@ -3171,7 +3183,8 @@ async fn when_chunked_parity(w: &mut BddWorld) {
     let mono = materialize_archive(&kit.monolithic, &mut dir)
         .expect("the monolithic archive materializes");
     let mut mono_runner = HoloRunner::from_bytes(mono).expect("the archive loads");
-    let refs: Vec<&[u8]> = vec![&ids];
+    let lp = last_pos_buf(STG_TOKENS.len());
+    let refs: Vec<&[u8]> = vec![&ids, &lp];
     let mono_out = mono_runner
         .execute(&refs)
         .expect("the monolithic pass runs");
@@ -3187,7 +3200,7 @@ async fn when_chunked_parity(w: &mut BddWorld) {
     )
     .expect("the chunked staged runner builds");
     use hologram_ai::engine::LmSession;
-    let staged_out = staged.execute(&[&ids]).expect("the chunked pass runs");
+    let staged_out = staged.execute(&[&ids, &lp]).expect("the chunked pass runs");
     let idx = staged
         .output_index_by_name("logits")
         .expect("a logits port");
@@ -3343,9 +3356,10 @@ async fn when_chunked_twice(w: &mut BddWorld) {
     // rematerialization whose traffic this witness measures.
     let mut staged = StagedRunner::from_archives(kit.stages.clone(), Box::new(store))
         .expect("the chunked staged runner builds");
-    staged.execute(&[&ids]).expect("the first pass runs");
+    let lp = last_pos_buf(STG_TOKENS.len());
+    staged.execute(&[&ids, &lp]).expect("the first pass runs");
     let pass1 = std::mem::take(&mut *log.borrow_mut());
-    staged.execute(&[&ids]).expect("the second pass runs");
+    staged.execute(&[&ids, &lp]).expect("the second pass runs");
     let pass2 = std::mem::take(&mut *log.borrow_mut());
 
     let head_idx = kit
@@ -3513,16 +3527,16 @@ async fn when_perf_staged_decode(w: &mut BddWorld, steps: usize) {
             .map(|i| toks.get(i).copied().unwrap_or(0))
             .flat_map(|t| t.to_le_bytes())
             .collect();
+        let lp = last_pos_buf(toks.len());
         let t = std::time::Instant::now();
-        let outs = runner.execute(&[&ids]).expect("a staged decode step");
+        let outs = runner.execute(&[&ids, &lp]).expect("a staged decode step");
         let secs = t.elapsed().as_secs_f64();
         let idx = runner
             .output_index_by_name("logits")
             .expect("a logits port");
-        let logits = le_f32(&outs[idx].bytes);
-        let vocab = logits.len() / window;
-        let row = &logits[(toks.len() - 1) * vocab..toks.len() * vocab];
-        toks.push(argmax(row) as i64);
+        // The single-position head emits exactly the consumed row.
+        let row = le_f32(&outs[idx].bytes);
+        toks.push(argmax(&row) as i64);
         recorded.push(PerfStep {
             secs,
             dispatched: runner.last_dispatched(),
@@ -3580,6 +3594,52 @@ async fn then_perf_report(w: &mut BddWorld) {
             s.materializations
         );
     }
+}
+
+// ─────── S3 — single-position head (row `single-position-head`) ──────────────
+
+#[when("a staged decode step runs at a mid-window position")]
+async fn when_sph_step(w: &mut BddWorld) {
+    use hologram_ai::engine::LmSession;
+    let kit = w.perf_kit.as_ref().expect("the perf kit");
+    let mut runner = StagedRunner::from_archives(
+        kit.stages.clone(),
+        Box::new(DirKappaStore::new(&kit.store.path)),
+    )
+    .expect("the staged runner builds");
+    let window = runner.window();
+    let toks: Vec<i64> = vec![1, 2, 3, 4, 5];
+    let ids: Vec<u8> = (0..window)
+        .map(|i| toks.get(i).copied().unwrap_or(0))
+        .flat_map(|t| t.to_le_bytes())
+        .collect();
+    let lp = last_pos_buf(toks.len());
+    let outs = runner
+        .execute(&[&ids, &lp])
+        .expect("the staged decode step runs");
+    let idx = runner
+        .output_index_by_name("logits")
+        .expect("a logits port");
+    let declares = runner
+        .input_port_info()
+        .iter()
+        .any(|p| p.name == "last_pos");
+    w.sph = Some((outs[idx].bytes.len(), declares));
+}
+
+#[then("the logits are a single vocabulary row and the pipeline declares the position input")]
+async fn then_sph_row(w: &mut BddWorld) {
+    let (logit_bytes, declares) = w.sph.expect("the step ran");
+    assert_eq!(
+        logit_bytes as u64,
+        STG_VOCAB * 4,
+        "the head emits exactly one vocabulary row of logits"
+    );
+    assert!(
+        declares,
+        "the pipeline exposes the `last_pos` port the generation loop synthesizes"
+    );
+    println!("[single-position-head] logits are one row ({STG_VOCAB} f32) at any window position");
 }
 
 // ──────────── S3 — quantized transit (row `quantized-transit`) ───────────────
@@ -4731,8 +4791,9 @@ async fn when_fused_phi3_executed(w: &mut BddWorld) {
     let mono = materialize_archive(&kit.monolithic, &mut dir)
         .expect("the fused monolithic archive materializes");
     let mut runner = HoloRunner::from_bytes(mono).expect("the fused monolithic archive loads");
+    let lp = last_pos_buf(STG_TOKENS.len());
     let mono_out = runner
-        .execute(&[&ids])
+        .execute(&[&ids, &lp])
         .expect("the fused monolithic pass executes");
     let mono_logits = mono_out
         .into_iter()
@@ -4746,7 +4807,7 @@ async fn when_fused_phi3_executed(w: &mut BddWorld) {
     )
     .expect("the fused staged runner builds");
     let staged_out =
-        LmSession::execute(&mut staged, &[&ids]).expect("the fused staged pass executes");
+        LmSession::execute(&mut staged, &[&ids, &lp]).expect("the fused staged pass executes");
     let staged_logits = staged_out
         .into_iter()
         .next()

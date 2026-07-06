@@ -293,6 +293,16 @@ executor = "rust"
 feature = "features/suites/s3_execution/idle_derivation.feature"
 
 [[row]]
+id = "single-position-head"
+statement = "The head computes only the position the sampler consumes: the pipeline gathers the consumed position's hidden state after the final norm (a runtime last_pos input the generation loop synthesizes by name, like every auxiliary), so per-step head cost is O(vocab·d) never O(window·vocab·d), the whole and chunked heads emit the same gathered form, staged equals monolithic through the gather, and greedy completions are unchanged by construction."
+stage = "S3"
+status = "build"
+oracles = ["journey-reference"]
+tier = "suite"
+executor = "rust"
+feature = "features/suites/s3_execution/single_position_head.feature"
+
+[[row]]
 id = "quantized-rest"
 statement = "A quant-tiered model rests quantized: the download derives each fully-retirable projection's matmul-ready int8 artifact in the browser and evaporates its wide blob — the wide form transits once and rests nowhere (recorded provenance keeps it recoverable; a missing artifact re-derives at session warm, fail-closed on its recorded κ) — the κ-store holds the quantized form, and the chat journey completes on it with the tier stated in the narration, never silently."
 stage = "S1"
