@@ -85,6 +85,42 @@ pub fn compile_stages_with(
     layers_per_stage: NonZeroU64,
     quant: Option<&hologram_ai_common::lower::QuantMap>,
 ) -> Result<Vec<Vec<u8>>> {
+    let graphs = bound_stage_graphs(
+        config_json,
+        keys,
+        kappas,
+        shapes,
+        dtypes,
+        context_length,
+        layers_per_stage,
+    )?;
+    let mut archives = Vec::with_capacity(graphs.len());
+    for (stage, mut graph) in graphs.into_iter().enumerate() {
+        if let Some(quant) = quant {
+            hologram_ai_common::lower::quantize_external_matmul_weights(&mut graph, quant)
+                .with_context(|| format!("quantizing stage {stage} onto derived artifacts"))?;
+        }
+        let archive = ModelCompiler::default()
+            .compile(ModelSource::AiGraph(graph))
+            .with_context(|| format!("compiling stage {stage}"))?;
+        archives.push(archive.bytes);
+    }
+    Ok(archives)
+}
+
+/// The stage graphs of the staged plan with every manifest κ bound — the
+/// shared front half of [`compile_stages_with`] and [`quantizable_weights`].
+/// Fails loud if any manifest tensor is consumed by no stage.
+#[allow(clippy::too_many_arguments)]
+fn bound_stage_graphs(
+    config_json: &str,
+    keys: &[String],
+    kappas: &[String],
+    shapes: &[Vec<u64>],
+    dtypes: &[DType],
+    context_length: Option<u64>,
+    layers_per_stage: NonZeroU64,
+) -> Result<Vec<hologram_ai_common::AiGraph>> {
     ensure!(
         keys.len() == kappas.len() && keys.len() == shapes.len() && keys.len() == dtypes.len(),
         "manifest slices disagree: {} keys, {} κs, {} shapes, {} dtypes",
@@ -95,7 +131,7 @@ pub fn compile_stages_with(
     );
     let config: serde_json::Value =
         serde_json::from_str(config_json).context("parsing config.json")?;
-    let graphs = hologram_ai_safetensors::parametric::build_parametric_stage_graphs(
+    let mut graphs = hologram_ai_safetensors::parametric::build_parametric_stage_graphs(
         &config,
         keys,
         dtypes,
@@ -104,8 +140,7 @@ pub fn compile_stages_with(
     )?;
 
     let mut bound = vec![false; keys.len()];
-    let mut archives = Vec::with_capacity(graphs.len());
-    for (stage, mut graph) in graphs.into_iter().enumerate() {
+    for graph in graphs.iter_mut() {
         // Bind the κ of every manifest tensor this stage declares. Only
         // declared names are bound — a stage's κ-map is exactly the weights
         // its layers consume, which is what the partition witness checks.
@@ -149,14 +184,6 @@ pub fn compile_stages_with(
             );
             bound[i] = true;
         }
-        if let Some(quant) = quant {
-            hologram_ai_common::lower::quantize_external_matmul_weights(&mut graph, quant)
-                .with_context(|| format!("quantizing stage {stage} onto derived artifacts"))?;
-        }
-        let archive = ModelCompiler::default()
-            .compile(ModelSource::AiGraph(graph))
-            .with_context(|| format!("compiling stage {stage}"))?;
-        archives.push(archive.bytes);
     }
 
     if let Some(i) = bound.iter().position(|b| !b) {
@@ -166,7 +193,53 @@ pub fn compile_stages_with(
             keys[i]
         );
     }
-    Ok(archives)
+    Ok(graphs)
+}
+
+/// The wide κs the staged plan can rewrite onto quantized artifacts AND
+/// fully retire in EVERY stage that consumes them (row `quantized-transit`,
+/// browser tier `quantized-rest`): the κs whose wide blobs go gas-phase
+/// once their artifacts crystallize. A κ that any stage keeps wide-bound
+/// (a tied embedding's Gather, a chunked head's ranged bindings) is
+/// excluded — its blob stays load-bearing.
+#[allow(clippy::too_many_arguments)]
+pub fn quantizable_weights(
+    config_json: &str,
+    keys: &[String],
+    kappas: &[String],
+    shapes: &[Vec<u64>],
+    dtypes: &[DType],
+    context_length: Option<u64>,
+    layers_per_stage: NonZeroU64,
+) -> Result<Vec<String>> {
+    let graphs = bound_stage_graphs(
+        config_json,
+        keys,
+        kappas,
+        shapes,
+        dtypes,
+        context_length,
+        layers_per_stage,
+    )?;
+    let mut eligible = std::collections::BTreeSet::new();
+    let mut kept_wide = std::collections::HashSet::new();
+    for graph in &graphs {
+        let per_stage = hologram_ai_common::lower::quantizable_external_weights(graph)?;
+        let stage_set: std::collections::HashSet<&String> = per_stage.iter().collect();
+        // κs this stage binds but cannot fully retire stay wide everywhere.
+        for param in graph.params.values() {
+            if let AiParam::External { kappa, .. } = param {
+                if !stage_set.contains(kappa) {
+                    kept_wide.insert(kappa.clone());
+                }
+            }
+        }
+        eligible.extend(per_stage);
+    }
+    Ok(eligible
+        .into_iter()
+        .filter(|k| !kept_wide.contains(k))
+        .collect())
 }
 
 /// A κ-store adapter that tallies the bytes it resolves — the per-stage
@@ -659,6 +732,11 @@ pub struct GrowableStagedSession {
     verified: std::rc::Rc<std::cell::RefCell<std::collections::HashSet<String>>>,
     derived_store: Option<Box<dyn DerivedStore>>,
     derived_hits: u64,
+    /// The quantized derived-artifact tier (row `quantized-transit`): window
+    /// compiles rewrite projection weights onto these artifacts, and the
+    /// derivation key carries the map — a quantized window is a different
+    /// derivation, never a reinterpretation.
+    quant: Option<hologram_ai_common::lower::QuantMap>,
     current: Option<(usize, StagedRunner<'static>)>,
 }
 
@@ -703,6 +781,7 @@ impl GrowableStagedSession {
             verified: std::rc::Rc::new(std::cell::RefCell::new(std::collections::HashSet::new())),
             derived_store: None,
             derived_hits: 0,
+            quant: None,
             current: None,
         })
     }
@@ -936,6 +1015,15 @@ impl GrowableStagedSession {
         self.derived_store = Some(store);
     }
 
+    /// Install the quantized derived-artifact map (row `quantized-transit`):
+    /// every window compiled from here on binds projection weights to their
+    /// quantized artifacts. Set before the first generation — the tier is a
+    /// property of the session's model, stated once, never a mid-session
+    /// mode switch.
+    pub fn set_quant_map(&mut self, quant: hologram_ai_common::lower::QuantMap) {
+        self.quant = Some(quant);
+    }
+
     /// Window regrows served from the derived store instead of compiled —
     /// the derivation-reuse instrument.
     pub fn derived_hits(&self) -> u64 {
@@ -968,6 +1056,16 @@ impl GrowableStagedSession {
             ingest.extend_from_slice(kappa.as_bytes());
             ingest.push(b';');
         }
+        // The quantized tier is derivation INPUT: a quantized window and a
+        // wide window are different artifacts under different keys.
+        if let Some(quant) = &self.quant {
+            ingest.extend_from_slice(b":quant-int8:");
+            let mut entries: Vec<_> = quant.iter().collect();
+            entries.sort_by(|a, b| a.0.cmp(b.0));
+            for (wide, (artifact, out, inf)) in entries {
+                ingest.extend_from_slice(format!("{wide}>{artifact}@{out}x{inf};").as_bytes());
+            }
+        }
         crate::materialize::kappa_of(&ingest)
     }
 
@@ -993,7 +1091,7 @@ impl GrowableStagedSession {
                 store.evaporate(&key);
             }
         }
-        let stages = compile_stages(
+        let stages = compile_stages_with(
             &self.config_json,
             &self.keys,
             &self.kappas,
@@ -1001,6 +1099,7 @@ impl GrowableStagedSession {
             &self.dtypes,
             Some(window as u64),
             self.layers_per_stage,
+            self.quant.as_ref(),
         )
         .with_context(|| format!("compiling a {window}-token staged window"))?;
         if let Some(store) = self.derived_store.as_mut() {

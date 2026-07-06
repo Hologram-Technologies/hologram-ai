@@ -7,9 +7,11 @@
     "modality": "text-chat",
     "size": "135M",
     "approxArchiveMb": 150,
-    "quantize": "none",
+    "quantize": "int8",
     "promptTemplate": "<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n<|im_start|>user\n{prompt}<|im_end|>\n<|im_start|>assistant\n",
-    "stop": ["<|im_end|>"],
+    "stop": [
+      "<|im_end|>"
+    ],
     "chatTurnSeparator": "<|im_end|>\n<|im_start|>assistant\n{response}<|im_end|>\n<|im_start|>user\n"
   },
   {
@@ -20,9 +22,11 @@
     "modality": "text-chat",
     "size": "0.5B",
     "approxArchiveMb": 350,
-    "quantize": "none",
+    "quantize": "int8",
     "promptTemplate": "<|im_start|>system\nYou are a helpful assistant<|im_end|>\n<|im_start|>user\n{prompt}<|im_end|>\n<|im_start|>assistant\n",
-    "stop": ["<|im_end|>"],
+    "stop": [
+      "<|im_end|>"
+    ],
     "chatTurnSeparator": "<|im_end|>\n<|im_start|>assistant\n{response}<|im_end|>\n<|im_start|>user\n"
   }
 ]

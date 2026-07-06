@@ -293,6 +293,16 @@ executor = "rust"
 feature = "features/suites/s3_execution/idle_derivation.feature"
 
 [[row]]
+id = "quantized-rest"
+statement = "A quant-tiered model rests quantized: the download derives each fully-retirable projection's matmul-ready int8 artifact in the browser and evaporates its wide blob — the wide form transits once and rests nowhere (recorded provenance keeps it recoverable; a missing artifact re-derives at session warm, fail-closed on its recorded κ) — the κ-store holds the quantized form, and the chat journey completes on it with the tier stated in the narration, never silently."
+stage = "S1"
+status = "build"
+oracles = ["journey-reference"]
+tier = "suite"
+executor = "browser"
+feature = "features/suites/s1_acquisition/quantized_rest.feature"
+
+[[row]]
 id = "quantized-transit"
 statement = "A quantized weight form is derived content: computed deterministically from the wide tensor's κ (re-derivation reproduces the artifact κ bit-identically), addressed by its own κ, stored matmul-ready and bound by stage graphs as two ranged sub-tensor κ-bindings feeding Dequantize adjacent to its MatMul; once the derivation crystallizes the wide blob goes gas-phase — with wide content evicted the pipeline still generates and never resolves a wide projection κ — and the quantized staged pipeline generates identically to the quantized monolithic archive; quantized-vs-wide quality is measured, never asserted."
 stage = "S3"

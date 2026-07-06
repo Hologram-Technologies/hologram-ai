@@ -8,9 +8,12 @@
 // corrupt κ aborts the turn with the label.
 import {
   generate as wasmGenerate,
+  computeKappa,
   createStagedSession,
+  deriveQuantizedArtifact,
   kappaRequirements,
   materialize,
+  type QuantEntry,
   type StagedSession,
 } from "./holo";
 
@@ -284,6 +287,58 @@ function disposeWarm() {
   warm = null;
 }
 
+/** Re-derive any missing quantized artifact from its wide κ (OPFS or the
+ * recorded provenance) and persist it — derive-as-recovery: the artifact's
+ * recorded κ pins the result, a mismatch fails loud naming the label. */
+async function ensureQuantArtifacts(
+  tensorsDir: FileSystemDirectoryHandle,
+  quant: QuantEntry[],
+  manifest: { keys: string[]; kappas: string[]; shapes: string[]; dtypes: string[] },
+  sources: KappaSources,
+  onProgress: (line: string) => void,
+): Promise<void> {
+  for (const entry of quant) {
+    try {
+      await tensorsDir.getFileHandle(`${entry.artifact}.bin`);
+      continue;
+    } catch {
+      // Missing (evaporated under pressure): recover by deriving.
+    }
+    const idx = manifest.kappas.indexOf(entry.wide);
+    if (idx < 0) throw new Error(`quant map names κ \`${entry.wide}\` outside the manifest`);
+    let wide: Uint8Array;
+    try {
+      const handle = await tensorsDir.getFileHandle(`${entry.wide}.bin`);
+      wide = new Uint8Array(await (await handle.getFile()).arrayBuffer());
+    } catch {
+      const source = sources[entry.wide];
+      if (!source) {
+        throw new Error(`κ \`${entry.wide}\` resolves nowhere: not cached, no recorded provenance`);
+      }
+      const res = await fetch(source.url, {
+        headers: { Range: `bytes=${source.start}-${source.end - 1}` },
+      });
+      if (!res.ok && res.status !== 206) {
+        throw new Error(`provenance fetch failed (HTTP ${res.status}) for κ \`${entry.wide}\``);
+      }
+      const body = new Uint8Array(await res.arrayBuffer());
+      wide = res.status === 200 ? body.slice(source.start, source.end) : body;
+    }
+    const artifact = await deriveQuantizedArtifact(wide, manifest.dtypes[idx], entry.out, entry.in);
+    const kappa = await computeKappa(artifact);
+    if (kappa !== entry.artifact) {
+      throw new Error(
+        `re-derived artifact κ \`${kappa}\` does not reproduce the recorded \`${entry.artifact}\``,
+      );
+    }
+    const handle = await tensorsDir.getFileHandle(`${entry.artifact}.bin`, { create: true });
+    const writable = await handle.createWritable();
+    await writable.write(artifact as unknown as ArrayBufferView<ArrayBuffer>);
+    await writable.close();
+    onProgress(`quantized artifact re-derived (derive-as-recovery): ${entry.artifact.slice(0, 24)}…`);
+  }
+}
+
 async function warmStagedSession(
   modelDirName: string,
   tokenizerBytes: Uint8Array,
@@ -311,12 +366,22 @@ async function warmStagedSession(
   const stagesMeta = JSON.parse(await readModelText(modelDir, "stages.json")) as {
     layersPerStage: number;
     contextLength?: number;
+    quant?: QuantEntry[];
   };
   const derivedEntries = await loadDerivedEntries(modelDir);
 
   const tensorsDir = await root.getDirectoryHandle("tensors");
+  // Quantized tier: every artifact must be resident before the session
+  // opens sync handles — a missing artifact re-derives from the wide form
+  // through recorded provenance (derive-as-recovery, fail-closed on its κ).
+  const quant = stagesMeta.quant ?? [];
+  if (quant.length) {
+    await ensureQuantArtifacts(tensorsDir, quant, manifest, sources, onProgress);
+    onProgress(`quantized tier (int8): ${quant.length} projection artifact(s) bound`);
+  }
   const kappaHandles = new Map<string, OpenHandle>();
-  for (const kappa of manifest.kappas) {
+  const sessionKappas = [...manifest.kappas, ...quant.map((q) => q.artifact)];
+  for (const kappa of sessionKappas) {
     try {
       kappaHandles.set(kappa, await openSync(tensorsDir, `${kappa}.bin`));
     } catch {
@@ -332,6 +397,7 @@ async function warmStagedSession(
     kappaResolver(kappaHandles, sources),
     kappaInvalidator(kappaHandles, tensorsDir),
     kappaRangeResolver(kappaHandles, sources),
+    quant.length ? quant : undefined,
     derivedStore(derivedEntries, modelDir),
     tokenizerBytes,
     onProgress,

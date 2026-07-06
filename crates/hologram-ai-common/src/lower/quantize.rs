@@ -166,6 +166,103 @@ pub fn quantize_weights(graph: &mut AiGraph, strategy: QuantStrategy) -> Result<
 /// `q_i8(in·out) ‖ scales_f32(4·out)` (one scale per output column).
 pub type QuantMap = std::collections::HashMap<String, (String, u64, u64)>;
 
+/// Matches of the projection chain `MatMul(x, Transpose{[1,0]}(wide))`
+/// (optionally through a `Cast`) where `wide` is an un-ranged
+/// [`AiParam::External`]: `(matmul node index, wide param tid, wide κ)`.
+fn transposed_external_matmul_weights(
+    graph: &AiGraph,
+    producer: &std::collections::HashMap<TensorId, usize>,
+) -> Vec<(usize, TensorId, String)> {
+    let mut matches = Vec::new();
+    for (m_idx, node) in graph.nodes.iter().enumerate() {
+        if !matches!(node.op, AiOp::MatMul) {
+            continue;
+        }
+        let Some(&b_tid) = node.inputs.get(1) else {
+            continue;
+        };
+        let Some(&t_idx) = producer.get(&b_tid) else {
+            continue;
+        };
+        let t_node = &graph.nodes[t_idx];
+        if !matches!(&t_node.op, AiOp::Transpose { perm } if perm == &[1, 0]) {
+            continue;
+        }
+        // The transpose input is the wide param, possibly through a Cast.
+        let Some(&t_in) = t_node.inputs.first() else {
+            continue;
+        };
+        let wide_tid = match producer.get(&t_in).map(|&i| &graph.nodes[i]) {
+            Some(c) if matches!(c.op, AiOp::Cast { .. }) => match c.inputs.first() {
+                Some(&w) => w,
+                None => continue,
+            },
+            Some(_) => continue,
+            None => t_in,
+        };
+        let Some(AiParam::External {
+            kappa, range: None, ..
+        }) = graph.params.get(&wide_tid)
+        else {
+            continue;
+        };
+        matches.push((m_idx, wide_tid, kappa.clone()));
+    }
+    matches
+}
+
+/// The wide κs this graph can rewrite onto quantized artifacts AND fully
+/// retire — after the rewrite, no binding in the graph still carries the
+/// wide κ. A κ with a consumer outside the projection chain (a tied
+/// embedding's Gather, a chunked head's ranged bindings) is excluded: its
+/// wide blob stays load-bearing and must not go gas-phase. Decided by
+/// probing a clone with a dummy map — the same rewrite that will run,
+/// never a parallel approximation of it.
+pub fn quantizable_external_weights(graph: &AiGraph) -> Result<Vec<String>> {
+    let producer: std::collections::HashMap<TensorId, usize> = graph
+        .nodes
+        .iter()
+        .enumerate()
+        .flat_map(|(i, n)| n.outputs.iter().map(move |t| (*t, i)))
+        .collect();
+    let mut dummy = QuantMap::new();
+    for (_, wide_tid, kappa) in transposed_external_matmul_weights(graph, &producer) {
+        let Some(info) = graph.tensor_info.get(&wide_tid) else {
+            continue;
+        };
+        let (Some(out), Some(inf)) = (
+            info.shape.first().and_then(|d| d.as_concrete()),
+            info.shape.get(1).and_then(|d| d.as_concrete()),
+        ) else {
+            continue;
+        };
+        if info.shape.len() != 2 {
+            continue;
+        }
+        dummy.insert(kappa.clone(), (format!("probe:{kappa}"), out, inf));
+    }
+    if dummy.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut probe = graph.clone();
+    quantize_external_matmul_weights(&mut probe, &dummy)?;
+    let still_wide: std::collections::HashSet<&String> = probe
+        .params
+        .values()
+        .filter_map(|p| match p {
+            AiParam::External { kappa, .. } if !kappa.starts_with("probe:") => Some(kappa),
+            _ => None,
+        })
+        .collect();
+    let mut eligible: Vec<String> = dummy
+        .keys()
+        .filter(|k| !still_wide.contains(k))
+        .cloned()
+        .collect();
+    eligible.sort();
+    Ok(eligible)
+}
+
 /// Rewrite κ-bound MatMul weights onto their quantized derived artifacts
 /// (row `quantized-transit`). The parametric recipe consumes a projection as
 /// `MatMul(x, Transpose(weight))` (optionally through a `Cast` for narrow
@@ -201,7 +298,7 @@ pub fn quantize_external_matmul_weights(graph: &mut AiGraph, quant: &QuantMap) -
         .flat_map(|(i, n)| n.outputs.iter().map(move |t| (*t, i)))
         .collect();
 
-    // Collect rewrites first (transpose node idx, wide param tid, quant entry)
+    // Collect rewrites first (matmul node idx, wide param tid, quant entry)
     // so the mutation phase never fights the producer index.
     struct Rewrite {
         matmul_idx: usize,
@@ -214,39 +311,8 @@ pub fn quantize_external_matmul_weights(graph: &mut AiGraph, quant: &QuantMap) -
     // [∏leading, in] around the matmul (a structural reshape pair — the
     // same computation, the kernel's proven shape) and unflatten after.
     let mut rewrites: Vec<Rewrite> = Vec::new();
-    for (m_idx, node) in graph.nodes.iter().enumerate() {
-        if !matches!(node.op, AiOp::MatMul) {
-            continue;
-        }
-        let Some(&b_tid) = node.inputs.get(1) else {
-            continue;
-        };
-        let Some(&t_idx) = producer.get(&b_tid) else {
-            continue;
-        };
-        let t_node = &graph.nodes[t_idx];
-        if !matches!(&t_node.op, AiOp::Transpose { perm } if perm == &[1, 0]) {
-            continue;
-        }
-        // The transpose input is the wide param, possibly through a Cast.
-        let Some(&t_in) = t_node.inputs.first() else {
-            continue;
-        };
-        let wide_tid = match producer.get(&t_in).map(|&i| &graph.nodes[i]) {
-            Some(c) if matches!(c.op, AiOp::Cast { .. }) => match c.inputs.first() {
-                Some(&w) => w,
-                None => continue,
-            },
-            Some(_) => continue,
-            None => t_in,
-        };
-        let Some(AiParam::External {
-            kappa, range: None, ..
-        }) = graph.params.get(&wide_tid)
-        else {
-            continue;
-        };
-        let Some((quant_kappa, out_features, in_features)) = quant.get(kappa) else {
+    for (m_idx, wide_tid, kappa) in transposed_external_matmul_weights(graph, &producer) {
+        let Some((quant_kappa, out_features, in_features)) = quant.get(&kappa) else {
             continue;
         };
         rewrites.push(Rewrite {

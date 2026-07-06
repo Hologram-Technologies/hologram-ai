@@ -144,7 +144,7 @@ export async function addCustomModel(hfId: string): Promise<void> {
     modality: "text-chat",
     size: "?",
     approxArchiveMb: 0,
-    quantize: "none",
+    quantize: "int8",
     promptTemplate: null,
     stop: [],
     chatTurnSeparator: null,
@@ -388,6 +388,9 @@ export async function downloadKnownModel(id: string): Promise<number> {
             reject(new Error(e.data.error));
           }
         };
+        // The quantized tier is a per-model catalogue statement (data, never
+        // code); the localStorage knob forces it for hermetic witnesses.
+        const quantize = localStorage.getItem("hologram_quantize") ?? model.quantize;
         worker.postMessage({
           type: "download_safetensors",
           payload: {
@@ -400,7 +403,8 @@ export async function downloadKnownModel(id: string): Promise<number> {
             localName,
             revision: info.sha,
             cacheBudgetBytes: cacheBudget,
-            hfBase: hfBase()
+            hfBase: hfBase(),
+            quantize
           }
         });
       },

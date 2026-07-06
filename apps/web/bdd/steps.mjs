@@ -543,6 +543,50 @@ Then("a non-empty completion streams back", async function () {
   );
 });
 
+// ── S1 — quantized rest (row `quantized-rest`) ──────────────────────────────
+
+Given("the quantized tier is forced", async function () {
+  // The tier is a per-model catalogue statement; the knob forces it for the
+  // hermetic fixture without touching the committed reference entry.
+  await this.page.evaluate(() => localStorage.setItem("hologram_quantize", "int8"));
+});
+
+Then("the κ-store holds every quantized artifact and no gas-phase wide blob", async function () {
+  const state = await this.page.evaluate(async () => {
+    const root = await navigator.storage.getDirectory();
+    const models = await root.getDirectoryHandle("models");
+    const dir = await models.getDirectoryHandle("handshake-tiny");
+    const fh = await dir.getFileHandle("stages.json");
+    const meta = JSON.parse(await (await fh.getFile()).text());
+    const tensors = await root.getDirectoryHandle("tensors");
+    const names = [];
+    for await (const name of tensors.keys()) names.push(name);
+    return { quant: meta.quant ?? [], names };
+  });
+  assert.ok(
+    state.quant.length > 0,
+    "the quant-tiered download must record a quantized derived-artifact map",
+  );
+  for (const entry of state.quant) {
+    assert.ok(
+      state.names.includes(`${entry.artifact}.bin`),
+      `quantized artifact ${entry.artifact} missing from the κ-store`,
+    );
+    assert.ok(
+      !state.names.includes(`${entry.wide}.bin`),
+      `wide blob ${entry.wide} must be gas-phase after its derivation crystallized`,
+    );
+  }
+});
+
+Then("the session narration states the quantized tier", async function () {
+  const log = await statusLog(this);
+  assert.ok(
+    log.some((line) => line.includes("quantized tier")),
+    `the pipeline must state its tier, never run it silently: ${JSON.stringify(log)}`,
+  );
+});
+
 // ── S4 — windowed execution over k ──────────────────────────────────────────
 
 Given("a forced single-layer execution window", async function () {

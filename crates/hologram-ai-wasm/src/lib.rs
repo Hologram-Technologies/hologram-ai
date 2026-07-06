@@ -328,6 +328,137 @@ pub fn compile_safetensors_staged(
     Ok(out)
 }
 
+/// Parse the JSON quant map the web tier records in `stages.json`:
+/// `[{"wide": κ, "artifact": κ, "out": n, "in": n}, …]`.
+fn parse_quant_json(
+    quant_json: Option<String>,
+) -> Result<Option<hologram_ai_common::lower::QuantMap>, JsValue> {
+    let Some(json) = quant_json.filter(|j| !j.is_empty()) else {
+        return Ok(None);
+    };
+    #[derive(serde::Deserialize)]
+    struct Entry {
+        wide: String,
+        artifact: String,
+        out: u64,
+        #[serde(rename = "in")]
+        inf: u64,
+    }
+    let entries: Vec<Entry> =
+        serde_json::from_str(&json).map_err(|e| err(format!("quant map JSON: {e}")))?;
+    Ok(Some(
+        entries
+            .into_iter()
+            .map(|e| (e.wide, (e.artifact, e.out, e.inf)))
+            .collect(),
+    ))
+}
+
+/// [`compile_safetensors_staged`] on the quantized tier (row
+/// `quantized-transit`): stage graphs bind projection weights to their
+/// quantized derived artifacts per the recorded map.
+#[wasm_bindgen]
+#[allow(clippy::too_many_arguments)]
+pub fn compile_safetensors_staged_quantized(
+    config_json: &str,
+    keys_js: &js_sys::Array,
+    kappas_js: &js_sys::Array,
+    tensor_shapes_js: &js_sys::Array,
+    tensor_dtypes_js: &js_sys::Array,
+    context_length: Option<u32>,
+    layers_per_stage: u32,
+    quant_json: Option<String>,
+) -> Result<js_sys::Array, JsValue> {
+    let rows = parse_manifest(keys_js, tensor_shapes_js, tensor_dtypes_js)?;
+    let kappas = parse_kappas(&rows.keys, kappas_js)?;
+    let layers_per_stage = std::num::NonZeroU64::new(u64::from(layers_per_stage))
+        .ok_or_else(|| err("layers_per_stage must be at least 1"))?;
+    let quant = parse_quant_json(quant_json)?;
+
+    let stages = hologram_ai::staged::compile_stages_with(
+        config_json,
+        &rows.keys,
+        &kappas,
+        &rows.shapes,
+        &rows.dtypes,
+        context_length.map(u64::from),
+        layers_per_stage,
+        quant.as_ref(),
+    )
+    .map_err(|e| err(format!("compile_safetensors_staged_quantized: {e:#}")))?;
+
+    let out = js_sys::Array::new();
+    for stage in stages {
+        let canonical = hologram_ai::materialize::canonicalize_archive(&stage)
+            .map_err(|e| err(format!("canonicalize stage: {e:#}")))?;
+        out.push(&js_sys::Uint8Array::from(canonical.as_slice()).into());
+    }
+    Ok(out)
+}
+
+/// The wide κs the staged plan can rewrite onto quantized artifacts and
+/// fully retire (browser tier of row `quantized-transit`): the download
+/// derives artifacts for exactly these and their wide blobs go gas-phase.
+#[wasm_bindgen]
+pub fn quantizable_weights(
+    config_json: &str,
+    keys_js: &js_sys::Array,
+    kappas_js: &js_sys::Array,
+    tensor_shapes_js: &js_sys::Array,
+    tensor_dtypes_js: &js_sys::Array,
+    context_length: Option<u32>,
+    layers_per_stage: u32,
+) -> Result<js_sys::Array, JsValue> {
+    let rows = parse_manifest(keys_js, tensor_shapes_js, tensor_dtypes_js)?;
+    let kappas = parse_kappas(&rows.keys, kappas_js)?;
+    let layers_per_stage = std::num::NonZeroU64::new(u64::from(layers_per_stage))
+        .ok_or_else(|| err("layers_per_stage must be at least 1"))?;
+    let eligible = hologram_ai::staged::quantizable_weights(
+        config_json,
+        &rows.keys,
+        &kappas,
+        &rows.shapes,
+        &rows.dtypes,
+        context_length.map(u64::from),
+        layers_per_stage,
+    )
+    .map_err(|e| err(format!("quantizable_weights: {e:#}")))?;
+    let out = js_sys::Array::new();
+    for kappa in eligible {
+        out.push(&JsValue::from_str(&kappa));
+    }
+    Ok(out)
+}
+
+/// Derive the quantized artifact of a wide `[out, in]` weight (row
+/// `quantized-transit`): matmul-ready per-channel symmetric int8,
+/// `q_i8(in·out) ‖ scales_f32(4·out)`. Deterministic — the caller mints the
+/// artifact's κ from the returned bytes.
+#[wasm_bindgen]
+pub fn derive_quantized_artifact(
+    wide: &[u8],
+    dtype: &str,
+    out_features: u32,
+    in_features: u32,
+) -> Result<Vec<u8>, JsValue> {
+    let dtype = match dtype {
+        "F32" => hologram_ai_common::DType::F32,
+        "BF16" => hologram_ai_common::DType::BF16,
+        other => {
+            return Err(err(format!(
+                "quantized derivation from dtype `{other}` is not defined"
+            )))
+        }
+    };
+    hologram_ai::quantized::derive_quantized_artifact(
+        wide,
+        dtype,
+        u64::from(out_features),
+        u64::from(in_features),
+    )
+    .map_err(|e| err(format!("derive_quantized_artifact: {e:#}")))
+}
+
 // ── κ-materialization (journey stage S3) ────────────────────────────────────
 
 /// The κ-labels a k-form archive requires (its `holospaces.kappa_map`
@@ -859,6 +990,7 @@ impl StagedChatSession {
         resolve_kappa: &js_sys::Function,
         invalidate_kappa: Option<js_sys::Function>,
         resolve_kappa_range: Option<js_sys::Function>,
+        quant_json: Option<String>,
         derived_load: Option<js_sys::Function>,
         derived_store: Option<js_sys::Function>,
         derived_evaporate: Option<js_sys::Function>,
@@ -888,6 +1020,10 @@ impl StagedChatSession {
             store,
         )
         .map_err(|e| err(format!("staged session: {e:#}")))?;
+
+        if let Some(quant) = parse_quant_json(quant_json)? {
+            session.set_quant_map(quant);
+        }
 
         if let (Some(load), Some(store), Some(evaporate)) =
             (derived_load, derived_store, derived_evaporate)

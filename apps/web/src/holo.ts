@@ -6,6 +6,9 @@ import init, {
   describe as wasmDescribe,
   supported_families as wasmSupportedFamilies,
   compile_safetensors_staged as wasmCompileSafetensorsStaged,
+  compile_safetensors_staged_quantized as wasmCompileSafetensorsStagedQuantized,
+  quantizable_weights as wasmQuantizableWeights,
+  derive_quantized_artifact as wasmDeriveQuantizedArtifact,
   count_tokens as wasmCountTokens,
   StagedChatSession as WasmStagedChatSession,
   validate_model_config as wasmValidateModelConfig,
@@ -143,6 +146,72 @@ export async function compileSafetensorsStaged(
  * sessions, verified-κ set, and derived-artifact cache survive across turns,
  * so a warm turn pays decode — never recompile, never rematerialization.
  * Construct once per model; call `generate` per turn. */
+/** One quantized derived-artifact record (row `quantized-transit`): the wide
+ * tensor's κ, its matmul-ready int8 artifact's κ, and the projection dims. */
+export interface QuantEntry {
+  wide: string;
+  artifact: string;
+  out: number;
+  in: number;
+}
+
+/** The wide κs the staged plan can rewrite onto quantized artifacts and
+ * fully retire — the download derives artifacts for exactly these and their
+ * wide blobs go gas-phase. */
+export async function quantizableWeights(
+  configJson: string,
+  keys: string[],
+  kappas: string[],
+  shapes: string[],
+  dtypes: string[],
+  contextLength: number | undefined,
+  layersPerStage: number,
+): Promise<string[]> {
+  await ensureReady();
+  return Array.from(
+    wasmQuantizableWeights(configJson, keys, kappas, shapes, dtypes, contextLength, layersPerStage),
+  ) as string[];
+}
+
+/** Derive the matmul-ready int8 artifact of a wide [out, in] weight —
+ * deterministic; mint the artifact's κ from the returned bytes. */
+export async function deriveQuantizedArtifact(
+  wide: Uint8Array,
+  dtype: string,
+  outFeatures: number,
+  inFeatures: number,
+): Promise<Uint8Array> {
+  await ensureReady();
+  return wasmDeriveQuantizedArtifact(wide, dtype, outFeatures, inFeatures);
+}
+
+/** `compileSafetensorsStaged` on the quantized tier: stage graphs bind
+ * projection weights to their quantized derived artifacts. */
+export async function compileSafetensorsStagedQuantized(
+  configJson: string,
+  keys: string[],
+  kappas: string[],
+  shapes: string[],
+  dtypes: string[],
+  contextLength: number | undefined,
+  layersPerStage: number,
+  quant: QuantEntry[],
+): Promise<Uint8Array[]> {
+  await ensureReady();
+  return Array.from(
+    wasmCompileSafetensorsStagedQuantized(
+      configJson,
+      keys,
+      kappas,
+      shapes,
+      dtypes,
+      contextLength,
+      layersPerStage,
+      JSON.stringify(quant),
+    ),
+  ) as Uint8Array[];
+}
+
 export async function createStagedSession(
   configJson: string,
   manifest: { keys: string[]; kappas: string[]; shapes: string[]; dtypes: string[] },
@@ -151,6 +220,7 @@ export async function createStagedSession(
   resolveKappa: (kappa: string) => Uint8Array | undefined,
   invalidateKappa: ((kappa: string) => void) | undefined,
   resolveKappaRange: ((kappa: string, offset: number, len: number) => Uint8Array | undefined) | undefined,
+  quant: QuantEntry[] | undefined,
   derived:
     | {
         load: (key: string) => { stages: Uint8Array[]; kappas: string[] } | undefined;
@@ -173,6 +243,7 @@ export async function createStagedSession(
     resolveKappa,
     invalidateKappa,
     resolveKappaRange,
+    quant && quant.length ? JSON.stringify(quant) : undefined,
     derived?.load,
     derived?.store,
     derived?.evaporate,

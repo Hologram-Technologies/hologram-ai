@@ -15,11 +15,16 @@
 //    k-form archive — it cannot fail on model validity.
 import {
   compileSafetensorsStaged,
+  compileSafetensorsStagedQuantized,
   compileSafetensorsStreamed,
+  computeKappa,
+  deriveQuantizedArtifact,
+  quantizableWeights,
   validateModelConfig,
   validateStreamedManifest,
   KappaHasher,
   ensureReady,
+  type QuantEntry,
 } from "./holo";
 
 self.onmessage = async (e) => {
@@ -172,6 +177,31 @@ async function saveShardPrior(
   }
 }
 
+/** Resolve a tensor's bytes for derivation: the local κ-store first, then
+ * the recorded provenance (an async ranged fetch — content addressing makes
+ * it exactly as trustworthy; the artifact's own κ pins the result). */
+async function readTensorBytes(
+  tensorsDir: FileSystemDirectoryHandle,
+  kappa: string,
+  sources: Record<string, { url: string; start: number; end: number }>,
+): Promise<Uint8Array> {
+  try {
+    const handle = await tensorsDir.getFileHandle(`${kappa}.bin`);
+    return new Uint8Array(await (await handle.getFile()).arrayBuffer());
+  } catch {
+    const source = sources[kappa];
+    if (!source) throw new Error(`κ \`${kappa}\` resolves nowhere: not cached, no recorded provenance`);
+    const res = await fetch(source.url, {
+      headers: { Range: `bytes=${source.start}-${source.end - 1}` },
+    });
+    if (!res.ok && res.status !== 206) {
+      throw new Error(`provenance fetch failed (HTTP ${res.status}) for κ \`${kappa}\``);
+    }
+    const body = new Uint8Array(await res.arrayBuffer());
+    return res.status === 200 ? body.slice(source.start, source.end) : body;
+  }
+}
+
 /** Write a load-bearing (crystalline) file, evaporating gas-phase tensor
  * cache entries to make room when the quota refuses (lifecycle σ-order:
  * cached tensors are provenance-recoverable; the structure is not). Fails
@@ -209,6 +239,7 @@ export async function handleSafetensorsDownload(
     revision,
     cacheBudgetBytes,
     hfBase,
+    quantize,
   }: {
     modelId: string;
     configText: string;
@@ -220,6 +251,7 @@ export async function handleSafetensorsDownload(
     revision?: string;
     cacheBudgetBytes?: number;
     hfBase?: string;
+    quantize?: string;
   },
   emitProgressFn = emitProgress,
   emitDoneFn = emitDone,
@@ -481,18 +513,79 @@ export async function handleSafetensorsDownload(
     // streamed κs and emits the k-form archive(s). Models beyond the
     // execution window compile as stage archives (windowed execution over k).
     if (stageCount && stageCount > 1 && layersPerStage && localName) {
+      // Quantized tier (row `quantized-transit`, stated by the catalogue —
+      // never silent): derive each fully-retirable projection's matmul-ready
+      // int8 artifact into the κ-store and evaporate its wide blob. The wide
+      // form rests nowhere; recorded provenance keeps it recoverable.
+      const quantEntries: QuantEntry[] = [];
+      if (quantize === "int8") {
+        const eligible = new Set(
+          await quantizableWeights(
+            configText,
+            allKeys,
+            allKappas,
+            allShapes,
+            allDtypes,
+            contextLength,
+            layersPerStage,
+          ),
+        );
+        emitProgressFn(
+          `Quantized tier (int8): deriving artifacts for ${eligible.size} projection weight(s)...`,
+        );
+        let wideTotal = 0;
+        let quantTotal = 0;
+        for (let i = 0; i < allKappas.length; i++) {
+          const wideKappa = allKappas[i];
+          if (!eligible.has(wideKappa) || quantEntries.some((e) => e.wide === wideKappa)) continue;
+          const dims = JSON.parse(allShapes[i]) as number[];
+          const wide = await readTensorBytes(tensorsDir, wideKappa, kappaSources);
+          const artifact = await deriveQuantizedArtifact(wide, allDtypes[i], dims[0], dims[1]);
+          const artifactKappa = await computeKappa(artifact);
+          await writeEssential(tensorsDir, cachedKappas, emitProgressFn, async () => {
+            const handle = await tensorsDir.getFileHandle(`${artifactKappa}.bin`, { create: true });
+            const writable = await handle.createWritable();
+            await writable.write(artifact as unknown as ArrayBufferView<ArrayBuffer>);
+            await writable.close();
+          });
+          // Crystallized: the wide blob is gas-phase — evaporate it now.
+          await tensorsDir.removeEntry(`${wideKappa}.bin`).catch(() => {});
+          const wideIdx = cachedKappas.indexOf(wideKappa);
+          if (wideIdx >= 0) cachedKappas.splice(wideIdx, 1);
+          cachedKappas.push(artifactKappa);
+          wideTotal += wide.length;
+          quantTotal += artifact.length;
+          quantEntries.push({ wide: wideKappa, artifact: artifactKappa, out: dims[0], in: dims[1] });
+        }
+        emitProgressFn(
+          `Quantized tier: ${quantEntries.length} artifact(s), ${(quantTotal / 1024 / 1024).toFixed(1)}MB ` +
+            `derived; ${(wideTotal / 1024 / 1024).toFixed(1)}MB of wide forms gas-phase.`,
+        );
+      }
+
       emitProgressFn(
         `Binding streamed κs into ${stageCount} stage archives (windowed execution over k)...`,
       );
-      const stages = await compileSafetensorsStaged(
-        configText,
-        allKeys,
-        allKappas,
-        allShapes,
-        allDtypes,
-        contextLength,
-        layersPerStage,
-      );
+      const stages = quantEntries.length
+        ? await compileSafetensorsStagedQuantized(
+            configText,
+            allKeys,
+            allKappas,
+            allShapes,
+            allDtypes,
+            contextLength,
+            layersPerStage,
+            quantEntries,
+          )
+        : await compileSafetensorsStaged(
+            configText,
+            allKeys,
+            allKappas,
+            allShapes,
+            allDtypes,
+            contextLength,
+            layersPerStage,
+          );
       const modelsDir = await root.getDirectoryHandle("models", { create: true });
       const localDir = await modelsDir.getDirectoryHandle(localName, { create: true });
       const stagesDir = await localDir.getDirectoryHandle("stages", { create: true });
@@ -508,7 +601,7 @@ export async function handleSafetensorsDownload(
         const metaHandle = await localDir.getFileHandle("stages.json", { create: true });
         const writable = await metaHandle.createWritable();
         await writable.write(
-          JSON.stringify({ stageCount: stages.length, layersPerStage, contextLength }),
+          JSON.stringify({ stageCount: stages.length, layersPerStage, contextLength, quant: quantEntries }),
         );
         await writable.close();
       });
