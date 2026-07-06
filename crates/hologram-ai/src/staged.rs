@@ -147,6 +147,16 @@ impl KappaStore for CountingStore<'_> {
         self.bytes += content.len() as u64;
         Ok(content)
     }
+
+    fn invalidate(&mut self, kappa: &str) {
+        self.inner.invalidate(kappa);
+    }
+
+    fn resolve_range(&mut self, kappa: &str, offset: u64, len: u64) -> Result<Vec<u8>> {
+        let content = self.inner.resolve_range(kappa, offset, len)?;
+        self.bytes += content.len() as u64;
+        Ok(content)
+    }
 }
 
 /// Resolves the k-form archive bytes of stage `i` — a `Vec` of precompiled
@@ -569,6 +579,14 @@ struct SharedStore(std::rc::Rc<std::cell::RefCell<Box<dyn KappaStore>>>);
 impl KappaStore for SharedStore {
     fn resolve(&mut self, kappa: &str) -> Result<Vec<u8>> {
         self.0.borrow_mut().resolve(kappa)
+    }
+
+    fn invalidate(&mut self, kappa: &str) {
+        self.0.borrow_mut().invalidate(kappa);
+    }
+
+    fn resolve_range(&mut self, kappa: &str, offset: u64, len: u64) -> Result<Vec<u8>> {
+        self.0.borrow_mut().resolve_range(kappa, offset, len)
     }
 }
 

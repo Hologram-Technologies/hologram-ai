@@ -358,6 +358,12 @@ pub fn kappa_requirements(holo: &[u8]) -> Result<js_sys::Array, JsValue> {
 struct JsKappaStore {
     resolve: js_sys::Function,
     invalidate: Option<js_sys::Function>,
+    /// Optional ranged read `(kappa, offset, len) => Uint8Array | null` —
+    /// the seekable-tier hook of sub-tensor κ-resolution (row `chunked-head`):
+    /// a session-verified ranged binding moves only its slice (an OPFS
+    /// `read({at})` or a ranged provenance GET), never the whole tensor.
+    /// Absent, or returning null, falls back to whole-resolve + slice.
+    resolve_range: Option<js_sys::Function>,
 }
 
 impl hologram_ai::materialize::KappaStore for JsKappaStore {
@@ -376,6 +382,37 @@ impl hologram_ai::materialize::KappaStore for JsKappaStore {
         if let Some(f) = &self.invalidate {
             let _ = f.call1(&JsValue::NULL, &JsValue::from_str(kappa));
         }
+    }
+
+    fn resolve_range(&mut self, kappa: &str, offset: u64, len: u64) -> anyhow::Result<Vec<u8>> {
+        if let Some(f) = &self.resolve_range {
+            let value = f
+                .call3(
+                    &JsValue::NULL,
+                    &JsValue::from_str(kappa),
+                    &JsValue::from_f64(offset as f64),
+                    &JsValue::from_f64(len as f64),
+                )
+                .map_err(|e| anyhow::anyhow!("κ range resolver threw for `{kappa}`: {e:?}"))?;
+            if !value.is_null() && !value.is_undefined() {
+                let bytes = js_sys::Uint8Array::new(&value).to_vec();
+                anyhow::ensure!(
+                    bytes.len() as u64 == len,
+                    "κ range resolver returned {} bytes for `{kappa}` range {offset}+{len}",
+                    bytes.len()
+                );
+                return Ok(bytes);
+            }
+        }
+        // No seekable tier (or a miss): whole-resolve + slice, the default law.
+        let bytes = self.resolve(kappa)?;
+        let (start, end) = (offset as usize, (offset + len) as usize);
+        anyhow::ensure!(
+            end <= bytes.len() && start <= end,
+            "range {offset}+{len} exceeds the {}-byte content of `{kappa}`",
+            bytes.len()
+        );
+        Ok(bytes[start..end].to_vec())
     }
 }
 
@@ -446,6 +483,7 @@ pub fn materialize(
     let mut store = JsKappaStore {
         resolve: resolve.clone(),
         invalidate,
+        resolve_range: None,
     };
     hologram_ai::materialize::materialize_archive(holo, &mut store)
         .map_err(|e| err(format!("materialize: {e:#}")))
@@ -820,6 +858,7 @@ impl StagedChatSession {
         layers_per_stage: u32,
         resolve_kappa: &js_sys::Function,
         invalidate_kappa: Option<js_sys::Function>,
+        resolve_kappa_range: Option<js_sys::Function>,
         derived_load: Option<js_sys::Function>,
         derived_store: Option<js_sys::Function>,
         derived_evaporate: Option<js_sys::Function>,
@@ -835,6 +874,7 @@ impl StagedChatSession {
         let store = Box::new(JsKappaStore {
             resolve: resolve_kappa.clone(),
             invalidate: invalidate_kappa,
+            resolve_range: resolve_kappa_range,
         });
 
         let mut session = hologram_ai::staged::GrowableStagedSession::new(

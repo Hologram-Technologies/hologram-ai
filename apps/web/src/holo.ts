@@ -150,6 +150,7 @@ export async function createStagedSession(
   layersPerStage: number,
   resolveKappa: (kappa: string) => Uint8Array | undefined,
   invalidateKappa: ((kappa: string) => void) | undefined,
+  resolveKappaRange: ((kappa: string, offset: number, len: number) => Uint8Array | undefined) | undefined,
   derived:
     | {
         load: (key: string) => { stages: Uint8Array[]; kappas: string[] } | undefined;
@@ -171,6 +172,7 @@ export async function createStagedSession(
     layersPerStage,
     resolveKappa,
     invalidateKappa,
+    resolveKappaRange,
     derived?.load,
     derived?.store,
     derived?.evaporate,

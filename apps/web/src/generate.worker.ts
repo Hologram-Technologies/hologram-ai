@@ -111,6 +111,28 @@ function kappaResolver(
   };
 }
 
+/** The seekable tier of sub-tensor κ-resolution (row `chunked-head`): a
+ * session-verified ranged binding moves ONLY its slice — an OPFS `read({at})`
+ * from the cache tier, or a ranged GET inside the recorded provenance span.
+ * Returning undefined falls back to whole-resolve + slice in wasm (first
+ * touch always resolves whole and verifies; this tier is read-only I/O). */
+function kappaRangeResolver(
+  handles: Map<string, OpenHandle>,
+  sources: KappaSources,
+): (kappa: string, offset: number, len: number) => Uint8Array | undefined {
+  return (kappa: string, offset: number, len: number) => {
+    const handle = handles.get(kappa);
+    if (handle) {
+      const buf = new Uint8Array(len);
+      if (handle.read(buf, { at: offset }) === len) return buf;
+      return undefined;
+    }
+    const source = sources[kappa];
+    if (!source) return undefined;
+    return syncFetchRange(source.url, source.start + offset, source.start + offset + len);
+  };
+}
+
 /** The UNPIN hook (row `saturation-residency`): a κ whose cached content
  * failed verification is evicted — the open handle drops (so the resolver's
  * next call falls through to the recorded provenance) and the OPFS entry
@@ -309,6 +331,7 @@ async function warmStagedSession(
     stagesMeta.layersPerStage,
     kappaResolver(kappaHandles, sources),
     kappaInvalidator(kappaHandles, tensorsDir),
+    kappaRangeResolver(kappaHandles, sources),
     derivedStore(derivedEntries, modelDir),
     tokenizerBytes,
     onProgress,

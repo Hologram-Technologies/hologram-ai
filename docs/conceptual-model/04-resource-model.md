@@ -371,7 +371,13 @@ it is now removed the same way whole-model residency was: the head
 partitions into vocab-row chunks at the pipeline's own stage granularity
 via **κ-range bindings** (row `chunked-head` — sub-tensor κ-resolution: a
 chunk binds a byte range of the whole tensor's κ; verification covers the
-whole content once; no whole-vocabulary image ever materializes). Chunked
+whole content once; no whole-vocabulary image ever materializes). The
+transit side matches the residency side: verification is the ONLY
+whole-content read — once a session has verified a κ, a ranged binding
+rematerializes through `KappaStore::resolve_range` (an OPFS `read({at})` or
+a ranged GET inside the recorded provenance span), moving only its slice
+(witnessed: a verified pass moves the ranged reads' exact tiling of the
+tensor, never chunk-count × whole). Chunked
 logits agree with the whole head within kernel reduction-order tolerance
 (measured ≤ 4e-7 — the substrate's matmul tiling varies with output width)
 with EXACT greedy-decode parity. A head within layer granularity is one

@@ -5,7 +5,10 @@ Feature: No head is too large to execute
   head partitions into vocab-row chunks no heavier than a layer stage, each
   chunk binding a BYTE RANGE of the head weight's κ (sub-tensor
   κ-resolution: the κ names, and first-touch verification covers, the whole
-  content; the constant holds one verified slice). Row-partitioned matmul
+  content; the constant holds one verified slice). Verification is the only
+  whole-content read: once a session has verified a κ, a ranged binding
+  rematerializes through KappaStore::resolve_range — read-only I/O of the
+  slice, never the tensor. Row-partitioned matmul
   concatenation is mathematically the whole matmul; the substrate's
   reduction tiling varies with output width, so agreement is witnessed at
   kernel reduction-order tolerance (measured ≤ 4e-7) with EXACT greedy-
@@ -28,3 +31,7 @@ Feature: No head is too large to execute
   Scenario: chunked generation equals the monolithic completion
     When a greedy completion is generated through the chunked staged session
     Then the chunked completion equals the monolithic completion and every chunk resolved through its κ-range
+
+  Scenario: a verified κ rematerializes moving only its bytes
+    When the chunked stages execute twice in one session
+    Then every ranged touch of the verified head κ moves only its slice and whole transits stay at one per pass

@@ -816,6 +816,7 @@ struct BddWorld {
     chunked: Option<ChunkedKit>,
     chunked_logits: Option<(Vec<u8>, Vec<u8>)>,
     chunked_completion: Option<(String, u64)>,
+    chunked_traffic: Option<ChunkedTraffic>,
     // S3 — idle derivation (row `idle-derivation`)
     idle_state: Option<IdleDeriveState>,
     // S3 — admission margin (row `stage-residency-cache`)
@@ -3276,6 +3277,128 @@ async fn then_chunked_generation(w: &mut BddWorld) {
     assert!(!text.is_empty(), "the chunked pipeline must generate");
     assert!(*ranged > 1, "the chunks resolved via κ-ranges");
     println!("[chunked-head] completion {text:?} over {ranged} κ-range bindings");
+}
+
+/// The per-resolution traffic journal of the resolve_range witness: every
+/// store touch as `(κ, bytes moved, ranged)`, split at the pass boundary.
+struct ChunkedTraffic {
+    pass1: Vec<(String, u64, bool)>,
+    pass2: Vec<(String, u64, bool)>,
+    head_kappa: String,
+    head_bytes: u64,
+    chunk_stages: usize,
+}
+
+/// A κ-store adapter that journals each resolution's moved bytes and whether
+/// it rode `resolve_range` — the I/O instrument of the resolve_range witness.
+struct JournalingStore {
+    inner: DirKappaStore,
+    log: std::rc::Rc<std::cell::RefCell<Vec<(String, u64, bool)>>>,
+}
+
+impl KappaStore for JournalingStore {
+    fn resolve(&mut self, kappa: &str) -> anyhow::Result<Vec<u8>> {
+        let bytes = self.inner.resolve(kappa)?;
+        self.log
+            .borrow_mut()
+            .push((kappa.to_string(), bytes.len() as u64, false));
+        Ok(bytes)
+    }
+
+    fn invalidate(&mut self, kappa: &str) {
+        self.inner.invalidate(kappa);
+    }
+
+    fn resolve_range(&mut self, kappa: &str, offset: u64, len: u64) -> anyhow::Result<Vec<u8>> {
+        let bytes = self.inner.resolve_range(kappa, offset, len)?;
+        self.log
+            .borrow_mut()
+            .push((kappa.to_string(), bytes.len() as u64, true));
+        Ok(bytes)
+    }
+}
+
+#[when("the chunked stages execute twice in one session")]
+async fn when_chunked_twice(w: &mut BddWorld) {
+    use hologram_ai::engine::LmSession;
+    let kit = w.chunked.as_ref().expect("the chunked kit");
+    let ids = staged_window_ids();
+    let log = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let store = JournalingStore {
+        inner: DirKappaStore::new(&kit.store.path),
+        log: std::rc::Rc::clone(&log),
+    };
+    // Residency budget 0: every pass rematerializes every stage — the
+    // rematerialization whose traffic this witness measures.
+    let mut staged = StagedRunner::from_archives(kit.stages.clone(), Box::new(store))
+        .expect("the chunked staged runner builds");
+    staged.execute(&[&ids]).expect("the first pass runs");
+    let pass1 = std::mem::take(&mut *log.borrow_mut());
+    staged.execute(&[&ids]).expect("the second pass runs");
+    let pass2 = std::mem::take(&mut *log.borrow_mut());
+
+    let head_idx = kit
+        .keys
+        .iter()
+        .position(|k| k == "lm_head.weight")
+        .expect("the untied fixture has a head tensor");
+    w.chunked_traffic = Some(ChunkedTraffic {
+        pass1,
+        pass2,
+        head_kappa: kit.kappas[head_idx].clone(),
+        head_bytes: kit.shapes[head_idx].iter().product::<u64>() * 4,
+        chunk_stages: kit.stages.len() - 3,
+    });
+}
+
+#[then("every ranged touch of the verified head κ moves only its slice and whole transits stay at one per pass")]
+async fn then_chunked_range_traffic(w: &mut BddWorld) {
+    let t = w.chunked_traffic.as_ref().expect("both passes ran");
+    // The fixture's embedding and head share one κ (identical content), so
+    // each pass carries exactly ONE whole transit of it: the embedding
+    // stage's own whole-tensor binding. Pass 1's is also the verification
+    // read; after it, every ranged binding — including pass 1's own chunk
+    // stages — moves only its slice through resolve_range.
+    for (pass, name) in [(&t.pass1, "first"), (&t.pass2, "second")] {
+        let head: Vec<&(String, u64, bool)> =
+            pass.iter().filter(|(k, _, _)| *k == t.head_kappa).collect();
+        let whole = head.iter().filter(|(_, _, ranged)| !ranged).count();
+        assert_eq!(
+            whole, 1,
+            "the {name} pass must move the head κ whole exactly once (the embedding's \
+             whole-tensor binding); verified ranged bindings never re-transit whole"
+        );
+        let ranged: Vec<u64> = head
+            .iter()
+            .filter(|(_, _, ranged)| *ranged)
+            .map(|(_, b, _)| *b)
+            .collect();
+        assert_eq!(
+            ranged.len(),
+            t.chunk_stages,
+            "every chunk stage of the {name} pass resolves through its κ-range"
+        );
+        assert!(
+            ranged.iter().all(|b| *b < t.head_bytes),
+            "no ranged read of the {name} pass moves the whole tensor"
+        );
+        assert_eq!(
+            ranged.iter().sum::<u64>(),
+            t.head_bytes,
+            "the {name} pass's ranged reads tile the tensor exactly"
+        );
+    }
+    let old = (1 + t.chunk_stages as u64) * t.head_bytes;
+    let now: u64 = t
+        .pass2
+        .iter()
+        .filter(|(k, _, _)| *k == t.head_kappa)
+        .map(|(_, b, _)| *b)
+        .sum();
+    println!(
+        "[chunked-head] verified rematerialization moves {now} B of the head κ \
+         (whole-resolve-and-slice would move {old} B)"
+    );
 }
 
 // ──────────── S3 — idle derivation (row `idle-derivation`) ───────────────────

@@ -37,6 +37,25 @@ pub trait KappaStore {
     /// (row `saturation-residency`). Stores with no cache tier need do
     /// nothing — the default is a no-op.
     fn invalidate(&mut self, _kappa: &str) {}
+
+    /// Resolve only bytes `[offset, offset+len)` of the content addressed by
+    /// `kappa` — the read-only tier of sub-tensor κ-resolution (row
+    /// `chunked-head`): once a session has verified the WHOLE content, a
+    /// ranged binding rematerializes moving only its slice. Callers use this
+    /// ONLY for session-verified κs; first touch always resolves whole and
+    /// verifies. The default is correct for any store (resolve + slice);
+    /// stores with seekable tiers override to avoid moving the rest.
+    fn resolve_range(&mut self, kappa: &str, offset: u64, len: u64) -> Result<Vec<u8>> {
+        let bytes = self.resolve(kappa)?;
+        let (start, end) = (offset as usize, (offset + len) as usize);
+        if end > bytes.len() || start > end {
+            bail!(
+                "range {offset}+{len} exceeds the {}-byte content of `{kappa}`",
+                bytes.len()
+            );
+        }
+        Ok(bytes[start..end].to_vec())
+    }
 }
 
 impl<F> KappaStore for F
@@ -82,6 +101,19 @@ impl KappaStore for DirKappaStore {
         // Evaporate the corrupted entry; a directory store has no deeper
         // tier, so the retry then fails loud — fail closed, by construction.
         let _ = std::fs::remove_file(self.root.join(format!("{kappa}.bin")));
+    }
+
+    fn resolve_range(&mut self, kappa: &str, offset: u64, len: u64) -> Result<Vec<u8>> {
+        use std::io::{Read, Seek, SeekFrom};
+        let path = self.root.join(format!("{kappa}.bin"));
+        let mut file = std::fs::File::open(&path)
+            .with_context(|| format!("κ `{kappa}` not present in store"))?;
+        file.seek(SeekFrom::Start(offset))
+            .with_context(|| format!("seeking to {offset} in `{kappa}`"))?;
+        let mut buf = vec![0u8; len as usize];
+        file.read_exact(&mut buf)
+            .with_context(|| format!("range {offset}+{len} exceeds the content of `{kappa}`"))?;
+        Ok(buf)
     }
 }
 
@@ -237,6 +269,21 @@ fn patch_constants(
         .map(|e| e.slot)
         .context("archive constants section is empty")?;
     for req in requirements {
+        // A session-verified κ with a ranged binding rematerializes moving
+        // ONLY its slice — read-only I/O of the range, not the tensor.
+        if let (Some((offset, len)), true) = (req.range, verified.contains(&req.kappa)) {
+            let idx = req.constant as usize;
+            let entry = entries.get_mut(idx).with_context(|| {
+                format!(
+                    "κ-map names ConstantId({}) but the constants section has fewer entries",
+                    req.constant
+                )
+            })?;
+            entry.bytes = store
+                .resolve_range(&req.kappa, offset, len)
+                .with_context(|| format!("resolving κ `{}` range {offset}+{len}", req.kappa))?;
+            continue;
+        }
         let idx = req.constant as usize;
         let entry = entries.get_mut(idx).with_context(|| {
             format!(
