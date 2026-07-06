@@ -54,6 +54,37 @@ pub fn compile_stages(
     context_length: Option<u64>,
     layers_per_stage: NonZeroU64,
 ) -> Result<Vec<Vec<u8>>> {
+    compile_stages_with(
+        config_json,
+        keys,
+        kappas,
+        shapes,
+        dtypes,
+        context_length,
+        layers_per_stage,
+        None,
+    )
+}
+
+/// [`compile_stages`] with a quantized derived-artifact tier (row
+/// `quantized-transit`): after κ-binding, each stage graph's κ-bound MatMul
+/// weights whose wide κ has a recorded quantized derivation are rewritten
+/// onto ranged bindings into the artifact's κ
+/// ([`hologram_ai_common::lower::quantize_external_matmul_weights`]) — the
+/// wide κ leaves the stage's κ-map, so it never transits and never
+/// materializes. Coverage is per weight: κs absent from the map (or consumed
+/// outside the projection chain) keep their wide binding.
+#[allow(clippy::too_many_arguments)]
+pub fn compile_stages_with(
+    config_json: &str,
+    keys: &[String],
+    kappas: &[String],
+    shapes: &[Vec<u64>],
+    dtypes: &[DType],
+    context_length: Option<u64>,
+    layers_per_stage: NonZeroU64,
+    quant: Option<&hologram_ai_common::lower::QuantMap>,
+) -> Result<Vec<Vec<u8>>> {
     ensure!(
         keys.len() == kappas.len() && keys.len() == shapes.len() && keys.len() == dtypes.len(),
         "manifest slices disagree: {} keys, {} κs, {} shapes, {} dtypes",
@@ -117,6 +148,10 @@ pub fn compile_stages(
                 },
             );
             bound[i] = true;
+        }
+        if let Some(quant) = quant {
+            hologram_ai_common::lower::quantize_external_matmul_weights(&mut graph, quant)
+                .with_context(|| format!("quantizing stage {stage} onto derived artifacts"))?;
         }
         let archive = ModelCompiler::default()
             .compile(ModelSource::AiGraph(graph))

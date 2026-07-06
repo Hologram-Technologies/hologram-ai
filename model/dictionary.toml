@@ -293,6 +293,16 @@ executor = "rust"
 feature = "features/suites/s3_execution/idle_derivation.feature"
 
 [[row]]
+id = "quantized-transit"
+statement = "A quantized weight form is derived content: computed deterministically from the wide tensor's κ (re-derivation reproduces the artifact κ bit-identically), addressed by its own κ, stored matmul-ready and bound by stage graphs as two ranged sub-tensor κ-bindings feeding Dequantize adjacent to its MatMul; once the derivation crystallizes the wide blob goes gas-phase — with wide content evicted the pipeline still generates and never resolves a wide projection κ — and the quantized staged pipeline generates identically to the quantized monolithic archive; quantized-vs-wide quality is measured, never asserted."
+stage = "S3"
+status = "build"
+oracles = ["journey-reference"]
+tier = "suite"
+executor = "rust"
+feature = "features/suites/s3_execution/quantized_transit.feature"
+
+[[row]]
 id = "chunked-head"
 statement = "No head is too large to execute: the LM head partitions into vocab-row chunks at the pipeline's own stage granularity via κ-range bindings (a chunk binds a byte range of the whole tensor's κ; verification covers the whole content once, and it is the only whole-content read — a session-verified ranged binding rematerializes through resolve_range, moving only its slice), the concatenated chunk logits agree with the whole-head logits within kernel reduction-order tolerance with exact greedy-decode parity, no whole-vocabulary image is ever materialized, and a single-chunk head is exactly the classic head stage."
 stage = "S3"

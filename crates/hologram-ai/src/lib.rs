@@ -15,6 +15,7 @@ pub mod compiler;
 pub mod download;
 pub mod engine;
 pub mod materialize;
+pub mod quantized;
 pub mod runner;
 pub mod staged;
 pub mod validate;

@@ -817,6 +817,11 @@ struct BddWorld {
     chunked_logits: Option<(Vec<u8>, Vec<u8>)>,
     chunked_completion: Option<(String, u64)>,
     chunked_traffic: Option<ChunkedTraffic>,
+    // S3 — quantized transit (row `quantized-transit`)
+    quant: Option<QuantKit>,
+    quant_derive: Option<(usize, u64, u64)>,
+    quant_completions: Option<(String, String)>,
+    quant_evicted: Option<(String, TrafficJournal)>,
     // S3 — idle derivation (row `idle-derivation`)
     idle_state: Option<IdleDeriveState>,
     // S3 — admission margin (row `stage-residency-cache`)
@@ -3289,11 +3294,14 @@ struct ChunkedTraffic {
     chunk_stages: usize,
 }
 
+/// One store touch per entry: `(κ, bytes moved, rode resolve_range)`.
+type TrafficJournal = Vec<(String, u64, bool)>;
+
 /// A κ-store adapter that journals each resolution's moved bytes and whether
 /// it rode `resolve_range` — the I/O instrument of the resolve_range witness.
 struct JournalingStore {
     inner: DirKappaStore,
-    log: std::rc::Rc<std::cell::RefCell<Vec<(String, u64, bool)>>>,
+    log: std::rc::Rc<std::cell::RefCell<TrafficJournal>>,
 }
 
 impl KappaStore for JournalingStore {
@@ -3398,6 +3406,293 @@ async fn then_chunked_range_traffic(w: &mut BddWorld) {
     println!(
         "[chunked-head] verified rematerialization moves {now} B of the head κ \
          (whole-resolve-and-slice would move {old} B)"
+    );
+}
+
+// ──────────── S3 — quantized transit (row `quantized-transit`) ───────────────
+
+/// Fixture weights with a NAME-dependent term so no two tensors share
+/// content (the shared generator gives the tied-dims embedding and head one
+/// κ, which would couple the wide-eviction assertion to the Gather path).
+fn quant_tensor_bytes(name: &str, dims: &[u64]) -> Vec<u8> {
+    let n: u64 = dims.iter().product();
+    let norm = name.contains("layernorm") || name.ends_with(".norm.weight");
+    // FNV-1a over the name: no two tensors share content (a weak salt let
+    // two projections collide onto one κ and collapsed the quant map).
+    let salt = (name.bytes().fold(0xcbf29ce484222325u64, |h, b| {
+        (h ^ u64::from(b)).wrapping_mul(0x100000001b3)
+    }) % 251) as f32;
+    (0..n)
+        .flat_map(|k| {
+            let v: f32 = if norm {
+                1.0
+            } else {
+                ((k % 13) as f32 - 6.0) * 0.01 + (k as f32) * 1e-7 + salt * 1e-4
+            };
+            v.to_le_bytes()
+        })
+        .collect()
+}
+
+struct QuantKit {
+    store: StoreDir,
+    keys: Vec<String>,
+    kappas: Vec<String>,
+    shapes: Vec<Vec<u64>>,
+    dtypes: Vec<DType>,
+    config: serde_json::Value,
+    /// wide κ → (artifact κ, out, in) for every rank-2 projection weight
+    /// (the embedding stays wide: its Gather consumes the whole table).
+    map: hologram_ai::quantized::QuantMap,
+}
+
+#[given("a decoder fixture with quantizable projection weights in a κ-store")]
+async fn given_quant_fixture(w: &mut BddWorld) {
+    let manifest = staged_manifest(false);
+    let (keys, shapes): (Vec<String>, Vec<Vec<u64>>) = manifest.into_iter().unzip();
+    let kappas: Vec<String> = keys
+        .iter()
+        .zip(&shapes)
+        .map(|(name, dims)| kappa_of(&quant_tensor_bytes(name, dims)))
+        .collect();
+    let dtypes = vec![DType::F32; keys.len()];
+
+    let store = StoreDir::new("quantized-transit");
+    let mut dir = DirKappaStore::new(&store.path);
+    for (name, dims) in keys.iter().zip(&shapes) {
+        dir.insert(&quant_tensor_bytes(name, dims))
+            .expect("persisting a fixture weight");
+    }
+
+    // Crystallize the quantized derivation of every projection weight —
+    // the derived form enters the κ-store as ordinary content.
+    let mut map = hologram_ai::quantized::QuantMap::new();
+    let mut eligible = 0usize;
+    for ((name, dims), kappa) in keys.iter().zip(&shapes).zip(&kappas) {
+        if dims.len() != 2 || name == "model.embed_tokens.weight" {
+            continue;
+        }
+        eligible += 1;
+        let entry = hologram_ai::quantized::crystallize_quantized(
+            &mut dir,
+            kappa,
+            DType::F32,
+            dims[0],
+            dims[1],
+        )
+        .expect("the quantized derivation crystallizes");
+        map.insert(kappa.clone(), entry);
+    }
+    assert!(
+        eligible > 1,
+        "the fixture has projection weights to quantize"
+    );
+    assert_eq!(
+        map.len(),
+        eligible,
+        "every projection weight has distinct content — one κ each"
+    );
+
+    w.quant = Some(QuantKit {
+        store,
+        keys,
+        kappas,
+        shapes,
+        dtypes,
+        config: staged_config(false),
+        map,
+    });
+}
+
+#[when("the projection weights derive their quantized artifacts twice")]
+async fn when_quant_derive_twice(w: &mut BddWorld) {
+    let kit = w.quant.as_ref().expect("the quant kit");
+    let mut dir = DirKappaStore::new(&kit.store.path);
+    let (mut wide_total, mut quant_total) = (0u64, 0u64);
+    for (wide_kappa, (artifact_kappa, out, inf)) in &kit.map {
+        let wide = dir.resolve(wide_kappa).expect("the wide form resolves");
+        let a = hologram_ai::quantized::derive_quantized_artifact(&wide, DType::F32, *out, *inf)
+            .expect("the derivation runs");
+        let b = hologram_ai::quantized::derive_quantized_artifact(&wide, DType::F32, *out, *inf)
+            .expect("the re-derivation runs");
+        assert_eq!(a, b, "derivation must be bit-deterministic");
+        assert_eq!(
+            &kappa_of(&a),
+            artifact_kappa,
+            "re-derivation must reproduce the crystallized artifact κ"
+        );
+        assert!(
+            a.len() < wide.len(),
+            "the artifact must be strictly smaller than its wide form"
+        );
+        wide_total += wide.len() as u64;
+        quant_total += a.len() as u64;
+    }
+    w.quant_derive = Some((kit.map.len(), wide_total, quant_total));
+}
+
+#[then("re-derivation reproduces each artifact κ bit-identically and every artifact is strictly smaller than its wide form")]
+async fn then_quant_deterministic(w: &mut BddWorld) {
+    let (count, wide, quant) = w.quant_derive.expect("the derivations ran");
+    println!(
+        "[quantized-transit] {count} artifacts, {quant} B derived from {wide} B wide \
+         ({:.2}x smaller), κs reproduced bit-identically",
+        wide as f64 / quant as f64
+    );
+}
+
+fn quant_stages(kit: &QuantKit) -> Vec<Vec<u8>> {
+    hologram_ai::staged::compile_stages_with(
+        &kit.config.to_string(),
+        &kit.keys,
+        &kit.kappas,
+        &kit.shapes,
+        &kit.dtypes,
+        None,
+        std::num::NonZeroU64::new(1).expect("1 is non-zero"),
+        Some(&kit.map),
+    )
+    .expect("the quantized staged fixture compiles")
+}
+
+#[when("the quantized stages and the quantized monolithic archive generate from the same prompt")]
+async fn when_quant_parity(w: &mut BddWorld) {
+    use hologram_ai::commands::generate::{generate_stream, GenConfig};
+    let kit = w.quant.as_ref().expect("the quant kit");
+    let cfg = GenConfig {
+        max_tokens: Some(6),
+        temperature: 0.0,
+        ..Default::default()
+    };
+
+    let mut staged = StagedRunner::from_archives(
+        quant_stages(kit),
+        Box::new(DirKappaStore::new(&kit.store.path)),
+    )
+    .expect("the quantized staged runner builds");
+    let mut sink = Vec::new();
+    let staged_text = generate_stream(&mut staged, &DecimalTok, "3 141 59 26 5", &cfg, &mut sink)
+        .expect("quantized staged generation completes");
+
+    // The monolithic oracle: the same manifest, the same κ-bindings, the
+    // same quantize pass — one archive.
+    let mut graph = build_parametric_graph_from_manifest(&kit.config, &kit.keys, &kit.dtypes, None)
+        .expect("the fixture graph builds");
+    let name_to_id: HashMap<String, u32> = graph
+        .tensor_names
+        .iter()
+        .map(|(id, name)| (name.clone(), *id))
+        .collect();
+    for (i, key) in kit.keys.iter().enumerate() {
+        let id = *name_to_id.get(key).expect("manifest tensor in the graph");
+        let info = ti(DType::F32, &kit.shapes[i]);
+        graph.tensor_info.insert(id, info.clone());
+        graph.params.insert(
+            id,
+            AiParam::External {
+                kappa: kit.kappas[i].clone(),
+                info,
+                range: None,
+            },
+        );
+    }
+    let rewritten =
+        hologram_ai_common::lower::quantize_external_matmul_weights(&mut graph, &kit.map)
+            .expect("the quantize pass runs");
+    assert_eq!(
+        rewritten,
+        kit.map.len(),
+        "every crystallized projection rewrites onto its artifact"
+    );
+    let mono = compile_graph(graph);
+    let mut dir = DirKappaStore::new(&kit.store.path);
+    let mono = materialize_archive(&mono, &mut dir).expect("the monolithic archive materializes");
+    let mut fixed =
+        hologram_ai::FixedSession::new(HoloRunner::from_bytes(mono).expect("the archive loads"));
+    let mut sink = Vec::new();
+    let mono_text = generate_stream(&mut fixed, &DecimalTok, "3 141 59 26 5", &cfg, &mut sink)
+        .expect("quantized monolithic generation completes");
+
+    w.quant_completions = Some((staged_text, mono_text));
+}
+
+#[then("both quantized completions are identical and non-empty")]
+async fn then_quant_parity(w: &mut BddWorld) {
+    let (staged, mono) = w.quant_completions.as_ref().expect("both passes ran");
+    assert!(!staged.is_empty(), "the quantized pipeline must generate");
+    assert_eq!(
+        staged, mono,
+        "staged and monolithic execution must agree on the quantized tier"
+    );
+    println!("[quantized-transit] staged == monolithic on the quantized tier: {staged:?}");
+}
+
+#[when("the quantized staged session generates with the wide projection blobs evicted")]
+async fn when_quant_evicted(w: &mut BddWorld) {
+    use hologram_ai::commands::generate::{generate_stream, GenConfig};
+    let kit = w.quant.as_ref().expect("the quant kit");
+    let stages = quant_stages(kit);
+
+    // The saturation decision: crystallized derivations make the wide blobs
+    // gas-phase; evict them all.
+    let mut dir = DirKappaStore::new(&kit.store.path);
+    for wide_kappa in kit.map.keys() {
+        dir.invalidate(wide_kappa);
+    }
+
+    let log = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let store = JournalingStore {
+        inner: DirKappaStore::new(&kit.store.path),
+        log: std::rc::Rc::clone(&log),
+    };
+    let mut staged = StagedRunner::from_archives(stages, Box::new(store))
+        .expect("the quantized staged runner builds");
+    let cfg = GenConfig {
+        max_tokens: Some(4),
+        temperature: 0.0,
+        ..Default::default()
+    };
+    let mut sink = Vec::new();
+    let text = generate_stream(&mut staged, &DecimalTok, "3 141 59", &cfg, &mut sink)
+        .expect("generation completes without the wide forms");
+    let journal = std::mem::take(&mut *log.borrow_mut());
+    w.quant_evicted = Some((text, journal));
+}
+
+#[then("the completion still produces and no wide projection κ is ever resolved")]
+async fn then_quant_gas_phase(w: &mut BddWorld) {
+    let kit = w.quant.as_ref().expect("the quant kit");
+    let (text, journal) = w.quant_evicted.as_ref().expect("the generation ran");
+    assert!(
+        !text.is_empty(),
+        "the pipeline must generate on the quantized tier"
+    );
+    for (kappa, _, _) in journal {
+        assert!(
+            !kit.map.contains_key(kappa),
+            "a gas-phase wide κ must never be resolved (`{kappa}` moved)"
+        );
+    }
+    let quant_kappas: std::collections::HashSet<&String> =
+        kit.map.values().map(|(k, _, _)| k).collect();
+    let (mut whole, mut ranged) = (0u64, 0u64);
+    for (kappa, bytes, was_ranged) in journal {
+        if quant_kappas.contains(kappa) {
+            if *was_ranged {
+                ranged += bytes;
+            } else {
+                whole += bytes;
+            }
+        }
+    }
+    assert!(whole > 0, "each artifact verifies whole at first touch");
+    assert!(
+        ranged > 0,
+        "the scales bind as a range of the verified artifact (resolve_range)"
+    );
+    println!(
+        "[quantized-transit] wide gas-phase: completion {text:?}; artifact traffic \
+         {whole} B whole (first-touch verification) + {ranged} B ranged"
     );
 }
 

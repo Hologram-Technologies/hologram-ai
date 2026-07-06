@@ -128,6 +128,21 @@ path. Arbitrary input: totality holds per tier by finiteness (any byte
 stream is Q0-valid; higher tiers reached by carry), so novel input executes
 on the same path as known input; reuse varies, semantics never.
 
+Arbitrary ceilings are prohibited. Any guard whose bound derives from a
+residency assumption is transitional and must be made unreachable by
+structure, never kept as a rejection. The instrument is sub-tensor
+κ-resolution: a stage binds a byte range of a κ, verified once against the
+whole label; the tensor is then a term over ranges exactly as the model is a
+term over κs. The head is the first application (row `chunked-head`, build):
+vocab-chunked head stages sized to the pipeline's own layer-stage
+granularity, logits concatenated across chunks, no whole-vocabulary image
+ever resident — any vocab at any scale executes, and the staged preflight
+floor has no reachable input (the guard survives only on the monolithic
+plan, where it is true). `KappaStore::resolve_range` completes the transit
+side: after one whole-κ verification, a ranged binding moves only its bytes.
+The same instrument dissolves any future per-tensor ceiling: no single
+tensor need ever fit anything.
+
 ## Lifecycle: saturation-derived residency (UOR-Framework #2)
 
 Retention is derived from resolution state, not assigned by policy:
@@ -194,7 +209,7 @@ Artifact classes this admits:
 |---|---|---|---|
 | Compiled stage archives | model κ-manifest, config, window bucket, partition | streamed compile per window per session | **build** — row `derived-artifact-kappa` |
 | Fused LUTs (Q0/Q1 unary chains) | op chain, dtype, tier | table build | declared (kernels upstream) |
-| Quantized weight forms | tensor κ, quantization params | wide-form re-transit and re-materialization | declared — candidate `quantized-transit` |
+| Quantized weight forms | tensor κ, quantization params | wide-form re-transit and re-materialization | **build** — row `quantized-transit`: the artifact is matmul-ready (transposed at derivation, per-channel symmetric int8, re-derivation bit-identical, ~3.8× smaller than f32 measured); stage graphs bind it as two ranged sub-tensor κ-bindings feeding `Dequantize` adjacent to its matmul (the substrate-fused shape); with wide blobs evicted the staged pipeline generates moving zero wide bytes and equals the quantized monolithic archive. Quantization is a semantic tier, never silent — quality vs the wide tier is measured, never asserted. Native; the browser derivation tier is not yet wired |
 | Curvature profiles | model κ-manifest, calibration set κ | per-layer lift decisions | declared (carry lift upstream) |
 | Prefill cones (recurring prompt prefixes) | graph κ, template/prefix κ, bucket | prefill of the recurring prefix | declared — candidate `prefill-cone-reuse`, behind `structural-ce` |
 
