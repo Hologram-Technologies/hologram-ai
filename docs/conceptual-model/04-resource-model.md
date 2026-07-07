@@ -570,6 +570,16 @@ shipped catalogue entry):
   from a step-fed one at the sampler row and every subsequent position;
   ceil(n/chunk) passes counted exactly. The seeder resolves through the
   derived store per (bucket, chunk) and drops on bucket growth
-  (re-installed lazily). The per-token GENERATION cost (~45–50 s at
-  0.5B) remains the substrate's single-position kernel throughput in
-  wasm — the kernel-floor axis, owned upstream.
+  (re-installed lazily).
+
+  Deployed re-measure (same probe, chunk 32): turn 1 cold
+  **1376 s → 706 s (~2×)** — the prefill share collapsed to two chunk
+  passes plus the one-time seeder compile (cached in the derived store
+  thereafter); turn 2 warm **1084 s → 642 s (~1.7×)** — the retained
+  suffix seeds in one pass. Streaming tail ~20–25 s/sample (prior runs
+  ~46–50). The narration shows the design working: step plan and seeder
+  compiled per bucket (64, then 128 at growth), 256 RESOLVED from the
+  derived store. The remaining per-token generation cost is the
+  substrate's single-position kernel throughput in wasm — the
+  kernel-floor axis, owned upstream; the decode path's in-repo levers
+  are exhausted.
