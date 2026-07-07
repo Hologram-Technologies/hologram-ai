@@ -535,3 +535,77 @@ fn external_kappa_compile_is_byte_identical_to_inline() {
         "materialized execution must be byte-identical to the inline compile"
     );
 }
+
+#[test]
+fn paged_load_bounds_weight_residency_bit_identically() {
+    // The weight-tier pager (row `lazy-constant-residency`): loading the SAME
+    // k-form against a κ-store under a residency budget below the full weight
+    // set must (1) keep the resident paged-weight bytes within the budget and
+    // (2) produce logits byte-identical to the fully-resident load — residency
+    // is orthogonal to identity.
+    let kform = compile(build_graph(false));
+    let dir = std::env::temp_dir().join(format!("hai-paged-residency-{}", std::process::id()));
+    let store = DirKappaStore::new(&dir);
+    for (_, _, bytes) in &fixture_tensors() {
+        store.insert(bytes).expect("κ insert");
+    }
+
+    // Oracle: the fully-resident (materialized) load, swept over every position.
+    let mut resident_store = DirKappaStore::new(&dir);
+    let materialized = materialize_archive(&kform, &mut resident_store).expect("materializes");
+    let mut resident = HoloRunner::from_bytes(materialized).expect("archive loads");
+    let oracle: Vec<Vec<u8>> = (0..TOKENS.len())
+        .map(|t| run_logits_at(&mut resident, &TOKENS, t))
+        .collect();
+
+    // The DISTINCT weight set (deduped by κ — the pool holds one buffer per
+    // content address) and a budget between the largest single weight and that
+    // distinct total: the largest weight still fits (a kernel's operand must),
+    // so the pager must EVICT cold weights to stay under budget rather than
+    // hold the whole set.
+    let mut distinct: std::collections::HashMap<String, u64> = std::collections::HashMap::new();
+    let mut largest = 0u64;
+    for (_, _, bytes) in &fixture_tensors() {
+        let n = bytes.len() as u64;
+        largest = largest.max(n);
+        distinct.insert(kappa_of(bytes), n);
+    }
+    let distinct_total: u64 = distinct.values().sum();
+    let budget = ((largest + distinct_total) / 2) as usize;
+    assert!(
+        (budget as u64) >= largest && (budget as u64) < distinct_total,
+        "the budget ({budget}) must sit between the largest weight ({largest}) and the distinct \
+         set ({distinct_total}) to force eviction"
+    );
+
+    let mut paged =
+        HoloRunner::from_kform_paged(&kform, DirKappaStore::new(&dir), budget).expect("paged load");
+
+    let mut peak = 0usize;
+    for (t, oracle_row) in oracle.iter().enumerate() {
+        let got = run_logits_at(&mut paged, &TOKENS, t);
+        peak = peak.max(paged.lazy_resident_bytes());
+        assert_eq!(
+            &got, oracle_row,
+            "paged logits at position {t} must be byte-identical to the fully-resident load"
+        );
+        assert!(
+            paged.lazy_resident_bytes() <= budget,
+            "resident paged-weight bytes ({}) exceeded the budget ({budget})",
+            paged.lazy_resident_bytes()
+        );
+    }
+    std::fs::remove_dir_all(&dir).ok();
+
+    assert!(peak > 0, "some weight must have paged in");
+    assert!(
+        (peak as u64) < distinct_total,
+        "peak paged residency ({peak}) must stay below the distinct weight set ({distinct_total}) \
+         — eviction under budget, not a full copy"
+    );
+    eprintln!(
+        "paged residency: peak {peak} B resident of {distinct_total} B distinct weights \
+         (budget {budget} B); logits byte-identical across {} positions",
+        TOKENS.len()
+    );
+}

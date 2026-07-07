@@ -15,6 +15,7 @@
 
 use anyhow::{bail, Context, Result};
 use hologram_archive::constant_codec::{self, ConstantEntry};
+use hologram_archive::writer::decode_weights;
 use hologram_archive::{HoloLoader, SectionKind, FORMAT_VERSION, MAGIC};
 use hologram_host::prism::vocabulary::Hasher;
 
@@ -55,6 +56,16 @@ pub trait KappaStore {
             );
         }
         Ok(bytes[start..end].to_vec())
+    }
+
+    /// The byte length of the content addressed by `kappa`, WITHOUT reading
+    /// the body — the size the weight-tier pager (row `lazy-constant-residency`)
+    /// needs at load to size a lazily-resident constant's slot, before any of
+    /// its bytes page in. The default reads the whole body (correct anywhere);
+    /// a seekable store overrides to `stat` its size (a file length, an OPFS
+    /// `getFile().size`) so a paged load never pulls a weight just to size it.
+    fn content_size(&mut self, kappa: &str) -> Result<u64> {
+        Ok(self.resolve(kappa)?.len() as u64)
     }
 }
 
@@ -114,6 +125,13 @@ impl KappaStore for DirKappaStore {
         file.read_exact(&mut buf)
             .with_context(|| format!("range {offset}+{len} exceeds the content of `{kappa}`"))?;
         Ok(buf)
+    }
+
+    fn content_size(&mut self, kappa: &str) -> Result<u64> {
+        let path = self.root.join(format!("{kappa}.bin"));
+        Ok(std::fs::metadata(&path)
+            .with_context(|| format!("κ `{kappa}` not present in store"))?
+            .len())
     }
 }
 
@@ -365,6 +383,204 @@ fn patch_constants(
         };
     }
     Ok(())
+}
+
+/// The 32-byte content digest a κ-label names — the bytes hologram addresses
+/// a weight by (`WeightFingerprint`). `kappa_of(body)` is `"blake3:"` + hex of
+/// exactly this digest, so a paged constant fingerprinted with it mints the
+/// identical `ContentLabel` (`fp.content_label() == address_bytes(body)`), and
+/// the paged load's derivation keys and outputs are bit-identical to the
+/// fully-resident one — residency is orthogonal to identity.
+fn kappa_digest(kappa: &str) -> Result<[u8; 32]> {
+    let hex = kappa
+        .strip_prefix("blake3:")
+        .with_context(|| format!("κ `{kappa}` is not a blake3 label"))?;
+    if hex.len() != 64 {
+        bail!(
+            "κ `{kappa}` has a {}-hex-digit digest, expected 64",
+            hex.len()
+        );
+    }
+    let mut out = [0u8; 32];
+    for (i, byte) in out.iter_mut().enumerate() {
+        *byte = u8::from_str_radix(&hex[i * 2..i * 2 + 2], 16)
+            .with_context(|| format!("κ `{kappa}` has a non-hex digest"))?;
+    }
+    Ok(out)
+}
+
+/// The weight-tier pager's binding table (row `lazy-constant-residency`): the
+/// fingerprint a paged constant carries → the whole κ its bytes page from, and
+/// the κ's byte length. A [`KappaWeightProvider`](crate::runner::KappaWeightProvider)
+/// answers hologram's `WeightProvider::{size,get_range}` from this without
+/// reading a body at load — the arena becomes a window over the κ-store rather
+/// than a full copy.
+#[derive(Debug, Default, Clone)]
+pub struct WeightBindingTable {
+    bindings: std::collections::HashMap<[u8; 32], (String, u64)>,
+}
+
+impl WeightBindingTable {
+    /// The κ a fingerprint's bytes page from, and the whole content length.
+    pub fn resolve(&self, fingerprint: &[u8; 32]) -> Option<(&str, u64)> {
+        self.bindings
+            .get(fingerprint)
+            .map(|(kappa, size)| (kappa.as_str(), *size))
+    }
+
+    /// Number of distinct paged weights.
+    pub fn len(&self) -> usize {
+        self.bindings.len()
+    }
+
+    /// Total paged weight bytes the table addresses (the full weight set the
+    /// pager holds a bounded window over).
+    pub fn total_bytes(&self) -> u64 {
+        self.bindings.values().map(|(_, size)| *size).sum()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.bindings.is_empty()
+    }
+}
+
+/// Build a **paged** archive from a k-form archive: rewrite each WHOLE-κ weight
+/// constant into a `by_reference` fingerprint (a weightless placeholder the
+/// pager pages on first use), materialize each RANGED (sub-tensor) binding
+/// inline as today, drop the now-stale κ-map, and return the paged archive plus
+/// the fingerprint→κ [`WeightBindingTable`] a `KappaWeightProvider` serves.
+///
+/// This is the weight-tier analog of [`materialize_archive`] (row
+/// `lazy-constant-residency`): where materialize resolves every κ and copies it
+/// resident, this leaves the dominant whole-tensor weights in the κ-store and
+/// makes the arena a bounded window over them. Ranged bindings (quantized
+/// artifacts, chunked-head slices — the sub-tensor tier that already pages by
+/// range) stay inline: each is a small slice, and paging them by their own
+/// fingerprint is a follow-on. An archive with no κ-map is already material and
+/// is returned unchanged with an empty table.
+pub fn paged_archive(
+    archive: &[u8],
+    store: &mut dyn KappaStore,
+) -> Result<(Vec<u8>, WeightBindingTable)> {
+    paged_archive_with(archive, store, &mut std::collections::HashSet::new())
+}
+
+/// [`paged_archive`] with a caller-owned session verified-κ set — the ranged
+/// bindings it materializes inline verify at the trust-boundary crossing once
+/// per session (row `session-verified-kappa`), exactly as
+/// [`materialize_archive_with`] does.
+pub fn paged_archive_with(
+    archive: &[u8],
+    store: &mut dyn KappaStore,
+    verified: &mut std::collections::HashSet<String>,
+) -> Result<(Vec<u8>, WeightBindingTable)> {
+    let requirements = kappa_requirements(archive)?;
+    if requirements.is_empty() {
+        return Ok((archive.to_vec(), WeightBindingTable::default()));
+    }
+
+    let loader =
+        HoloLoader::from_bytes(archive).map_err(|e| anyhow::anyhow!("loading archive: {e:?}"))?;
+    let plan = loader
+        .into_plan()
+        .map_err(|e| anyhow::anyhow!("decoding archive sections: {e:?}"))?;
+    let constants_bytes = plan
+        .section(SectionKind::Constants)
+        .map_err(|e| anyhow::anyhow!("archive has a κ-map but no constants section: {e:?}"))?;
+    let mut entries = constant_codec::decode(constants_bytes)
+        .map_err(|e| anyhow::anyhow!("decoding constants section: {e:?}"))?;
+
+    let base_slot = entries
+        .first()
+        .map(|e| e.slot)
+        .context("archive constants section is empty")?;
+    let mut table = WeightBindingTable::default();
+
+    // The compiler interns some constant-node bodies (rope tables, causal
+    // masks) into a `Weights` section as `by_reference` constants OUTSIDE the
+    // κ-map. A paged load makes the provider authoritative for every
+    // by_reference constant, so these must be inlined here (they are small,
+    // non-model constants) — then the paged archive's only references are the
+    // κ-map whole-κ weights the provider serves, and the Weights section is
+    // dropped entirely.
+    let interned = plan
+        .section(SectionKind::Weights)
+        .ok()
+        .map(decode_weights)
+        .transpose()
+        .map_err(|e| anyhow::anyhow!("decoding weights section: {e:?}"))?;
+    for entry in entries.iter_mut().filter(|e| e.by_reference) {
+        let fp = hologram_archive::WeightFingerprint(entry.fingerprint);
+        let body = interned.as_ref().and_then(|w| w.get(fp)).with_context(|| {
+            format!(
+                "constant slot {} references a weight absent from the archive's Weights section",
+                entry.slot
+            )
+        })?;
+        entry.bytes = body.to_vec();
+        entry.by_reference = false;
+    }
+
+    // Ranged bindings materialize inline (verified once) exactly as
+    // `materialize_archive` does; whole-κ bindings become paged references.
+    let ranged: Vec<KappaRequirement> = requirements
+        .iter()
+        .filter(|r| r.range.is_some())
+        .cloned()
+        .collect();
+    patch_constants(&mut entries, &ranged, store, verified)?;
+
+    for req in requirements.iter().filter(|r| r.range.is_none()) {
+        let idx = req.constant as usize;
+        let entry = entries.get_mut(idx).with_context(|| {
+            format!(
+                "κ-map names ConstantId({}) but the constants section has fewer entries",
+                req.constant
+            )
+        })?;
+        if entry.slot != base_slot + req.constant {
+            bail!(
+                "constants section layout drift: ConstantId({}) maps to slot {} (expected {})",
+                req.constant,
+                entry.slot,
+                base_slot + req.constant
+            );
+        }
+        if entry.by_reference {
+            bail!(
+                "ConstantId({}) is already a weight-pool reference; a k-form archive inlines its placeholders",
+                req.constant
+            );
+        }
+        // The whole κ pages on first use: the fingerprint IS its content digest,
+        // so the slot's initial label equals the fully-resident path's. Size
+        // comes from a stat (no body read).
+        let size = store
+            .content_size(&req.kappa)
+            .with_context(|| format!("sizing κ `{}` for the pager", req.kappa))?;
+        entry.by_reference = true;
+        entry.fingerprint = kappa_digest(&req.kappa)?;
+        entry.bytes = Vec::new();
+        table
+            .bindings
+            .insert(entry.fingerprint, (req.kappa.clone(), size));
+    }
+
+    let new_constants = constant_codec::encode(&entries);
+    // Re-emit with the paged constants and the stale warm-fold dropped. The
+    // κ-map extension stays: it names the whole-κ dependencies (which the
+    // browser reads to pre-open OPFS handles), and `load_paged` reads the
+    // Constants section, never the map — a by_reference constant is
+    // self-describing by fingerprint.
+    let paged = reassemble(archive, plan.sections(), |kind, body| match kind {
+        SectionKind::Constants => Ok(Some(new_constants.clone())),
+        SectionKind::WarmStart => Ok(None), // folded over placeholders; stale
+        // Every interned weight is now inline; the model weights page from the
+        // provider. The archive carries no bodies — the weightless deploy.
+        SectionKind::Weights => Ok(None),
+        _ => Ok(Some(body.to_vec())),
+    })?;
+    Ok((paged, table))
 }
 
 /// Re-emit the archive: same sections in order, with the constants payload

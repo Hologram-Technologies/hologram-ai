@@ -831,6 +831,8 @@ struct BddWorld {
     decode_retention: Option<(usize, u64, String, String)>, // (prompt2 tokens, turn2 steps, retained, fresh)
     // S3 — chunked prefill (row `chunked-prefill`)
     chunk_prefill: Option<ChunkPrefill>,
+    // S3 — lazy constant residency (row `lazy-constant-residency`)
+    paged_residency: Option<PagedResidency>,
     // S3 — quantized transit (row `quantized-transit`)
     quant: Option<QuantKit>,
     quant_derive: Option<(usize, u64, u64)>,
@@ -3901,6 +3903,114 @@ async fn then_decode_completions_equal(w: &mut BddWorld) {
         "the decode-plan completion must equal the whole-window completion"
     );
     println!("[decode-plan] greedy completion (both plans): {decode:?}");
+}
+
+// ─────────── S3 — lazy constant residency (row `lazy-constant-residency`) ───────────
+
+/// The weight-tier pager witness: peak resident weight bytes, the budget they
+/// stayed under, the distinct weight set, and per-position paged-vs-resident
+/// logit equality.
+struct PagedResidency {
+    store: StoreDir,
+    peak: usize,
+    budget: usize,
+    distinct_total: u64,
+    identical: bool,
+}
+
+#[given("the staged decoder fixture compiled monolithically over a κ-store")]
+async fn given_paged_fixture(w: &mut BddWorld) {
+    // The κ-store holds the fixture weights; the monolithic k-form binds them
+    // by External κ (the same archive the materialize path resolves).
+    w.paged_residency = Some(PagedResidency {
+        store: staged_store("paged-residency"),
+        peak: 0,
+        budget: 0,
+        distinct_total: 0,
+        identical: false,
+    });
+}
+
+#[when("it is loaded paged under a budget below its distinct weight set and decoded")]
+async fn when_paged_decode(w: &mut BddWorld) {
+    let kit = staged_kit();
+    let pr = w.paged_residency.as_mut().expect("the paged fixture");
+    let ids = staged_window_ids();
+
+    // Oracle: the fully-resident (materialized) load, swept over every position.
+    let mut dir = DirKappaStore::new(&pr.store.path);
+    let mono = materialize_archive(&kit.monolithic, &mut dir).expect("the archive materializes");
+    let mut resident = HoloRunner::from_bytes(mono).expect("the archive loads");
+    let oracle: Vec<Vec<u8>> = (0..STG_TOKENS.len())
+        .map(|t| {
+            let lp = last_pos_buf(t + 1);
+            resident.execute(&[&ids, &lp]).expect("resident pass")[0]
+                .bytes
+                .clone()
+        })
+        .collect();
+
+    // The distinct weight set (deduped by κ) and a budget between the largest
+    // single weight and that total — forcing eviction, not a full copy.
+    let mut distinct: std::collections::HashMap<String, u64> = std::collections::HashMap::new();
+    let mut largest = 0u64;
+    for (name, dims) in staged_manifest(false) {
+        let bytes = staged_tensor_bytes(&name, &dims);
+        largest = largest.max(bytes.len() as u64);
+        distinct.insert(kappa_of(&bytes), bytes.len() as u64);
+    }
+    let distinct_total: u64 = distinct.values().sum();
+    let budget = ((largest + distinct_total) / 2) as usize;
+
+    let mut paged =
+        HoloRunner::from_kform_paged(&kit.monolithic, DirKappaStore::new(&pr.store.path), budget)
+            .expect("paged load");
+
+    let mut peak = 0usize;
+    let mut identical = true;
+    for (t, oracle_row) in oracle.iter().enumerate() {
+        let lp = last_pos_buf(t + 1);
+        let got = paged.execute(&[&ids, &lp]).expect("paged pass")[0]
+            .bytes
+            .clone();
+        peak = peak.max(paged.lazy_resident_bytes());
+        identical &= &got == oracle_row && paged.lazy_resident_bytes() <= budget;
+    }
+
+    pr.peak = peak;
+    pr.budget = budget;
+    pr.distinct_total = distinct_total;
+    pr.identical = identical;
+}
+
+#[then("peak resident weight bytes stay under the budget and the logits are byte-identical to the fully-resident load")]
+async fn then_paged_bounded(w: &mut BddWorld) {
+    let pr = w.paged_residency.as_ref().expect("the paged decode ran");
+    assert!(
+        pr.identical,
+        "paged logits must equal the fully-resident load at every position, within the budget"
+    );
+    assert!(pr.peak > 0, "some weight must have paged in");
+    assert!(
+        pr.peak <= pr.budget,
+        "peak residency ({}) must stay under the budget ({})",
+        pr.peak,
+        pr.budget
+    );
+    assert!(
+        (pr.peak as u64) < pr.distinct_total,
+        "peak residency ({}) must stay below the distinct weight set ({}) — eviction, not a full copy",
+        pr.peak,
+        pr.distinct_total
+    );
+    println!(
+        "[lazy-constant-residency] peak {} B resident of {} B distinct weights (budget {} B); \
+         logits byte-identical across {} positions",
+        pr.peak,
+        pr.distinct_total,
+        pr.budget,
+        STG_TOKENS.len()
+    );
 }
 
 /// Chunk-vs-step prefill comparison (row `chunked-prefill`).

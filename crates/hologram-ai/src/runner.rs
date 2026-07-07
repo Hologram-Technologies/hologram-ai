@@ -8,11 +8,15 @@
 //! decode steps is structural (content-addressed elision), so each step simply
 //! re-executes the graph with the next input.
 
-use anyhow::Context;
-use hologram_archive::ContentLabel;
+use anyhow::{Context, Result};
+use hologram_archive::{ContentLabel, WeightFingerprint, WeightProvider};
 use hologram_backend::CpuBackend;
 use hologram_exec::{BufferArena, InferenceSession, InputBuffer, OutputBuffer};
+use std::borrow::Cow;
 use std::path::Path;
+use std::sync::{Arc, Mutex};
+
+use crate::materialize::{kappa_of, WeightBindingTable};
 
 /// Shape/dtype facts about one graph port: its semantic name (e.g.
 /// `"input_ids"`; empty if unnamed), the backend dtype tag
@@ -58,6 +62,52 @@ impl HoloRunner {
         let bytes =
             std::fs::read(path).with_context(|| format!("reading .holo archive {path:?}"))?;
         Self::from_bytes(bytes)
+    }
+
+    /// Load a **paged** runner (row `lazy-constant-residency`): the archive's
+    /// whole-κ weight constants are `by_reference` fingerprints the session
+    /// pages from `provider` on first use, holding their bytes resident only
+    /// within `budget` (LRU-evicted, `budget == 0` = unbounded). The arena is a
+    /// bounded **window** over the provider rather than a full copy of the
+    /// weight set — the one structural change that lets a model whose weights
+    /// exceed the window run at all. Build the paged archive + provider with
+    /// [`Self::from_kform_paged`], or supply your own.
+    pub fn from_paged(
+        bytes: Vec<u8>,
+        provider: Arc<dyn WeightProvider + Send + Sync>,
+        budget: usize,
+    ) -> anyhow::Result<Self> {
+        let backend = CpuBackend::new();
+        let session = InferenceSession::load_paged(&bytes, backend, provider, budget)
+            .map_err(|e| anyhow::anyhow!("loading paged .holo archive: {e:?}"))?;
+        drop(bytes);
+        Ok(Self { session })
+    }
+
+    /// Build a paged runner directly from a k-form archive and its κ-store: turn
+    /// the whole-κ constants into paged references ([`crate::materialize::paged_archive`]),
+    /// wrap the store as a [`KappaWeightProvider`], and load against `budget`.
+    /// The store is consumed as a resolver closure; ranged (sub-tensor) bindings
+    /// are materialized inline at build (verified once), the dominant
+    /// whole-tensor weights page on demand.
+    pub fn from_kform_paged<S>(kform: &[u8], mut store: S, budget: usize) -> anyhow::Result<Self>
+    where
+        S: crate::materialize::KappaStore + Send + 'static,
+    {
+        let (paged, table) = crate::materialize::paged_archive(kform, &mut store)?;
+        let provider = Arc::new(KappaWeightProvider::new(
+            table,
+            Box::new(move |kappa: &str| store.resolve(kappa)),
+        ));
+        Self::from_paged(paged, provider, budget)
+    }
+
+    /// Resident **paged-weight** bytes — the lazy tier bounded by the residency
+    /// budget of a [`Self::from_paged`] load (`0` for a fully-resident load).
+    /// Its peak across a decode is the pager's witness (row
+    /// `lazy-constant-residency`): under budget while output is unchanged.
+    pub fn lazy_resident_bytes(&self) -> usize {
+        self.session.paged_weight_bytes()
     }
 
     /// Number of graph inputs the model expects.
@@ -216,6 +266,78 @@ impl HoloRunner {
     /// Total kernels in the loaded schedule (denominator for the elision ratio).
     pub fn kernel_count(&self) -> usize {
         self.session.kernel_count()
+    }
+}
+
+/// hologram's [`WeightProvider`] backed by a κ-store (row
+/// `lazy-constant-residency`): the inversion of the fully-resident load, where
+/// the weight bodies live in the host's κ-store (a directory, OPFS) and the
+/// session pages ranges from here instead of copying every body resident.
+///
+/// A paged constant carries the fingerprint of its whole κ content (built by
+/// [`crate::materialize::paged_archive`]); this provider maps that fingerprint
+/// back to the κ and serves its bytes. Verification is placed at the
+/// trust-boundary crossing exactly once per κ per session (row
+/// `session-verified-kappa`): the first page-in of a κ resolves its whole
+/// content and checks it re-hashes to the κ, and every later page-in (after an
+/// eviction) is read-only I/O — corrupted content fails loud, never executes.
+pub struct KappaWeightProvider {
+    table: WeightBindingTable,
+    inner: Mutex<Resolver>,
+}
+
+/// A resolver over the κ-store: returns a κ's whole content, or fails naming it.
+pub type KappaResolve = Box<dyn FnMut(&str) -> Result<Vec<u8>> + Send>;
+
+struct Resolver {
+    resolve: KappaResolve,
+    verified: std::collections::HashSet<String>,
+}
+
+impl KappaWeightProvider {
+    /// Build from a fingerprint→κ [`WeightBindingTable`] and a resolver closure
+    /// over the κ-store. The closure returns a κ's whole content; the provider
+    /// owns verification and residency.
+    pub fn new(table: WeightBindingTable, resolve: KappaResolve) -> Self {
+        Self {
+            table,
+            inner: Mutex::new(Resolver {
+                resolve,
+                verified: std::collections::HashSet::new(),
+            }),
+        }
+    }
+
+    /// Total weight bytes the provider addresses — the full set the pager holds
+    /// a bounded window over.
+    pub fn total_bytes(&self) -> u64 {
+        self.table.total_bytes()
+    }
+}
+
+impl WeightProvider for KappaWeightProvider {
+    fn size(&self, fp: WeightFingerprint) -> Option<usize> {
+        self.table.resolve(&fp.0).map(|(_, size)| size as usize)
+    }
+
+    fn get_range(&self, fp: WeightFingerprint, offset: usize, len: usize) -> Option<Cow<'_, [u8]>> {
+        let (kappa, size) = self.table.resolve(&fp.0)?;
+        if offset.checked_add(len)? > size as usize {
+            return None;
+        }
+        let mut inner = self.inner.lock().expect("weight provider mutex poisoned");
+        let bytes = (inner.resolve)(kappa).ok()?;
+        if bytes.len() != size as usize {
+            return None;
+        }
+        // Verify at the trust-boundary crossing, once per κ per session.
+        if !inner.verified.contains(kappa) {
+            if kappa_of(&bytes) != kappa {
+                return None; // fail closed — never serve unverified content
+            }
+            inner.verified.insert(kappa.to_string());
+        }
+        Some(Cow::Owned(bytes[offset..offset + len].to_vec()))
     }
 }
 

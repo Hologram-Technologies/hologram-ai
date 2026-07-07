@@ -303,6 +303,16 @@ executor = "rust"
 feature = "features/suites/s3_execution/single_position_head.feature"
 
 [[row]]
+id = "lazy-constant-residency"
+statement = "The weight tier pages: a k-form archive loads against a κ-store provider with a residency budget instead of copying every weight resident — whole-κ weight constants become by_reference fingerprints (the fingerprint IS the κ's content digest, so the slot's label and every derivation key equal the fully-resident path's) that page in on first use and evict cold under the budget, verified once per κ per session at the trust boundary; the arena is a bounded window over the provider rather than a full copy, so peak resident weight bytes stay under the budget across a whole decode while the logits are byte-identical to the fully-resident load — residency is orthogonal to identity, the weight-tier analog of sub-tensor κ-resolution."
+stage = "S3"
+status = "build"
+oracles = ["journey-reference"]
+tier = "suite"
+executor = "rust"
+feature = "features/suites/s3_execution/lazy_constant_residency.feature"
+
+[[row]]
 id = "decode-plan"
 statement = "The per-token pass computes one position: the decoder recipe emitted at seq = 1 with every fused attention node decomposed into masked past-attention over a fixed bucket of carried K/V rows — carried K/V is derived content through named ports (past_k/past_v in, k_new/v_new out, the engine splices each step's rows between steps), positions are runtime data (rope tables synthesized at the absolute position, an additive mask erasing unrealized bucket rows), one compiled artifact serves every step, bucket exhaustion is a geometric recompile never a ceiling, every step's logits match the whole-window plan at that position, and the carried rows persist across turns: a prompt extending the session's realized sequence rewinds to the shared prefix and steps only its novel suffix, indistinguishable from a fresh replay."
 stage = "S3"
