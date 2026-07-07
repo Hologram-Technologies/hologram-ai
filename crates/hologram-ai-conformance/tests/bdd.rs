@@ -829,6 +829,8 @@ struct BddWorld {
     decode_staged_pairs: Option<Vec<(Vec<f32>, Vec<f32>)>>, // (staged, monolithic) per position
     decode_completions: Option<(String, String)>,           // (decode plan, whole-window)
     decode_retention: Option<(usize, u64, String, String)>, // (prompt2 tokens, turn2 steps, retained, fresh)
+    // S3 — chunked prefill (row `chunked-prefill`)
+    chunk_prefill: Option<ChunkPrefill>,
     // S3 — quantized transit (row `quantized-transit`)
     quant: Option<QuantKit>,
     quant_derive: Option<(usize, u64, u64)>,
@@ -3899,6 +3901,110 @@ async fn then_decode_completions_equal(w: &mut BddWorld) {
         "the decode-plan completion must equal the whole-window completion"
     );
     println!("[decode-plan] greedy completion (both plans): {decode:?}");
+}
+
+/// Chunk-vs-step prefill comparison (row `chunked-prefill`).
+struct ChunkPrefill {
+    chunk: usize,
+    tokens: usize,
+    seeded_passes: u64,
+    stepped_passes: u64,
+    seeded_row: Vec<f32>,
+    stepped_row: Vec<f32>,
+    /// Greedy continuations from each session after the prefill.
+    seeded_next: Vec<usize>,
+    stepped_next: Vec<usize>,
+}
+
+#[when(expr = "the fixture transcript prefills through a chunk-{int} seeder and through steps")]
+async fn when_chunk_prefill(w: &mut BddWorld, chunk: usize) {
+    let kit = w.decode_staged.as_mut().expect("the staged decode kit");
+
+    // The seeder: the same manifest compiled at seq = chunk over the same
+    // bucket, resolved against the same κ-store.
+    let manifest = staged_manifest(false);
+    let (keys, shapes): (Vec<String>, Vec<Vec<u64>>) = manifest.into_iter().unzip();
+    let kappas: Vec<String> = keys
+        .iter()
+        .zip(&shapes)
+        .map(|(name, dims)| kappa_of(&staged_tensor_bytes(name, dims)))
+        .collect();
+    let dtypes = vec![DType::F32; keys.len()];
+    let archives = hologram_ai::staged::compile_chunk_stages(
+        &staged_config(false).to_string(),
+        &keys,
+        &kappas,
+        &shapes,
+        &dtypes,
+        kit.staged.geometry().bucket as u64,
+        chunk as u64,
+        std::num::NonZeroU64::new(1).expect("1 is non-zero"),
+        None,
+    )
+    .expect("the seeder pipeline compiles");
+    let seeder =
+        StagedRunner::from_archives(archives, Box::new(DirKappaStore::new(&kit.store.path)))
+            .expect("the seeder runner builds");
+    kit.staged.set_seeder(seeder).expect("the seeder installs");
+
+    let toks: Vec<i64> = STG_TOKENS.to_vec();
+    let seeded_row = kit.staged.feed(&toks).expect("chunked prefill");
+    let seeded_passes = kit.staged.steps_taken();
+    let stepped_row = kit.mono.feed(&toks).expect("stepped prefill");
+    let stepped_passes = kit.mono.steps_taken();
+
+    // Greedy continuations: the seeded rows must carry generation identically.
+    let mut seeded_next = Vec::new();
+    let mut stepped_next = Vec::new();
+    let (mut a, mut b) = (seeded_row.clone(), stepped_row.clone());
+    for _ in 0..4 {
+        let na = argmax(&a);
+        let nb = argmax(&b);
+        seeded_next.push(na);
+        stepped_next.push(nb);
+        a = kit.staged.step(na as i64).expect("seeded session step");
+        b = kit.mono.step(nb as i64).expect("stepped session step");
+    }
+
+    w.chunk_prefill = Some(ChunkPrefill {
+        chunk,
+        tokens: toks.len(),
+        seeded_passes,
+        stepped_passes,
+        seeded_row,
+        stepped_row,
+        seeded_next,
+        stepped_next,
+    });
+}
+
+#[then("the seeded session matches the stepped session in ceil-n-over-chunk passes")]
+async fn then_chunk_prefill(w: &mut BddWorld) {
+    let p = w.chunk_prefill.as_ref().expect("the prefills ran");
+    assert_eq!(
+        p.seeded_passes,
+        (p.tokens as u64).div_ceil(p.chunk as u64),
+        "chunked prefill pays ceil(n/chunk) passes"
+    );
+    assert_eq!(
+        p.stepped_passes, p.tokens as u64,
+        "stepped prefill pays one pass per token"
+    );
+    for (i, (&a, &b)) in p.seeded_row.iter().zip(&p.stepped_row).enumerate() {
+        assert!(
+            (a - b).abs() <= 1e-4 + 1e-3 * b.abs(),
+            "sampler row[{i}]: seeded {a} vs stepped {b}"
+        );
+    }
+    assert_eq!(
+        p.seeded_next, p.stepped_next,
+        "the greedy continuation must be identical over the seeded rows"
+    );
+    println!(
+        "[chunked-prefill] {} tokens: {} chunk-{} passes vs {} steps; sampler row and \
+         4-token greedy continuation match the stepped oracle",
+        p.tokens, p.seeded_passes, p.chunk, p.stepped_passes
+    );
 }
 
 #[when("two chat turns extend one transcript through the decode session")]

@@ -1,32 +1,40 @@
-//! Decode-step attention rewrite (dictionary row `decode-plan`).
+//! Decode-plan attention rewrite (dictionary rows `decode-plan`,
+//! `chunked-prefill`).
 //!
-//! Replaces each fused [`AiOp::GroupedQueryAttention`] node in a **seq-1,
-//! batch-1** graph with the decomposed masked past-attention block over a
-//! FIXED past bucket, turning the per-token forward pass from a window-sized
-//! computation into a single-position one:
+//! Replaces each fused [`AiOp::GroupedQueryAttention`] node in a **batch-1,
+//! seq-C** graph with the decomposed masked past-attention block over a
+//! FIXED past bucket. One plan family, parametric in the chunk `C`:
+//!
+//! * `C = 1` is the generation step — one position per pass, the window
+//!   gone from the step;
+//! * `C > 1` is chunked prefill (prefill seeding) — C prompt positions per
+//!   pass, amortizing the weight stream across the chunk. Causality within
+//!   the chunk is no longer vacuous; it enters through the same additive
+//!   mask that erases unrealized bucket rows.
+//!
+//! The block, per kv-head group (g = heads/kv):
 //!
 //! * carried K/V enter as per-layer graph **inputs** `past_k_l`/`past_v_l`
 //!   (`[kv, bucket, head_dim]`) — derived content through named ports, not a
-//!   mutable cache. The engine splices each step's `k_new_l`/`v_new_l`
-//!   **outputs** into row `pos` of its buffers between steps; no scatter op
-//!   exists in the graph.
-//! * bucket rows past the realized length hold arbitrary bytes; the additive
-//!   `decode_mask` input (`[1, bucket+1]`, `0` / `-1e9`) erases them inside
-//!   the softmax, so a fixed bucket never changes the numbers.
-//! * RoPE becomes plain arithmetic on **runtime** `rope_cos`/`rope_sin`
-//!   inputs (`[1, head_dim]`) the engine synthesizes at the absolute position
-//!   — the canonical `rope_rotate` lowering bakes tables by relative index at
-//!   compile time, so rotation must arrive as data, not as an op. Rotate-half
-//!   pairs `j ± head_dim/2` (non-interleaved), matching the fused kernel.
-//! * attention decomposes per kv-head group into strictly 2-D matmuls
-//!   (`q_group · past_kᵀ`, softmax over `Concat(scores_past, score_self)`,
-//!   `probs · Concat(past_v, v_new)`) — the substrate's MatMul kernel is 2-D,
-//!   so no batched-matmul support is assumed.
+//!   mutable cache. The engine splices each pass's `k_new_l`/`v_new_l`
+//!   **outputs** (`[kv, C, head_dim]`, head-major so a per-head splice is
+//!   one contiguous row-range copy) into rows `pos..pos+C` between passes;
+//!   no scatter op exists in the graph.
+//! * the additive `decode_mask` input (`[g·C, bucket+C]`, `0` / `-1e9`)
+//!   carries BOTH visibility laws: bucket rows past the realized length are
+//!   erased, and chunk position `i` sees only new columns `≤ i` (row
+//!   `jj·C + i` is position `i`'s row for every head `jj` of the group).
+//! * RoPE is plain arithmetic on **runtime** tables the engine synthesizes
+//!   at the absolute positions, pre-expanded to the head-major row layout
+//!   (`rope_cos_q`/`rope_sin_q` `[heads·C, head_dim]`,
+//!   `rope_cos_k`/`rope_sin_k` `[kv·C, head_dim]`) — exact-shape `Mul`,
+//!   zero broadcast assumptions. Rotate-half pairs `j ± head_dim/2`.
+//! * attention decomposes into strictly 2-D matmuls
+//!   (`q_group · Concat(past_k, k_new)ᵀ`, softmax, `probs · values`) — the
+//!   substrate's MatMul kernel is 2-D, so nothing batched is assumed.
 //!
-//! Causality is vacuous at q = 1 (the single query is the last position);
-//! `causal` is therefore ignored. `qk_norm` attention is rejected loud — the
-//! parametric safetensors recipe never emits it, and silently dropping the
-//! norm would be a wrong number, not a missing feature.
+//! `qk_norm` attention is rejected loud — the parametric safetensors recipe
+//! never emits it, and silently dropping the norm would be a wrong number.
 
 use anyhow::{bail, ensure, Context, Result};
 
@@ -34,11 +42,15 @@ use crate::ir::{
     shape_from_concrete, AiGraph, AiNode, AiOp, AiParam, DType, NodeId, TensorId, TensorInfo,
 };
 
-/// Named input port for the runtime cosine RoPE table (`[1, head_dim]` f32).
-pub const DECODE_ROPE_COS_PORT: &str = "rope_cos";
-/// Named input port for the runtime sine RoPE table (`[1, head_dim]` f32).
-pub const DECODE_ROPE_SIN_PORT: &str = "rope_sin";
-/// Named input port for the additive decode mask (`[1, bucket+1]` f32).
+/// Runtime cosine RoPE table for Q, head-major (`[heads·C, head_dim]` f32).
+pub const DECODE_ROPE_COS_Q_PORT: &str = "rope_cos_q";
+/// Runtime sine RoPE table for Q, head-major.
+pub const DECODE_ROPE_SIN_Q_PORT: &str = "rope_sin_q";
+/// Runtime cosine RoPE table for K, head-major (`[kv·C, head_dim]` f32).
+pub const DECODE_ROPE_COS_K_PORT: &str = "rope_cos_k";
+/// Runtime sine RoPE table for K, head-major.
+pub const DECODE_ROPE_SIN_K_PORT: &str = "rope_sin_k";
+/// Additive decode mask (`[g·C, bucket+C]` f32).
 pub const DECODE_MASK_PORT: &str = "decode_mask";
 
 /// Named input port carrying layer `l`'s past keys (`[kv, bucket, head_dim]`).
@@ -49,11 +61,12 @@ pub fn past_key_port(layer: usize) -> String {
 pub fn past_value_port(layer: usize) -> String {
     format!("past_v_{layer}")
 }
-/// Named output port carrying layer `l`'s post-RoPE new key row (`[kv, head_dim]`).
+/// Named output port carrying layer `l`'s post-RoPE new key rows
+/// (`[kv, C, head_dim]`, head-major).
 pub fn new_key_port(layer: usize) -> String {
     format!("k_new_{layer}")
 }
-/// Named output port carrying layer `l`'s new value row (`[kv, head_dim]`).
+/// Named output port carrying layer `l`'s new value rows (`[kv, C, head_dim]`).
 pub fn new_value_port(layer: usize) -> String {
     format!("v_new_{layer}")
 }
@@ -65,10 +78,14 @@ pub struct DecodeRewrite {
     pub layers: usize,
     /// The fixed past bucket size the per-layer K/V ports were shaped to.
     pub bucket: u64,
+    /// Positions processed per pass (1 = generation step).
+    pub chunk: u64,
     /// Head dim shared by every rewritten node (the rope table width).
     pub head_dim: u64,
     /// KV heads shared by every rewritten node (the K/V buffer row count).
     pub kv_heads: u64,
+    /// Query heads shared by every rewritten node.
+    pub heads: u64,
 }
 
 /// Fresh-id allocator + append-only node buffer over a graph under rewrite.
@@ -134,18 +151,19 @@ impl<'g> Emitter<'g> {
         tid
     }
 
-    /// `x · cos + rotate_half(x) · sin` — rotate-half pairs `j ± head_dim/2`.
+    /// `x · cos + rotate_half(x) · sin` on head-major flat rows
+    /// (`[n, head_dim]` against exact-shape tables).
     fn rope(
         &mut self,
         x: TensorId,
-        rows: u64,
+        n: u64,
         head_dim: u64,
         cos: TensorId,
         sin: TensorId,
         name: &str,
     ) -> TensorId {
         let half = head_dim / 2;
-        let x_lo = self.tensor(&format!("{name}_lo"), DType::F32, &[rows, half]);
+        let x_lo = self.tensor(&format!("{name}_lo"), DType::F32, &[n, half]);
         self.node(
             AiOp::Slice {
                 axes: vec![1],
@@ -156,7 +174,7 @@ impl<'g> Emitter<'g> {
             vec![x],
             vec![x_lo],
         );
-        let x_hi = self.tensor(&format!("{name}_hi"), DType::F32, &[rows, half]);
+        let x_hi = self.tensor(&format!("{name}_hi"), DType::F32, &[n, half]);
         self.node(
             AiOp::Slice {
                 axes: vec![1],
@@ -167,15 +185,15 @@ impl<'g> Emitter<'g> {
             vec![x],
             vec![x_hi],
         );
-        let neg_hi = self.tensor(&format!("{name}_neg_hi"), DType::F32, &[rows, half]);
+        let neg_hi = self.tensor(&format!("{name}_neg_hi"), DType::F32, &[n, half]);
         self.node(AiOp::Neg, vec![x_hi], vec![neg_hi]);
-        let rot = self.tensor(&format!("{name}_rot"), DType::F32, &[rows, head_dim]);
+        let rot = self.tensor(&format!("{name}_rot"), DType::F32, &[n, head_dim]);
         self.node(AiOp::Concat { axis: 1 }, vec![neg_hi, x_lo], vec![rot]);
-        let x_cos = self.tensor(&format!("{name}_cos"), DType::F32, &[rows, head_dim]);
+        let x_cos = self.tensor(&format!("{name}_cos"), DType::F32, &[n, head_dim]);
         self.node(AiOp::Mul, vec![x, cos], vec![x_cos]);
-        let rot_sin = self.tensor(&format!("{name}_sin"), DType::F32, &[rows, head_dim]);
+        let rot_sin = self.tensor(&format!("{name}_sin"), DType::F32, &[n, head_dim]);
         self.node(AiOp::Mul, vec![rot, sin], vec![rot_sin]);
-        let out = self.tensor(name, DType::F32, &[rows, head_dim]);
+        let out = self.tensor(name, DType::F32, &[n, head_dim]);
         self.node(AiOp::Add, vec![x_cos, rot_sin], vec![out]);
         out
     }
@@ -204,6 +222,37 @@ impl<'g> Emitter<'g> {
         );
         out
     }
+
+    /// A seq-C 4-D projection (`[1,C,rows,dh]` or heads-first `[1,rows,C,dh]`)
+    /// to head-major flat `[rows·C, dh]` — plus the `[rows, C, dh]` 3-D form.
+    fn emit_head_major(
+        &mut self,
+        x4: TensorId,
+        rows: u64,
+        chunk: u64,
+        dh: u64,
+        heads_first: bool,
+        name: &str,
+    ) -> (TensorId, TensorId) {
+        let hf3 = self.tensor(&format!("{name}_hf"), DType::F32, &[rows, chunk, dh]);
+        if heads_first {
+            // Already [1, rows, C, dh]: drop the batch dim.
+            self.node(AiOp::Reshape { allow_zero: false }, vec![x4], vec![hf3]);
+        } else {
+            let pm3 = self.tensor(&format!("{name}_pm"), DType::F32, &[chunk, rows, dh]);
+            self.node(AiOp::Reshape { allow_zero: false }, vec![x4], vec![pm3]);
+            self.node(
+                AiOp::Transpose {
+                    perm: vec![1, 0, 2],
+                },
+                vec![pm3],
+                vec![hf3],
+            );
+        }
+        let flat = self.tensor(&format!("{name}_flat"), DType::F32, &[rows * chunk, dh]);
+        self.node(AiOp::Reshape { allow_zero: false }, vec![hf3], vec![flat]);
+        (hf3, flat)
+    }
 }
 
 /// The concrete `[u64]` shape of a tensor, or an error naming the port.
@@ -216,7 +265,7 @@ fn concrete_dims(graph: &AiGraph, tid: TensorId, what: &str) -> Result<Vec<u64>>
         .iter()
         .map(|d| {
             d.as_concrete().with_context(|| {
-                format!("{what}: dimension {d:?} is symbolic — the decode-step rewrite requires a fully concretized seq-1 graph")
+                format!("{what}: dimension {d:?} is symbolic — the decode rewrite requires a fully concretized seq-C graph")
             })
         })
         .collect()
@@ -224,18 +273,20 @@ fn concrete_dims(graph: &AiGraph, tid: TensorId, what: &str) -> Result<Vec<u64>>
 
 /// Decompose every fused GQA node into the masked past-attention block.
 ///
-/// The graph must already be built at `batch = 1, seq = 1` with concrete
+/// The graph must already be built at `batch = 1, seq = chunk` with concrete
 /// shapes at each attention node's ports. New ports are appended: shared
-/// `rope_cos`/`rope_sin`/`decode_mask` inputs, per-layer `past_k_l`/`past_v_l`
-/// inputs and `k_new_l`/`v_new_l` outputs (layer index = attention-node order,
-/// offset by `layer_base` — 0 for a monolithic graph, the stage's first
-/// absolute layer for a stage graph).
+/// rope-table and `decode_mask` inputs, per-layer `past_k_l`/`past_v_l`
+/// inputs and `k_new_l`/`v_new_l` outputs (layer index = attention-node
+/// order, offset by `layer_base` — 0 for a monolithic graph, the stage's
+/// first absolute layer for a stage graph).
 pub fn rewrite_decode_attention(
     graph: &mut AiGraph,
     bucket: u64,
+    chunk: u64,
     layer_base: usize,
 ) -> Result<DecodeRewrite> {
     ensure!(bucket > 0, "decode bucket must be non-empty");
+    ensure!(chunk > 0, "decode chunk must be non-empty");
 
     let gqa_positions: Vec<usize> = graph
         .nodes
@@ -245,11 +296,12 @@ pub fn rewrite_decode_attention(
         .map(|(i, _)| i)
         .collect();
     if gqa_positions.is_empty() {
-        bail!("decode-step rewrite found no GroupedQueryAttention node — not a fused-attention decoder graph");
+        bail!("decode rewrite found no GroupedQueryAttention node — not a fused-attention decoder graph");
     }
 
     let mut em = Emitter::new(graph);
-    let mut shared: Option<(TensorId, TensorId, TensorId, u64)> = None; // cos, sin, mask, head_dim
+    // (cos_q, sin_q, cos_k, sin_k, mask, head_dim)
+    let mut shared: Option<(TensorId, TensorId, TensorId, TensorId, TensorId, u64)> = None;
     let mut report: Option<DecodeRewrite> = None;
     // node vec position → replacement nodes (spliced in place, preserving order).
     let mut replacements: Vec<(usize, Vec<AiNode>)> = Vec::new();
@@ -272,7 +324,7 @@ pub fn rewrite_decode_attention(
         };
         ensure!(
             !qk_norm,
-            "decode-step rewrite does not support qk_norm attention (layer {layer}) — \
+            "decode rewrite does not support qk_norm attention (layer {layer}) — \
              decomposing it without the norm would be silently wrong"
         );
         let (h, kv, dh) = (num_heads as u64, num_kv_heads as u64, head_dim as u64);
@@ -287,26 +339,26 @@ pub fn rewrite_decode_attention(
         let v_tid = *node.inputs.get(2).context("GQA node missing V input")?;
         let out_tid = *node.outputs.first().context("GQA node missing output")?;
 
-        // Both layouts ([b,1,h,dh] and [b,h,1,dh]) flatten identically at
-        // batch=1, seq=1 — verify exactly that, loud on anything else.
         let q_dims = concrete_dims(em.graph, q_tid, "decode attention Q")?;
         let expected = if heads_first {
-            vec![1, h, 1, dh]
+            vec![1, h, chunk, dh]
         } else {
-            vec![1, 1, h, dh]
+            vec![1, chunk, h, dh]
         };
         ensure!(
             q_dims == expected,
-            "decode-step rewrite requires a batch-1, seq-1 graph: layer {layer} Q is \
+            "decode rewrite requires a batch-1, seq-{chunk} graph: layer {layer} Q is \
              {q_dims:?}, expected {expected:?}"
         );
 
         // Shared runtime ports, created at the first attention node.
-        let (cos, sin, mask, shared_dh) = *shared.get_or_insert_with(|| {
-            let cos = em.input(DECODE_ROPE_COS_PORT, DType::F32, &[1, dh]);
-            let sin = em.input(DECODE_ROPE_SIN_PORT, DType::F32, &[1, dh]);
-            let mask = em.input(DECODE_MASK_PORT, DType::F32, &[1, bucket + 1]);
-            (cos, sin, mask, dh)
+        let (cos_q, sin_q, cos_k, sin_k, mask, shared_dh) = *shared.get_or_insert_with(|| {
+            let cos_q = em.input(DECODE_ROPE_COS_Q_PORT, DType::F32, &[h * chunk, dh]);
+            let sin_q = em.input(DECODE_ROPE_SIN_Q_PORT, DType::F32, &[h * chunk, dh]);
+            let cos_k = em.input(DECODE_ROPE_COS_K_PORT, DType::F32, &[kv * chunk, dh]);
+            let sin_k = em.input(DECODE_ROPE_SIN_K_PORT, DType::F32, &[kv * chunk, dh]);
+            let mask = em.input(DECODE_MASK_PORT, DType::F32, &[g * chunk, bucket + chunk]);
+            (cos_q, sin_q, cos_k, sin_k, mask, dh)
         });
         ensure!(
             shared_dh == dh,
@@ -320,95 +372,136 @@ pub fn rewrite_decode_attention(
 
         em.nodes.clear();
 
-        // Flatten the seq-1 4-D projections to their 2-D row forms.
-        let q2 = em.tensor(&format!("dq_{layer}"), DType::F32, &[h, dh]);
-        em.node(AiOp::Reshape { allow_zero: false }, vec![q_tid], vec![q2]);
-        let k2 = em.tensor(&format!("dk_{layer}"), DType::F32, &[kv, dh]);
-        em.node(AiOp::Reshape { allow_zero: false }, vec![k_tid], vec![k2]);
-        let v2 = em.tensor(&format!("dv_{layer}"), DType::F32, &[kv, dh]);
-        em.node(AiOp::Reshape { allow_zero: false }, vec![v_tid], vec![v2]);
+        // Head-major forms: q/k flat for rope + group slicing, v both forms
+        // (3-D for the output port, flat for per-group slicing).
+        let (_, q_flat) =
+            em.emit_head_major(q_tid, h, chunk, dh, heads_first, &format!("dq_{layer}"));
+        let (_, k_flat) =
+            em.emit_head_major(k_tid, kv, chunk, dh, heads_first, &format!("dk_{layer}"));
+        let (v_hf3, v_flat) =
+            em.emit_head_major(v_tid, kv, chunk, dh, heads_first, &format!("dv_{layer}"));
 
-        // RoPE as data: rotate q and the new k at the absolute position.
+        // RoPE as data at the absolute positions (tables pre-expanded to the
+        // head-major layout by the engine).
         let (q_r, k_r) = if rope {
             (
-                em.rope(q2, h, dh, cos, sin, &format!("dq_rope_{layer}")),
-                em.rope(k2, kv, dh, cos, sin, &format!("dk_rope_{layer}")),
+                em.rope(
+                    q_flat,
+                    h * chunk,
+                    dh,
+                    cos_q,
+                    sin_q,
+                    &format!("dq_rope_{layer}"),
+                ),
+                em.rope(
+                    k_flat,
+                    kv * chunk,
+                    dh,
+                    cos_k,
+                    sin_k,
+                    &format!("dk_rope_{layer}"),
+                ),
             )
         } else {
-            (q2, k2)
+            (q_flat, k_flat)
         };
 
         // Attention scale folded into q once.
         let scale_val = scale.unwrap_or(1.0 / (dh as f32).sqrt());
         let scale_c = em.const_f32(&format!("dscale_{layer}"), &[scale_val], &[1, 1]);
-        let q_s = em.tensor(&format!("dq_scaled_{layer}"), DType::F32, &[h, dh]);
+        let q_s = em.tensor(&format!("dq_scaled_{layer}"), DType::F32, &[h * chunk, dh]);
         em.node(AiOp::Mul, vec![q_r, scale_c], vec![q_s]);
 
-        // Per kv-head group: strictly 2-D masked attention over the bucket.
+        // Per kv-head group: strictly 2-D masked attention over the bucket
+        // plus the chunk's own keys.
+        let span = bucket + chunk;
         let mut group_outs = Vec::with_capacity(kv as usize);
         for j in 0..kv {
             let n = format!("l{layer}_kv{j}");
-            let q_j = em.slice0(q_s, &format!("dqj_{n}"), j * g, g, &[dh]);
+            // Head-major rows: group j's heads occupy rows j·g·C..(j+1)·g·C.
+            let q_j = em.slice0(q_s, &format!("dqj_{n}"), j * g * chunk, g * chunk, &[dh]);
 
             let pk3 = em.slice0(past_k, &format!("dpk3_{n}"), j, 1, &[bucket, dh]);
             let pk = em.tensor(&format!("dpk_{n}"), DType::F32, &[bucket, dh]);
             em.node(AiOp::Reshape { allow_zero: false }, vec![pk3], vec![pk]);
-            let pk_t = em.tensor(&format!("dpkt_{n}"), DType::F32, &[dh, bucket]);
-            em.node(AiOp::Transpose { perm: vec![1, 0] }, vec![pk], vec![pk_t]);
+            let kn = em.slice0(k_r, &format!("dkn_{n}"), j * chunk, chunk, &[dh]);
+            let keys = em.tensor(&format!("dkeys_{n}"), DType::F32, &[span, dh]);
+            em.node(AiOp::Concat { axis: 0 }, vec![pk, kn], vec![keys]);
+            let keys_t = em.tensor(&format!("dkeyst_{n}"), DType::F32, &[dh, span]);
+            em.node(
+                AiOp::Transpose { perm: vec![1, 0] },
+                vec![keys],
+                vec![keys_t],
+            );
 
-            let kn = em.slice0(k_r, &format!("dkn_{n}"), j, 1, &[dh]);
-            let kn_t = em.tensor(&format!("dknt_{n}"), DType::F32, &[dh, 1]);
-            em.node(AiOp::Transpose { perm: vec![1, 0] }, vec![kn], vec![kn_t]);
-
-            let s_past = em.tensor(&format!("dspast_{n}"), DType::F32, &[g, bucket]);
-            em.node(AiOp::MatMul, vec![q_j, pk_t], vec![s_past]);
-            let s_self = em.tensor(&format!("dsself_{n}"), DType::F32, &[g, 1]);
-            em.node(AiOp::MatMul, vec![q_j, kn_t], vec![s_self]);
-            let scores = em.tensor(&format!("dscores_{n}"), DType::F32, &[g, bucket + 1]);
-            em.node(AiOp::Concat { axis: 1 }, vec![s_past, s_self], vec![scores]);
-
-            let masked = em.tensor(&format!("dmasked_{n}"), DType::F32, &[g, bucket + 1]);
+            let scores = em.tensor(&format!("dscores_{n}"), DType::F32, &[g * chunk, span]);
+            em.node(AiOp::MatMul, vec![q_j, keys_t], vec![scores]);
+            let masked = em.tensor(&format!("dmasked_{n}"), DType::F32, &[g * chunk, span]);
             em.node(AiOp::Add, vec![scores, mask], vec![masked]);
-            let probs = em.tensor(&format!("dprobs_{n}"), DType::F32, &[g, bucket + 1]);
+            let probs = em.tensor(&format!("dprobs_{n}"), DType::F32, &[g * chunk, span]);
             em.node(AiOp::Softmax { axis: 1 }, vec![masked], vec![probs]);
 
             let pv3 = em.slice0(past_v, &format!("dpv3_{n}"), j, 1, &[bucket, dh]);
             let pv = em.tensor(&format!("dpv_{n}"), DType::F32, &[bucket, dh]);
             em.node(AiOp::Reshape { allow_zero: false }, vec![pv3], vec![pv]);
-            let vn = em.slice0(v2, &format!("dvn_{n}"), j, 1, &[dh]);
-            let vals = em.tensor(&format!("dvals_{n}"), DType::F32, &[bucket + 1, dh]);
+            let vn = em.slice0(v_flat, &format!("dvn_{n}"), j * chunk, chunk, &[dh]);
+            let vals = em.tensor(&format!("dvals_{n}"), DType::F32, &[span, dh]);
             em.node(AiOp::Concat { axis: 0 }, vec![pv, vn], vec![vals]);
 
-            let out_j = em.tensor(&format!("dout_{n}"), DType::F32, &[g, dh]);
+            let out_j = em.tensor(&format!("dout_{n}"), DType::F32, &[g * chunk, dh]);
             em.node(AiOp::MatMul, vec![probs, vals], vec![out_j]);
             group_outs.push(out_j);
         }
 
-        // Chain-concat the kv groups back to [h, dh], then restore the fused
-        // node's own output tensor (its 4-D shape is already declared).
+        // Chain-concat the kv groups (head-major) → [h·C, dh], then restore
+        // the fused node's own 4-D output tensor.
         let mut acc = group_outs[0];
         for (j, &t) in group_outs.iter().enumerate().skip(1) {
-            let rows = (j as u64 + 1) * g;
+            let rows = (j as u64 + 1) * g * chunk;
             let cat = em.tensor(&format!("dcat_l{layer}_{j}"), DType::F32, &[rows, dh]);
             em.node(AiOp::Concat { axis: 0 }, vec![acc, t], vec![cat]);
             acc = cat;
         }
-        em.node(
-            AiOp::Reshape { allow_zero: false },
-            vec![acc],
-            vec![out_tid],
-        );
+        if heads_first {
+            // out_tid is [1, h, C, dh] — the head-major flat IS that layout.
+            em.node(
+                AiOp::Reshape { allow_zero: false },
+                vec![acc],
+                vec![out_tid],
+            );
+        } else {
+            let hf3 = em.tensor(&format!("dout_hf_{layer}"), DType::F32, &[h, chunk, dh]);
+            em.node(AiOp::Reshape { allow_zero: false }, vec![acc], vec![hf3]);
+            let pm3 = em.tensor(&format!("dout_pm_{layer}"), DType::F32, &[chunk, h, dh]);
+            em.node(
+                AiOp::Transpose {
+                    perm: vec![1, 0, 2],
+                },
+                vec![hf3],
+                vec![pm3],
+            );
+            em.node(
+                AiOp::Reshape { allow_zero: false },
+                vec![pm3],
+                vec![out_tid],
+            );
+        }
 
-        // The step's derived K/V rows leave through named ports.
-        em.output(k_r, &new_key_port(layer));
-        em.output(v2, &new_value_port(layer));
+        // The pass's derived K/V rows leave through named ports, head-major
+        // ([kv, C, dh]) so the engine's per-head splice is contiguous.
+        let k_out = em.tensor(&format!("dknew_{layer}"), DType::F32, &[kv, chunk, dh]);
+        em.node(AiOp::Reshape { allow_zero: false }, vec![k_r], vec![k_out]);
+        em.output(k_out, &new_key_port(layer));
+        em.output(v_hf3, &new_value_port(layer));
 
         replacements.push((pos, std::mem::take(&mut em.nodes)));
         report = Some(DecodeRewrite {
             layers: order + 1,
             bucket,
+            chunk,
             head_dim: dh,
             kv_heads: kv,
+            heads: h,
         });
     }
 

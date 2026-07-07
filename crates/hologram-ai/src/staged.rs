@@ -124,13 +124,42 @@ pub fn compile_decode_stages(
     layers_per_stage: NonZeroU64,
     quant: Option<&hologram_ai_common::lower::QuantMap>,
 ) -> Result<Vec<Vec<u8>>> {
+    compile_chunk_stages(
+        config_json,
+        keys,
+        kappas,
+        shapes,
+        dtypes,
+        bucket,
+        1,
+        layers_per_stage,
+        quant,
+    )
+}
+
+/// [`compile_decode_stages`] parametric in the chunk (row `chunked-prefill`):
+/// `chunk` positions per pass over the carried past — the prefill-seeding
+/// pipeline that amortizes the weight stream across the chunk.
+#[allow(clippy::too_many_arguments)]
+pub fn compile_chunk_stages(
+    config_json: &str,
+    keys: &[String],
+    kappas: &[String],
+    shapes: &[Vec<u64>],
+    dtypes: &[DType],
+    bucket: u64,
+    chunk: u64,
+    layers_per_stage: NonZeroU64,
+    quant: Option<&hologram_ai_common::lower::QuantMap>,
+) -> Result<Vec<Vec<u8>>> {
     let config: serde_json::Value =
         serde_json::from_str(config_json).context("parsing config.json")?;
-    let graphs = hologram_ai_safetensors::parametric::build_parametric_decode_stage_graphs(
+    let graphs = hologram_ai_safetensors::parametric::build_parametric_chunk_stage_graphs(
         &config,
         keys,
         dtypes,
         bucket,
+        chunk,
         layers_per_stage,
     )?;
     let graphs = bind_manifest_kappas(graphs, keys, kappas, shapes, dtypes)?;
@@ -1105,7 +1134,7 @@ impl GrowableStagedSession {
         if next <= current {
             return Ok(None);
         }
-        let _ = self.decode_stages_for_bucket(next)?;
+        let _ = self.decode_stages_for_bucket(next, 1)?;
         Ok(Some(next))
     }
 }
@@ -1144,6 +1173,13 @@ impl GrowableStagedSession {
     /// K/V buffers); this session stays the archive factory across regrows,
     /// so derived-store hits, the verified-κ set, and observers all carry.
     pub fn decode_runner_for(&mut self, want: usize) -> Result<StagedRunner<'static>> {
+        self.chunk_runner_for(want, 1)
+    }
+
+    /// [`Self::decode_runner_for`] parametric in the chunk (row
+    /// `chunked-prefill`): the seeding pipeline processing `chunk` positions
+    /// per pass over the same bucket geometry.
+    pub fn chunk_runner_for(&mut self, want: usize, chunk: u64) -> Result<StagedRunner<'static>> {
         ensure!(
             want <= self.max_window,
             "the sequence needs a decode bucket of {want} rows but the model's context length \
@@ -1151,13 +1187,13 @@ impl GrowableStagedSession {
             self.max_window
         );
         let bucket = crate::engine::geometric_window(want.max(1), self.max_window);
-        tracing::info!(bucket, want, "building decode-plan bucket");
-        let (archives, resolved) = self.decode_stages_for_bucket(bucket)?;
+        tracing::info!(bucket, want, chunk, "building decode-plan bucket");
+        let (archives, resolved) = self.decode_stages_for_bucket(bucket, chunk)?;
         if let Some(f) = self.on_window.as_mut() {
             f(bucket, resolved);
         }
         self.wire_runner(archives)
-            .with_context(|| format!("loading the {bucket}-row decode pipeline"))
+            .with_context(|| format!("loading the {bucket}-row decode pipeline (chunk {chunk})"))
     }
 }
 
@@ -1369,13 +1405,18 @@ impl GrowableStagedSession {
     }
 
     /// The decode-plan twin of [`Self::stages_for_window`]: resolve or
-    /// compile the `bucket`-row decode pipeline under its OWN derivation key
-    /// — a decode pipeline and a whole-window pipeline are different
-    /// derivations of the same inputs, never reinterpretations.
-    fn decode_stages_for_bucket(&mut self, bucket: usize) -> Result<(Vec<Vec<u8>>, bool)> {
+    /// compile the `bucket`-row, `chunk`-position decode pipeline under its
+    /// OWN derivation key — a decode pipeline and a whole-window pipeline
+    /// are different derivations of the same inputs, never
+    /// reinterpretations, and each (bucket, chunk) pair is its own artifact.
+    fn decode_stages_for_bucket(
+        &mut self,
+        bucket: usize,
+        chunk: u64,
+    ) -> Result<(Vec<Vec<u8>>, bool)> {
         let key = crate::materialize::kappa_of(
             format!(
-                "decode-archives:v1:bucket={bucket}:base={}",
+                "decode-archives:v2:bucket={bucket}:chunk={chunk}:base={}",
                 self.derivation_key(0)
             )
             .as_bytes(),
@@ -1396,17 +1437,18 @@ impl GrowableStagedSession {
                 store.evaporate(&key);
             }
         }
-        let stages = compile_decode_stages(
+        let stages = compile_chunk_stages(
             &self.config_json,
             &self.keys,
             &self.kappas,
             &self.shapes,
             &self.dtypes,
             bucket as u64,
+            chunk,
             self.layers_per_stage,
             self.quant.as_ref(),
         )
-        .with_context(|| format!("compiling a {bucket}-row decode pipeline"))?;
+        .with_context(|| format!("compiling a {bucket}-row decode pipeline (chunk {chunk})"))?;
         if let Some(store) = self.derived_store.as_mut() {
             let kappas: Vec<String> = stages
                 .iter()

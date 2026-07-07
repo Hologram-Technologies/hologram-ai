@@ -313,6 +313,16 @@ executor = "rust"
 feature = "features/suites/s3_execution/decode_plan.feature"
 
 [[row]]
+id = "chunked-prefill"
+statement = "Prefill amortizes the weight stream across a chunk: the decode plan generalized to seq = C emits C positions per pass over the same carried bucket (intra-chunk causality enters through the same additive mask that erases unrealized rows; rope tables arrive pre-expanded to the plan's head-major layout), a prompt suffix seeds in ceil(n/C) passes instead of n, a partial final chunk pads with rows that land above the realized length where the mask makes them unreachable until overwritten, and a chunk-seeded session is indistinguishable from a step-fed one at the sampler row and at every subsequent position."
+stage = "S3"
+status = "build"
+oracles = ["journey-reference"]
+tier = "suite"
+executor = "rust"
+feature = "features/suites/s3_execution/chunked_prefill.feature"
+
+[[row]]
 id = "quantized-rest"
 statement = "A quant-tiered model rests quantized: the download derives each fully-retirable projection's matmul-ready int8 artifact in the browser and evaporates its wide blob — the wide form transits once and rests nowhere (recorded provenance keeps it recoverable; a missing artifact re-derives at session warm, fail-closed on its recorded κ) — the κ-store holds the quantized form, and the chat journey completes on it with the tier stated in the narration, never silently."
 stage = "S1"

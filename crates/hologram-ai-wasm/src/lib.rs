@@ -1303,6 +1303,29 @@ impl DecodeChatSession {
         }
 
         let session = self.session.as_mut().expect("session just ensured");
+
+        // Chunked-prefill seeder (row `chunked-prefill`): a prompt suffix
+        // seeds in ceil(n/chunk) passes instead of n — one weight stream per
+        // chunk. Installed lazily (growth drops it), cached per bucket in
+        // the derived store; a failed build degrades prefill to steps — a
+        // projection, never a refusal.
+        if session.seeder_chunk().is_none() {
+            const PREFILL_CHUNK: u64 = 32;
+            let bucket = session.geometry().bucket;
+            let chunk = PREFILL_CHUNK.min(self.context_length).max(2);
+            match self
+                .growable
+                .borrow_mut()
+                .chunk_runner_for(bucket, chunk)
+                .and_then(|seeder| session.set_seeder(seeder))
+            {
+                Ok(()) => {}
+                Err(e) => web_sys::console::warn_1(&JsValue::from_str(&format!(
+                    "prefill seeder unavailable (stepping instead): {e:#}"
+                ))),
+            }
+        }
+
         let mut sink = CallbackSink {
             buffer: Vec::new(),
             callback: callback.as_ref(),

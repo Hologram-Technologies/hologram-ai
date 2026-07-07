@@ -557,8 +557,19 @@ shipped catalogue entry):
   prefix is verified at real scale. The bucket machinery narrated its
   design: 64 → 128 compiled at growth, 256 RESOLVED from the derived
   store (the idle prederive's hit).
-- The remaining in-repo lever is prefill seeding (one whole-window pass
-  emitting per-layer K/V to seed the carried rows — turn-1 TTFT). The
-  per-token generation cost (~45–50 s at 0.5B) is the substrate's
-  single-position kernel throughput in wasm — the kernel-floor axis,
-  owned upstream; the plan-structure levers in this repo are spent.
+- The remaining in-repo lever was prefill seeding — realized as row
+  `chunked-prefill`: the decode plan generalized to seq = C. A prompt
+  suffix seeds in ceil(n/C) passes instead of n (one weight stream per
+  chunk, not per token; C = 32 in the browser); intra-chunk causality
+  enters through the same additive mask that erases unrealized rows;
+  rope tables arrive pre-expanded to the plan's head-major layout
+  (exact-shape arithmetic, zero broadcast assumptions); a partial final
+  chunk PADS — padded rows land above the realized length, unreachable
+  by the mask until overwritten, sound by the same law as the fixed
+  bucket itself. Witnessed: a chunk-seeded session is indistinguishable
+  from a step-fed one at the sampler row and every subsequent position;
+  ceil(n/chunk) passes counted exactly. The seeder resolves through the
+  derived store per (bucket, chunk) and drops on bucket growth
+  (re-installed lazily). The per-token GENERATION cost (~45–50 s at
+  0.5B) remains the substrate's single-position kernel throughput in
+  wasm — the kernel-floor axis, owned upstream.

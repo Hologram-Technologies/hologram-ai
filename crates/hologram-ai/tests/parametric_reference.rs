@@ -408,6 +408,103 @@ fn decode_plan_matches_whole_window_per_position() {
     assert_decode_matches_window(decode_session(8), "fixed bucket");
 }
 
+/// Build the chunked-prefill seeder graph (row `chunked-prefill`) with
+/// inline params — the same fixture weights, `chunk` positions per pass.
+fn build_chunk_graph(bucket: u64, chunk: u64) -> AiGraph {
+    let tensors = fixture_tensors();
+    let keys: Vec<String> = tensors.iter().map(|(n, _, _)| n.clone()).collect();
+    let dtypes = vec![DType::F32; keys.len()];
+    let mut graph =
+        hologram_ai_safetensors::parametric::build_parametric_chunk_graph_from_manifest(
+            &config_json(),
+            &keys,
+            &dtypes,
+            bucket,
+            chunk,
+        )
+        .expect("chunk graph builds");
+    let mut name_to_id: HashMap<String, u32> = HashMap::new();
+    for (id, name) in &graph.tensor_names {
+        name_to_id.insert(name.clone(), *id);
+    }
+    for (name, dims, bytes) in &tensors {
+        let id = *name_to_id.get(name).expect("manifest tensor in graph");
+        let info = TensorInfo::new(DType::F32, shape_from_concrete(dims));
+        graph.tensor_info.insert(id, info.clone());
+        graph
+            .params
+            .insert(id, AiParam::inline(bytes.clone(), info));
+    }
+    graph
+}
+
+#[test]
+fn chunked_prefill_matches_stepped_prefill() {
+    // Two sessions over the same bucket: one seeds the prompt through
+    // chunk-4 passes (6 tokens → 2 passes, the second padded), the other
+    // steps token by token. Their sampler rows and every subsequent
+    // generation step must agree — the padded rows are unreachable by
+    // construction, and chunked prefill is a projection, never a meaning.
+    let toks: Vec<i64> = TOKENS.iter().map(|&t| t as i64).collect();
+
+    let mut stepped = decode_session(16);
+    let row_stepped = stepped.feed(&toks).expect("stepped prefill");
+    assert_eq!(stepped.steps_taken(), toks.len() as u64);
+
+    let mut chunked = decode_session(16);
+    let seeder = HoloRunner::from_bytes(compile(build_chunk_graph(16, 4))).expect("seeder loads");
+    chunked.set_seeder(seeder).expect("seeder installs");
+    let row_chunked = chunked.feed(&toks).expect("chunked prefill");
+    assert_eq!(
+        chunked.steps_taken(),
+        (toks.len() as u64).div_ceil(4),
+        "chunked prefill takes ceil(n/chunk) passes"
+    );
+    assert_eq!(
+        chunked.realized_len(),
+        toks.len(),
+        "pad rows are not realized"
+    );
+
+    let close = |a: &[f32], b: &[f32], what: &str| {
+        assert_eq!(a.len(), b.len(), "{what}: row sizes");
+        for (i, (&x, &y)) in a.iter().zip(b).enumerate() {
+            assert!(
+                (x - y).abs() <= 1e-4 + 1e-3 * y.abs(),
+                "{what}[{i}]: chunked {x} vs stepped {y}"
+            );
+        }
+    };
+    close(&row_chunked, &row_stepped, "prefill row");
+
+    // Generation over the seeded rows: every subsequent step agrees.
+    let mut a = row_chunked;
+    let mut b = row_stepped;
+    for turn in 0..4 {
+        let next_a = a
+            .iter()
+            .enumerate()
+            .max_by(|x, y| x.1.total_cmp(y.1))
+            .unwrap()
+            .0;
+        let next_b = b
+            .iter()
+            .enumerate()
+            .max_by(|x, y| x.1.total_cmp(y.1))
+            .unwrap()
+            .0;
+        assert_eq!(next_a, next_b, "greedy token diverges at generation {turn}");
+        a = chunked.step(next_a as i64).expect("chunked session step");
+        b = stepped.step(next_b as i64).expect("stepped session step");
+        close(&a, &b, &format!("generation row {turn}"));
+    }
+    eprintln!(
+        "chunked prefill: {} passes for {} tokens; rows and greedy path match the stepped oracle",
+        (toks.len() as u64).div_ceil(4),
+        toks.len()
+    );
+}
+
 #[test]
 fn decode_plan_bucket_growth_preserves_parity() {
     // Bucket 2 with 6 tokens: growth (2 → 4 → 8) fires twice mid-sequence;

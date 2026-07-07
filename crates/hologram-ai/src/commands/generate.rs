@@ -473,15 +473,12 @@ pub fn generate_stream_decode<S: LmSession>(
         .min(prompt_tokens.len() - 1);
     session.rewind_to(common);
 
-    // Prefill: replay the prompt's novel suffix through decode steps. Only
-    // the last step's row feeds the sampler (causality makes the earlier
-    // rows byproducts).
-    let mut row: Vec<f32> = Vec::new();
-    for &t in &prompt_tokens[common..] {
-        row = session
-            .step(t as i64)
-            .context("decode prefill step failed")?;
-    }
+    // Prefill: feed the prompt's novel suffix — chunked when a seeder is
+    // installed (row `chunked-prefill`: ceil(suffix/chunk) passes amortize
+    // the weight stream), one step per token otherwise. Only the last row
+    // feeds the sampler (causality makes the earlier rows byproducts).
+    let suffix: Vec<i64> = prompt_tokens[common..].iter().map(|&t| t as i64).collect();
+    let mut row = session.feed(&suffix).context("decode prefill failed")?;
 
     let remaining = max_window - prompt_tokens.len();
     let budget = cfg.max_tokens.map_or(remaining, |n| n.min(remaining));

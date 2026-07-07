@@ -806,13 +806,15 @@ impl DecoderDims {
         }
     }
 
-    /// Dims for the decode-step plan: `batch = seq = 1`, fully concrete — no
-    /// dim vars are interned, so the built graph is a pure function of the
-    /// config with no free window parameter (the past bucket carries it).
-    fn decode_step(cfg: &ModelConfig) -> Self {
+    /// Dims for the decode plan: `batch = 1, seq = chunk`, fully concrete —
+    /// no dim vars are interned, so the built graph is a pure function of
+    /// `(config, chunk)` with no free window parameter (the past bucket
+    /// carries it). `chunk = 1` is the generation step; `chunk > 1` is the
+    /// chunked-prefill pass (row `chunked-prefill`).
+    fn decode_step(cfg: &ModelConfig, chunk: u64) -> Self {
         Self {
             batch: DimExpr::Concrete(1),
-            seq: DimExpr::Concrete(1),
+            seq: DimExpr::Concrete(chunk),
             vocab: DimExpr::Concrete(cfg.vocab_size),
             hidden: DimExpr::Concrete(cfg.hidden_size),
             ffn_hidden: DimExpr::Concrete(cfg.intermediate_size),
@@ -1695,11 +1697,26 @@ pub fn build_parametric_decode_graph_from_manifest(
     dtypes: &[DType],
     bucket: u64,
 ) -> Result<AiGraph> {
+    build_parametric_chunk_graph_from_manifest(config, keys, dtypes, bucket, 1)
+}
+
+/// [`build_parametric_decode_graph_from_manifest`] parametric in the chunk
+/// (row `chunked-prefill`): `batch = 1, seq = chunk` positions per pass over
+/// the carried past — `chunk = 1` is the generation step, `chunk > 1` the
+/// prefill-seeding pass that amortizes the weight stream across the chunk.
+pub fn build_parametric_chunk_graph_from_manifest(
+    config: &Value,
+    keys: &[String],
+    dtypes: &[DType],
+    bucket: u64,
+    chunk: u64,
+) -> Result<AiGraph> {
     let recipe = DecoderRecipe::prepare(config, keys, dtypes, None)?;
     ensure!(bucket > 0, "decode bucket must be non-empty");
+    ensure!(chunk > 0, "decode chunk must be non-empty");
 
     let mut builder = GraphBuilder::new("parametric_decode_step".to_string());
-    let dims = DecoderDims::decode_step(&recipe.cfg);
+    let dims = DecoderDims::decode_step(&recipe.cfg, chunk);
     let (embed_f32, mut current) = recipe.emit_embedding(&mut builder, &dims);
     for l in 0..recipe.cfg.num_hidden_layers {
         let tail = recipe.emit_layer_core(&mut builder, &dims, l, current)?;
@@ -1709,7 +1726,7 @@ pub fn build_parametric_decode_graph_from_manifest(
     builder.add_output(logits, "logits");
 
     let mut graph = builder.build();
-    let rewrite = rewrite_decode_attention(&mut graph, bucket, 0)?;
+    let rewrite = rewrite_decode_attention(&mut graph, bucket, chunk, 0)?;
     ensure!(
         rewrite.layers as u64 == recipe.cfg.num_hidden_layers,
         "decode rewrite touched {} attention nodes, expected {} layers",
@@ -1720,6 +1737,9 @@ pub fn build_parametric_decode_graph_from_manifest(
     graph
         .metadata
         .insert("decode_bucket".to_string(), MetaValue::Int(bucket as i64));
+    graph
+        .metadata
+        .insert("decode_chunk".to_string(), MetaValue::Int(chunk as i64));
     graph.metadata.insert(
         "rope_theta".to_string(),
         MetaValue::Float(recipe.cfg.rope_theta as f64),
@@ -1799,17 +1819,31 @@ pub fn build_parametric_decode_stage_graphs(
     bucket: u64,
     layers_per_stage: NonZeroU64,
 ) -> Result<Vec<AiGraph>> {
-    let recipe = DecoderRecipe::prepare(config, keys, dtypes, None)?;
-    ensure!(bucket > 0, "decode bucket must be non-empty");
-    assemble_stage_graphs(&recipe, layers_per_stage, Some(bucket))
+    build_parametric_chunk_stage_graphs(config, keys, dtypes, bucket, 1, layers_per_stage)
 }
 
-/// The shared stage assembler: `decode_bucket = None` emits the
-/// whole-window plan, `Some(bucket)` the decode-step plan.
+/// [`build_parametric_decode_stage_graphs`] parametric in the chunk (row
+/// `chunked-prefill`): stage graphs at `batch = 1, seq = chunk`.
+pub fn build_parametric_chunk_stage_graphs(
+    config: &Value,
+    keys: &[String],
+    dtypes: &[DType],
+    bucket: u64,
+    chunk: u64,
+    layers_per_stage: NonZeroU64,
+) -> Result<Vec<AiGraph>> {
+    let recipe = DecoderRecipe::prepare(config, keys, dtypes, None)?;
+    ensure!(bucket > 0, "decode bucket must be non-empty");
+    ensure!(chunk > 0, "decode chunk must be non-empty");
+    assemble_stage_graphs(&recipe, layers_per_stage, Some((bucket, chunk)))
+}
+
+/// The shared stage assembler: `decode = None` emits the whole-window plan,
+/// `Some((bucket, chunk))` the decode plan at `seq = chunk`.
 fn assemble_stage_graphs(
     recipe: &DecoderRecipe<'_>,
     layers_per_stage: NonZeroU64,
-    decode_bucket: Option<u64>,
+    decode: Option<(u64, u64)>,
 ) -> Result<Vec<AiGraph>> {
     let layers = recipe.cfg.num_hidden_layers;
     let block = layers_per_stage.get();
@@ -1836,21 +1870,24 @@ fn assemble_stage_graphs(
             graph
                 .metadata
                 .insert("stage_role".to_string(), MetaValue::Str(role.to_string()));
-            if let Some(bucket) = decode_bucket {
+            if let Some((bucket, chunk)) = decode {
                 graph
                     .metadata
                     .insert("decode_bucket".to_string(), MetaValue::Int(bucket as i64));
+                graph
+                    .metadata
+                    .insert("decode_chunk".to_string(), MetaValue::Int(chunk as i64));
                 graph.metadata.insert(
                     "rope_theta".to_string(),
                     MetaValue::Float(recipe.cfg.rope_theta as f64),
                 );
             }
         };
-    // The decode plan is fully concrete (batch = seq = 1); the whole-window
-    // plan interns its batch/seq dim vars per stage builder.
-    let stage_dims = |builder: &mut GraphBuilder| match decode_bucket {
+    // The decode plan is fully concrete (batch = 1, seq = chunk); the
+    // whole-window plan interns its batch/seq dim vars per stage builder.
+    let stage_dims = |builder: &mut GraphBuilder| match decode {
         None => DecoderDims::register(builder, &recipe.cfg),
-        Some(_) => DecoderDims::decode_step(&recipe.cfg),
+        Some((_, chunk)) => DecoderDims::decode_step(&recipe.cfg, chunk),
     };
 
     // Stage 0 — embedding.
@@ -1888,11 +1925,11 @@ fn assemble_stage_graphs(
             None => builder.add_output(current, "hidden_states"),
         }
         let mut graph = builder.build();
-        if let Some(bucket) = decode_bucket {
+        if let Some((bucket, chunk)) = decode {
             // Decompose this stage's fused attention over the carried past —
             // absolute layer indices, so the pipeline's K/V port names are
             // the model's layer numbers regardless of the partition.
-            let rewrite = rewrite_decode_attention(&mut graph, bucket, start as usize)?;
+            let rewrite = rewrite_decode_attention(&mut graph, bucket, chunk, start as usize)?;
             ensure!(
                 rewrite.layers as u64 == end - start,
                 "decode rewrite touched {} attention nodes in stage {s}, expected {}",
