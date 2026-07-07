@@ -551,4 +551,14 @@ shipped catalogue entry):
   measured owner of the browser gap — not the window, which is gone.
 - Turn 2 under per-turn transcript replay measured CATASTROPHIC
   (>30 min for a ~130-step replay) — the measurement that forced
-  cross-turn retention. With retention, a turn's cost is its suffix.
+  cross-turn retention. With retention deployed and re-measured: turn 2
+  completes in **1084 s ≈ suffix + generation only** (~23 tokens at
+  ~46 s/step; a full replay would have been ~5850 s) — the retained
+  prefix is verified at real scale. The bucket machinery narrated its
+  design: 64 → 128 compiled at growth, 256 RESOLVED from the derived
+  store (the idle prederive's hit).
+- The remaining in-repo lever is prefill seeding (one whole-window pass
+  emitting per-layer K/V to seed the carried rows — turn-1 TTFT). The
+  per-token generation cost (~45–50 s at 0.5B) is the substrate's
+  single-position kernel throughput in wasm — the kernel-floor axis,
+  owned upstream; the plan-structure levers in this repo are spent.
