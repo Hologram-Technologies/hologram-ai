@@ -33,3 +33,8 @@ Feature: The per-token pass computes one position
     Given a staged decode pipeline over the staged fixture with a bucket of 64 rows
     When the same greedy completion is generated through the decode plan and the whole-window plan
     Then both plans emit the identical completion
+
+  Scenario: a turn extending the transcript pays only its novel suffix
+    Given a staged decode pipeline over the staged fixture with a bucket of 64 rows
+    When two chat turns extend one transcript through the decode session
+    Then the second turn steps only its suffix and matches a fresh replay

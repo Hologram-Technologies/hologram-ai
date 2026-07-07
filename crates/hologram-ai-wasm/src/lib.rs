@@ -1258,9 +1258,11 @@ impl DecodeChatSession {
         })
     }
 
-    /// One chat turn: rewind to position 0 and run the decode loop — prompt
-    /// prefill as decode steps, one step per generated token — streaming the
-    /// running completion to `callback`. Returns the generated text.
+    /// One chat turn over the decode loop — prompt prefill as decode steps,
+    /// one step per generated token — streaming the running completion to
+    /// `callback`. Cross-turn K/V retention lives in the loop itself: a
+    /// transcript extending its own history rewinds to the shared prefix
+    /// and pays only its novel suffix. Returns the generated text.
     pub fn generate(
         &mut self,
         prompt: &str,
@@ -1271,18 +1273,21 @@ impl DecodeChatSession {
         let cfg = opts.config();
         let templated = apply_template(opts.prompt_template.as_deref(), prompt);
 
-        // Size the bucket to the prompt up front — one compile instead of a
-        // geometric ladder of them; generation growth regrows as needed.
-        let want = self.tokenizer.encode(&templated).len().max(1);
-        let need = match &self.session {
-            None => true,
-            Some(s) => s.geometry().bucket < want.min(self.context_length as usize),
-        };
-        if need {
+        if self.session.is_none() {
+            // First turn: size the bucket to the prompt up front — one
+            // compile instead of a geometric ladder of them. Later turns
+            // KEEP the session (its carried K/V is the retained prefix) and
+            // grow through the rebuild closure, which copies the rows.
+            let want = self
+                .tokenizer
+                .encode(&templated)
+                .len()
+                .max(1)
+                .min(self.context_length as usize);
             let runner = self
                 .growable
                 .borrow_mut()
-                .decode_runner_for(want.min(self.context_length as usize))
+                .decode_runner_for(want)
                 .map_err(|e| err(format!("decode pipeline: {e:#}")))?;
             let g = std::rc::Rc::clone(&self.growable);
             let session = hologram_ai::decode::DecodeSession::new(
@@ -1298,7 +1303,6 @@ impl DecodeChatSession {
         }
 
         let session = self.session.as_mut().expect("session just ensured");
-        session.reset();
         let mut sink = CallbackSink {
             buffer: Vec::new(),
             callback: callback.as_ref(),

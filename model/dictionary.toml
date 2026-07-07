@@ -304,7 +304,7 @@ feature = "features/suites/s3_execution/single_position_head.feature"
 
 [[row]]
 id = "decode-plan"
-statement = "The per-token pass computes one position: the decoder recipe emitted at seq = 1 with every fused attention node decomposed into masked past-attention over a fixed bucket of carried K/V rows — carried K/V is derived content through named ports (past_k/past_v in, k_new/v_new out, the engine splices each step's rows between steps), positions are runtime data (rope tables synthesized at the absolute position, an additive mask erasing unrealized bucket rows), one compiled artifact serves every step, bucket exhaustion is a geometric recompile never a ceiling, and every step's logits match the whole-window plan at that position."
+statement = "The per-token pass computes one position: the decoder recipe emitted at seq = 1 with every fused attention node decomposed into masked past-attention over a fixed bucket of carried K/V rows — carried K/V is derived content through named ports (past_k/past_v in, k_new/v_new out, the engine splices each step's rows between steps), positions are runtime data (rope tables synthesized at the absolute position, an additive mask erasing unrealized bucket rows), one compiled artifact serves every step, bucket exhaustion is a geometric recompile never a ceiling, every step's logits match the whole-window plan at that position, and the carried rows persist across turns: a prompt extending the session's realized sequence rewinds to the shared prefix and steps only its novel suffix, indistinguishable from a fresh replay."
 stage = "S3"
 status = "build"
 oracles = ["journey-reference"]

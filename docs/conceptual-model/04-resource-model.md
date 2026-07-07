@@ -522,9 +522,33 @@ completions are identical across the decode and whole-window plans
 browser, `DecodeChatSession` is the default chat path (knob
 `hologram_decode_plan=0` reverts): every token — prompt prefill included —
 is one single-position pass; buckets grow geometrically through the same
-derived-artifact store under a decode-specific derivation key; each turn
-rewinds the position and replays the templated transcript (elision
-recognizes the unchanged prefix). Prefill seeding from a whole-window
-pass and cross-turn K/V prefix retention are the remaining levers
-(`decode-plan` stays honest at "build" until the deployed instance runs
-it).
+derived-artifact store under a decode-specific derivation key.
+
+**Cross-turn K/V retention** (same cycle, forced by measurement): the
+carried rows persist across turns, keyed by their realized tokens. A
+prompt extending the session's realized sequence — a chat transcript
+extends its own history — rewinds to the shared prefix and steps only its
+novel suffix; witnessed exactly (turn 2 stepped 5× for a 10-token
+transcript: its 2-token suffix plus generation), with the completion
+equal to a fresh replay. The Generation axis's "resident prefix labels"
+are now held across turns, not just across steps.
+
+## Measured (2026-07-06 — Qwen2.5-0.5B int8, headless Chromium, DEPLOYED instance)
+
+The decode plan at real scale, on the live Pages deploy (probe against the
+shipped catalogue entry):
+
+- Download + streamed compile + int8 derivation: **41.6 s** (unchanged).
+- Turn 1 (cold, ~40-token templated prompt, 26 streamed samples):
+  **~21 s/step average** (prefill steps + generated tokens), vs
+  **~85 s/token** under the whole-window plan — the window multiplier left
+  the step, and per-token cost no longer grows with context.
+- The residual per-step cost is WEIGHTS-SIDE, window-independent: a
+  single-position matmul streams the full weight set with no row reuse,
+  so per-element cost × O(weights) elements dominates where the
+  whole-window plan amortized weight traffic across positions. This is
+  the kernel-floor axis (per-element cost, substrate-owned), now the
+  measured owner of the browser gap — not the window, which is gone.
+- Turn 2 under per-turn transcript replay measured CATASTROPHIC
+  (>30 min for a ~130-step replay) — the measurement that forced
+  cross-turn retention. With retention, a turn's cost is its suffix.

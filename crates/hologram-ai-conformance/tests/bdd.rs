@@ -828,6 +828,7 @@ struct BddWorld {
     decode_staged: Option<DecodeStagedKit>,
     decode_staged_pairs: Option<Vec<(Vec<f32>, Vec<f32>)>>, // (staged, monolithic) per position
     decode_completions: Option<(String, String)>,           // (decode plan, whole-window)
+    decode_retention: Option<(usize, u64, String, String)>, // (prompt2 tokens, turn2 steps, retained, fresh)
     // S3 — quantized transit (row `quantized-transit`)
     quant: Option<QuantKit>,
     quant_derive: Option<(usize, u64, u64)>,
@@ -3898,6 +3899,60 @@ async fn then_decode_completions_equal(w: &mut BddWorld) {
         "the decode-plan completion must equal the whole-window completion"
     );
     println!("[decode-plan] greedy completion (both plans): {decode:?}");
+}
+
+#[when("two chat turns extend one transcript through the decode session")]
+async fn when_decode_retention(w: &mut BddWorld) {
+    use hologram_ai::commands::generate::{generate_stream_decode, GenConfig};
+
+    let cfg = GenConfig {
+        max_tokens: Some(4),
+        temperature: 0.0,
+        ..Default::default()
+    };
+    let kit = w.decode_staged.as_mut().expect("the staged decode kit");
+
+    let p1 = "3 141 59 26 5";
+    let mut sink = Vec::new();
+    let c1 = generate_stream_decode(&mut kit.staged, &DecimalTok, p1, &cfg, &mut sink)
+        .expect("turn 1 completes");
+    let steps_after_t1 = kit.staged.steps_taken();
+
+    // Turn 2 extends the transcript: turn 1's prompt + completion + a new
+    // token — the realized sequence is a strict prefix of this prompt.
+    let p2 = format!("{p1} {c1} 7");
+    let mut sink = Vec::new();
+    let retained = generate_stream_decode(&mut kit.staged, &DecimalTok, &p2, &cfg, &mut sink)
+        .expect("turn 2 completes over the retained prefix");
+    let turn2_steps = kit.staged.steps_taken() - steps_after_t1;
+
+    // The oracle: the same prompt from a session with NO retained prefix.
+    let mut sink = Vec::new();
+    let fresh = generate_stream_decode(&mut kit.mono, &DecimalTok, &p2, &cfg, &mut sink)
+        .expect("the fresh replay completes");
+
+    let p2_tokens = DecimalTok.encode(&p2).len();
+    w.decode_retention = Some((p2_tokens, turn2_steps, retained, fresh));
+}
+
+#[then("the second turn steps only its suffix and matches a fresh replay")]
+async fn then_decode_retention(w: &mut BddWorld) {
+    let (p2_tokens, turn2_steps, retained, fresh) =
+        w.decode_retention.as_ref().expect("the turns ran");
+    assert_eq!(
+        retained, fresh,
+        "the retained-prefix completion must equal the fresh replay"
+    );
+    assert!(!retained.is_empty(), "turn 2 must complete non-empty");
+    assert!(
+        *turn2_steps < *p2_tokens as u64,
+        "the shared prefix must not re-step: turn 2 took {turn2_steps} steps for a \
+         {p2_tokens}-token prompt"
+    );
+    println!(
+        "[decode-plan] retention: turn 2 stepped {turn2_steps}x for a {p2_tokens}-token \
+         transcript (suffix + generation only); completion {retained:?} equals the fresh replay"
+    );
 }
 
 #[when(

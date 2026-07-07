@@ -433,6 +433,12 @@ pub fn generate_stream(
 /// every generated token costs exactly one step — never a window-sized
 /// forward. Sampling, streaming, and stop conditions are the same code as the
 /// whole-window loop; the plans differ only in how a logit row is produced.
+///
+/// Cross-turn K/V retention: the session's carried rows are keyed by their
+/// realized tokens, so a prompt sharing a prefix with the session's realized
+/// sequence (a chat transcript extends its own history) rewinds to the
+/// common prefix and prefills ONLY the suffix — a warm turn's cost is its
+/// novel tokens, never the transcript.
 pub fn generate_stream_decode<S: LmSession>(
     session: &mut DecodeSession<S>,
     tokenizer: &dyn Tokenizer,
@@ -456,10 +462,22 @@ pub fn generate_stream_decode<S: LmSession>(
         );
     }
 
-    // Prefill: replay the prompt through decode steps. Only the last step's
-    // row feeds the sampler (causality makes the earlier rows byproducts).
+    // Rewind to the longest common prefix of the prompt and the session's
+    // realized sequence — capped at prompt_len - 1 so the last prompt token
+    // always re-steps (its logit row feeds the sampler).
+    let common = prompt_tokens
+        .iter()
+        .zip(session.realized_tokens())
+        .take_while(|(&p, &r)| p as i64 == r)
+        .count()
+        .min(prompt_tokens.len() - 1);
+    session.rewind_to(common);
+
+    // Prefill: replay the prompt's novel suffix through decode steps. Only
+    // the last step's row feeds the sampler (causality makes the earlier
+    // rows byproducts).
     let mut row: Vec<f32> = Vec::new();
-    for &t in &prompt_tokens {
+    for &t in &prompt_tokens[common..] {
         row = session
             .step(t as i64)
             .context("decode prefill step failed")?;

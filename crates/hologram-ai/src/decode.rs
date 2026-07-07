@@ -96,6 +96,14 @@ pub struct DecodeSession<S: LmSession> {
     past_v: Vec<Vec<u8>>,
     /// Realized positions (= the next token's absolute position).
     cur_len: usize,
+    /// The realized token at each position — the carried K/V's provenance,
+    /// so a later sequence can rewind to its common prefix instead of
+    /// replaying it (cross-turn K/V retention: the Generation axis's
+    /// resident prefix labels held ACROSS turns).
+    tokens: Vec<i64>,
+    /// Steps executed over this session's lifetime (the retention
+    /// instrument: a shared-prefix turn adds only its suffix).
+    steps: u64,
 }
 
 impl<S: LmSession> DecodeSession<S> {
@@ -115,6 +123,8 @@ impl<S: LmSession> DecodeSession<S> {
             context_length,
             rebuild: None,
             cur_len: 0,
+            tokens: Vec::new(),
+            steps: 0,
         })
     }
 
@@ -150,7 +160,27 @@ impl<S: LmSession> DecodeSession<S> {
     /// the runner keeps its materialized stages (a warm turn pays decode,
     /// never rematerialization).
     pub fn reset(&mut self) {
-        self.cur_len = 0;
+        self.rewind_to(0);
+    }
+
+    /// Rewind to position `len` (≤ the realized length): the carried K/V
+    /// rows for positions `0..len` stay live, rows past `len` become
+    /// unrealized (masked out until overwritten). Cross-turn retention:
+    /// a new sequence sharing a realized prefix pays only its suffix.
+    pub fn rewind_to(&mut self, len: usize) {
+        let len = len.min(self.cur_len);
+        self.cur_len = len;
+        self.tokens.truncate(len);
+    }
+
+    /// The realized token at each carried position, in order.
+    pub fn realized_tokens(&self) -> &[i64] {
+        &self.tokens
+    }
+
+    /// Steps executed over this session's lifetime (retention instrument).
+    pub fn steps_taken(&self) -> u64 {
+        self.steps
     }
 
     /// Kernel-dispatch counters for the last step (perf attribution).
@@ -324,6 +354,8 @@ impl<S: LmSession> DecodeSession<S> {
             }
         }
         self.cur_len += 1;
+        self.tokens.push(token);
+        self.steps += 1;
         logits.context("decode step produced no logits output")
     }
 }
