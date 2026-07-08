@@ -13,7 +13,7 @@ only.
 | Rest | corpus entropy / addressing quotient | coarsen the quotient (canonical form) | `kappa-addressing`; candidate S0 canonical rows (open) |
 | Transit | set-difference(remote, known) under the quotient; known = provenance-recorded κ, not cached bytes | κ-prior: provenance (exact repeat, under the shard's content pin — build, row `network-skip`), κ-manifest (cross-model — declared); coalesced ranges | `kappa-provenance-resolution`, `network-skip` |
 | Structure | O(config) graph + 32B·#tensors(config) identity data | parametric generation; minimal rep = (family id, config, κ-manifest) | `parametric-graph`, `parametricity` |
-| Residency | max stage + context window + resident prefix labels O(L·seq·d_kv), per environment | stage granularity — down to SUB-TENSOR: no tensor is atomic; the head partitions into vocab-row chunks via κ-range bindings (`chunked-head`); measured-headroom residency — admission leaves the model's own largest-stage transient bound free (a MODEL-derived margin, computed from the manifest before any byte moves); one stage is the floor; fallback to strict windowing, never refusal | `staged-execution`, `chunked-head`, `stage-residency-cache`, `memory-guard` |
+| Residency | max stage + context window + resident prefix labels O(L·seq·d_kv), per environment | stage granularity — down to SUB-TENSOR: no tensor is atomic; the head partitions into vocab-row chunks via κ-range bindings (`chunked-head`); and the WEIGHT tier pages — a stage loads against a residency budget, its weights a bounded window over the κ-store rather than pinned whole (`lazy-constant-residency`); measured-headroom residency — admission leaves the model's own largest-stage transient bound free (a MODEL-derived margin, computed from the manifest before any byte moves); one stage is the floor; fallback to strict windowing, never refusal | `staged-execution`, `chunked-head`, `lazy-constant-residency`, `stage-residency-cache`, `memory-guard` |
 | Generation | novel suffix cone only | window follows the sequence (geometric buckets, model context as ceiling); recursion through the known: resident labels re-derived, not re-executed (CE) | `staged-window-growth`, `decode-elision`, `structural-ce` |
 
 ## Critical path (in-browser)
@@ -142,6 +142,26 @@ plan, where it is true). `KappaStore::resolve_range` completes the transit
 side: after one whole-κ verification, a ranged binding moves only its bytes.
 The same instrument dissolves any future per-tensor ceiling: no single
 tensor need ever fit anything.
+
+The last ceiling was below hologram-ai: the substrate pinned every model
+weight resident at load, so a model whose weight set exceeds the window
+would not fit however finely staged. hologram v0.7.0 inverts it — `WeightStore`
+becomes a `WeightProvider` trait the host implements, and a session loads
+against a residency budget, paging each weight in on first use and evicting
+cold. hologram-ai's provider is its κ-store (row `lazy-constant-residency`):
+a k-form archive's whole-κ weight constants become `by_reference`
+fingerprints (the fingerprint IS the κ's content digest, so the paged slot's
+label and every derivation key equal the fully-resident path's — residency is
+orthogonal to identity), sized from a stat and paged from OPFS on demand. The
+arena is then a bounded window over the provider at the weight tier, exactly
+as sub-tensor κ-resolution made it a window at the stage-archive tier. The
+staged pipeline pages per stage; the browser pages from the OPFS κ-store
+under a budget knob. Verification stays at the trust boundary, once per κ per
+session. Witnessed: a paged load bounds peak resident weight bytes under the
+budget while the logits stay byte-identical to the fully-resident load, and
+the staged and browser handshakes reproduce the committed reference through
+paging. Ranged (quantized, chunked-head) bindings still materialize inline —
+per-slice-κ paging so they page too is the named follow-on.
 
 ## Lifecycle: saturation-derived residency (UOR-Framework #2)
 
