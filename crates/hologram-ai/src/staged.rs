@@ -352,6 +352,20 @@ impl KappaStore for CountingStore<'_> {
 /// k-forms (structure + κ-bindings), so resolving one moves no parameters.
 pub type StageResolver<'a> = Box<dyn FnMut(usize) -> Result<Vec<u8>> + 'a>;
 
+/// A factory producing a fresh `Send` κ-resolver — one per paged stage
+/// session, backing the weight provider independently of the runner's own
+/// `store`. Native: a resolver over a `DirKappaStore` path. Browser: a
+/// resolver over a cloned OPFS callback (single-threaded, so `Send`-safe).
+pub type ResolverFactory<'a> = Box<dyn Fn() -> crate::runner::KappaResolve + 'a>;
+
+/// Weight-tier paging configuration (row `lazy-constant-residency`).
+struct PagedWeights<'a> {
+    /// Resident paged-weight byte budget per stage session (`0` = unbounded).
+    budget: usize,
+    /// Produces the provider's κ-resolver, `Send` per hologram's `load_paged`.
+    make_resolver: ResolverFactory<'a>,
+}
+
 /// Per-stage observer: `(stage, stage_count, materialized_weight_bytes)`,
 /// called after a stage materializes and before it executes.
 pub type StageObserver<'a> = Box<dyn FnMut(usize, usize, u64) + 'a>;
@@ -403,6 +417,14 @@ fn stage_transient_bound(stage_weight_bytes: u64, stage_elements: u64) -> u64 {
 pub struct StagedRunner<'a> {
     resolve_stage: StageResolver<'a>,
     store: Box<dyn KappaStore + 'a>,
+    /// Weight-tier paging (row `lazy-constant-residency`), if enabled: each
+    /// stage loads PAGED against a residency budget instead of materializing
+    /// its weights whole — the arena is a bounded window over the κ-store, so
+    /// a stage whose weights exceed the window still runs. The resolver
+    /// factory produces a `Send` κ-resolver per stage session (independent of
+    /// this runner's `store`, which paging still uses to build the paged
+    /// archive and resolve any ranged sub-tensor bindings inline).
+    paged: Option<PagedWeights<'a>>,
     stage_count: usize,
     input_ports: Vec<PortInfo>,
     output_ports: Vec<PortInfo>,
@@ -582,6 +604,7 @@ impl<'a> StagedRunner<'a> {
         Ok(Self {
             resolve_stage,
             store,
+            paged: None,
             stage_count,
             feeds,
             sinks,
@@ -629,6 +652,19 @@ impl<'a> StagedRunner<'a> {
             .max()
             .unwrap_or(0);
         expected.max(measured)
+    }
+
+    /// Enable weight-tier paging (row `lazy-constant-residency`): each stage
+    /// loads PAGED against `budget` resident paged-weight bytes instead of
+    /// materializing its weights whole, `make_resolver` producing the
+    /// provider's `Send` κ-resolver per stage. A stage whose weights exceed
+    /// the window then still runs — the arena is a bounded window over the
+    /// κ-store. `budget == 0` pages without eviction (unbounded).
+    pub fn set_weight_paging(&mut self, budget: usize, make_resolver: ResolverFactory<'a>) {
+        self.paged = Some(PagedWeights {
+            budget,
+            make_resolver,
+        });
     }
 
     /// Adopt a shared session verified-κ set (a growable session forwards
@@ -745,22 +781,56 @@ impl<'a> StagedRunner<'a> {
             } else {
                 let archive = (self.resolve_stage)(stage)
                     .with_context(|| format!("resolving the stage {stage} archive"))?;
-                let mut counting = CountingStore {
-                    inner: self.store.as_mut(),
-                    bytes: 0,
-                };
                 let verified = std::rc::Rc::clone(&self.verified);
-                let material =
-                    materialize_archive_with(&archive, &mut counting, &mut verified.borrow_mut())
-                        .with_context(|| format!("materializing stage {stage}"))?;
+                let loaded = if let Some(paged) = self.paged.as_ref() {
+                    // Weight-tier paging: build the paged archive (ranged
+                    // sub-tensor bindings resolve inline; whole-κ weights
+                    // become provider references) and load against the budget.
+                    // The residency accounting for the resident-stage cache is
+                    // the pager's budget — a paged stage session holds at most
+                    // that many weight bytes, not the whole stage.
+                    let (paged_archive, tbl) = crate::materialize::paged_archive_with(
+                        &archive,
+                        self.store.as_mut(),
+                        &mut verified.borrow_mut(),
+                    )
+                    .with_context(|| format!("building the paged stage {stage} archive"))?;
+                    self.stage_weight_bytes[stage] = if paged.budget > 0 {
+                        (paged.budget as u64).min(tbl.total_bytes())
+                    } else {
+                        tbl.total_bytes()
+                    };
+                    let provider = std::sync::Arc::new(crate::runner::KappaWeightProvider::new(
+                        tbl,
+                        (paged.make_resolver)(),
+                    ));
+                    self.materialization_count += 1;
+                    if let Some(f) = self.on_stage.as_mut() {
+                        f(stage, self.stage_count, self.stage_weight_bytes[stage]);
+                    }
+                    HoloRunner::from_paged(paged_archive, provider, paged.budget)
+                        .with_context(|| format!("loading paged stage {stage}"))?
+                } else {
+                    let mut counting = CountingStore {
+                        inner: self.store.as_mut(),
+                        bytes: 0,
+                    };
+                    let material = materialize_archive_with(
+                        &archive,
+                        &mut counting,
+                        &mut verified.borrow_mut(),
+                    )
+                    .with_context(|| format!("materializing stage {stage}"))?;
+                    self.stage_weight_bytes[stage] = counting.bytes;
+                    self.materialization_count += 1;
+                    if let Some(f) = self.on_stage.as_mut() {
+                        f(stage, self.stage_count, counting.bytes);
+                    }
+                    HoloRunner::from_bytes(material)
+                        .with_context(|| format!("loading stage {stage}"))?
+                };
                 drop(archive);
-                self.stage_weight_bytes[stage] = counting.bytes;
-                self.materialization_count += 1;
-                if let Some(f) = self.on_stage.as_mut() {
-                    f(stage, self.stage_count, counting.bytes);
-                }
-                HoloRunner::from_bytes(material)
-                    .with_context(|| format!("loading stage {stage}"))?
+                loaded
             };
 
             // Each input port draws from its resolved source: a pipeline
@@ -928,6 +998,10 @@ impl KappaStore for SharedStore {
     fn resolve_range(&mut self, kappa: &str, offset: u64, len: u64) -> Result<Vec<u8>> {
         self.0.borrow_mut().resolve_range(kappa, offset, len)
     }
+
+    fn content_size(&mut self, kappa: &str) -> Result<u64> {
+        self.0.borrow_mut().content_size(kappa)
+    }
 }
 
 /// A length-adaptive staged provider: the window follows the SEQUENCE, never
@@ -969,6 +1043,12 @@ pub struct GrowableStagedSession {
     /// derivation key carries the map — a quantized window is a different
     /// derivation, never a reinterpretation.
     quant: Option<hologram_ai_common::lower::QuantMap>,
+    /// Weight-tier paging (row `lazy-constant-residency`): when set, every
+    /// regrown window's stages load PAGED against the budget, the factory
+    /// producing the provider's `Send` κ-resolver (independent of this
+    /// session's store). A model whose stage weights exceed the window then
+    /// runs — the arena is a bounded window over the κ-store.
+    weight_paging: Option<(usize, std::rc::Rc<dyn Fn() -> crate::runner::KappaResolve>)>,
     current: Option<(usize, StagedRunner<'static>)>,
 }
 
@@ -1014,6 +1094,7 @@ impl GrowableStagedSession {
             derived_store: None,
             derived_hits: 0,
             quant: None,
+            weight_paging: None,
             current: None,
         })
     }
@@ -1163,7 +1244,24 @@ impl GrowableStagedSession {
             let probe = std::rc::Rc::clone(probe);
             runner.set_admission_probe(Box::new(move |margin| probe(margin)));
         }
+        if let Some((budget, factory)) = &self.weight_paging {
+            let factory = std::rc::Rc::clone(factory);
+            runner.set_weight_paging(*budget, Box::new(move || factory()));
+        }
         Ok(runner)
+    }
+
+    /// Enable weight-tier paging for every regrown window (row
+    /// `lazy-constant-residency`): stages load PAGED against `budget`,
+    /// `make_resolver` producing the provider's `Send` κ-resolver. Set before
+    /// the first generation — paging is a property of the session's host, not
+    /// a mid-session switch.
+    pub fn set_weight_paging(
+        &mut self,
+        budget: usize,
+        make_resolver: std::rc::Rc<dyn Fn() -> crate::runner::KappaResolve>,
+    ) {
+        self.weight_paging = Some((budget, make_resolver));
     }
 
     /// A **decode-plan** pipeline runner over a bucket ≥ `want` (geometric,

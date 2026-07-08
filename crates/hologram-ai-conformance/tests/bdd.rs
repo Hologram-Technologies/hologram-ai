@@ -3983,6 +3983,89 @@ async fn when_paged_decode(w: &mut BddWorld) {
     pr.identical = identical;
 }
 
+#[given("the staged decoder fixture stage archives over a κ-store")]
+async fn given_paged_staged_fixture(w: &mut BddWorld) {
+    w.paged_residency = Some(PagedResidency {
+        store: staged_store("paged-staged"),
+        peak: 0,
+        budget: 0,
+        distinct_total: 0,
+        identical: false,
+    });
+}
+
+#[when("the staged pipeline is executed paged and fully resident")]
+async fn when_paged_staged(w: &mut BddWorld) {
+    use hologram_ai::runner::KappaResolve;
+    let kit = staged_kit();
+    let pr = w
+        .paged_residency
+        .as_mut()
+        .expect("the paged staged fixture");
+    let ids = staged_window_ids();
+    let lp = last_pos_buf(STG_TOKENS.len());
+
+    // Fully-resident staged pipeline → oracle logits.
+    let mut resident = StagedRunner::from_archives(
+        kit.stages.clone(),
+        Box::new(DirKappaStore::new(&pr.store.path)),
+    )
+    .expect("the resident staged runner builds");
+    let oracle = resident
+        .execute(&[&ids, &lp])
+        .expect("resident staged pass")[0]
+        .bytes
+        .clone();
+
+    // Budget between the largest single weight and the distinct set.
+    let mut distinct: std::collections::HashMap<String, u64> = std::collections::HashMap::new();
+    let mut largest = 0u64;
+    for (name, dims) in staged_manifest(false) {
+        let bytes = staged_tensor_bytes(&name, &dims);
+        largest = largest.max(bytes.len() as u64);
+        distinct.insert(kappa_of(&bytes), bytes.len() as u64);
+    }
+    let budget = ((largest + distinct.values().sum::<u64>()) / 2) as usize;
+
+    // Paged staged pipeline: each stage loads paged, the provider's resolver
+    // a fresh DirKappaStore over the same store path.
+    let mut paged = StagedRunner::from_archives(
+        kit.stages.clone(),
+        Box::new(DirKappaStore::new(&pr.store.path)),
+    )
+    .expect("the paged staged runner builds");
+    let path = pr.store.path.clone();
+    paged.set_weight_paging(
+        budget,
+        Box::new(move || {
+            let path = path.clone();
+            Box::new(move |kappa: &str| DirKappaStore::new(&path).resolve(kappa)) as KappaResolve
+        }),
+    );
+    let got = paged.execute(&[&ids, &lp]).expect("paged staged pass")[0]
+        .bytes
+        .clone();
+
+    pr.budget = budget;
+    pr.identical = got == oracle;
+    pr.peak = 1; // structural: the paged staged pass completed
+    pr.distinct_total = distinct.values().sum();
+}
+
+#[then("the paged staged logits are byte-identical to the fully-resident staged logits")]
+async fn then_paged_staged_equal(w: &mut BddWorld) {
+    let pr = w.paged_residency.as_ref().expect("the paged staged run");
+    assert!(
+        pr.identical,
+        "the paged staged pipeline must reproduce the fully-resident staged logits byte-for-byte"
+    );
+    println!(
+        "[lazy-constant-residency] staged paged == fully-resident staged (budget {} B, \
+         distinct weights {} B): byte-identical logits",
+        pr.budget, pr.distinct_total
+    );
+}
+
 #[then("peak resident weight bytes stay under the budget and the logits are byte-identical to the fully-resident load")]
 async fn then_paged_bounded(w: &mut BddWorld) {
     let pr = w.paged_residency.as_ref().expect("the paged decode ran");

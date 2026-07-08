@@ -16,3 +16,8 @@ Feature: The weight tier pages against a residency budget
     Given the staged decoder fixture compiled monolithically over a κ-store
     When it is loaded paged under a budget below its distinct weight set and decoded
     Then peak resident weight bytes stay under the budget and the logits are byte-identical to the fully-resident load
+
+  Scenario: a paged staged pipeline equals the fully-resident staged pipeline
+    Given the staged decoder fixture stage archives over a κ-store
+    When the staged pipeline is executed paged and fully resident
+    Then the paged staged logits are byte-identical to the fully-resident staged logits
