@@ -23,10 +23,10 @@ use std::collections::HashMap;
 use std::num::NonZeroU64;
 
 use hologram_ai::materialize::DirKappaStore;
-use hologram_ai::quantized::crystallize_quantized;
-use hologram_ai::staged::{quantizable_weights, GrowableStagedSession};
+use hologram_ai::quantized::{crystallize_quantized, crystallize_quantized_range};
+use hologram_ai::staged::{head_quant_chunks, quantizable_weights, GrowableStagedSession};
 use hologram_ai::DecodeSession;
-use hologram_ai_common::lower::QuantMap;
+use hologram_ai_common::lower::{quant_key, QuantMap};
 use hologram_ai_common::DType;
 
 /// A prompt of arbitrary in-vocabulary token ids (values are immaterial — the
@@ -86,6 +86,30 @@ fn decode_family(scale: &FamilyScale) -> (Vec<f32>, Vec<i64>) {
         let entry = crystallize_quantized(&mut dir, wide, DType::BF16, out, inf)
             .unwrap_or_else(|e| panic!("{arch}: crystallizing int8 artifact for {wide}: {e:#}"));
         quant.insert(wide.clone(), entry);
+    }
+
+    // The LM head joins the int8 tier too (row `quantized-transit`, chunked
+    // head): each vocab-row chunk of a large head gets its OWN per-chunk
+    // artifact, keyed by (κ, range), so a chunked head is a dequant-fused int8
+    // matmul instead of a bf16 matmul whose whole-panel F32 image thrashes
+    // residency. A no-op where the head is a single chunk (small vocab).
+    for target in head_quant_chunks(&config_json, &keys, &kappas, &shapes, &dtypes, None, one)
+        .unwrap_or_else(|e| panic!("{arch}: head_quant_chunks: {e:#}"))
+    {
+        let entry = crystallize_quantized_range(
+            &mut dir,
+            &target.kappa,
+            target.offset,
+            target.len,
+            DType::BF16,
+            target.out_features,
+            target.in_features,
+        )
+        .unwrap_or_else(|e| panic!("{arch}: crystallizing head-chunk artifact: {e:#}"));
+        quant.insert(
+            quant_key(&target.kappa, Some((target.offset, target.len))),
+            entry,
+        );
     }
 
     // The footprint-bounded shared-ledger session (the wasm residency model).

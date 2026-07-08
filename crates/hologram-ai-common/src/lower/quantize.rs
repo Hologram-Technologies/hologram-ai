@@ -159,20 +159,46 @@ pub fn quantize_weights(graph: &mut AiGraph, strategy: QuantStrategy) -> Result<
     Ok(())
 }
 
-/// The quantized derived-artifact map (row `quantized-transit`): wide κ →
-/// `(artifact κ, out_features, in_features)` where the artifact is the
-/// matmul-ready per-channel symmetric int8 form of the wide `[out, in]`
-/// weight — transposed to `[in, out]` at derivation, layout
-/// `q_i8(in·out) ‖ scales_f32(4·out)` (one scale per output column).
+/// The quantized derived-artifact map (row `quantized-transit`): a
+/// [`quant_key`] → `(artifact κ, out_features, in_features)` where the
+/// artifact is the matmul-ready per-channel symmetric int8 form of the wide
+/// `[out, in]` weight — transposed to `[in, out]` at derivation, layout
+/// `q_i8(in·out) ‖ scales_f32(4·out)` (one scale per output column). A whole
+/// projection is keyed by its wide κ; a **head chunk** (a vocab-row range of
+/// the LM-head/tied-embedding weight) is keyed by that κ AND its byte range,
+/// so the several chunks that share one κ each map to their own per-chunk
+/// artifact.
 pub type QuantMap = std::collections::HashMap<String, (String, u64, u64)>;
 
+/// The [`QuantMap`] key of a κ-bound projection weight: the bare κ for a
+/// whole-tensor binding, or `κ@offset+len` for a ranged (head-chunk) binding.
+/// The graph matcher and the derivation loop must mint the identical key for a
+/// chunk to resolve its artifact — this one function is that shared law.
+pub fn quant_key(kappa: &str, range: Option<(u64, u64)>) -> String {
+    match range {
+        Some((offset, len)) => format!("{kappa}@{offset}+{len}"),
+        None => kappa.to_string(),
+    }
+}
+
+/// One matched projection weight: the `MatMul` node, its wide param tensor id,
+/// the κ, and the κ byte range when the binding is ranged (a head chunk).
+struct WeightMatch {
+    matmul_idx: usize,
+    wide_tid: TensorId,
+    kappa: String,
+    range: Option<(u64, u64)>,
+}
+
 /// Matches of the projection chain `MatMul(x, Transpose{[1,0]}(wide))`
-/// (optionally through a `Cast`) where `wide` is an un-ranged
-/// [`AiParam::External`]: `(matmul node index, wide param tid, wide κ)`.
+/// (optionally through a `Cast`) where `wide` is an [`AiParam::External`].
+/// Whole-tensor bindings (`range: None`) and ranged head-chunk bindings are
+/// both reported; a caller that only quantizes whole tensors (the retirement
+/// prober) filters to `range.is_none()`.
 fn transposed_external_matmul_weights(
     graph: &AiGraph,
     producer: &std::collections::HashMap<TensorId, usize>,
-) -> Vec<(usize, TensorId, String)> {
+) -> Vec<WeightMatch> {
     let mut matches = Vec::new();
     for (m_idx, node) in graph.nodes.iter().enumerate() {
         if !matches!(node.op, AiOp::MatMul) {
@@ -200,13 +226,15 @@ fn transposed_external_matmul_weights(
             Some(_) => continue,
             None => t_in,
         };
-        let Some(AiParam::External {
-            kappa, range: None, ..
-        }) = graph.params.get(&wide_tid)
-        else {
+        let Some(AiParam::External { kappa, range, .. }) = graph.params.get(&wide_tid) else {
             continue;
         };
-        matches.push((m_idx, wide_tid, kappa.clone()));
+        matches.push(WeightMatch {
+            matmul_idx: m_idx,
+            wide_tid,
+            kappa: kappa.clone(),
+            range: *range,
+        });
     }
     matches
 }
@@ -226,7 +254,13 @@ pub fn quantizable_external_weights(graph: &AiGraph) -> Result<Vec<String>> {
         .flat_map(|(i, n)| n.outputs.iter().map(move |t| (*t, i)))
         .collect();
     let mut dummy = QuantMap::new();
-    for (_, wide_tid, kappa) in transposed_external_matmul_weights(graph, &producer) {
+    // Retirement is a whole-κ decision: a ranged head-chunk binding never
+    // retires its (shared, still-wide) κ, so the prober ignores ranged matches.
+    for m in transposed_external_matmul_weights(graph, &producer)
+        .into_iter()
+        .filter(|m| m.range.is_none())
+    {
+        let (wide_tid, kappa) = (m.wide_tid, m.kappa);
         let Some(info) = graph.tensor_info.get(&wide_tid) else {
             continue;
         };
@@ -261,6 +295,60 @@ pub fn quantizable_external_weights(graph: &AiGraph) -> Result<Vec<String>> {
         .collect();
     eligible.sort();
     Ok(eligible)
+}
+
+/// A head-chunk quantization target: a vocab-row range of the LM-head weight
+/// the int8 tier can crystallize into its OWN per-chunk artifact. The several
+/// chunks of one head share the wide κ (a tied head shares the embedding
+/// table's κ, kept wide for the Gather) but each covers a distinct byte range,
+/// so a whole-κ derivation cannot express them — each is derived from its slice
+/// and keyed by [`quant_key`]`(κ, Some((offset, len)))`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HeadChunkTarget {
+    /// The wide κ the chunk ranges into (tied → the embedding table's κ).
+    pub kappa: String,
+    /// Byte offset of this chunk within the wide tensor.
+    pub offset: u64,
+    /// Byte length of this chunk (`rows · hidden · elem_bytes`).
+    pub len: u64,
+    /// Chunk rows — the vocab slice this chunk covers (the artifact's `out`).
+    pub out_features: u64,
+    /// Hidden size — the projection's `in`.
+    pub in_features: u64,
+}
+
+/// The ranged (head-chunk) projection weights of a stage graph: the vocab-row
+/// chunks of a large LM head that the int8 tier derives into per-chunk
+/// artifacts. Whole-tensor projections (the 196 attention/MLP weights) are
+/// reported by [`quantizable_external_weights`]; this is their ranged twin, so
+/// a chunked head joins the int8 tier instead of staying a bf16 matmul whose
+/// whole-panel F32 image thrashes residency.
+pub fn ranged_external_matmul_weights(graph: &AiGraph) -> Vec<HeadChunkTarget> {
+    let producer: std::collections::HashMap<TensorId, usize> = graph
+        .nodes
+        .iter()
+        .enumerate()
+        .flat_map(|(i, n)| n.outputs.iter().map(move |t| (*t, i)))
+        .collect();
+    transposed_external_matmul_weights(graph, &producer)
+        .into_iter()
+        .filter_map(|m| {
+            let (offset, len) = m.range?;
+            let info = graph.tensor_info.get(&m.wide_tid)?;
+            if info.shape.len() != 2 {
+                return None;
+            }
+            let out_features = info.shape.first()?.as_concrete()?;
+            let in_features = info.shape.get(1)?.as_concrete()?;
+            Some(HeadChunkTarget {
+                kappa: m.kappa,
+                offset,
+                len,
+                out_features,
+                in_features,
+            })
+        })
+        .collect()
 }
 
 /// Rewrite κ-bound MatMul weights onto their quantized derived artifacts
@@ -311,13 +399,16 @@ pub fn quantize_external_matmul_weights(graph: &mut AiGraph, quant: &QuantMap) -
     // [∏leading, in] around the matmul (a structural reshape pair — the
     // same computation, the kernel's proven shape) and unflatten after.
     let mut rewrites: Vec<Rewrite> = Vec::new();
-    for (m_idx, wide_tid, kappa) in transposed_external_matmul_weights(graph, &producer) {
-        let Some((quant_kappa, out_features, in_features)) = quant.get(&kappa) else {
+    for m in transposed_external_matmul_weights(graph, &producer) {
+        // Whole tensor → keyed by κ; head chunk → keyed by κ AND its range, so
+        // the several chunks sharing one κ each resolve their own artifact.
+        let key = quant_key(&m.kappa, m.range);
+        let Some((quant_kappa, out_features, in_features)) = quant.get(&key) else {
             continue;
         };
         rewrites.push(Rewrite {
-            matmul_idx: m_idx,
-            wide_tid,
+            matmul_idx: m.matmul_idx,
+            wide_tid: m.wide_tid,
             kappa: quant_kappa.clone(),
             out_features: *out_features,
             in_features: *in_features,
@@ -571,6 +662,143 @@ mod tests {
             .unwrap();
         assert_eq!(mm.inputs[1], deq.outputs[0]);
         assert!(!g.params.contains_key(&1), "old f32 weight retired");
+    }
+
+    /// A head-chunk projection: `MatMul(x, Transpose(Cast(external_ranged)))`,
+    /// the exact shape the parametric head chunk emits — a ranged bf16 external
+    /// (a vocab-row slice of the tied embedding), widened by `Cast`, transposed,
+    /// matmul'd. `out` rows of `in` hidden, at byte `offset` of the wide κ.
+    fn ranged_head_chunk_graph(kappa: &str, offset: u64, out: u64, inf: u64) -> AiGraph {
+        let mut ti: HashMap<TensorId, TensorInfo> = HashMap::new();
+        let mut params: HashMap<TensorId, AiParam> = HashMap::new();
+        // x = input [1, in]
+        ti.insert(
+            0,
+            TensorInfo::new(DType::F32, shape_from_concrete(&[1, inf])),
+        );
+        // W = ranged bf16 external [out, in]
+        let w_info = TensorInfo::new(DType::BF16, shape_from_concrete(&[out, inf]));
+        let len = out * inf * 2; // bf16 = 2 bytes
+        params.insert(
+            1,
+            AiParam::external_range(kappa.to_string(), w_info.clone(), offset, len),
+        );
+        ti.insert(1, w_info);
+        // Wf32 = Cast(W) [out, in]
+        ti.insert(
+            2,
+            TensorInfo::new(DType::F32, shape_from_concrete(&[out, inf])),
+        );
+        // Wt = Transpose(Wf32) [in, out]
+        ti.insert(
+            3,
+            TensorInfo::new(DType::F32, shape_from_concrete(&[inf, out])),
+        );
+        // y = MatMul(x, Wt) [1, out]
+        ti.insert(
+            4,
+            TensorInfo::new(DType::F32, shape_from_concrete(&[1, out])),
+        );
+        AiGraph {
+            name: "head_chunk".into(),
+            nodes: vec![
+                AiNode::new(0, AiOp::Cast { to: DType::F32 }, vec![1], vec![2]),
+                AiNode::new(1, AiOp::Transpose { perm: vec![1, 0] }, vec![2], vec![3]),
+                AiNode::new(2, AiOp::MatMul, vec![0, 3], vec![4]),
+            ],
+            inputs: vec![0],
+            outputs: vec![4],
+            input_names: Vec::new(),
+            output_names: Vec::new(),
+            params,
+            tensor_info: ti,
+            metadata: HashMap::new(),
+            warnings: Vec::new(),
+            dim_vars: DimVarTable::default(),
+            shape_constraints: crate::ir::ConstraintStore::default(),
+            subgraphs: HashMap::new(),
+            tensor_names: HashMap::new(),
+            topo_cache: Default::default(),
+        }
+    }
+
+    #[test]
+    fn ranged_head_chunk_is_a_quant_target_keyed_by_kappa_and_range() {
+        // Two chunks of ONE head share the κ but cover distinct byte ranges —
+        // each must be its own target under a distinct composite key.
+        let g0 = ranged_head_chunk_graph("embed", 0, 3, 4);
+        let g1 = ranged_head_chunk_graph("embed", 3 * 4 * 2, 3, 4);
+        let t0 = ranged_external_matmul_weights(&g0);
+        let t1 = ranged_external_matmul_weights(&g1);
+        assert_eq!(t0.len(), 1);
+        assert_eq!(t1.len(), 1);
+        assert_eq!(t0[0].kappa, "embed");
+        assert_eq!(
+            (
+                t0[0].offset,
+                t0[0].len,
+                t0[0].out_features,
+                t0[0].in_features
+            ),
+            (0, 24, 3, 4)
+        );
+        assert_eq!(t1[0].offset, 24);
+        // Distinct composite keys for chunks that share the κ.
+        assert_ne!(
+            quant_key(&t0[0].kappa, Some((t0[0].offset, t0[0].len))),
+            quant_key(&t1[0].kappa, Some((t1[0].offset, t1[0].len))),
+        );
+        // A whole-tensor retirement prober must NOT see a ranged chunk.
+        assert!(quantizable_external_weights(&g0).unwrap().is_empty());
+    }
+
+    #[test]
+    fn ranged_head_chunk_rewrites_onto_its_per_chunk_artifact() {
+        let mut g = ranged_head_chunk_graph("embed", 0, 3, 4);
+        let key = quant_key("embed", Some((0, 24)));
+        let mut quant = QuantMap::new();
+        quant.insert(key, ("chunk-artifact-κ".to_string(), 3, 4));
+
+        let rewritten = quantize_external_matmul_weights(&mut g, &quant).unwrap();
+        assert_eq!(rewritten, 1, "the ranged head chunk must be rewritten");
+
+        // A Dequantize node feeds the matmul directly; the bf16 Cast+Transpose
+        // and the wide ranged binding are gone (no F32 head panel remains).
+        let deq = g
+            .nodes
+            .iter()
+            .find(|n| matches!(n.op, AiOp::Dequantize { .. }))
+            .expect("dequant inserted");
+        let mm = g
+            .nodes
+            .iter()
+            .find(|n| matches!(n.op, AiOp::MatMul))
+            .unwrap();
+        assert_eq!(
+            mm.inputs[1], deq.outputs[0],
+            "matmul B is the dequant output"
+        );
+        assert!(
+            !g.nodes
+                .iter()
+                .any(|n| matches!(n.op, AiOp::Cast { .. } | AiOp::Transpose { .. })),
+            "the bf16 Cast and Transpose retire with the wide binding"
+        );
+        // Both artifact bindings range into the ONE per-chunk artifact κ.
+        let art: Vec<_> = g
+            .params
+            .values()
+            .filter_map(|p| match p {
+                AiParam::External { kappa, .. } => Some(kappa.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert!(art.iter().all(|k| *k == "chunk-artifact-κ"));
+        assert_eq!(
+            art.len(),
+            2,
+            "i8 block + per-channel scales range into one artifact"
+        );
     }
 
     #[test]

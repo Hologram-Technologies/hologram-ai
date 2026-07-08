@@ -366,6 +366,49 @@ pub fn quantizable_weights(
         .collect())
 }
 
+/// The head-chunk quantization targets of the staged plan (row
+/// `quantized-transit`, chunked head): the vocab-row ranges of a large LM head
+/// that the int8 tier derives into per-chunk artifacts, so a chunked head
+/// joins the int8 tier instead of remaining a bf16 matmul whose whole-panel F32
+/// image thrashes residency. Distinct from [`quantizable_weights`], which lists
+/// whole projection κs to RETIRE: a head chunk's κ (a tied head's is the
+/// embedding table's) stays wide for the embedding Gather — only its slice is
+/// crystallized, never the tensor. Deduplicated by (κ, range), so the several
+/// stages that reference one chunk report it once.
+pub fn head_quant_chunks(
+    config_json: &str,
+    keys: &[String],
+    kappas: &[String],
+    shapes: &[Vec<u64>],
+    dtypes: &[DType],
+    context_length: Option<u64>,
+    layers_per_stage: NonZeroU64,
+) -> Result<Vec<hologram_ai_common::lower::HeadChunkTarget>> {
+    let graphs = bound_stage_graphs(
+        config_json,
+        keys,
+        kappas,
+        shapes,
+        dtypes,
+        context_length,
+        layers_per_stage,
+    )?;
+    let mut seen = std::collections::HashSet::new();
+    let mut targets = Vec::new();
+    for graph in &graphs {
+        for target in hologram_ai_common::lower::ranged_external_matmul_weights(graph) {
+            let key = hologram_ai_common::lower::quant_key(
+                &target.kappa,
+                Some((target.offset, target.len)),
+            );
+            if seen.insert(key) {
+                targets.push(target);
+            }
+        }
+    }
+    Ok(targets)
+}
+
 /// A κ-store adapter that tallies the bytes it resolves — the per-stage
 /// weight-residency instrument of the [`StagedRunner`].
 struct CountingStore<'s> {

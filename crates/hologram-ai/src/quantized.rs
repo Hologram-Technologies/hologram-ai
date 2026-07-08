@@ -109,6 +109,37 @@ pub fn crystallize_quantized(
     Ok((kappa, out_features, in_features))
 }
 
+/// Crystallize the int8 artifact of a **head chunk**: a byte range
+/// `[offset, offset+len)` of the wide LM-head tensor `wide_kappa` (a tied
+/// head's is the embedding table), covering `out_features` vocab rows of
+/// `in_features` hidden. Resolves only the chunk's slice through the store
+/// (sub-tensor κ-resolution — the tied embedding never re-transits whole),
+/// derives its matmul-ready per-channel int8 form, and persists it. Returns
+/// the artifact's [`QuantMap`] entry `(artifact κ, out_features, in_features)`;
+/// the caller keys it by [`hologram_ai_common::lower::quant_key`]`(wide_kappa,
+/// Some((offset, len)))`. The wide κ is NOT evaporated — the embedding Gather
+/// still binds it.
+pub fn crystallize_quantized_range(
+    store: &mut DirKappaStore,
+    wide_kappa: &str,
+    offset: u64,
+    len: u64,
+    dtype: DType,
+    out_features: u64,
+    in_features: u64,
+) -> Result<(String, u64, u64)> {
+    let slice = store
+        .resolve_range(wide_kappa, offset, len)
+        .with_context(|| {
+            format!(
+                "resolving head-chunk range [{offset}, {offset}+{len}) of wide κ `{wide_kappa}`"
+            )
+        })?;
+    let artifact = derive_quantized_artifact(&slice, dtype, out_features, in_features)?;
+    let kappa = store.insert(&artifact)?;
+    Ok((kappa, out_features, in_features))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

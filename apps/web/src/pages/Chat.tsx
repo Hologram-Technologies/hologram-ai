@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { renderChatTemplate } from "../chatTemplate";
 import {
   CompiledArchive,
@@ -9,8 +9,8 @@ import {
   generate,
   listCompiledArchives,
   listKnownModels,
-  onProcessLine,
 } from "../ipc";
+import { chatStream } from "../chatStream";
 import { countTokens } from "../holo";
 import { MessageBody } from "../components/MessageBody";
 
@@ -167,12 +167,16 @@ export function Chat() {
   const [sessionMeta, setSessionMeta] = useState<
     ({ contextLength: number | null; tokenizer?: Uint8Array } & ModelChat) | null
   >(null);
-  // Narration of the work behind the first token (window compiles, stage
-  // materialization) — shown in the streaming placeholder so a large model's
-  // honest startup is visible, never a silent hang.
-  const [genStatus, setGenStatus] = useState("");
   const transcriptRef = useRef<HTMLDivElement>(null);
-  const streamingRef = useRef<string>("");
+
+  // The in-flight generation lives in a module-level store, not this component:
+  // token deltas + startup narration accumulate whichever route is mounted, so
+  // watching the Logs page mid-generation no longer strands the bubble. `Chat`
+  // reads the live snapshot and renders it; the completed turn is committed by
+  // `onSend` (and persisted to localStorage) independent of mount state.
+  const stream = useSyncExternalStore(chatStream.subscribe, chatStream.getSnapshot);
+  const inFlight = stream.generating && stream.archive === archive;
+  const streamingText = inFlight ? cleanAssistantText(stream.text) : "";
 
   useEffect(() => {
     listCompiledArchives().then((a) => {
@@ -236,58 +240,12 @@ export function Chat() {
   const turnSeparator =
     selectedKnown?.chatTurnSeparator ?? GENERIC_TURN_SEPARATOR;
 
-  // Subscribe to chat lines once.
-  useEffect(() => {
-    let timeoutId: number | null = null;
-    let isFlushing = false;
-    
-    const flushText = () => {
-      if (!isFlushing) return;
-      isFlushing = false;
-      
-      setMessages((prev) => {
-        const last = prev[prev.length - 1];
-        if (last && last.role === "assistant") {
-          const updated = [...prev];
-          updated[updated.length - 1] = { role: "assistant", text: streamingRef.current };
-          return updated;
-        }
-        return [...prev, { role: "assistant", text: streamingRef.current }];
-      });
-    };
-
-    const unlistenStatus = onProcessLine("chat://status", (l) => {
-      if (l.stream === "stderr") return;
-      setGenStatus(l.line);
-    });
-    const unlisten = onProcessLine("chat://line", (l) => {
-      if (l.stream === "stderr") return;
-      if (l.line) setGenStatus("");
-      // Each event is a cumulative SNAPSHOT of the whole completion so far
-      // (the generation loop re-decodes the full token sequence each step for
-      // correct BPE spacing) — replace, never append: appending garbles the
-      // stored turn and poisons every subsequent multi-turn prompt.
-      streamingRef.current = l.line;
-
-      if (!isFlushing) {
-        isFlushing = true;
-        timeoutId = window.setTimeout(flushText, 50);
-      }
-    });
-    
-    return () => {
-      unlisten.then((un) => un());
-      unlistenStatus.then((un) => un());
-      if (timeoutId !== null) window.clearTimeout(timeoutId);
-    };
-  }, []);
-
   useEffect(() => {
     transcriptRef.current?.scrollTo({
       top: transcriptRef.current.scrollHeight,
       behavior: "smooth",
     });
-  }, [messages]);
+  }, [messages, stream.text, inFlight]);
 
   async function onSend() {
     if (!archive || !prompt.trim() || running) return;
@@ -371,10 +329,26 @@ export function Chat() {
       promptTemplateForGen = selectedKnown?.promptTemplate ?? undefined;
     }
 
-    setMessages((prev) => [...prev, { role: "user", text: userText }]);
+    // Append the user turn and persist it DIRECTLY (not only through the
+    // messages effect), so it survives the component unmounting mid-generation:
+    // navigating to Logs/Models to watch the stream must not lose the turn.
+    const base: Message[] = [...messages, { role: "user", text: userText }];
+    const storeKey = `hologram_chat:${archive}`;
+    const persist = (msgs: Message[]) => {
+      try {
+        localStorage.setItem(storeKey, JSON.stringify(msgs));
+      } catch {
+        // Storage full/unavailable — the session still works in memory.
+      }
+    };
+    setMessages(base);
+    persist(base);
     setPrompt("");
     setRunning(true);
-    streamingRef.current = "";
+    // The in-flight completion streams into the module-level store (rendered as
+    // a live trailing bubble), not into `messages` — so it accumulates whichever
+    // route is mounted.
+    chatStream.begin(archive);
     try {
       await generate({
         archive,
@@ -391,47 +365,26 @@ export function Chat() {
         eos: sessionMeta?.eosTokenId,
         promptTemplate: promptTemplateForGen,
       });
-      // Commit the final streamed text SYNCHRONOUSLY: the token stream's
-      // debounced flush may still be pending, and the next turn's history
-      // is built from `messages` — a turn sent inside that 50 ms window
-      // would otherwise assemble its prompt one flush short (CI caught
-      // turn-3 prompts missing the last characters of turn 2).
-      setMessages((prev) => {
-        const last = prev[prev.length - 1];
-        if (last && last.role === "assistant" && last.text !== streamingRef.current) {
-          const updated = [...prev];
-          updated[updated.length - 1] = { role: "assistant", text: streamingRef.current };
-          return updated;
-        }
-        if (last && last.role === "assistant") return prev;
-        return [...prev, { role: "assistant", text: streamingRef.current }];
-      });
-      // Commit the final completion SYNCHRONOUSLY before the composer
-      // re-enables: the streaming path batches transcript updates behind a
-      // debounce, and a send that lands before the last flush would build
-      // the next prompt from a truncated assistant turn (a real one-token
-      // loss caught by the handshake reference gate in CI). The debounced
-      // flush that follows writes identical content — idempotent.
-      const finalText = streamingRef.current;
-      if (finalText) {
-        setMessages((prev) => {
-          const last = prev[prev.length - 1];
-          if (last && last.role === "assistant") {
-            const updated = [...prev];
-            updated[updated.length - 1] = { role: "assistant", text: finalText };
-            return updated;
-          }
-          return [...prev, { role: "assistant", text: finalText }];
-        });
-      }
+      // Commit the final completion, persisting DIRECTLY. `generate` emits the
+      // final `chat://line` synchronously before it resolves, so the store's
+      // snapshot IS the completed text here. Writing localStorage (not relying
+      // on a setState a torn-down component would ignore) is what makes the turn
+      // survive a route change; committing before the composer re-enables also
+      // stops the next prompt being built one flush short (the turn-3 truncation
+      // the handshake reference gate caught).
+      const finalText = chatStream.getSnapshot().text;
+      const committed: Message[] = finalText
+        ? [...base, { role: "assistant", text: finalText }]
+        : base;
+      setMessages(committed);
+      persist(committed);
     } catch (e) {
-      setMessages((prev) => [
-        ...prev,
-        { role: "assistant", text: `error: ${String(e)}` },
-      ]);
+      const errored: Message[] = [...base, { role: "assistant", text: `error: ${String(e)}` }];
+      setMessages(errored);
+      persist(errored);
     } finally {
       setRunning(false);
-      setGenStatus("");
+      chatStream.end();
     }
   }
 
@@ -442,7 +395,6 @@ export function Chat() {
   function onResetChat() {
     if (running) return;
     setMessages([]);
-    streamingRef.current = "";
   }
 
   return (
@@ -485,25 +437,32 @@ export function Chat() {
       </div>
 
       <div className="transcript" ref={transcriptRef}>
-        {messages.length === 0 ? (
+        {messages.length === 0 && !inFlight ? (
           <div className="empty">Pick an archive and send a prompt.</div>
         ) : (
-          messages.map((m, i) => {
-            const text =
-              m.role === "assistant" ? cleanAssistantText(m.text) : m.text;
-            const isStreamingPlaceholder =
-              !text && running && i === messages.length - 1;
-            return (
+          <>
+            {messages.map((m, i) => (
               <div key={i} className={`bubble ${m.role}`}>
                 <div className="role">{m.role}</div>
-                {isStreamingPlaceholder ? (
-                  <div className="md">{genStatus ? `${genStatus} …` : "…"}</div>
+                <MessageBody
+                  text={m.role === "assistant" ? cleanAssistantText(m.text) : m.text}
+                />
+              </div>
+            ))}
+            {/* The live in-flight completion (from the module store), rendered
+                whether or not this route was mounted when it started. Before the
+                first token it shows the honest startup narration. */}
+            {inFlight && (
+              <div className="bubble assistant">
+                <div className="role">assistant</div>
+                {streamingText ? (
+                  <MessageBody text={streamingText} />
                 ) : (
-                  <MessageBody text={text} />
+                  <div className="md">{stream.status ? `${stream.status} …` : "…"}</div>
                 )}
               </div>
-            );
-          })
+            )}
+          </>
         )}
       </div>
 

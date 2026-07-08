@@ -968,6 +968,7 @@ struct BddWorld {
     chunked_logits: Option<(Vec<u8>, Vec<u8>)>,
     chunked_completion: Option<(String, u64)>,
     chunked_traffic: Option<ChunkedTraffic>,
+    chunked_head_quant: Option<ChunkedHeadQuant>,
     // S4 — performance contract (row `performance-contract`)
     perf: Option<PerfReport>,
     perf_kit: Option<PerfKit>,
@@ -3572,6 +3573,153 @@ async fn then_chunked_granularity(w: &mut BddWorld) {
             "chunk stage {i} ({bytes} B) must stay within layer granularity ({layer_max} B)"
         );
     }
+}
+
+/// The chunked head quantized onto per-chunk int8 artifacts (row `chunked-head`
+/// × `quantized-transit`): the quantized chunk stages, the tied head source κ,
+/// the per-chunk artifact κs, and a reproducible completion.
+struct ChunkedHeadQuant {
+    stages: Vec<Vec<u8>>,
+    head_kappa: String,
+    artifact_kappas: Vec<String>,
+    completion: String,
+    completion_again: String,
+}
+
+#[when("the chunked head derives a per-chunk int8 artifact for every chunk")]
+async fn when_chunked_head_quantized(w: &mut BddWorld) {
+    // Own everything up front so the fixture borrow ends before the world is
+    // written back.
+    let (keys, kappas, shapes, store_path) = {
+        let kit = w.chunked.as_ref().expect("the chunked kit");
+        (
+            kit.keys.clone(),
+            kit.kappas.clone(),
+            kit.shapes.clone(),
+            kit.store.path.clone(),
+        )
+    };
+    let config = chunked_config().to_string();
+    let dtypes = vec![DType::F32; keys.len()];
+    let one = std::num::NonZeroU64::new(1).expect("1 is non-zero");
+
+    let targets = hologram_ai::staged::head_quant_chunks(
+        &config, &keys, &kappas, &shapes, &dtypes, None, one,
+    )
+    .expect("the head-chunk targets compute");
+    assert!(
+        targets.len() > 1,
+        "the wide head must partition into >1 chunk"
+    );
+
+    // Crystallize a per-chunk int8 artifact for every chunk, keyed by κ+range.
+    let mut dir = DirKappaStore::new(&store_path);
+    let mut map = hologram_ai::quantized::QuantMap::new();
+    let mut artifact_kappas = Vec::new();
+    for t in &targets {
+        let (artifact, _, _) = hologram_ai::quantized::crystallize_quantized_range(
+            &mut dir,
+            &t.kappa,
+            t.offset,
+            t.len,
+            DType::F32,
+            t.out_features,
+            t.in_features,
+        )
+        .expect("the head-chunk artifact crystallizes");
+        artifact_kappas.push(artifact.clone());
+        map.insert(
+            hologram_ai_common::lower::quant_key(&t.kappa, Some((t.offset, t.len))),
+            (artifact, t.out_features, t.in_features),
+        );
+    }
+
+    let stages = hologram_ai::staged::compile_stages_with(
+        &config,
+        &keys,
+        &kappas,
+        &shapes,
+        &dtypes,
+        None,
+        one,
+        Some(&map),
+    )
+    .expect("the int8-head chunked stages compile");
+
+    let gen = || {
+        use hologram_ai::commands::generate::{generate_stream, GenConfig};
+        let cfg = GenConfig {
+            max_tokens: Some(6),
+            temperature: 0.0,
+            ..Default::default()
+        };
+        let mut runner =
+            StagedRunner::from_archives(stages.clone(), Box::new(DirKappaStore::new(&store_path)))
+                .expect("the int8-head staged runner builds");
+        let mut sink = Vec::new();
+        generate_stream(&mut runner, &DecimalTok, "3 141 59 26 5", &cfg, &mut sink)
+            .expect("int8-head generation completes")
+    };
+    let completion = gen();
+    let completion_again = gen();
+
+    w.chunked_head_quant = Some(ChunkedHeadQuant {
+        stages,
+        head_kappa: targets[0].kappa.clone(),
+        artifact_kappas,
+        completion,
+        completion_again,
+    });
+}
+
+#[then("every head chunk rewrites onto its int8 artifact with no whole-vocabulary F32 image")]
+async fn then_chunked_head_int8(w: &mut BddWorld) {
+    let q = w.chunked_head_quant.as_ref().expect("the quantized head");
+    // The base pipeline is embedding + 2 one-layer stages; the rest are head
+    // chunks. After quantization no head chunk may still bind a RANGE of the
+    // wide head κ — that would be the bf16 matmul whose whole-panel F32 image
+    // thrashes residency; each binds its per-chunk int8 artifact instead.
+    let mut wide_head_ranges = 0usize;
+    let mut artifact_hits = 0usize;
+    for archive in &q.stages[3..] {
+        for req in kappa_requirements(archive).expect("the κ-map parses") {
+            if req.kappa == q.head_kappa && req.range.is_some() {
+                wide_head_ranges += 1;
+            }
+            if q.artifact_kappas.contains(&req.kappa) {
+                artifact_hits += 1;
+            }
+        }
+    }
+    assert_eq!(
+        wide_head_ranges, 0,
+        "no head chunk may still bind the wide head κ — the int8 head has no F32 panel"
+    );
+    assert!(
+        artifact_hits >= q.artifact_kappas.len(),
+        "every head chunk must bind its per-chunk int8 artifact"
+    );
+    println!(
+        "[chunked-head] head joined the int8 tier: {} per-chunk artifact(s), no wide head range remains",
+        q.artifact_kappas.len()
+    );
+}
+
+#[then("the int8-head staged session generates a reproducible completion")]
+async fn then_chunked_head_generates(w: &mut BddWorld) {
+    let q = w.chunked_head_quant.as_ref().expect("the quantized head");
+    assert!(
+        !q.completion.is_empty(),
+        "the int8-head session must generate"
+    );
+    assert_eq!(
+        q.completion, q.completion_again,
+        "int8-head decode must be reproducible run to run"
+    );
+    println!(
+        "[chunked-head] int8-head completion (reproducible): {:?}",
+        q.completion
+    );
 }
 
 #[when("the same token window runs through the chunked stages and the monolithic archive")]

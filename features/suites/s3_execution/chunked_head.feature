@@ -35,3 +35,16 @@ Feature: No head is too large to execute
   Scenario: a verified κ rematerializes moving only its bytes
     When the chunked stages execute twice in one session
     Then every ranged touch of the verified head κ moves only its slice and whole transits stay at one per pass
+
+  # A bf16 chunked head is still a matmul whose whole-panel F32 Cast image
+  # (per chunk, ~2× its bf16 weight) the substrate's float-first dispatch
+  # materializes — across the chunks it dwarfs the model and, under the wasm
+  # address ceiling, the head cannot stay resident, so admission evicts it and
+  # every decode step re-materializes it (the deployed 1.5B thrash). Joining the
+  # head to the int8 tier removes the F32 panel: each chunk is a dequant-fused
+  # int8 matmul, so the head stays resident. The head shares a tied model's
+  # embedding κ (kept wide for the Gather); only its slices are crystallized.
+  Scenario: a chunked head joins the int8 tier
+    When the chunked head derives a per-chunk int8 artifact for every chunk
+    Then every head chunk rewrites onto its int8 artifact with no whole-vocabulary F32 image
+    And the int8-head staged session generates a reproducible completion

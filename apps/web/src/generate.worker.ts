@@ -352,6 +352,11 @@ async function ensureQuantArtifacts(
       const body = new Uint8Array(await res.arrayBuffer());
       wide = res.status === 200 ? body.slice(source.start, source.end) : body;
     }
+    // A head chunk derives from a BYTE RANGE of the wide head/embedding tensor,
+    // not the whole tensor: slice to its range before deriving.
+    if (entry.offset != null && entry.len != null) {
+      wide = wide.slice(entry.offset, entry.offset + entry.len);
+    }
     const artifact = await deriveQuantizedArtifact(wide, manifest.dtypes[idx], entry.out, entry.in);
     const kappa = await computeKappa(artifact);
     if (kappa !== entry.artifact) {
@@ -359,9 +364,13 @@ async function ensureQuantArtifacts(
         `re-derived artifact κ \`${kappa}\` does not reproduce the recorded \`${entry.artifact}\``,
       );
     }
-    // Crystallize before writing: a lingering wide blob is gas-phase and
-    // must not hold the quota against its own artifact.
-    await tensorsDir.removeEntry(`${entry.wide}.bin`).catch(() => {});
+    // Crystallize before writing: a lingering wide blob is gas-phase and must
+    // not hold the quota against its own artifact — EXCEPT a head chunk's wide
+    // κ, which a tied head shares with the embedding Gather (and the sibling
+    // chunks) and so stays load-bearing.
+    if (entry.offset == null) {
+      await tensorsDir.removeEntry(`${entry.wide}.bin`).catch(() => {});
+    }
     try {
       const handle = await tensorsDir.getFileHandle(`${entry.artifact}.bin`, { create: true });
       const writable = await handle.createWritable();

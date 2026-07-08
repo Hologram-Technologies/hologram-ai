@@ -20,6 +20,7 @@ import {
   computeKappa,
   deriveQuantizedArtifact,
   quantizableWeights,
+  headQuantChunks,
   validateModelConfig,
   validateStreamedManifest,
   KappaHasher,
@@ -584,6 +585,73 @@ export async function handleSafetensorsDownload(
         // re-derivable, but dearer than provenance-recoverable wide) so a
         // later structure write never dead-ends while gas remains.
         cachedKappas.unshift(...artifactKappas);
+
+        // The LM head joins the int8 tier too (chunked head): each vocab-row
+        // chunk gets its OWN per-chunk artifact, derived from a byte range of
+        // the wide head/embedding tensor. Unlike a projection, the wide κ is
+        // NOT evaporated — a tied head shares the embedding table's κ, which the
+        // embedding Gather still needs, and re-derivation reads the same range.
+        // A large bf16 head is otherwise a matmul whose whole-panel F32 image
+        // thrashes residency; the int8 chunk is a dequant-fused matmul with no
+        // F32 panel. Empty (a no-op) where the head is a single chunk.
+        const headTargets = await headQuantChunks(
+          configText,
+          allKeys,
+          allKappas,
+          allShapes,
+          allDtypes,
+          contextLength,
+          layersPerStage,
+        );
+        if (headTargets.length) {
+          emitProgressFn(
+            `Quantized tier (int8): deriving ${headTargets.length} LM-head chunk artifact(s)...`,
+          );
+          const headArtifactKappas: string[] = [];
+          const wideCache = new Map<string, Uint8Array>();
+          for (const t of headTargets) {
+            const idx = allKappas.indexOf(t.kappa);
+            if (idx < 0) throw new Error(`head-chunk κ \`${t.kappa}\` is outside the manifest`);
+            let wide = wideCache.get(t.kappa);
+            if (!wide) {
+              wide = await readTensorBytes(tensorsDir, t.kappa, kappaSources);
+              wideCache.set(t.kappa, wide);
+            }
+            const slice = wide.slice(t.offset, t.offset + t.len);
+            const artifact = await deriveQuantizedArtifact(slice, allDtypes[idx], t.out, t.in);
+            const artifactKappa = await computeKappa(artifact);
+            try {
+              await writeEssential(tensorsDir, cachedKappas, emitProgressFn, async () => {
+                const handle = await tensorsDir.getFileHandle(`${artifactKappa}.bin`, {
+                  create: true,
+                });
+                const writable = await handle.createWritable();
+                await writable.write(artifact as unknown as ArrayBufferView<ArrayBuffer>);
+                await writable.close();
+              });
+            } catch {
+              emitProgressFn(
+                `Quantized tier saturated by the storage quota while crystallizing the LM head; ` +
+                  `the remaining head chunks stay on the wide tier via recorded provenance.`,
+              );
+              break;
+            }
+            headArtifactKappas.push(artifactKappa);
+            quantEntries.push({
+              wide: t.kappa,
+              artifact: artifactKappa,
+              out: t.out,
+              in: t.in,
+              offset: t.offset,
+              len: t.len,
+            });
+          }
+          cachedKappas.unshift(...headArtifactKappas);
+          emitProgressFn(
+            `Quantized tier: LM head crystallized into ${headArtifactKappas.length} int8 chunk(s) ` +
+              `(dequant-fused matmul — no whole-panel F32 image).`,
+          );
+        }
       }
 
       emitProgressFn(

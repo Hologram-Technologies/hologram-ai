@@ -331,7 +331,12 @@ pub fn compile_safetensors_staged(
 }
 
 /// Parse the JSON quant map the web tier records in `stages.json`:
-/// `[{"wide": κ, "artifact": κ, "out": n, "in": n}, …]`.
+/// `[{"wide": κ, "artifact": κ, "out": n, "in": n}, …]`. A whole projection
+/// carries just its wide κ; a **head chunk** additionally carries `offset`/`len`
+/// (its byte range within the wide LM-head/embedding tensor), and its map key is
+/// the composite [`quant_key`](hologram_ai_common::lower::quant_key)`(κ,
+/// Some((offset, len)))` — so the graph matcher and this loader mint the
+/// identical key from the one shared function, never a re-implemented format.
 fn parse_quant_json(
     quant_json: Option<String>,
 ) -> Result<Option<hologram_ai_common::lower::QuantMap>, JsValue> {
@@ -345,13 +350,20 @@ fn parse_quant_json(
         out: u64,
         #[serde(rename = "in")]
         inf: u64,
+        #[serde(default)]
+        offset: Option<u64>,
+        #[serde(default)]
+        len: Option<u64>,
     }
     let entries: Vec<Entry> =
         serde_json::from_str(&json).map_err(|e| err(format!("quant map JSON: {e}")))?;
     Ok(Some(
         entries
             .into_iter()
-            .map(|e| (e.wide, (e.artifact, e.out, e.inf)))
+            .map(|e| {
+                let key = hologram_ai_common::lower::quant_key(&e.wide, e.offset.zip(e.len));
+                (key, (e.artifact, e.out, e.inf))
+            })
             .collect(),
     ))
 }
@@ -430,6 +442,55 @@ pub fn quantizable_weights(
         out.push(&JsValue::from_str(&kappa));
     }
     Ok(out)
+}
+
+/// The head-chunk quantization targets of the staged plan (row
+/// `quantized-transit`, chunked head): the vocab-row ranges of a large LM head
+/// the int8 tier derives into per-chunk artifacts, so a chunked head is a
+/// dequant-fused int8 matmul instead of a bf16 matmul whose whole-panel F32
+/// image thrashes residency. Returns a JSON array
+/// `[{"kappa": κ, "offset": n, "len": n, "out": n, "in": n}, …]` — the download
+/// derives each artifact from `[offset, offset+len)` of the wide κ (the tied
+/// head's is the embedding table's, kept wide for the Gather; only its slice is
+/// crystallized) and records a quant entry keyed by that κ AND range. Empty
+/// where the head is a single chunk (small vocabulary).
+#[wasm_bindgen]
+pub fn head_quant_chunks(
+    config_json: &str,
+    keys_js: &js_sys::Array,
+    kappas_js: &js_sys::Array,
+    tensor_shapes_js: &js_sys::Array,
+    tensor_dtypes_js: &js_sys::Array,
+    context_length: Option<u32>,
+    layers_per_stage: u32,
+) -> Result<String, JsValue> {
+    let rows = parse_manifest(keys_js, tensor_shapes_js, tensor_dtypes_js)?;
+    let kappas = parse_kappas(&rows.keys, kappas_js)?;
+    let layers_per_stage = std::num::NonZeroU64::new(u64::from(layers_per_stage))
+        .ok_or_else(|| err("layers_per_stage must be at least 1"))?;
+    let targets = hologram_ai::staged::head_quant_chunks(
+        config_json,
+        &rows.keys,
+        &kappas,
+        &rows.shapes,
+        &rows.dtypes,
+        context_length.map(u64::from),
+        layers_per_stage,
+    )
+    .map_err(|e| err(format!("head_quant_chunks: {e:#}")))?;
+    let json: Vec<serde_json::Value> = targets
+        .into_iter()
+        .map(|t| {
+            serde_json::json!({
+                "kappa": t.kappa,
+                "offset": t.offset,
+                "len": t.len,
+                "out": t.out_features,
+                "in": t.in_features,
+            })
+        })
+        .collect();
+    serde_json::to_string(&json).map_err(|e| err(format!("head_quant_chunks JSON: {e}")))
 }
 
 /// Derive the quantized artifact of a wide `[out, in]` weight (row

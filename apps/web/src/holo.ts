@@ -8,6 +8,7 @@ import init, {
   compile_safetensors_staged as wasmCompileSafetensorsStaged,
   compile_safetensors_staged_quantized as wasmCompileSafetensorsStagedQuantized,
   quantizable_weights as wasmQuantizableWeights,
+  head_quant_chunks as wasmHeadQuantChunks,
   derive_quantized_artifact as wasmDeriveQuantizedArtifact,
   count_tokens as wasmCountTokens,
   StagedChatSession as WasmStagedChatSession,
@@ -148,12 +149,48 @@ export async function compileSafetensorsStaged(
  * so a warm turn pays decode — never recompile, never rematerialization.
  * Construct once per model; call `generate` per turn. */
 /** One quantized derived-artifact record (row `quantized-transit`): the wide
- * tensor's κ, its matmul-ready int8 artifact's κ, and the projection dims. */
+ * tensor's κ, its matmul-ready int8 artifact's κ, and the projection dims. A
+ * whole projection carries just those; a **head chunk** additionally carries
+ * `offset`/`len` — its byte range within the wide LM-head/embedding tensor — so
+ * the several chunks that share one κ (a tied head shares the embedding table's)
+ * each map to their own per-chunk artifact under a κ+range key. */
 export interface QuantEntry {
   wide: string;
   artifact: string;
   out: number;
   in: number;
+  offset?: number;
+  len?: number;
+}
+
+/** One head-chunk quantization target (row `quantized-transit`, chunked head):
+ * a vocab-row byte range of the LM-head weight to crystallize into its own int8
+ * artifact. */
+export interface HeadChunkTarget {
+  kappa: string;
+  offset: number;
+  len: number;
+  out: number;
+  in: number;
+}
+
+/** The head-chunk quantization targets of the staged plan: the vocab-row ranges
+ * of a large LM head the int8 tier derives into per-chunk artifacts (so a
+ * chunked head joins the int8 tier instead of remaining a bf16 matmul whose F32
+ * panel thrashes residency). Empty where the head is a single chunk. */
+export async function headQuantChunks(
+  configJson: string,
+  keys: string[],
+  kappas: string[],
+  shapes: string[],
+  dtypes: string[],
+  contextLength: number | undefined,
+  layersPerStage: number,
+): Promise<HeadChunkTarget[]> {
+  await ensureReady();
+  return JSON.parse(
+    wasmHeadQuantChunks(configJson, keys, kappas, shapes, dtypes, contextLength, layersPerStage),
+  ) as HeadChunkTarget[];
 }
 
 /** The wide κs the staged plan can rewrite onto quantized artifacts and
