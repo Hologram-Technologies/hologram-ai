@@ -1658,11 +1658,15 @@ impl<'a> DecoderRecipe<'a> {
     /// byte range the caller records as `kappa_range:<name>` graph metadata.
     /// No head floor guard: the chunk's working set is bounded by the layer
     /// stage granularity BY CONSTRUCTION.
+    /// One vocab-row chunk of the head, over `head_seq` positions (`1` for the
+    /// gathered single-position head, the decode chunk `K` for the verify head).
+    #[allow(clippy::too_many_arguments)]
     fn emit_head_chunk(
         &self,
         builder: &mut GraphBuilder,
         dims: &DecoderDims,
         normed: TensorId,
+        head_seq: &DimExpr,
         chunk: usize,
         row_start: u64,
         rows: u64,
@@ -1686,7 +1690,7 @@ impl<'a> DecoderRecipe<'a> {
                 output_name: &format!("logits_chunk_{chunk}"),
                 output_shape: vec![
                     dims.batch.clone(),
-                    DimExpr::Concrete(1),
+                    head_seq.clone(),
                     DimExpr::Concrete(rows),
                 ],
             },
@@ -2012,6 +2016,29 @@ pub fn build_parametric_chunk_stage_graphs(
     assemble_stage_graphs(&recipe, layers_per_stage, Some((bucket, chunk)))
 }
 
+/// The **staged verify pipeline** of row `speculative-decode`: the staged chunk
+/// plan whose head emits logits at EVERY position (`all_positions_head`), so the
+/// browser's paged/staged runner verifies a `K`-token draft in one `M = K` pass
+/// exactly as the monolithic [`build_parametric_verify_graph_from_manifest`]
+/// does. The head still partitions over vocab at the pipeline's own stage
+/// granularity — every vocab chunk now carries all `K` positions — so a
+/// large-vocabulary model verifies without ever materializing a whole-vocab F32
+/// image, parametric over any vocabulary.
+pub fn build_parametric_verify_stage_graphs(
+    config: &Value,
+    keys: &[String],
+    dtypes: &[DType],
+    bucket: u64,
+    chunk: u64,
+    layers_per_stage: NonZeroU64,
+) -> Result<Vec<AiGraph>> {
+    let mut recipe = DecoderRecipe::prepare(config, keys, dtypes, None)?;
+    recipe.all_positions_head = true;
+    ensure!(bucket > 0, "decode bucket must be non-empty");
+    ensure!(chunk > 0, "decode chunk must be non-empty");
+    assemble_stage_graphs(&recipe, layers_per_stage, Some((bucket, chunk)))
+}
+
 /// The shared stage assembler: `decode = None` emits the whole-window plan,
 /// `Some((bucket, chunk))` the decode plan at `seq = chunk`.
 fn assemble_stage_graphs(
@@ -2157,6 +2184,21 @@ fn assemble_stage_graphs(
         let mut builder = GraphBuilder::new(format!("parametric_stage_head_chunk_{chunk}"));
         let dims = stage_dims(&mut builder);
 
+        // The head's position span: the verify head keeps every position
+        // (`all_positions_head`), the gathered decode/whole-window head keeps
+        // one. `head_state` is the matching `[batch, head_seq, hidden]` shape
+        // the norm output and every subsequent chunk's carried state wear.
+        let head_seq = if recipe.all_positions_head {
+            dims.seq.clone()
+        } else {
+            DimExpr::Concrete(1)
+        };
+        let head_state = if recipe.all_positions_head {
+            dims.hidden_state()
+        } else {
+            dims.last_state()
+        };
+
         let (normed, acc) = if chunk == 0 {
             let attn_residual = builder.add_input("hidden_states", DType::F32, dims.hidden_state());
             let mlp_down = builder.add_input("hidden_residual", DType::F32, dims.hidden_state());
@@ -2170,23 +2212,36 @@ fn assemble_stage_graphs(
                 },
             );
             let normed = recipe.emit_final_norm(&mut builder, &dims, current);
-            (gather_last_position(&mut builder, &dims, normed), None)
+            // Verify keeps every position; the gathered head takes the last.
+            let normed = if recipe.all_positions_head {
+                normed
+            } else {
+                gather_last_position(&mut builder, &dims, normed)
+            };
+            (normed, None)
         } else {
-            let normed = builder.add_input("normed_states", DType::F32, dims.last_state());
+            let normed = builder.add_input("normed_states", DType::F32, head_state.clone());
             let acc = builder.add_input(
                 "logits_acc",
                 DType::F32,
                 vec![
                     dims.batch.clone(),
-                    DimExpr::Concrete(1),
+                    head_seq.clone(),
                     DimExpr::Concrete(row_start),
                 ],
             );
             (normed, Some(acc))
         };
 
-        let (chunk_logits, range) =
-            recipe.emit_head_chunk(&mut builder, &dims, normed, chunk as usize, row_start, rows)?;
+        let (chunk_logits, range) = recipe.emit_head_chunk(
+            &mut builder,
+            &dims,
+            normed,
+            &head_seq,
+            chunk as usize,
+            row_start,
+            rows,
+        )?;
         let out = match acc {
             Some(acc) => {
                 let joined = builder.add_tensor(
@@ -2194,7 +2249,7 @@ fn assemble_stage_graphs(
                     DType::F32,
                     vec![
                         dims.batch.clone(),
-                        DimExpr::Concrete(1),
+                        head_seq.clone(),
                         DimExpr::Concrete(row_start + rows),
                     ],
                 );

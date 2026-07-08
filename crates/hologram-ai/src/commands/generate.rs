@@ -606,33 +606,47 @@ pub fn generate_stream_speculative<S: LmSession>(
         generated.len() >= budget
     };
 
+    // Speculation degrades to plain decode if the verify runner ever goes
+    // stale (e.g. the decode bucket grew mid-generation past the verify
+    // runner's bucket): a projection of speed, never of meaning, so a failure
+    // to verify is never worse than not speculating.
+    let mut speculate = true;
     while generated.len() < budget {
         let cap = draft_cap.min(budget - generated.len());
-        let draft = prompt_lookup_draft(session.realized_tokens(), ngram_max, cap);
-        if draft.is_empty() {
-            // No recurrence: a plain single-position step (never worse).
-            let next = argmax(&row) as i64;
-            if emit(next, &mut generated, &mut emitted) {
-                break;
-            }
-            row = session.step(next).context("decode step failed")?;
+        let draft = if speculate {
+            prompt_lookup_draft(session.realized_tokens(), ngram_max, cap)
         } else {
-            // Verify the draft in one M=K pass; accept the model's own prefix.
-            let (accepted, bonus) = session
-                .draft_verify(verify_runner, &row, &draft)
-                .context("speculative verify pass failed")?;
-            let mut stop = false;
-            for t in accepted.into_iter().chain(std::iter::once(bonus)) {
-                if emit(t, &mut generated, &mut emitted) {
-                    stop = true;
+            Vec::new()
+        };
+        match draft.is_empty() {
+            true => {
+                // No recurrence (or speculation retired): a plain step.
+                let next = argmax(&row) as i64;
+                if emit(next, &mut generated, &mut emitted) {
                     break;
                 }
+                row = session.step(next).context("decode step failed")?;
             }
-            if stop {
-                break;
-            }
-            // Commit the bonus's K/V and get the next acceptance row.
-            row = session.step(bonus).context("decode step failed")?;
+            false => match session.draft_verify(verify_runner, &row, &draft) {
+                Ok((accepted, bonus)) => {
+                    let mut stop = false;
+                    for t in accepted.into_iter().chain(std::iter::once(bonus)) {
+                        if emit(t, &mut generated, &mut emitted) {
+                            stop = true;
+                            break;
+                        }
+                    }
+                    if stop {
+                        break;
+                    }
+                    // Commit the bonus's K/V and get the next acceptance row.
+                    row = session.step(bonus).context("decode step failed")?;
+                }
+                Err(_) => {
+                    // Verify runner stale: stop speculating, keep decoding.
+                    speculate = false;
+                }
+            },
         }
     }
     Ok(tokenizer.decode(&generated))

@@ -162,16 +162,60 @@ pub fn compile_chunk_stages(
         chunk,
         layers_per_stage,
     )?;
+    bind_quantize_compile(graphs, keys, kappas, shapes, dtypes, quant)
+}
+
+/// The **staged verify pipeline** of row `speculative-decode`: `chunk` positions
+/// per pass whose head emits logits at every position (over any vocabulary — the
+/// head still chunks). The browser's paged/staged runner verifies a `K`-token
+/// draft in one `M = K` pass; K/V is spliced from that same pass. Same κ
+/// bindings and quant map as the decode pipeline, so it shares the weight tier.
+#[allow(clippy::too_many_arguments)]
+pub fn compile_verify_stages(
+    config_json: &str,
+    keys: &[String],
+    kappas: &[String],
+    shapes: &[Vec<u64>],
+    dtypes: &[DType],
+    bucket: u64,
+    chunk: u64,
+    layers_per_stage: NonZeroU64,
+    quant: Option<&hologram_ai_common::lower::QuantMap>,
+) -> Result<Vec<Vec<u8>>> {
+    let config: serde_json::Value =
+        serde_json::from_str(config_json).context("parsing config.json")?;
+    let graphs = hologram_ai_safetensors::parametric::build_parametric_verify_stage_graphs(
+        &config,
+        keys,
+        dtypes,
+        bucket,
+        chunk,
+        layers_per_stage,
+    )?;
+    bind_quantize_compile(graphs, keys, kappas, shapes, dtypes, quant)
+}
+
+/// Bind manifest κs onto stage graphs, optionally rewrite their matmuls onto
+/// quantized artifacts, and compile each — the shared back half of the chunk,
+/// decode, and verify pipelines.
+fn bind_quantize_compile(
+    graphs: Vec<hologram_ai_common::AiGraph>,
+    keys: &[String],
+    kappas: &[String],
+    shapes: &[Vec<u64>],
+    dtypes: &[DType],
+    quant: Option<&hologram_ai_common::lower::QuantMap>,
+) -> Result<Vec<Vec<u8>>> {
     let graphs = bind_manifest_kappas(graphs, keys, kappas, shapes, dtypes)?;
     let mut archives = Vec::with_capacity(graphs.len());
     for (stage, mut graph) in graphs.into_iter().enumerate() {
         if let Some(quant) = quant {
             hologram_ai_common::lower::quantize_external_matmul_weights(&mut graph, quant)
-                .with_context(|| format!("quantizing decode stage {stage} onto artifacts"))?;
+                .with_context(|| format!("quantizing stage {stage} onto artifacts"))?;
         }
         let archive = ModelCompiler::default()
             .compile(ModelSource::AiGraph(graph))
-            .with_context(|| format!("compiling decode stage {stage}"))?;
+            .with_context(|| format!("compiling stage {stage}"))?;
         archives.push(archive.bytes);
     }
     Ok(archives)
@@ -1564,5 +1608,72 @@ impl GrowableStagedSession {
             store.store(&key, &stages, &kappas);
         }
         Ok((stages, false))
+    }
+
+    /// Compile (and cache in the derived store) the staged VERIFY pipeline at
+    /// `bucket` rows and `chunk` positions (row `speculative-decode`): the same
+    /// κ bindings and quant tier as the decode pipeline, but the all-positions
+    /// head, so a `chunk`-token draft verifies in one `M = chunk` pass.
+    fn verify_stages_for_bucket(&mut self, bucket: usize, chunk: u64) -> Result<Vec<Vec<u8>>> {
+        let key = crate::materialize::kappa_of(
+            format!(
+                "verify-archives:v1:bucket={bucket}:chunk={chunk}:base={}",
+                self.derivation_key(0)
+            )
+            .as_bytes(),
+        );
+        if let Some(store) = self.derived_store.as_mut() {
+            if let Some((stages, kappas)) = store.load(&key) {
+                let intact = stages.len() == kappas.len()
+                    && !stages.is_empty()
+                    && stages
+                        .iter()
+                        .zip(&kappas)
+                        .all(|(s, k)| crate::materialize::kappa_of(s) == *k);
+                if intact {
+                    self.derived_hits += 1;
+                    return Ok(stages);
+                }
+                store.evaporate(&key);
+            }
+        }
+        let stages = compile_verify_stages(
+            &self.config_json,
+            &self.keys,
+            &self.kappas,
+            &self.shapes,
+            &self.dtypes,
+            bucket as u64,
+            chunk,
+            self.layers_per_stage,
+            self.quant.as_ref(),
+        )
+        .with_context(|| format!("compiling a {bucket}-row verify pipeline (chunk {chunk})"))?;
+        if let Some(store) = self.derived_store.as_mut() {
+            let kappas: Vec<String> = stages
+                .iter()
+                .map(|s| crate::materialize::kappa_of(s))
+                .collect();
+            store.store(&key, &stages, &kappas);
+        }
+        Ok(stages)
+    }
+
+    /// A staged VERIFY runner at `bucket` rows (which MUST match the decode
+    /// session's bucket — they share the carried past) and draft width `chunk`
+    /// (row `speculative-decode`).
+    pub fn verify_runner_for(
+        &mut self,
+        bucket: usize,
+        chunk: u64,
+    ) -> Result<StagedRunner<'static>> {
+        ensure!(
+            bucket <= self.max_window,
+            "verify bucket {bucket} exceeds the model's context length {}",
+            self.max_window
+        );
+        let stages = self.verify_stages_for_bucket(bucket, chunk)?;
+        self.wire_runner(stages)
+            .with_context(|| format!("loading the {bucket}-row verify pipeline (chunk {chunk})"))
     }
 }

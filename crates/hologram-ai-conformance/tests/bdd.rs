@@ -889,6 +889,10 @@ struct StreamedMeta {
     dtypes: Vec<DType>,
 }
 
+/// (whole-head verify rows, chunked staged verify rows, head_chunks) — the
+/// `speculative-decode` chunked-head parity witness.
+type VerifyChunkedWitness = (Vec<Vec<f32>>, Vec<Vec<f32>>, u64);
+
 #[derive(Default, cucumber::World)]
 struct BddWorld {
     // S0 — addressing
@@ -984,6 +988,8 @@ struct BddWorld {
     spec_fixture: Option<(StoreDir, usize)>, // κ-store + bucket
     spec_completions: Option<(String, String)>, // (plain, speculative)
     spec_passes: Option<(u64, usize)>,       // (speculative forward passes, tokens)
+    // (whole-head verify rows, chunked staged verify rows, head_chunks)
+    spec_verify_chunked: Option<VerifyChunkedWitness>,
     // S3 — idle derivation (row `idle-derivation`)
     idle_state: Option<IdleDeriveState>,
     // S3 — admission margin (row `stage-residency-cache`)
@@ -4049,6 +4055,164 @@ async fn then_spec_fewer_passes(w: &mut BddWorld) {
     println!(
         "[speculative-decode] {passes} forward passes for {tokens} tokens \
          (a recurring stretch commits several tokens per two passes)"
+    );
+}
+
+/// The staged fixture with a vocabulary large enough to force the head to chunk
+/// (`head_chunks > 1`), so the verify head is exercised over vocab AND every
+/// position — the parametric case a real large-vocabulary model hits.
+fn big_vocab_config() -> serde_json::Value {
+    let mut c = staged_config(false);
+    c["vocab_size"] = serde_json::json!(2048);
+    c
+}
+fn big_vocab_manifest() -> Vec<(String, Vec<u64>)> {
+    staged_manifest(false)
+        .into_iter()
+        .map(|(n, mut d)| {
+            if n == "model.embed_tokens.weight" || n == "lm_head.weight" {
+                d[0] = 2048;
+            }
+            (n, d)
+        })
+        .collect()
+}
+
+/// Materialize a graph over the big-vocab weights from `store` — bind every
+/// manifest tensor as an external κ, compile, materialize.
+fn big_vocab_archive(
+    mut graph: AiGraph,
+    keys: &[String],
+    shapes: &[Vec<u64>],
+    store: &Path,
+) -> Vec<u8> {
+    let name_to_id: HashMap<String, u32> = graph
+        .tensor_names
+        .iter()
+        .map(|(id, name)| (name.clone(), *id))
+        .collect();
+    for (name, dims) in keys.iter().zip(shapes) {
+        let id = *name_to_id.get(name).expect("manifest tensor in the graph");
+        let info = ti(DType::F32, dims);
+        graph.tensor_info.insert(id, info.clone());
+        graph.params.insert(
+            id,
+            AiParam::External {
+                kappa: kappa_of(&staged_tensor_bytes(name, dims)),
+                info,
+                range: None,
+            },
+        );
+    }
+    let mut dir = DirKappaStore::new(store);
+    materialize_archive(&compile_graph(graph), &mut dir).expect("archive materializes")
+}
+
+#[when("a large-vocabulary draft is verified by the whole head and the chunked staged head")]
+async fn when_verify_chunked(w: &mut BddWorld) {
+    let config = big_vocab_config();
+    let manifest = big_vocab_manifest();
+    let (keys, shapes): (Vec<String>, Vec<Vec<u64>>) = manifest.into_iter().unzip();
+    let dtypes = vec![DType::F32; keys.len()];
+    let kappas: Vec<String> = keys
+        .iter()
+        .zip(&shapes)
+        .map(|(n, d)| kappa_of(&staged_tensor_bytes(n, d)))
+        .collect();
+    let store = staged_store("verify-chunked");
+    {
+        let dir = DirKappaStore::new(&store.path);
+        for (n, d) in keys.iter().zip(&shapes) {
+            dir.insert(&staged_tensor_bytes(n, d))
+                .expect("persist weight");
+        }
+    }
+    let bucket = 8u64;
+    let k = 4u64;
+    let toks: Vec<i64> = vec![3, 141, 59, 26];
+    let theta = config["rope_theta"].as_f64().expect("rope_theta") as f32;
+    let one = std::num::NonZeroU64::new(1).expect("1 is non-zero");
+    let cfg_s = config.to_string();
+
+    // Whole-head (monolithic) verify.
+    let mono_decode = big_vocab_archive(
+        build_parametric_decode_graph_from_manifest(&config, &keys, &dtypes, bucket)
+            .expect("decode graph"),
+        &keys,
+        &shapes,
+        &store.path,
+    );
+    let mono_verify_bytes = big_vocab_archive(
+        build_parametric_verify_graph_from_manifest(&config, &keys, &dtypes, bucket, k)
+            .expect("verify graph"),
+        &keys,
+        &shapes,
+        &store.path,
+    );
+    let mono_session = DecodeSession::new(
+        HoloRunner::from_bytes(mono_decode).expect("mono decode loads"),
+        theta,
+        STG_WINDOW,
+    )
+    .expect("mono session");
+    let mut mono_verify = HoloRunner::from_bytes(mono_verify_bytes).expect("mono verify loads");
+    let mono_logits = mono_session
+        .verify(&mut mono_verify, &toks)
+        .expect("whole-head verify");
+
+    // Chunked staged verify.
+    let staged_decode = hologram_ai::staged::compile_decode_stages(
+        &cfg_s, &keys, &kappas, &shapes, &dtypes, bucket, one, None,
+    )
+    .expect("staged decode compiles");
+    let verify_stages = hologram_ai::staged::compile_verify_stages(
+        &cfg_s, &keys, &kappas, &shapes, &dtypes, bucket, k, one, None,
+    )
+    .expect("staged verify compiles");
+    let head_chunks = verify_stages.len() as u64 - (STG_LAYERS + 1);
+    let staged_session = DecodeSession::new(
+        StagedRunner::from_archives(staged_decode, Box::new(DirKappaStore::new(&store.path)))
+            .expect("staged decode runner"),
+        theta,
+        STG_WINDOW,
+    )
+    .expect("staged session");
+    let mut staged_verify =
+        StagedRunner::from_archives(verify_stages, Box::new(DirKappaStore::new(&store.path)))
+            .expect("staged verify runner");
+    let staged_logits = staged_session
+        .verify(&mut staged_verify, &toks)
+        .expect("chunked-head verify");
+
+    w.spec_verify_chunked = Some((mono_logits, staged_logits, head_chunks));
+}
+
+#[then("the chunked head reproduces the whole head at every position")]
+async fn then_verify_chunked(w: &mut BddWorld) {
+    let (mono, staged, head_chunks) = w
+        .spec_verify_chunked
+        .as_ref()
+        .expect("the chunked-verify witness ran");
+    assert!(
+        *head_chunks > 1,
+        "the fixture must force the head to chunk (head_chunks = {head_chunks})"
+    );
+    assert_eq!(mono.len(), staged.len(), "same number of positions");
+    let mut max_abs = 0f32;
+    for (p, (mrow, srow)) in mono.iter().zip(staged).enumerate() {
+        assert_eq!(mrow.len(), srow.len(), "position {p}: same vocab width");
+        for (i, (&m, &s)) in mrow.iter().zip(srow).enumerate() {
+            let d = (m - s).abs();
+            max_abs = max_abs.max(d);
+            assert!(
+                d <= 1e-3 + 1e-2 * m.abs(),
+                "position {p} tok {i}: whole {m} vs chunked {s} (|Δ| = {d})"
+            );
+        }
+    }
+    println!(
+        "[speculative-decode] chunked verify head ({head_chunks} vocab chunks) reproduces the \
+         whole head at every position, max |Δ| = {max_abs:e}"
     );
 }
 

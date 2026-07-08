@@ -24,3 +24,7 @@ Feature: Speculative decode batches a drafted continuation without changing the 
     Given a decode session and a verify runner over the staged fixture with a bucket of 64 rows
     When a recurring fixture continuation is decoded by speculative decode
     Then it emits every token in fewer forward passes than tokens
+
+  Scenario: the verify head is parametric over any vocabulary
+    When a large-vocabulary draft is verified by the whole head and the chunked staged head
+    Then the chunked head reproduces the whole head at every position

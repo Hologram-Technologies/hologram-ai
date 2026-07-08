@@ -912,6 +912,13 @@ pub struct GenOpts {
     pub stop: Vec<String>,
     pub eos: Option<u32>,
     pub seed: Option<u64>,
+    /// Speculative decode (row `speculative-decode`): the draft width `K` (also
+    /// the verify pass's chunk). `None`/`0`/`1` decode plainly; `≥ 2` drafts the
+    /// next tokens from the realized sequence's recurrence and verifies them in
+    /// one `M = K` pass. Greedy only, so it engages solely at temperature 0.
+    pub speculative_draft: Option<usize>,
+    /// The drafter's max n-gram context length (default 3 when speculating).
+    pub speculative_ngram: Option<usize>,
 }
 
 impl GenOpts {
@@ -1427,6 +1434,42 @@ impl DecodeChatSession {
             buffer: Vec::new(),
             callback: callback.as_ref(),
         };
+
+        // Speculative decode (row `speculative-decode`): a `K ≥ 2` draft, greedy
+        // only. Build a verify runner at the session's OWN bucket (they share the
+        // carried past) and draft the next K tokens from the realized sequence's
+        // recurrence, verifying them in one M=K pass. A failed/absent verify
+        // runner falls back to plain decode — a projection of speed, never
+        // meaning.
+        let draft = opts.speculative_draft.unwrap_or(0);
+        if draft >= 2 && cfg.temperature <= 0.0 {
+            let ngram = opts.speculative_ngram.unwrap_or(3);
+            let bucket = session.geometry().bucket;
+            match self
+                .growable
+                .borrow_mut()
+                .verify_runner_for(bucket, draft as u64)
+            {
+                Ok(mut verify) => {
+                    hologram_ai::commands::generate::generate_stream_speculative(
+                        session,
+                        &mut verify,
+                        &self.tokenizer,
+                        &templated,
+                        &cfg,
+                        ngram,
+                        draft,
+                        &mut sink,
+                    )
+                    .map_err(|e| err(format!("speculative decode: {e:#}")))?;
+                    return String::from_utf8(sink.buffer).map_err(err);
+                }
+                Err(e) => web_sys::console::warn_1(&JsValue::from_str(&format!(
+                    "verify pipeline unavailable (decoding plainly): {e:#}"
+                ))),
+            }
+        }
+
         generate_stream_decode(session, &self.tokenizer, &templated, &cfg, &mut sink)
             .map_err(|e| err(format!("decode generate: {e:#}")))?;
         String::from_utf8(sink.buffer).map_err(err)
