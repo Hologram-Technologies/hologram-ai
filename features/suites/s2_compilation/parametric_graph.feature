@@ -4,10 +4,14 @@ Feature: The parametric decoder graph
   alone: hidden size, layers, heads, KV heads, head dim, vocabulary,
   rope_theta, rms_norm_eps, weight tying, context length, and tensor dtypes
   all come from the model's own published configuration. The architecture
-  family registry selects the builder from `config.architectures[0]`; an
-  unsupported family fails loud naming the family and the supported set.
-  Validated against the deterministic quantities of the arbitrary
-  handshake-tiny use-case (model/usecases.toml) — never a canonical constant.
+  family registry selects the builder from `config.architectures[0]` when it
+  recognizes the name; an UNRECOGNIZED architecture is not rejected but
+  DERIVED from its tensor manifest — the generic decoder recipe is built when
+  the manifest matches its shape, so arbitrary decoders run without a name
+  allowlist, while a manifest the recipe cannot faithfully represent fails
+  loud rather than silently wrong. Validated against the deterministic
+  quantities of the arbitrary handshake-tiny use-case (model/usecases.toml) —
+  never a canonical constant.
 
   Scenario: config quantities flow into the graph
     Given a Llama-family config with the handshake-tiny quantities and an untied manifest
@@ -23,7 +27,12 @@ Feature: The parametric decoder graph
     Then the graph declares no separate lm_head weight
     And the embedding weight feeds both the token gather and the head projection
 
-  Scenario: an unsupported family fails loud naming the family
-    Given a config naming the architecture family "MambaForCausalLM"
+  Scenario: an unrecognized architecture with a decoder manifest is derived and built
+    Given a config naming the architecture family "SomeNovelForCausalLM"
     When the parametric graph build is attempted
-    Then the build fails naming "MambaForCausalLM" and the supported families
+    Then the graph is built and its metadata names the family "SomeNovelForCausalLM"
+
+  Scenario: a manifest that is not a decoder fails loud
+    Given a config naming the architecture family "MambaForCausalLM" with a non-decoder manifest
+    When the parametric graph build is attempted
+    Then the build fails naming "MambaForCausalLM" and the decoder shape

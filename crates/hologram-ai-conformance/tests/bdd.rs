@@ -507,6 +507,145 @@ fn decoder_manifest(e: &UseCaseExpects, tied: bool, qkv_bias: bool) -> Vec<(Stri
     m
 }
 
+/// The config and tensor manifest *characteristic of a given architecture
+/// family's real published layout* — so the coverage probe measures true
+/// derivation faithfulness (does the generic decoder recipe accept or reject
+/// THIS family's actual shape?) rather than name-gating. A family whose real
+/// tensors match the gated-SwiGLU decoder derives and builds; a family whose
+/// layout the recipe cannot faithfully represent (per-head qk-norm, GeGLU,
+/// sparse MoE, Conv1D attention, a bidirectional encoder) is rejected loud.
+fn characteristic_fixture(family: &str, e: &UseCaseExpects) -> (serde_json::Value, Vec<String>) {
+    let mut config = handshake_config(family, e, false);
+    let base = || -> Vec<String> {
+        decoder_manifest(e, false, false)
+            .into_iter()
+            .map(|(k, _)| k)
+            .collect()
+    };
+    let head = || {
+        vec![
+            "model.embed_tokens.weight".to_string(),
+            "model.norm.weight".to_string(),
+            "lm_head.weight".to_string(),
+        ]
+    };
+    let keys = match family {
+        // Llama / Mistral: the canonical gated-SwiGLU decoder — derives faithfully.
+        "LlamaForCausalLM" | "MistralForCausalLM" => base(),
+        // Qwen2: the decoder shape plus attention biases — derives faithfully.
+        "Qwen2ForCausalLM" => decoder_manifest(e, false, true)
+            .into_iter()
+            .map(|(k, _)| k)
+            .collect(),
+        // Phi3: fused qkv and fused gate/up — the recipe's fused decoder path.
+        "Phi3ForCausalLM" => {
+            let mut m = head();
+            for l in 0..e.num_hidden_layers {
+                let b = format!("model.layers.{l}");
+                m.push(format!("{b}.input_layernorm.weight"));
+                m.push(format!("{b}.post_attention_layernorm.weight"));
+                m.push(format!("{b}.self_attn.qkv_proj.weight"));
+                m.push(format!("{b}.self_attn.o_proj.weight"));
+                m.push(format!("{b}.mlp.gate_up_proj.weight"));
+                m.push(format!("{b}.mlp.down_proj.weight"));
+            }
+            m
+        }
+        // Qwen3: adds per-head q/k RMSNorm the generic recipe cannot represent.
+        "Qwen3ForCausalLM" => {
+            let mut m = base();
+            for l in 0..e.num_hidden_layers {
+                m.push(format!("model.layers.{l}.self_attn.q_norm.weight"));
+                m.push(format!("model.layers.{l}.self_attn.k_norm.weight"));
+            }
+            m
+        }
+        // Gemma2: decoder-shaped, but GeGLU — rejected by the activation guard.
+        "Gemma2ForCausalLM" => {
+            config["hidden_act"] = serde_json::json!("gelu_pytorch_tanh");
+            base()
+        }
+        // Mixtral: sparse MoE experts, not one gated MLP — no `mlp.gate_proj`.
+        "MixtralForCausalLM" => {
+            let mut m = head();
+            for l in 0..e.num_hidden_layers {
+                let b = format!("model.layers.{l}");
+                m.push(format!("{b}.input_layernorm.weight"));
+                m.push(format!("{b}.post_attention_layernorm.weight"));
+                m.push(format!("{b}.self_attn.q_proj.weight"));
+                m.push(format!("{b}.self_attn.k_proj.weight"));
+                m.push(format!("{b}.self_attn.v_proj.weight"));
+                m.push(format!("{b}.self_attn.o_proj.weight"));
+                m.push(format!("{b}.block_sparse_moe.gate.weight"));
+                m.push(format!("{b}.block_sparse_moe.experts.0.w1.weight"));
+                m.push(format!("{b}.block_sparse_moe.experts.0.w2.weight"));
+                m.push(format!("{b}.block_sparse_moe.experts.0.w3.weight"));
+            }
+            m
+        }
+        // GPT-2: Conv1D fused c_attn under `transformer.h.*`, learned positions.
+        "GPT2LMHeadModel" => {
+            let mut m = vec![
+                "transformer.wte.weight".to_string(),
+                "transformer.wpe.weight".to_string(),
+                "transformer.ln_f.weight".to_string(),
+            ];
+            for l in 0..e.num_hidden_layers {
+                let b = format!("transformer.h.{l}");
+                m.push(format!("{b}.attn.c_attn.weight"));
+                m.push(format!("{b}.attn.c_proj.weight"));
+                m.push(format!("{b}.mlp.c_fc.weight"));
+                m.push(format!("{b}.mlp.c_proj.weight"));
+            }
+            m
+        }
+        // GPT-NeoX: fused query_key_value under `gpt_neox.layers.*`.
+        "GPTNeoXForCausalLM" => {
+            let mut m = vec![
+                "gpt_neox.embed_in.weight".to_string(),
+                "gpt_neox.final_layer_norm.weight".to_string(),
+                "embed_out.weight".to_string(),
+            ];
+            for l in 0..e.num_hidden_layers {
+                let b = format!("gpt_neox.layers.{l}");
+                m.push(format!("{b}.attention.query_key_value.weight"));
+                m.push(format!("{b}.attention.dense.weight"));
+                m.push(format!("{b}.mlp.dense_h_to_4h.weight"));
+                m.push(format!("{b}.mlp.dense_4h_to_h.weight"));
+            }
+            m
+        }
+        // BERT: a bidirectional encoder — no causal decoder stack at all.
+        "BertForMaskedLM" => {
+            let mut m = vec![
+                "bert.embeddings.word_embeddings.weight".to_string(),
+                "bert.embeddings.position_embeddings.weight".to_string(),
+            ];
+            for l in 0..e.num_hidden_layers {
+                let b = format!("bert.encoder.layer.{l}");
+                m.push(format!("{b}.attention.self.query.weight"));
+                m.push(format!("{b}.attention.self.key.weight"));
+                m.push(format!("{b}.attention.self.value.weight"));
+                m.push(format!("{b}.intermediate.dense.weight"));
+                m.push(format!("{b}.output.dense.weight"));
+            }
+            m
+        }
+        _ => base(),
+    };
+    (config, keys)
+}
+
+/// Families whose real tensor layout the generic decoder recipe represents
+/// faithfully — the coverage probe asserts exactly these build and all others
+/// are rejected loud. This is the honest, manifest-driven coverage frontier.
+const FAITHFUL_DECODER_FAMILIES: &[&str] = &[
+    "LlamaForCausalLM",
+    "MistralForCausalLM",
+    "Qwen2ForCausalLM",
+    "Phi3ForCausalLM",
+];
+
 /// Deterministic seeded f32 weights for a named tensor: an xorshift64* stream
 /// seeded from the tensor name's blake3, mapped to small values (norm weights
 /// sit near 1.0 for numerical sanity). Reproducible by construction.
@@ -1314,6 +1453,20 @@ async fn given_family_fixture(w: &mut BddWorld, family: String) {
     w.graph_fixture = Some((config, keys, e));
 }
 
+#[given(expr = "a config naming the architecture family {string} with a non-decoder manifest")]
+async fn given_non_decoder_family_fixture(w: &mut BddWorld, family: String) {
+    let (_, e) = handshake_expects();
+    let config = handshake_config(&family, &e, false);
+    // A manifest with no attention/MLP projections — not a decoder shape, so a
+    // derived family cannot be built from it.
+    let keys = vec![
+        "model.embed_tokens.weight".to_string(),
+        "model.norm.weight".to_string(),
+        "lm_head.weight".to_string(),
+    ];
+    w.graph_fixture = Some((config, keys, e));
+}
+
 #[when("the parametric graph is built from config and manifest alone")]
 async fn when_graph_built(w: &mut BddWorld) {
     let (config, keys, _) = w.graph_fixture.as_ref().expect("a graph fixture");
@@ -1457,19 +1610,37 @@ async fn then_context_from_config(w: &mut BddWorld) {
     );
 }
 
-#[then(expr = "the build fails naming {string} and the supported families")]
+#[then(expr = "the graph is built and its metadata names the family {string}")]
+async fn then_family_derived(w: &mut BddWorld, family: String) {
+    assert!(
+        w.graph_err.is_none(),
+        "an unrecognized architecture with a decoder manifest must build, not fail: {:?}",
+        w.graph_err
+    );
+    let got = match built_graph(w).metadata.get("family") {
+        Some(hologram_ai_common::MetaValue::Str(s)) => s.clone(),
+        other => panic!("family metadata missing or mistyped: {other:?}"),
+    };
+    assert_eq!(
+        got, family,
+        "the derived family carries the architecture's name"
+    );
+    println!("[parametric-graph] `{family}` derived from the manifest and built");
+}
+
+#[then(expr = "the build fails naming {string} and the decoder shape")]
 async fn then_family_fails(w: &mut BddWorld, family: String) {
     let err = w
         .graph_err
         .as_ref()
-        .expect("an unsupported family must fail the build");
+        .expect("a non-decoder manifest must fail the build");
     assert!(
         err.contains(&family),
         "the error must name `{family}`: {err}"
     );
     assert!(
-        err.contains("supported families"),
-        "the error must name the supported set: {err}"
+        err.contains("generic decoder shape"),
+        "the error must explain the shape mismatch: {err}"
     );
 }
 
@@ -1637,14 +1808,14 @@ async fn then_selected_family(w: &mut BddWorld, family: String) {
     let m = w.streamed.as_ref().expect("streamed metadata");
     let config: serde_json::Value =
         serde_json::from_str(&m.config_json).expect("parsing the authority's config.json");
-    let selected =
-        selected_family(&config).expect("the registry selects a family for the authority's config");
+    let selected = selected_family(&config, &m.keys)
+        .expect("the registry selects a family for the authority's config");
     assert_eq!(
         selected, family,
         "registry selection diverges from the outline row"
     );
     assert!(
-        supported_families().contains(&selected),
+        supported_families().contains(&selected.as_str()),
         "`{selected}` must be listed by supported_families()"
     );
     println!("[family-registry] {selected}: selected for the pinned authority");
@@ -1876,27 +2047,27 @@ async fn given_probe_families(w: &mut BddWorld) {
 #[when("each family is probed against the parametric registry")]
 async fn when_families_probed(w: &mut BddWorld) {
     let (_, e) = handshake_expects();
-    // Probe with a bias-carrying manifest so bias-structural families
-    // (e.g. Qwen2) can build; the probe measures *registry selection*.
-    let keys: Vec<String> = decoder_manifest(&e, false, true)
-        .into_iter()
-        .map(|(k, _)| k)
-        .collect();
-    let dtypes = vec![DType::F32; keys.len()];
+    // Probe each family against its OWN characteristic manifest — the honest
+    // measure of derivation faithfulness, not name-gating. A family builds iff
+    // the generic decoder recipe can represent its real tensor layout.
     w.probe_results = w
         .probe_families
         .iter()
         .map(|family| {
-            let config = handshake_config(family, &e, false);
-            let known = match build_parametric_graph_from_manifest(&config, &keys, &dtypes, None) {
-                Ok(_) => true,
-                Err(e) => !format!("{e:#}").contains("unsupported architecture family"),
-            };
-            println!(
-                "[coverage] {family}: {}",
-                if known { "supported" } else { "unsupported" }
-            );
-            (family.clone(), known)
+            let (config, keys) = characteristic_fixture(family, &e);
+            let dtypes = vec![DType::F32; keys.len()];
+            let supported =
+                match build_parametric_graph_from_manifest(&config, &keys, &dtypes, None) {
+                    Ok(_) => true,
+                    Err(err) => {
+                        println!("[coverage] {family}: rejected — {err:#}");
+                        false
+                    }
+                };
+            if supported {
+                println!("[coverage] {family}: built from its characteristic manifest");
+            }
+            (family.clone(), supported)
         })
         .collect();
 }
@@ -1908,10 +2079,21 @@ async fn then_probe_reported(w: &mut BddWorld) {
         w.probe_families.len(),
         "every family in the list must be probed"
     );
+    // The measurement has teeth: the faithful decoder families MUST build and
+    // every other layout MUST be rejected loud. A family that silently built
+    // when the recipe cannot represent it (or failed when it should have
+    // built) is a correctness defect, not a coverage number.
+    for (family, supported) in &w.probe_results {
+        let expected = FAITHFUL_DECODER_FAMILIES.contains(&family.as_str());
+        assert_eq!(
+            *supported, expected,
+            "{family}: built={supported} but the faithful-decoder frontier expects {expected}"
+        );
+    }
     let supported = w.probe_results.iter().filter(|(_, s)| *s).count();
     let unsupported = w.probe_results.len() - supported;
     println!(
-        "[coverage] measured: {supported} supported / {unsupported} unsupported of {} probed families",
+        "[coverage] measured: {supported} faithful / {unsupported} rejected of {} probed families",
         w.probe_results.len()
     );
 }

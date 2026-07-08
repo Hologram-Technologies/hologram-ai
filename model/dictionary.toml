@@ -90,7 +90,7 @@ feature = "features/suites/s1_acquisition/supported_search.feature"
 
 [[row]]
 id = "model-preflight"
-statement = "Before any shard byte moves, the model is validated: config names a supported family with its required keys, and the parametric graph builds from config + the header-only manifest; rejection names the family/key with zero shard bytes transferred."
+statement = "Before any shard byte moves, the model is validated: the config supplies the parametric decoder schema (a recognized family, or an unrecognized architecture derived from its manifest) and the graph builds from config + the header-only manifest; a config or manifest the recipe cannot represent is rejected loud naming the architecture/key, with zero shard bytes transferred."
 stage = "S1"
 status = "build"
 oracles = ["journey-reference", "hf-hub"]
@@ -132,7 +132,7 @@ feature = "features/suites/s1_acquisition/companion_assets.feature"
 
 [[row]]
 id = "parametric-graph"
-statement = "The decoder graph is a function of config.json + the tensor manifest alone (hidden/layers/heads/kv-heads/head-dim/vocab/rope_theta/rms_norm_eps/tying/context/dtype); the family registry selects the builder; unsupported families fail loud."
+statement = "The decoder graph is a function of config.json + the tensor manifest alone (hidden/layers/heads/kv-heads/head-dim/vocab/rope_theta/rms_norm_eps/tying/context/dtype); a recognized family selects its builder and an unrecognized architecture is derived from its manifest, so arbitrary decoders build without a name allowlist while a manifest the recipe cannot faithfully represent fails loud."
 stage = "S2"
 status = "build"
 oracles = ["journey-reference"]

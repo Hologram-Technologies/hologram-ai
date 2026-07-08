@@ -24,9 +24,12 @@ Given any HuggingFace repository id:
    `tokenizer.json`, `tokenizer_config.json`, `generation_config.json`) — each matched by
    its exact basename, never by suffix.
 3. **Preflight — the journey validates the model before any shard byte moves:**
-   a. `config.json` must name a supported architecture family and carry the family's
-      required keys; an unsupported family or malformed config rejects the journey
-      naming the family/key, with zero shard bytes transferred.
+   a. `config.json` must supply the parametric decoder schema — a recognized family, or
+      an unrecognized architecture whose config carries the generic decoder's required
+      keys. There is no name allowlist: an unknown family is derived from its manifest at
+      build (step b), but a config outside the decoder schema (GPT-2's learned positions
+      and Conv1D attention, say) rejects the journey on config alone, naming the
+      architecture/key, with zero shard bytes transferred.
    b. The tensor manifest is read from the shards' safetensors *headers alone*
       (ranged requests — kilobytes, not weights), and the parametric graph is built
       from config + manifest. A manifest the family cannot realize rejects here.
@@ -52,9 +55,12 @@ stage after the transfer.
 ## Stage S2 — Compile
 
 1. Build the parametric decoder graph **solely** from `config.json` and the tensor
-   manifest (names, shapes, dtypes, κ). The architecture family is selected from
-   `config.architectures` via the family registry; an unsupported family fails loud
-   naming the family.
+   manifest (names, shapes, dtypes, κ). A recognized `config.architectures` family
+   selects its builder; an unrecognized architecture is **derived** from its tensor
+   manifest — the generic decoder recipe is built when the manifest matches its shape,
+   so arbitrary decoders run without a name allowlist, while a manifest the recipe
+   cannot faithfully represent (qk-norm, GeGLU, sparse MoE, Conv1D attention) fails loud
+   naming the architecture.
 2. Compile to a weightless κ-form `.holo`: graph, schedule, ports, tokenizer/generation
    extensions, and the `holospaces.kappa_map` binding each weight constant to its κ.
 3. Persist the archive to OPFS under the model directory.

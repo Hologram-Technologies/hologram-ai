@@ -9,7 +9,7 @@
 //! loud. No canonical model constant appears in this code path.
 
 use crate::builder::GraphBuilder;
-use anyhow::{anyhow, ensure, Result};
+use anyhow::{anyhow, bail, ensure, Context, Result};
 use hologram_ai_common::ir::{
     dtype::DType, graph::AiGraph, node::TensorId, op::AiOp, shape::DimExpr,
 };
@@ -34,10 +34,16 @@ fn map_dtype(d: SafeDtype) -> Result<DType> {
 /// One architecture family the parametric builder knows how to assemble.
 ///
 /// The registry is the single place where family-specific structure lives;
-/// every other quantity comes from the model's own `config.json`.
+/// every other quantity comes from the model's own `config.json`. A family is
+/// either a KNOWN registry entry or one DERIVED from the tensor manifest for
+/// an unrecognized architecture — the generic decoder recipe (RMSNorm +
+/// RoPE + SwiGLU) built only when the manifest and config confirm those
+/// assumptions, so an arbitrary decoder runs without a name allowlist, yet a
+/// model the recipe cannot represent fails loud rather than silently wrong.
+#[derive(Clone)]
 struct FamilySpec {
     /// The `config.architectures[0]` value this entry matches.
-    name: &'static str,
+    name: String,
     /// The attention Q/K/V projections carry bias tensors
     /// (`model.layers.N.self_attn.{q,k,v}_proj.bias`) as a structural property
     /// of the family (Qwen2), independent of any `attention_bias` config flag.
@@ -65,65 +71,88 @@ struct FamilySpec {
     unsupported_knobs: &'static [&'static str],
 }
 
+/// Config keys that change RoPE / attention semantics the generic recipe does
+/// NOT implement — rejected for a DERIVED family (and the known families that
+/// list them), because ignoring them would be silently wrong, not a missing
+/// feature.
+const SEMANTIC_KNOBS: &[&str] = &["partial_rotary_factor", "rope_scaling"];
+
 /// The architecture-family registry: `config.architectures[0]` → structure.
-const SUPPORTED_FAMILIES: &[FamilySpec] = &[
-    FamilySpec {
-        name: "LlamaForCausalLM",
-        attention_qkv_bias: false,
-        attention_fused_qkv: false,
-        mlp_fused_gate_up: false,
-        sliding_window_clamp: false,
-        unsupported_knobs: &[],
-    },
-    FamilySpec {
-        name: "Qwen2ForCausalLM",
-        attention_qkv_bias: true,
-        attention_fused_qkv: false,
-        mlp_fused_gate_up: false,
-        sliding_window_clamp: false,
-        unsupported_knobs: &[],
-    },
-    // Tensor-identical to Llama (separate q/k/v and gate/up projections,
-    // untied lm_head, no biases); sliding-window checkpoints clamp the
-    // effective context length.
-    FamilySpec {
-        name: "MistralForCausalLM",
-        attention_qkv_bias: false,
-        attention_fused_qkv: false,
-        mlp_fused_gate_up: false,
-        sliding_window_clamp: true,
-        unsupported_knobs: &[],
-    },
-    // Llama-family compute with fused qkv_proj / gate_up_proj checkpoint
-    // tensors, realized by compile-time Slice. Partial-rotary and
-    // rope-scaling variants (Phi-3-mini) are not implemented: those knobs
-    // change the RoPE semantics, so they fail loud instead of being ignored.
-    FamilySpec {
-        name: "Phi3ForCausalLM",
-        attention_qkv_bias: false,
-        attention_fused_qkv: true,
-        mlp_fused_gate_up: true,
-        sliding_window_clamp: true,
-        unsupported_knobs: &["partial_rotary_factor", "rope_scaling"],
-    },
-];
+fn known_families() -> Vec<FamilySpec> {
+    vec![
+        FamilySpec {
+            name: "LlamaForCausalLM".into(),
+            attention_qkv_bias: false,
+            attention_fused_qkv: false,
+            mlp_fused_gate_up: false,
+            sliding_window_clamp: false,
+            unsupported_knobs: &[],
+        },
+        FamilySpec {
+            name: "Qwen2ForCausalLM".into(),
+            attention_qkv_bias: true,
+            attention_fused_qkv: false,
+            mlp_fused_gate_up: false,
+            sliding_window_clamp: false,
+            unsupported_knobs: &[],
+        },
+        // Tensor-identical to Llama (separate q/k/v and gate/up projections,
+        // untied lm_head, no biases); sliding-window checkpoints clamp the
+        // effective context length.
+        FamilySpec {
+            name: "MistralForCausalLM".into(),
+            attention_qkv_bias: false,
+            attention_fused_qkv: false,
+            mlp_fused_gate_up: false,
+            sliding_window_clamp: true,
+            unsupported_knobs: &[],
+        },
+        // Llama-family compute with fused qkv_proj / gate_up_proj checkpoint
+        // tensors, realized by compile-time Slice. Partial-rotary and
+        // rope-scaling variants (Phi-3-mini) are not implemented: those knobs
+        // change the RoPE semantics, so they fail loud instead of being ignored.
+        FamilySpec {
+            name: "Phi3ForCausalLM".into(),
+            attention_qkv_bias: false,
+            attention_fused_qkv: true,
+            mlp_fused_gate_up: true,
+            sliding_window_clamp: true,
+            unsupported_knobs: SEMANTIC_KNOBS,
+        },
+    ]
+}
 
-/// The architecture-family names the registry supports — the single source
-/// the browser's search filter and the coverage probe read (dictionary rows
-/// `supported-search`, `family-registry-support`).
+/// The architecture-family names the registry recognizes by NAME — the single
+/// source the browser's search filter and the coverage probe read (dictionary
+/// rows `supported-search`, `family-registry-support`). An unrecognized
+/// architecture is NOT rejected: it is derived from the tensor manifest when
+/// its shape matches the generic decoder recipe (see `select_family`), so
+/// this list is what the search ADVERTISES, not the limit of what runs.
 pub fn supported_families() -> Vec<&'static str> {
-    SUPPORTED_FAMILIES.iter().map(|f| f.name).collect()
+    vec![
+        "LlamaForCausalLM",
+        "Qwen2ForCausalLM",
+        "MistralForCausalLM",
+        "Phi3ForCausalLM",
+    ]
 }
 
-/// The registry family selected for a config — the same selection the
-/// builder performs. The external-authority witness (dictionary row
-/// `family-registry-support`) asserts this against the published model's own
-/// `config.json`.
-pub fn selected_family(config: &Value) -> Result<&'static str> {
-    Ok(select_family(config)?.name)
+/// The family name the builder selects for a config+manifest — a known
+/// registry entry, or the architecture's own name when it is derived from the
+/// manifest. The external-authority witness (dictionary row
+/// `family-registry-support`) asserts this against the published model.
+pub fn selected_family(config: &Value, keys: &[String]) -> Result<String> {
+    Ok(select_family(config, keys)?.name)
 }
 
-fn select_family(config: &Value) -> Result<&'static FamilySpec> {
+/// Select the architecture family: a known registry entry by name, else DERIVE
+/// one from the tensor manifest for an unrecognized architecture. The
+/// derivation is guarded — it builds the generic decoder recipe only when the
+/// manifest and config confirm the recipe's assumptions (a Llama-shaped
+/// tensor layout, no qk-norm, no RoPE-altering knobs) — so an arbitrary
+/// decoder runs without a name allowlist, while a model the recipe cannot
+/// faithfully represent fails loud rather than producing wrong numbers.
+fn select_family(config: &Value, keys: &[String]) -> Result<FamilySpec> {
     let name = config
         .get("architectures")
         .and_then(Value::as_array)
@@ -135,16 +164,50 @@ fn select_family(config: &Value) -> Result<&'static FamilySpec> {
                  (expected `architectures[0]` to name the model family)"
             )
         })?;
-    SUPPORTED_FAMILIES
-        .iter()
-        .find(|f| f.name == name)
-        .ok_or_else(|| {
-            let supported: Vec<&str> = SUPPORTED_FAMILIES.iter().map(|f| f.name).collect();
-            anyhow!(
-                "unsupported architecture family `{name}` — supported families: {}",
-                supported.join(", ")
-            )
-        })
+    if let Some(known) = known_families().into_iter().find(|f| f.name == name) {
+        return Ok(known);
+    }
+    derive_family(name, keys)
+}
+
+/// Derive a [`FamilySpec`] for an unrecognized architecture from its tensor
+/// manifest — the generic decoder path. Only the structural properties the
+/// manifest reveals are inferred (separate vs fused Q/K/V, separate vs fused
+/// gate/up, Q/K/V biases); anything the recipe cannot represent fails loud:
+/// a qk-normalized attention (a `q_norm`/`k_norm` tensor), or a manifest that
+/// is not a decoder at all. Sliding-window clamping is off (the config's own
+/// `sliding_window` still drives context), and the RoPE-altering knobs are
+/// rejected for a derived family exactly as for Phi3.
+fn derive_family(name: &str, keys: &[String]) -> Result<FamilySpec> {
+    let has = |suffix: &str| keys.iter().any(|k| k.contains(suffix));
+
+    // qk-norm attention (Qwen3, Gemma2, OLMo2) applies an RmsNorm to Q and K
+    // the recipe does not emit — building without it is a wrong number.
+    ensure!(
+        !has("self_attn.q_norm.weight") && !has("self_attn.k_norm.weight"),
+        "architecture `{name}` is unrecognized and its manifest carries qk-norm tensors \
+         (`self_attn.q_norm`/`k_norm`), which the generic decoder recipe does not implement"
+    );
+
+    let attention_fused_qkv = has("self_attn.qkv_proj.weight");
+    let mlp_fused_gate_up = has("mlp.gate_up_proj.weight");
+    let has_attn = attention_fused_qkv || has("self_attn.q_proj.weight");
+    let has_mlp = mlp_fused_gate_up || has("mlp.gate_proj.weight");
+    ensure!(
+        has_attn && has_mlp,
+        "architecture `{name}` is unrecognized and its tensor manifest does not match the \
+         generic decoder shape (an attention projection and a gated MLP): the model cannot be \
+         built parametrically"
+    );
+
+    Ok(FamilySpec {
+        name: name.to_string(),
+        attention_qkv_bias: has("self_attn.q_proj.bias"),
+        attention_fused_qkv,
+        mlp_fused_gate_up,
+        sliding_window_clamp: false,
+        unsupported_knobs: SEMANTIC_KNOBS,
+    })
 }
 
 /// Every parametric quantity of the decoder graph, extracted from the model's
@@ -216,6 +279,19 @@ impl ModelConfig {
         let rms_norm_eps = default_f64(config, "rms_norm_eps", 1e-6)? as f32;
         let rope_theta = default_f64(config, "rope_theta", 10_000.0)? as f32;
         let max_position_embeddings = require_u64(config, "max_position_embeddings")?;
+
+        // The recipe's MLP is SwiGLU (silu gate). A model that shares the
+        // Llama tensor shape but gates with a different activation (Gemma's
+        // GeGLU) would be SILENTLY WRONG under this recipe, so its
+        // `hidden_act` fails loud rather than being mis-built. Absent means
+        // the Llama default (silu).
+        match config.get("hidden_act").and_then(Value::as_str) {
+            None | Some("silu") | Some("swish") => {}
+            Some(other) => bail!(
+                "config.json hidden_act `{other}` is unsupported — the parametric recipe \
+                 implements SwiGLU (silu); a different gate activation would be silently wrong"
+            ),
+        }
         ensure!(
             num_attention_heads > 0,
             "config.json key `num_attention_heads` must be positive"
@@ -330,14 +406,59 @@ impl<'a> TensorManifest<'a> {
     }
 }
 
-/// Config-only preflight: the architecture family must be registered and the
-/// family's required keys present and well-formed. Weight- and manifest-free —
-/// the earliest, cheapest rejection point of the journey (S1 preflight, step
-/// a). Fails loud naming the family or the missing key.
+/// Config-only preflight: the config's required keys are present and
+/// well-formed, and no RoPE/attention-altering knob the recipe cannot honor is
+/// set. Weight- and manifest-free — the earliest, cheapest check of the
+/// journey (S1 preflight, step a). An UNRECOGNIZED architecture is NOT
+/// rejected here: whether it can be built is a property of its tensor manifest
+/// (see `select_family`), verified at build; only a KNOWN family's own
+/// unsupported knobs, and the globally-unsupported semantic knobs, fail loud
+/// this early.
 pub fn validate_config(config: &Value) -> Result<()> {
-    let family = select_family(config)?;
-    reject_unsupported_knobs(family, config)?;
-    let _cfg = ModelConfig::from_json(config)?;
+    let name = config
+        .get("architectures")
+        .and_then(Value::as_array)
+        .and_then(|a| a.first())
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("config.json is missing required key `architectures`"))?;
+    let known = known_families().into_iter().find(|f| f.name == name);
+    match &known {
+        Some(known) => reject_unsupported_knobs(known, config)?,
+        // Unrecognized: defer the shape decision to the manifest at build, but
+        // still reject the semantic knobs the generic recipe cannot honor.
+        None => reject_semantic_knobs(name, config)?,
+    }
+    // A recognized family surfaces its own missing-key error verbatim; an
+    // UNRECOGNIZED architecture whose config cannot even supply the generic
+    // decoder's dimensions is rejected here naming the architecture — the
+    // earliest honest "this is not a parametric decoder" signal, before any
+    // shard header is read.
+    let cfg = ModelConfig::from_json(config);
+    if known.is_some() {
+        cfg?;
+    } else {
+        cfg.with_context(|| {
+            format!(
+                "architecture `{name}` is not a recognized family and its config does not supply \
+                 the generic decoder schema the parametric recipe requires \
+                 (hidden_size, num_hidden_layers, num_attention_heads, vocab_size)"
+            )
+        })?;
+    }
+    Ok(())
+}
+
+/// Reject the globally-unsupported RoPE-altering knobs for an architecture the
+/// registry does not know by name (the same knobs a derived family lists).
+fn reject_semantic_knobs(name: &str, config: &Value) -> Result<()> {
+    for knob in SEMANTIC_KNOBS {
+        if config.get(*knob).is_some_and(|v| !v.is_null()) {
+            bail!(
+                "architecture `{name}` sets `{knob}`, which changes RoPE/attention semantics the \
+                 generic decoder recipe does not implement"
+            );
+        }
+    }
     Ok(())
 }
 
@@ -896,7 +1017,7 @@ struct LayerTail {
 /// emitters, so a stage slice contains exactly the nodes the monolithic
 /// graph contains for the same layers.
 struct DecoderRecipe<'a> {
-    family: &'static FamilySpec,
+    family: FamilySpec,
     cfg: ModelConfig,
     manifest: TensorManifest<'a>,
     context_length: u64,
@@ -911,12 +1032,12 @@ impl<'a> DecoderRecipe<'a> {
         dtypes: &[DType],
         context_length: Option<u64>,
     ) -> Result<Self> {
-        let family = select_family(config)?;
-        reject_unsupported_knobs(family, config)?;
+        let family = select_family(config, keys)?;
+        reject_unsupported_knobs(&family, config)?;
         let cfg = ModelConfig::from_json(config)?;
         let manifest = TensorManifest::new(keys, dtypes)?;
         validate_layer_count(&cfg, keys)?;
-        let context_length = resolve_context_length(family, &cfg, context_length)?;
+        let context_length = resolve_context_length(&family, &cfg, context_length)?;
         Ok(Self {
             family,
             cfg,
@@ -998,7 +1119,7 @@ impl<'a> DecoderRecipe<'a> {
         l: u64,
         current: TensorId,
     ) -> Result<LayerTail> {
-        let family = self.family;
+        let family = &self.family;
         let cfg = &self.cfg;
         let manifest = &self.manifest;
         let DecoderDims {
@@ -2440,19 +2561,130 @@ mod tests {
     }
 
     #[test]
-    fn unknown_family_fails_naming_family_and_supported_set() {
+    fn unrecognized_architecture_builds_via_manifest_derivation() {
+        // An architecture the registry does not know BY NAME, but whose tensor
+        // manifest matches the generic decoder shape, is DERIVED and built —
+        // no name allowlist gates arbitrary decoders.
+        let mut config = tiny_llama_config();
+        config["architectures"] = serde_json::json!(["SomeNovelForCausalLM"]);
+        let keys = decoder_keys(2, false, false);
+        let dtypes = vec![DType::F32; keys.len()];
+        let graph = build_parametric_graph_from_manifest(&config, &keys, &dtypes, None)
+            .expect("an unrecognized architecture with a Llama-shaped manifest builds");
+        assert_eq!(
+            meta_str(&graph, "family"),
+            Some("SomeNovelForCausalLM"),
+            "the derived family carries the architecture's own name"
+        );
+        // Same graph shape as the equivalent Llama config — the recipe is the
+        // generic one, selected structurally, not by name.
+        assert!(graph
+            .nodes
+            .iter()
+            .any(|n| matches!(n.op, AiOp::GroupedQueryAttention { .. })));
+    }
+
+    #[test]
+    fn unrecognized_architecture_without_a_decoder_manifest_fails_loud() {
         let mut config = tiny_llama_config();
         config["architectures"] = serde_json::json!(["MambaForCausalLM"]);
+        // A manifest with no attention/MLP projections — not a decoder shape.
+        let keys = vec![
+            "model.embed_tokens.weight".to_string(),
+            "model.norm.weight".to_string(),
+            "lm_head.weight".to_string(),
+        ];
+        let dtypes = vec![DType::F32; keys.len()];
+        let err = build_parametric_graph_from_manifest(&config, &keys, &dtypes, None)
+            .err()
+            .expect("a non-decoder manifest must fail loud");
+        let msg = err.to_string();
+        assert!(msg.contains("MambaForCausalLM"), "names the family: {msg}");
+        assert!(
+            msg.contains("generic decoder shape"),
+            "explains the shape mismatch: {msg}"
+        );
+    }
+
+    #[test]
+    fn derived_family_rejects_a_qk_norm_manifest() {
+        // A qk-normalized decoder (Qwen3/Gemma2/OLMo2 shape) shares the Llama
+        // tensor names but adds q_norm/k_norm the recipe does not emit —
+        // building without them would be silently wrong, so it fails loud.
+        let mut config = tiny_llama_config();
+        config["architectures"] = serde_json::json!(["Qwen3ForCausalLM"]);
+        let mut keys = decoder_keys(2, false, false);
+        keys.push("model.layers.0.self_attn.q_norm.weight".to_string());
+        keys.push("model.layers.0.self_attn.k_norm.weight".to_string());
+        let dtypes = vec![DType::F32; keys.len()];
+        let err = build_parametric_graph_from_manifest(&config, &keys, &dtypes, None)
+            .err()
+            .expect("a qk-norm manifest must fail loud");
+        assert!(
+            err.to_string().contains("qk-norm"),
+            "names the unsupported feature: {err}"
+        );
+    }
+
+    #[test]
+    fn non_silu_gate_activation_fails_loud() {
+        // A GeGLU decoder (Gemma) shares the Llama tensor shape but gates with
+        // gelu — the SwiGLU recipe would be silently wrong, so hidden_act
+        // fails loud.
+        let mut config = tiny_llama_config();
+        config["hidden_act"] = serde_json::json!("gelu_pytorch_tanh");
         let keys = decoder_keys(2, false, false);
         let dtypes = vec![DType::F32; keys.len()];
         let err = build_parametric_graph_from_manifest(&config, &keys, &dtypes, None)
             .err()
-            .expect("must fail loud");
-        let msg = err.to_string();
-        assert!(msg.contains("MambaForCausalLM"), "names the family: {msg}");
+            .expect("a non-silu gate must fail loud");
         assert!(
-            msg.contains("LlamaForCausalLM") && msg.contains("Qwen2ForCausalLM"),
-            "names the supported set: {msg}"
+            err.to_string().contains("hidden_act"),
+            "names the activation: {err}"
+        );
+    }
+
+    #[test]
+    fn unrecognized_architecture_rejects_rope_scaling_at_preflight() {
+        // The semantic knobs (rope_scaling / partial_rotary_factor) are
+        // rejected even for a derived family — ignoring them is wrong, not
+        // missing.
+        let mut config = tiny_llama_config();
+        config["architectures"] = serde_json::json!(["NovelForCausalLM"]);
+        config["rope_scaling"] = serde_json::json!({ "type": "linear", "factor": 2.0 });
+        let err = validate_config(&config)
+            .expect_err("rope_scaling on an unrecognized family must fail loud");
+        assert!(
+            err.to_string().contains("rope_scaling"),
+            "names the knob: {err}"
+        );
+    }
+
+    #[test]
+    fn unrecognized_architecture_missing_decoder_keys_is_named_at_preflight() {
+        // A real non-decoder config (GPT-2 names its dimensions `n_embd` /
+        // `n_layer`, not the generic decoder schema) is rejected on config
+        // alone, before any shard header — and the rejection names the
+        // architecture so the journey is honest about WHAT it declined.
+        let config = serde_json::json!({
+            "architectures": ["GPT2LMHeadModel"],
+            "n_embd": 768,
+            "n_layer": 12,
+            "n_head": 12,
+            "vocab_size": 50257,
+            "n_positions": 1024,
+            "model_type": "gpt2",
+        });
+        let err = validate_config(&config)
+            .expect_err("a config outside the generic decoder schema must fail preflight");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("GPT2LMHeadModel"),
+            "the rejection names the architecture: {msg}"
+        );
+        assert!(
+            msg.contains("generic decoder schema"),
+            "the rejection explains the schema mismatch: {msg}"
         );
     }
 

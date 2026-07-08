@@ -30,9 +30,12 @@ const FIXTURE_FILES = [
   "generation_config.json",
 ];
 
-// A valid repo whose family the parametric registry does not support
-// (GPT2: learned positions + LayerNorm — structurally outside the decoder
-// families the registry realizes). Preflight must reject on config alone.
+// A valid repo whose architecture is outside the parametric decoder schema:
+// GPT-2 names its dimensions `n_embd` / `n_layer` (learned positions + Conv1D
+// attention), not the generic decoder schema the recipe consumes. There is no
+// name allowlist — an unknown family is normally derived from its manifest —
+// but this config cannot even supply the decoder's dimensions, so preflight
+// rejects on config alone, naming the architecture.
 const UNSUPPORTED_FAMILY_CONFIG = JSON.stringify({
   architectures: ["GPT2LMHeadModel"],
   n_embd: 768,
