@@ -606,7 +606,15 @@ export async function generate(opts: GenerateOpts): Promise<number> {
     top_k: opts.topK,
     stop: opts.stop,
   };
-  
+  // Speculative decode (row `speculative-decode`): opt-in via the
+  // `hologram_speculative` knob = draft width K (>= 2). Greedy only, so it takes
+  // effect at temperature 0; a stale/absent verify pipeline falls back to plain
+  // decode. Off by default — the decode plan is unchanged unless the knob is set.
+  const specKnob = Number(localStorage.getItem("hologram_speculative") ?? "");
+  if (Number.isFinite(specKnob) && specKnob >= 2) {
+    genOpts.speculative_draft = Math.floor(specKnob);
+  }
+
   emitLine("chat://line", { stream: "stdout", line: "" });
   
   return new Promise((resolve, reject) => {

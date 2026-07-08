@@ -555,6 +555,16 @@ executor = "browser"
 feature = "features/suites/s4_application/chat_handshake.feature"
 
 [[row]]
+id = "speculative-journey"
+statement = "With speculative decode enabled, the browser's staged decode session drafts from the realized sequence's recurrence and verifies in one batched pass through a paged/staged verify pipeline, and the chat journey streams live and warm across turns over that path — the deployed browser integration of the natively byte-exact speculative decode (the batched shortcut changes speed, never meaning)."
+stage = "S4"
+status = "build"
+oracles = ["journey-reference"]
+tier = "suite"
+executor = "browser"
+feature = "features/suites/s4_application/speculative_journey.feature"
+
+[[row]]
 id = "live-model-journey"
 statement = "The full journey (download → compile → run → handshake) completes in real Chromium on the pinned SmolLM2-135M-Instruct."
 stage = "S4"

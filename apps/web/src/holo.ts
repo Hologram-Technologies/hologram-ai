@@ -357,6 +357,12 @@ export interface GenOpts {
   stop?: string[];
   eos?: number;
   seed?: number;
+  /** Speculative decode (row `speculative-decode`): draft width K (also the
+   * verify chunk). `>= 2` drafts the next tokens from the realized sequence's
+   * recurrence and verifies them in one M=K pass; greedy only (temperature 0). */
+  speculative_draft?: number;
+  /** The drafter's max n-gram context length (default 3 when speculating). */
+  speculative_ngram?: number;
 }
 
 /**

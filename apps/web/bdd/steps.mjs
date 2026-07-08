@@ -617,6 +617,16 @@ Given("a forced single-layer execution window", async function () {
   });
 });
 
+Given("speculative decode is enabled", async function () {
+  // The `hologram_speculative` knob = draft width K (row `speculative-decode`).
+  // Greedy only, so it engages at temperature 0; the browser's staged decode
+  // session drafts from the realized sequence's recurrence and verifies in one
+  // M=K pass. Output must be byte-identical to plain decode.
+  await this.page.evaluate(() => {
+    localStorage.setItem("hologram_speculative", "4");
+  });
+});
+
 Given("a small weight-paging budget", async function () {
   // The weight-tier pager (row `lazy-constant-residency`): 1 MB of resident
   // paged-weight bytes per stage, well below the fixture's weight set, so
