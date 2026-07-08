@@ -645,7 +645,7 @@ impl<S: LmSession> DecodeSession<S> {
     /// prefix the model itself would produce, advancing the session by the
     /// accepted count and splicing their K/V from the same pass. `prev_row` is
     /// the logits after the currently-realized sequence. Returns
-    /// `(accepted, bonus)`; the caller commits `bonus` with [`step`] to advance
+    /// `(accepted, bonus)`; the caller commits `bonus` with `step` to advance
     /// past it and obtain the next `prev_row`. Output-identical to stepping the
     /// accepted tokens one at a time — a batched shortcut, never a change in
     /// meaning.

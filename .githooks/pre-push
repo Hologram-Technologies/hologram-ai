@@ -11,13 +11,21 @@ fi
 echo "1. Checking rust formatting..."
 cargo fmt --all -- --check
 
-echo "2. Running rust clippy..."
-cargo clippy --workspace --tests --bins -- -D warnings
+echo "2. Running rust clippy (--all-targets, mirroring the CI gate)..."
+cargo clippy --workspace --all-targets -- -D warnings
 
-echo "3. Running rust tests..."
+echo "3. Checking rustdoc (the CI gate's doc step: -D warnings)..."
+RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps
+
+echo "4. Running rust tests..."
 cargo test --workspace
 
-echo "4. Running structural witnesses..."
+echo "4b. Gate parity (oracle integrity, conformance ledger, anti-hardcode)..."
+cargo run -q -p xtask -- oracle-verify
+cargo run -q -p xtask -- report
+./scripts/anti-hardcode.sh
+
+echo "5. Running structural witnesses..."
 cargo test --release -p hologram-ai-conformance --features=structural \
     --test structural_ce \
     --test structural_za \
@@ -26,23 +34,23 @@ cargo test --release -p hologram-ai-conformance --features=structural \
     --test structural_lw \
     --test structural_im
 
-echo "5. Checking wasm32-unknown-unknown compilation..."
+echo "6. Checking wasm32-unknown-unknown compilation..."
 cargo build --target wasm32-unknown-unknown -p hologram-ai-quant
 cargo build --target wasm32-unknown-unknown -p hologram-ai-tokenizer --no-default-features
 
-echo "6. Checking thumbv7em-none-eabi compilation..."
+echo "7. Checking thumbv7em-none-eabi compilation..."
 cargo build --target thumbv7em-none-eabi -p hologram-ai-quant
 cargo build --target thumbv7em-none-eabi -p hologram-ai-tokenizer --no-default-features
 
-echo "7. Running ORT conformance tests..."
+echo "8. Running ORT conformance tests..."
 cargo test --release -p hologram-ai-conformance --features=conformance
 
-echo "8. Building web app..."
+echo "9. Building web app..."
 cd apps/web
 pnpm install
 pnpm run build
 
-echo "9. Running web app tests..."
+echo "10. Running web app tests..."
 pnpm run test
 
 echo "Pre-push checks passed successfully!"
