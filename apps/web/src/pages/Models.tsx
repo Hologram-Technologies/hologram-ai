@@ -148,6 +148,41 @@ export function Models() {
     );
   }
 
+  function renderModelItem(m: KnownModelStatus) {
+    return (
+      <div className="list-item" key={m.id} style={{ alignItems: "flex-start" }}>
+        <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+          <div style={{ display: "flex", gap: 8, alignItems: "baseline" }}>
+            <strong>{m.displayName}</strong>
+            <span className="meta">
+              {m.size && m.size !== "?" ? `${m.size} · ` : ""}
+              {m.modality}
+            </span>
+          </div>
+          <div className="meta">{m.description}</div>
+          <div className="meta">
+            HF: <code>{m.hfId}</code> ·{" "}
+            {m.approxArchiveMb > 0
+              ? `~${m.approxArchiveMb} MB archive`
+              : "archive size resolved on download"}{" "}
+            ·{" "}
+            <span style={{ color: m.compiledArchive ? "var(--accent)" : "var(--fg-dim)" }}>
+              {statusLabel(m)}
+            </span>
+          </div>
+        </div>
+        <div>{actionFor(m)}</div>
+      </div>
+    );
+  }
+
+  // "My Models" = models the user actually has (added themselves, or downloaded/
+  // compiled locally). Featured suggestions the user has NOT adopted stay in
+  // their own section — clearing storage empties "My Models" instead of
+  // re-showing the shipped catalogue as if it were the user's.
+  const myModels = models.filter((m) => !m.featured || m.downloaded || m.compiledArchive);
+  const featured = models.filter((m) => m.featured && !m.downloaded && !m.compiledArchive);
+
   return (
     <div className="page">
       <div className="page-header">
@@ -211,43 +246,27 @@ export function Models() {
         )}
 
         <h2 style={{ fontSize: 16, marginTop: 32, marginBottom: 16 }}>My Models</h2>
-        <div className="list">
-          {models.map((m) => (
-            <div
-              className="list-item"
-              key={m.id}
-              style={{ alignItems: "flex-start" }}
-            >
-              <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-                <div style={{ display: "flex", gap: 8, alignItems: "baseline" }}>
-                  <strong>{m.displayName}</strong>
-                  <span className="meta">
-                    {m.size && m.size !== "?" ? `${m.size} · ` : ""}
-                    {m.modality}
-                  </span>
-                </div>
-                <div className="meta">{m.description}</div>
-                <div className="meta">
-                  HF: <code>{m.hfId}</code> ·{" "}
-                  {m.approxArchiveMb > 0
-                    ? `~${m.approxArchiveMb} MB archive`
-                    : "archive size resolved on download"}{" "}
-                  ·{" "}
-                  <span
-                    style={{
-                      color: m.compiledArchive
-                        ? "var(--accent)"
-                        : "var(--fg-dim)",
-                    }}
-                  >
-                    {statusLabel(m)}
-                  </span>
-                </div>
-              </div>
-              <div>{actionFor(m)}</div>
-            </div>
-          ))}
-        </div>
+        {myModels.length === 0 ? (
+          <p className="meta" style={{ marginTop: 0 }}>
+            No models yet. Search HuggingFace above, or pick a featured starting
+            point below — anything you download appears here.
+          </p>
+        ) : (
+          <div className="list">{myModels.map(renderModelItem)}</div>
+        )}
+
+        {featured.length > 0 && (
+          <>
+            <h2 style={{ fontSize: 16, marginTop: 32, marginBottom: 8 }}>
+              Featured — quick start
+            </h2>
+            <p className="meta" style={{ marginTop: 0, marginBottom: 16 }}>
+              Curated starting points. These are suggestions, not stored on your
+              device until you download one.
+            </p>
+            <div className="list">{featured.map(renderModelItem)}</div>
+          </>
+        )}
 
         {tail.length > 0 && (
           <section style={{ marginTop: 24 }}>

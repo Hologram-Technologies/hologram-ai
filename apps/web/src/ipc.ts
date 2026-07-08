@@ -28,6 +28,11 @@ export interface KnownModelStatus {
   localDir: string | null;
   downloaded: boolean;
   compiledArchive: string | null;
+  /** `true` for a shipped-catalogue suggestion (a FEATURED starting point the
+   * user has not adopted), `false` for a model the user added themselves. The
+   * Models page keeps featured suggestions OUT of "My Models" until the user
+   * actually downloads one — a curated starter list is not the user's library. */
+  featured: boolean;
 }
 
 export interface CompiledArchive {
@@ -53,7 +58,10 @@ export interface ProcessLine {
   line: string;
 }
 
-type CatalogueEntry = Omit<KnownModelStatus, "localDir" | "downloaded" | "compiledArchive">;
+type CatalogueEntry = Omit<
+  KnownModelStatus,
+  "localDir" | "downloaded" | "compiledArchive" | "featured"
+>;
 
 // The catalogue is DATA (public/catalogue.json), never code: the anti-hardcode
 // gate forbids model identities in the app source. localStorage carries
@@ -107,7 +115,9 @@ async function getOpfsDirIfExists(dir: FileSystemDirectoryHandle, name: string):
   }
 }
 
-async function getCatalogue(): Promise<CatalogueEntry[]> {
+type TaggedEntry = CatalogueEntry & { featured: boolean };
+
+async function getCatalogue(): Promise<TaggedEntry[]> {
   const shipped = await loadShippedCatalogue();
   const stored = localStorage.getItem("hologram_catalogue_custom");
   let custom: CatalogueEntry[] = [];
@@ -118,9 +128,13 @@ async function getCatalogue(): Promise<CatalogueEntry[]> {
       localStorage.removeItem("hologram_catalogue_custom");
     }
   }
-  const merged = [...shipped];
+  // Shipped entries are FEATURED suggestions; the user's own added entries are
+  // not. A custom entry that shadows a shipped hfId wins (the user adopted it).
+  const merged: TaggedEntry[] = shipped
+    .filter((s) => !custom.some((c) => c.hfId === s.hfId))
+    .map((s) => ({ ...s, featured: true }));
   for (const entry of custom) {
-    if (!merged.some(m => m.hfId === entry.hfId)) merged.push(entry);
+    merged.push({ ...entry, featured: false });
   }
   return merged;
 }
