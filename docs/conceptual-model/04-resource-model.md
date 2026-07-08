@@ -389,6 +389,36 @@ its own measured cost; no aggregate canonicalization claim.
 - Kernel-floor performance contract: native hardware-counter witness
   (L1-dcache table-access miss ratio ~0 after warmup) once Q0-tier kernels
   carry these workloads; structural-only until then.
+- S3/S4 `speculative-decode` (batched-verify generation): the decode step is
+  the substrate's worst matmul shape (`M=1`; the `decode_shape` bench measures a
+  `M=8` pass at ~1/7 the wall-clock of a single `M=1` step). The lever is to
+  stop feeding the kernel `M=1` work — draft `K` tokens from a PARAMETRIC,
+  zero-weight source and verify them in one `M=K` pass, accepting the longest
+  correct prefix. Staged realization, each increment shippable:
+  1. A multi-position verify head — a decode/chunk graph that emits logits at
+     ALL `K` positions (the chunked-prefill `M=K` machinery already produces the
+     per-position hidden states and K/V; today the head gathers only the last).
+     Witness: verify-pass logits at each position == step-decode logits there.
+  2. Prompt-lookup drafting — draft the next `K` tokens by matching the last
+     `g` realized tokens against their most recent earlier occurrence in the
+     realized sequence (prompt + generation) and copying what followed. No draft
+     model, no training — parametric over any model/input; `K=0` fallback (plain
+     single-step) when no match, so never worse than today.
+  3. Greedy accept + rewind — accept `draft[i]` while `argmax(logits[i]) ==
+     draft[i]`, append the model's argmax at the first divergence (the bonus
+     token), and `rewind_to` the accepted length (the K/V for accepted positions
+     is already spliced by the verify pass; `DecodeSession::rewind_to` exists).
+     For temperature 0 this is OUTPUT-IDENTICAL to step-decode — a pure speedup.
+     Witness: speculative-greedy completion == step-greedy, byte-identical;
+     forward passes < tokens on a draftable fixture; the handshake reproduces.
+  4. Browser wiring (`generate.worker` + `DecodeChatSession`); the deployed
+     probe reports acceptance rate and passes/token.
+  Faithfulness/limits, never over-claimed: v1 is GREEDY only (temperature-0);
+  speculative SAMPLING (the Leviathan/Chen accept rule that preserves the
+  distribution for temperature > 0) and draft-MODEL drafting are follow-ons.
+  The win is input-dependent — high on structured/repetitive text (code, JSON,
+  retrieval), low on free-form prose — so the acceptance rate is REPORTED, never
+  asserted as a universal speedup.
 - Measured, never asserted: dedup ratio per corpus; elision ratio per
   workload; stage-granularity optimum per environment.
 
@@ -649,10 +679,38 @@ in-repo lever left over the decode floor.
   `DecodeChatSession` sets it from `stages.json`); this scenario makes its
   floor reduction a measured, regression-guarded number.
 
-Conclusion: there is no un-addressed in-repo bottleneck on the decode path.
-The structure is optimal (O(1) compile and reuse), the byte-count lever
-(quantized decode) is wired and now measured, and the residual above the
-reduced floor is the substrate's single-position kernel throughput — a
-read-only upstream dependency. The next byte-count lever is quantizing the
-head/embedding (int4 via the substrate Q0 carry chain), a follow-on, not a
-defect in what ships.
+- **The residual is the M=1 shape, not "kernel throughput" in general —
+  measured** (`cargo bench --bench scaling -- decode_shape`). A decode step is a
+  single-position (`M=1`) matmul: one activation vector times each weight, a
+  GEMV, the thinnest shape. The substrate matmul is a GEMM kernel; the bench
+  sweeps the batch dimension `M` over a fixed 2048×2048 weight, perturbing only
+  the activation so the fixed per-`execute` cost amortizes and the curve is the
+  kernel's own `M`-scaling:
+
+  | M (positions) | time | per-output throughput |
+  |---|---|---|
+  | **1 (decode)** | **15.3 ms** | 134 Kelem/s |
+  | 2 | 6.8 ms | 603 Kelem/s |
+  | 4 | 2.2 ms | 3.8 Melem/s |
+  | 8 | 2.3 ms | 7.2 Melem/s |
+  | 16 | 2.6 ms | 12.8 Melem/s |
+  | 32 | 3.5 ms | 19.0 Melem/s |
+
+  `M=8` is **6.7× faster in absolute wall-clock than `M=1`** while producing 8×
+  the outputs — a ~140× per-output swing. `M=1` hits a pathological path the
+  tiled GEMM escapes from `M≥4`; a `K=4–16` batched pass costs *less* wall-clock
+  than one `M=1` step. (Native; wasm stacks its ~20× on every row, but the ratio
+  holds.) This is the real shape of the upstream bottleneck: the kernel is
+  read-only, but it is only slow at `M=1`.
+
+Conclusion: the decode STRUCTURE is optimal (O(1) compile and reuse) and the
+byte-count lever (quantized decode) is wired and measured — but "in-repo decode
+levers are exhausted" was wrong. The substrate is only slow at `M=1`, and
+hologram-ai chooses the shape it feeds the kernel. Chunked prefill already
+exploits this (batching `C` positions is why prefill halved). The un-exhausted
+lever for GENERATION is the same trick: a **batched-verify (speculative) decode
+step** — draft `K` tokens from a cheap parametric source, verify them in one
+`M=K` pass, accept the longest correct prefix — turning `K` pathological `M=1`
+steps into one efficient GEMM-shaped pass, output-identical to greedy
+step-decode. See the candidate row `speculative-decode`. The head/embedding
+int4 byte-count lever remains a separate follow-on.
