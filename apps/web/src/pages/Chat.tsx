@@ -321,9 +321,11 @@ export function Chat() {
     const rendered = renderChat(history, sessionMeta);
     if (rendered) {
       // The model's own template — the rendered text IS the full prompt, so no
-      // extra `{prompt}` wrap; stop on the model's own eos.
+      // extra `{prompt}` wrap. Stop on the model's OWN eos (derived); the engine
+      // also stops on the tokenizer's eos id, so no arbitrary label stop is
+      // fabricated for a chat model that ships no eos string.
       promptForModel = rendered.prompt;
-      stopStrings = rendered.stop.length ? rendered.stop : ["\nUser:", "\nAssistant:"];
+      stopStrings = rendered.stop;
       promptTemplateForGen = undefined;
       if (ctx && tok) {
         let working = history;
@@ -358,7 +360,14 @@ export function Chat() {
           // Counting unavailable: send untrimmed.
         }
       }
-      stopStrings = selectedKnown?.stop?.length ? selectedKnown.stop : ["\nUser:", "\nAssistant:"];
+      // Prefer the model's OWN eos (derived), then a curated catalogue stop;
+      // the generic User/Assistant stop is a last resort ONLY for a bare base
+      // model with no eos, and it matches the generic separator we imposed.
+      stopStrings = sessionMeta?.eosToken
+        ? [sessionMeta.eosToken]
+        : selectedKnown?.stop?.length
+          ? selectedKnown.stop
+          : ["\nUser:", "\nAssistant:"];
       promptTemplateForGen = selectedKnown?.promptTemplate ?? undefined;
     }
 
@@ -375,6 +384,11 @@ export function Chat() {
         maxTokens: selectedKnown?.maxTokens,
         temperature,
         stop: stopStrings,
+        // The model's OWN eos id (from its generation_config.json / config.json)
+        // — a token-level stop that fires before detokenization, more reliable
+        // than the decoded stop strings. Absent (or multi-eos) → the engine
+        // falls back to the tokenizer's eos and the stop strings terminate.
+        eos: sessionMeta?.eosTokenId,
         promptTemplate: promptTemplateForGen,
       });
       // Commit the final streamed text SYNCHRONOUSLY: the token stream's

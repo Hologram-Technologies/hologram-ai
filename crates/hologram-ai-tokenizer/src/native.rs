@@ -92,7 +92,49 @@ impl NativeTokenizer {
     pub fn from_tokenizer_json(path: &Path) -> Result<Self> {
         let data = std::fs::read(path)
             .with_context(|| format!("reading tokenizer file: {}", path.display()))?;
-        Self::from_tokenizer_json_bytes(&data)
+        let mut tok = Self::from_tokenizer_json_bytes(&data)?;
+        // The eos/bos IDENTITY lives in the sibling `tokenizer_config.json`, not
+        // in `tokenizer.json` (which only lists tokens, never which one ends a
+        // turn). Resolve it so a non-`</s>` model (ChatML `<|im_end|>`, Llama-3
+        // `<|eot_id|>`, GPT-2/Qwen `<|endoftext|>`, …) stops on its OWN eos
+        // rather than the Llama default id 2. Best-effort: a bare tokenizer dir
+        // with no config leaves the parsed ids untouched.
+        if let Some(dir) = path.parent() {
+            tok.resolve_special_tokens_from_config(&dir.join("tokenizer_config.json"));
+        }
+        Ok(tok)
+    }
+
+    /// Override eos/bos ids from a `tokenizer_config.json`'s `eos_token` /
+    /// `bos_token` (a bare string or an `{ "content": … }` AddedToken), mapping
+    /// each to its id through the loaded vocab. A missing file, missing field,
+    /// or unmapped token leaves the existing id in place — enrichment, never a
+    /// hard failure (the caller may pass `--eos` to be explicit).
+    fn resolve_special_tokens_from_config(&mut self, config_path: &Path) {
+        let Ok(bytes) = std::fs::read(config_path) else {
+            return;
+        };
+        let Ok(cfg) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
+            return;
+        };
+        if let Some(token) = special_token_content(&cfg["eos_token"]) {
+            if let Some(id) = self.vocab_table().str_to_id(token) {
+                self.config.special_tokens.eos_id = id;
+            }
+        }
+        if let Some(token) = special_token_content(&cfg["bos_token"]) {
+            if let Some(id) = self.vocab_table().str_to_id(token) {
+                self.config.special_tokens.bos_id = Some(id);
+            }
+        }
+        // Whether a BOS is auto-prepended is the model's OWN declaration
+        // (`add_bos_token`), not a guess from the mere presence of a
+        // post_processor: a ChatML model (Qwen) ships a ByteLevel post_processor
+        // yet sets `add_bos_token: false`, and prepending one would corrupt its
+        // prompt. When the config states it, it overrides the coarse heuristic.
+        if let Some(add_bos) = cfg["add_bos_token"].as_bool() {
+            self.config.add_bos = add_bos;
+        }
     }
 
     /// Construct from in-memory HuggingFace `tokenizer.json` bytes — used to load
@@ -360,6 +402,15 @@ impl Tokenizer for NativeTokenizer {
 
 // ── JSON parsing helpers (host shell) ───────────────────────────────────
 
+/// The content of a `tokenizer_config.json` special-token field: either a bare
+/// string (`"eos_token": "</s>"`) or an `AddedToken` object with a `content`
+/// key (`"eos_token": { "content": "<|im_end|>", … }`).
+#[cfg(feature = "std")]
+fn special_token_content(v: &serde_json::Value) -> Option<&str> {
+    v.as_str()
+        .or_else(|| v.get("content").and_then(|c| c.as_str()))
+}
+
 #[cfg(feature = "std")]
 fn parse_special_tokens(json: &serde_json::Value) -> Result<SpecialTokens> {
     let added = json.get("added_tokens").and_then(|v| v.as_array());
@@ -565,6 +616,65 @@ mod tests {
         p.pop(); // workspace root
         p.push("models/TinyLlama-1.1B-Chat-v1.0/tokenizer.json");
         p
+    }
+
+    /// A non-`</s>` chat model (ChatML `<|im_end|>`) loaded from a path resolves
+    /// its OWN eos from the sibling `tokenizer_config.json` — never the Llama
+    /// default id 2, which would be a wrong (or never-firing) stop token.
+    #[test]
+    fn eos_resolves_from_sibling_tokenizer_config() {
+        let dir = tempfile::tempdir().unwrap();
+        // A minimal BPE tokenizer.json: vocab has `<|im_end|>` at id 5, and its
+        // `added_tokens` deliberately contain NO `</s>` — so `parse_special_tokens`
+        // alone would fall back to the default eos id 2.
+        // A `post_processor` is present, so the coarse heuristic sets
+        // `add_bos = true` — the sibling config must be able to override it.
+        let tokenizer_json = r#"{
+            "model": {
+                "type": "BPE",
+                "vocab": {"h": 0, "e": 1, "l": 2, "o": 3, "ll": 4, "<|im_end|>": 5},
+                "merges": ["l l"],
+                "byte_fallback": false
+            },
+            "post_processor": {"type": "ByteLevel"},
+            "added_tokens": [
+                {"id": 5, "content": "<|im_end|>", "special": true}
+            ]
+        }"#;
+        std::fs::write(dir.path().join("tokenizer.json"), tokenizer_json).unwrap();
+
+        // Without the config: eos falls back to the default 2 (the bug), and the
+        // presence of a post_processor coarsely implies add_bos.
+        let bare =
+            NativeTokenizer::from_tokenizer_json(&dir.path().join("tokenizer.json")).unwrap();
+        assert_eq!(bare.eos_token_id(), 2, "no config ⇒ documented default");
+        assert!(bare.config.add_bos, "post_processor ⇒ coarse add_bos");
+
+        // With the sibling config naming `<|im_end|>`: eos resolves to id 5.
+        std::fs::write(
+            dir.path().join("tokenizer_config.json"),
+            r#"{"eos_token": "<|im_end|>", "add_bos_token": false}"#,
+        )
+        .unwrap();
+        let tok = NativeTokenizer::from_tokenizer_json(&dir.path().join("tokenizer.json")).unwrap();
+        assert_eq!(
+            tok.eos_token_id(),
+            5,
+            "eos must come from the model's own config, not the Llama default"
+        );
+        assert!(
+            !tok.config.add_bos,
+            "the model's own add_bos_token: false must override the post_processor heuristic"
+        );
+
+        // The AddedToken object form (`{content}`) resolves identically.
+        std::fs::write(
+            dir.path().join("tokenizer_config.json"),
+            r#"{"eos_token": {"content": "<|im_end|>", "special": true}}"#,
+        )
+        .unwrap();
+        let tok = NativeTokenizer::from_tokenizer_json(&dir.path().join("tokenizer.json")).unwrap();
+        assert_eq!(tok.eos_token_id(), 5);
     }
 
     #[test]

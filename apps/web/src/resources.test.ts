@@ -7,6 +7,7 @@ import {
   environmentBudgetBytes,
   estimateResources,
   formatBytes,
+  resolveMaxPositions,
 } from "./resources";
 
 const TINY = {
@@ -32,6 +33,21 @@ describe("environmentBudgetBytes", () => {
   });
   it("falls back to the ceiling when unreported", () => {
     expect(environmentBudgetBytes(undefined)).toBe(2 * 1024 ** 3);
+  });
+});
+
+describe("resolveMaxPositions", () => {
+  it("reads max_position_embeddings (Llama/Qwen/Mistral/Phi)", () => {
+    expect(resolveMaxPositions({ max_position_embeddings: 4096 })).toBe(4096);
+  });
+  it("falls back across GPT-2-family and other aliases", () => {
+    expect(resolveMaxPositions({ n_positions: 1024 })).toBe(1024);
+    expect(resolveMaxPositions({ n_ctx: 2048 })).toBe(2048);
+    expect(resolveMaxPositions({ max_sequence_length: 512 })).toBe(512);
+    expect(resolveMaxPositions({ seq_length: 8192 })).toBe(8192);
+  });
+  it("fails loud when a config declares no context length — never a silent 64", () => {
+    expect(() => resolveMaxPositions({ hidden_size: 64 })).toThrow(/no context length/);
   });
 });
 
@@ -105,6 +121,10 @@ describe("dtypeBytes / formatBytes", () => {
     expect(dtypeBytes("BF16")).toBe(2);
     expect(dtypeBytes("bfloat16")).toBe(2);
     expect(dtypeBytes("F64")).toBe(8);
+    expect(dtypeBytes("I8")).toBe(1);
+  });
+  it("fails loud on an unrecognized dtype rather than assuming 1 byte", () => {
+    expect(() => dtypeBytes("float3")).toThrow(/unrecognized/);
   });
   it("prints human figures", () => {
     expect(formatBytes(2 * 1024 ** 3)).toBe("2.0 GiB");

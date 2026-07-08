@@ -17,21 +17,60 @@ export interface ResourceEstimate {
   stageCount: number;
 }
 
-/** Bytes per element of a safetensors/torch dtype tag. */
+/** Bytes per element of a safetensors/torch dtype tag. An unrecognized dtype
+ * fails loud: silently assuming 1 byte would under-count the parameter storage
+ * and skew every downstream stage/context estimate for a model whose weights we
+ * cannot actually size. */
 export function dtypeBytes(dtype: string): number {
   switch (dtype.toUpperCase().replace("FLOAT", "F").replace("TORCH.", "")) {
     case "F64":
     case "I64":
+    case "U64":
       return 8;
     case "F32":
     case "I32":
+    case "U32":
       return 4;
     case "F16":
     case "BF16":
+    case "I16":
+    case "U16":
       return 2;
-    default:
+    case "F8_E4M3":
+    case "F8_E5M2":
+    case "I8":
+    case "U8":
+    case "BOOL":
       return 1;
+    default:
+      throw new Error(
+        `unrecognized torch/safetensors dtype \`${dtype}\` — cannot size the model's weights (add its byte width rather than assuming one)`,
+      );
   }
+}
+
+/** The model's own maximum context (positions) from config.json, resolved
+ * across the architecture-specific aliases HF uses: `max_position_embeddings`
+ * (Llama/Qwen/Mistral/Phi), `n_positions`/`n_ctx` (GPT-2 family),
+ * `max_sequence_length`/`seq_length` (others). No silent default — a config
+ * declaring none of these cannot yield a context window, so we fail loud rather
+ * than bake an arbitrary 64-token window into the stage plan. */
+export function resolveMaxPositions(config: Record<string, unknown>): number {
+  const aliases = [
+    "max_position_embeddings",
+    "n_positions",
+    "n_ctx",
+    "max_sequence_length",
+    "seq_length",
+  ] as const;
+  for (const key of aliases) {
+    const v = config[key];
+    if (typeof v === "number" && Number.isInteger(v) && v > 0) return v;
+  }
+  throw new Error(
+    `config.json declares no context length (looked for ${aliases.join(", ")}) — ` +
+      `cannot derive a context window without inventing an arbitrary one`,
+  );
 }
 
 /**
@@ -57,7 +96,7 @@ export function chooseContextLength(
   budgetShare = 0.25,
 ): number {
   requireNumeric(config, ["hidden_size", "num_hidden_layers"]);
-  const maxPos = config.max_position_embeddings ?? 64;
+  const maxPos = resolveMaxPositions(config);
   const lanes = 8;
   let context = 64;
   for (let candidate = 128; candidate <= maxPos; candidate *= 2) {
@@ -169,7 +208,7 @@ export function estimateResources(
   const half = stagePlanBudgetBytes / 2;
   const perLayerActivation = (ctx: number) => ctx * config.hidden_size * 8 * 4;
 
-  let contextLength = config.max_position_embeddings ?? 64;
+  let contextLength = resolveMaxPositions(config);
   while (contextLength > 64 && w.layerBytes + perLayerActivation(contextLength) > half) {
     contextLength = Math.floor(contextLength / 2);
   }

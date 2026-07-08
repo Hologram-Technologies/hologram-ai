@@ -36,7 +36,14 @@ export function renderChatTemplate(
     // The model's own eos ends its assistant turn (the engine also stops on the
     // tokenizer's eos id — this is the text backstop).
     return { prompt, stop: opts.eosToken ? [opts.eosToken] : [] };
-  } catch {
+  } catch (e) {
+    // The template DECLARED itself Jinja (it passed the `{{`/`{%` guard) but
+    // failed to compile/render. Degrade to the caller's fallback so the chat
+    // survives — but SURFACE it: a silent null here would let a real instruct
+    // model masquerade as a base model with generic stops. The "not Jinja /
+    // absent" case above returns null without a warning (a legitimate, expected
+    // fallback); only an actual render failure is noisy.
+    console.warn(`chat_template failed to render, falling back to plain prompt: ${e}`);
     return null;
   }
 }

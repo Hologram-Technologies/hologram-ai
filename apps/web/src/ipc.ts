@@ -508,20 +508,53 @@ function tokenString(v: unknown): string | undefined {
   return undefined;
 }
 
-/** The model's chat config DERIVED from its own `tokenizer_config.json` — never
- * hard-coded per model. `chat_template` is the model's Jinja template (rendered
- * with the conversation by the caller); `eos`/`bos` are its special tokens. A
- * model that ships no `chat_template` (a base, non-chat model) returns none and
- * the caller falls back to the catalogue's template. */
+/** The model's chat config DERIVED from its own config files — never hard-coded
+ * per model. `chatTemplate` is the model's Jinja template (rendered with the
+ * conversation by the caller); `eosToken`/`bosToken` are its special-token
+ * strings (from `tokenizer_config.json`); `eosTokenId` is its generation stop
+ * id (from `generation_config.json`, else `config.json`). A model that ships no
+ * `chat_template` (a base, non-chat model) returns none and the caller falls
+ * back to the catalogue's template. */
 export interface ModelChat {
   chatTemplate?: string;
   eosToken?: string;
   bosToken?: string;
+  eosTokenId?: number;
+}
+
+/** The model's OWN end-of-sequence token id, read from a HF config object's
+ * `eos_token_id`. HF allows a single id OR an array of ids (a model with
+ * several terminators, e.g. Llama-3's `<|end_of_text|>` + `<|eot_id|>`). A
+ * single `Option<u32>` engine stop cannot represent a set without picking one
+ * arbitrarily, so we derive an id ONLY for the unambiguous single-number case;
+ * for the array case we return none and let the rendered chat-template stop
+ * strings (which carry every terminator) do the stopping — parametric, no
+ * per-model guess. */
+function parseEosTokenId(cfg: unknown): number | undefined {
+  const raw = (cfg as { eos_token_id?: unknown } | null)?.eos_token_id;
+  return typeof raw === "number" && Number.isInteger(raw) && raw >= 0 ? raw : undefined;
+}
+
+async function loadEosTokenId(dirName: string): Promise<number | undefined> {
+  // generation_config.json is authoritative for generation; config.json is the
+  // fallback. Exact basenames — never a substring guess.
+  for (const file of ["generation_config.json", "config.json"]) {
+    const raw = await readModelFile(dirName, file);
+    if (!raw) continue;
+    try {
+      const id = parseEosTokenId(JSON.parse(new TextDecoder().decode(raw)));
+      if (id !== undefined) return id;
+    } catch {
+      // Malformed config: try the next candidate rather than fail the load.
+    }
+  }
+  return undefined;
 }
 
 async function loadModelChat(dirName: string): Promise<ModelChat> {
+  const eosTokenId = await loadEosTokenId(dirName);
   const raw = await readModelFile(dirName, "tokenizer_config.json");
-  if (!raw) return {};
+  if (!raw) return { eosTokenId };
   try {
     const cfg = JSON.parse(new TextDecoder().decode(raw));
     // `chat_template` is usually a string; some repos ship an array of named
@@ -538,9 +571,10 @@ async function loadModelChat(dirName: string): Promise<ModelChat> {
       chatTemplate,
       eosToken: tokenString(cfg.eos_token),
       bosToken: tokenString(cfg.bos_token),
+      eosTokenId,
     };
   } catch {
-    return {};
+    return { eosTokenId };
   }
 }
 
@@ -596,6 +630,10 @@ export interface GenerateOpts {
   topK?: number;
   stop?: string[];
   promptTemplate?: string;
+  /** The model's OWN end-of-sequence token id (from its generation_config.json /
+   * config.json). Passed so generation stops on the model's real eos rather than
+   * a tokenizer default — parametric over any model. */
+  eos?: number;
 }
 
 // Removed unused variable
@@ -652,6 +690,7 @@ export async function generate(opts: GenerateOpts): Promise<number> {
     temperature: opts.temperature,
     top_k: opts.topK,
     stop: opts.stop,
+    eos: opts.eos,
   };
   // Speculative decode (row `speculative-decode`): opt-in via the
   // `hologram_speculative` knob = draft width K (>= 2). Greedy only, so it takes

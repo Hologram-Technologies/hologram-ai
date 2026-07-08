@@ -684,19 +684,27 @@ impl<'a> StagedRunner<'a> {
     /// bytes carry no dtype, so their element count is bounded by bytes
     /// (1-byte elements — the widest F32 image a byte count can imply).
     fn admission_margin(&self) -> u64 {
-        let expected = self
+        // The manifest-derived per-stage element counts give the ACCURATE
+        // transient bound; use them when available. Only when they are absent
+        // (no `set_expected_stage_bytes`) do we fall back to the raw byte
+        // counts, and there the element count is bounded by the byte count
+        // itself (1-byte elements — the widest F32 image a byte count can
+        // imply): dividing by 4 would UNDER-count elements for a bf16/int8/int4
+        // stage and shrink the margin, risking over-admission → OOM instead of
+        // the intended clean windowing degrade.
+        if let Some(expected) = self
             .expected_stage_bytes
             .iter()
             .map(|&(bytes, elems)| stage_transient_bound(bytes, elems))
             .max()
-            .unwrap_or(0);
-        let measured = self
-            .stage_weight_bytes
+        {
+            return expected;
+        }
+        self.stage_weight_bytes
             .iter()
-            .map(|&bytes| stage_transient_bound(bytes, bytes / 4))
+            .map(|&bytes| stage_transient_bound(bytes, bytes))
             .max()
-            .unwrap_or(0);
-        expected.max(measured)
+            .unwrap_or(0)
     }
 
     /// Enable weight-tier paging (row `lazy-constant-residency`): each stage

@@ -80,13 +80,19 @@ const SEMANTIC_KNOBS: &[&str] = &["partial_rotary_factor", "rope_scaling"];
 /// The architecture-family registry: `config.architectures[0]` → structure.
 fn known_families() -> Vec<FamilySpec> {
     vec![
+        // The RoPE-altering knobs (`rope_scaling`: Llama-3's llama3 / long-context
+        // YaRN, `partial_rotary_factor`) are rejected for EVERY family, not
+        // silently ignored: the runtime RoPE uses plain `theta^(-2i/d)`
+        // frequencies (see `decode.rs`), so a checkpoint that sets them would be
+        // decoded at the WRONG positions — a silent wrong number. Failing loud
+        // here is correct until the scaled-frequency variants are implemented.
         FamilySpec {
             name: "LlamaForCausalLM".into(),
             attention_qkv_bias: false,
             attention_fused_qkv: false,
             mlp_fused_gate_up: false,
             sliding_window_clamp: false,
-            unsupported_knobs: &[],
+            unsupported_knobs: SEMANTIC_KNOBS,
         },
         FamilySpec {
             name: "Qwen2ForCausalLM".into(),
@@ -94,7 +100,7 @@ fn known_families() -> Vec<FamilySpec> {
             attention_fused_qkv: false,
             mlp_fused_gate_up: false,
             sliding_window_clamp: false,
-            unsupported_knobs: &[],
+            unsupported_knobs: SEMANTIC_KNOBS,
         },
         // Tensor-identical to Llama (separate q/k/v and gate/up projections,
         // untied lm_head, no biases); sliding-window checkpoints clamp the
@@ -105,7 +111,7 @@ fn known_families() -> Vec<FamilySpec> {
             attention_fused_qkv: false,
             mlp_fused_gate_up: false,
             sliding_window_clamp: true,
-            unsupported_knobs: &[],
+            unsupported_knobs: SEMANTIC_KNOBS,
         },
         // Llama-family compute with fused qkv_proj / gate_up_proj checkpoint
         // tensors, realized by compile-time Slice. Partial-rotary and

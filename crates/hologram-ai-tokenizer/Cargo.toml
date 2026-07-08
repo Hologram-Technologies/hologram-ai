@@ -23,6 +23,9 @@ serde       = { workspace = true, optional = true }
 serde_json  = { workspace = true, optional = true }
 rkyv        = { workspace = true, optional = true }
 
+[dev-dependencies]
+tempfile = { workspace = true }
+
 [features]
 default = ["std"]
 # Host-shell capabilities: JSON tokenizer loading + `.holo` archive sections.

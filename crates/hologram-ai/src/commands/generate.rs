@@ -642,8 +642,12 @@ pub fn generate_stream_speculative<S: LmSession>(
                     // Commit the bonus's K/V and get the next acceptance row.
                     row = session.step(bonus).context("decode step failed")?;
                 }
-                Err(_) => {
-                    // Verify runner stale: stop speculating, keep decoding.
+                Err(e) => {
+                    // The verify runner went stale (e.g. the decode bucket grew
+                    // past it) — retire speculation and keep decoding plainly
+                    // (never worse). Surfaced, not swallowed, so a genuine
+                    // misconfiguration is visible rather than a silent slowdown.
+                    tracing::warn!("speculative verify failed, decoding plainly: {e:#}");
                     speculate = false;
                 }
             },

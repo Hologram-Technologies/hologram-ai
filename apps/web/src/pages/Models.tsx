@@ -222,12 +222,17 @@ export function Models() {
                 <div style={{ display: "flex", gap: 8, alignItems: "baseline" }}>
                   <strong>{m.displayName}</strong>
                   <span className="meta">
-                    {m.size} · {m.modality}
+                    {m.size && m.size !== "?" ? `${m.size} · ` : ""}
+                    {m.modality}
                   </span>
                 </div>
                 <div className="meta">{m.description}</div>
                 <div className="meta">
-                  HF: <code>{m.hfId}</code> · ~{m.approxArchiveMb} MB archive ·{" "}
+                  HF: <code>{m.hfId}</code> ·{" "}
+                  {m.approxArchiveMb > 0
+                    ? `~${m.approxArchiveMb} MB archive`
+                    : "archive size resolved on download"}{" "}
+                  ·{" "}
                   <span
                     style={{
                       color: m.compiledArchive
