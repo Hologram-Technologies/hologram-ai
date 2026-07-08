@@ -1092,25 +1092,23 @@ fn build_growable_session(
         }));
     }
 
-    // Residency admission — an environment MEASUREMENT against a
-    // MODEL-DERIVED margin, never a preference: the wasm32 address space
-    // is a structural 4 GiB ceiling, and a stage session may join the
-    // resident set only while the heap measurably leaves the pipeline's
-    // largest-stage transient bound free (the probe's `margin` argument
-    // — a fixed half-ceiling margin crashed a 1.5B model at its head
-    // stage while smaller stages held the room). Raw κ-byte budgets
-    // under-count a live session's true footprint, so admission asks
-    // the environment directly. Stages that fit stay resident across
-    // tokens AND turns — κ-store bandwidth is paid once per window; a
-    // model past the headroom falls back to strict one-stage windowing,
-    // never refused.
+    // Residency admission against the wasm32 4 GiB address-space ceiling. The
+    // budget is a BYTE budget on the resident weight set, not a heap
+    // measurement: `memory_size` only ever GROWS (wasm memory never shrinks), so
+    // after the compile/derivation phase peaks it stays pinned near the ceiling
+    // and refuses residency for the rest of the session — every stage then
+    // re-materializes from the κ-store on every token. The byte budget tracks
+    // what the session actually holds, and the admission check adds the model's
+    // own largest-stage transient (see `StagedRunner`), so a model whose weights
+    // fit under the ceiling minus the runtime reserve stays resident across
+    // tokens AND turns; a larger one falls back to windowing, never refused. The
+    // reserve is the fixed non-weight headroom (activations, K/V, the runtime) —
+    // the margin, which adapts to the model, is subtracted inside the check.
     #[cfg(target_arch = "wasm32")]
     {
         const STRUCTURAL_CEILING: u64 = 4 << 30;
-        session.set_residency_budget(u64::MAX);
-        session.set_admission_probe(std::rc::Rc::new(|margin: u64| {
-            (core::arch::wasm32::memory_size(0) as u64) * 65536 + margin < STRUCTURAL_CEILING
-        }));
+        const RUNTIME_RESERVE: u64 = 1 << 30; // 1 GiB: activations + K/V + runtime
+        session.set_residency_budget(STRUCTURAL_CEILING - RUNTIME_RESERVE);
     }
 
     // Weight-tier paging (row `lazy-constant-residency`): each stage loads

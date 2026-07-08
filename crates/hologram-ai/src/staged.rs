@@ -909,6 +909,13 @@ impl<'a> StagedRunner<'a> {
             // `resident_bytes` counts it at most once.
             let bytes = self.stage_weight_bytes[stage];
             let margin = self.admission_margin();
+            // Residency is bounded by the SESSION'S OWN tracked footprint (the
+            // resident weight set), not a grow-only heap peak: `residency_budget`
+            // is the host's effective weight-residency ceiling (the wasm32
+            // address space minus a runtime reserve that covers activations, K/V,
+            // the largest-stage transient, and the runtime; or `u64::MAX`
+            // native). So a model whose weights fit stays resident across tokens
+            // AND turns; one past the headroom falls back to windowing.
             let admissible = bytes > 0
                 && self.resident_bytes + bytes <= self.residency_budget
                 && self.admission_probe.as_ref().is_none_or(|p| p(margin));
