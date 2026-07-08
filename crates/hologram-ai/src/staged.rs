@@ -456,9 +456,38 @@ fn stage_transient_bound(stage_weight_bytes: u64, stage_elements: u64) -> u64 {
 /// ([`Self::stage_weight_bytes`], [`Self::peak_resident_weight_bytes`])
 /// measures exactly that.
 ///
+/// The combined address-space residency of every runner that shares it — the
+/// step plan, the prefill seeder, and any verify plan of one decode session.
+/// `footprint` is the live resident bytes summed across all siblings;
+/// `max_walk` is the largest single-stage footprint any sibling has walked (the
+/// headroom the reserve must leave for the next walk); `peak` is the high-water
+/// `footprint` for instrumentation/witnesses. A footprint-bounded runner admits
+/// a stage only while `footprint + this + max_walk <= budget`, so no
+/// combination of concurrent runners over-commits the ceiling.
+#[derive(Default)]
+pub(crate) struct ResidencyLedger {
+    footprint: u64,
+    max_walk: u64,
+    peak: u64,
+}
+
+/// A handle every sibling runner of one session shares.
+pub(crate) type SharedResidency = std::rc::Rc<std::cell::RefCell<ResidencyLedger>>;
+
 /// Implements [`LmSession`] + [`SessionProvider`], so
 /// [`generate_stream`](crate::commands::generate::generate_stream) drives it
 /// unchanged.
+///
+/// # Shared residency ledger
+///
+/// A single decode turn holds SEVERAL runners at once against ONE address
+/// space — the step plan (chunk 1), the chunked-prefill seeder (chunk `C`),
+/// and, under speculation, the verify plan. Each would otherwise gate residency
+/// against its own budget and, together, over-commit the wasm 4 GiB ceiling. So
+/// footprint-bounded runners spawned by one [`GrowableStagedSession`] share a
+/// residency ledger: admission is charged against the COMBINED resident
+/// footprint of every sibling, and a dropped runner returns its share. The
+/// address space is one resource, accounted as one.
 pub struct StagedRunner<'a> {
     resolve_stage: StageResolver<'a>,
     store: Box<dyn KappaStore + 'a>,
@@ -498,21 +527,21 @@ pub struct StagedRunner<'a> {
     resident: Vec<Option<(HoloRunner, u64, u64)>>,
     /// Weight bytes currently held by `resident` (the cache metric).
     resident_bytes: u64,
-    /// TRUE runtime footprint currently held by `resident` — what residency
-    /// actually costs the address space. Admission is gated on this, not on the
-    /// packed weight bytes, so a session whose retained transient the budget
-    /// cannot hold is windowed instead of pinned into an allocation abort.
+    /// This runner's OWN contribution to the shared ledger's `footprint` — the
+    /// TRUE runtime footprint its resident stages hold. Tracked locally so the
+    /// runner can return exactly its share to the ledger when a stage is evicted
+    /// or the whole runner is dropped.
     resident_footprint: u64,
-    /// Largest single-stage runtime footprint observed — the worst-case walk.
-    /// Admission reserves this much headroom so the currently-executing stage
-    /// always fits on top of the resident set (parametric: derived from the
-    /// model's own stages, never a fixed constant).
-    max_walk_footprint: u64,
+    /// The address-space residency ledger this runner shares with its session
+    /// siblings (step / seeder / verify). Admission is gated on the COMBINED
+    /// footprint here, not this runner's alone, so concurrent runners never
+    /// over-commit the ceiling. A standalone runner gets its own fresh ledger.
+    residency: SharedResidency,
     /// When set, the residency budget is a HARD address-space ceiling (the
-    /// wasm32 tab): admission is gated on the session's true runtime footprint
-    /// (weights + retained transients) plus a largest-walk reserve, not on the
-    /// packed weight bytes. Default `false` — the budget is a κ-store-bandwidth
-    /// cache limit and a 64-bit host has no address ceiling to respect.
+    /// wasm32 tab): admission is gated on the shared true-footprint ledger plus
+    /// a largest-walk reserve, not on the packed weight bytes. Default `false` —
+    /// the budget is a κ-store-bandwidth cache limit and a 64-bit host has no
+    /// address ceiling to respect.
     bound_by_footprint: bool,
     /// Stage materializations performed over this runner's lifetime — the
     /// bandwidth instrument (`resident` hits don't count).
@@ -685,7 +714,7 @@ impl<'a> StagedRunner<'a> {
             resident: (0..stage_count).map(|_| None).collect(),
             resident_bytes: 0,
             resident_footprint: 0,
-            max_walk_footprint: 0,
+            residency: SharedResidency::default(),
             bound_by_footprint: false,
             last_dispatched: 0,
             last_skipped: 0,
@@ -775,8 +804,22 @@ impl<'a> StagedRunner<'a> {
                 *slot = None;
             }
             self.resident_bytes = 0;
+            // Return this runner's whole share to the shared ledger.
+            self.residency.borrow_mut().footprint -= self.resident_footprint;
             self.resident_footprint = 0;
         }
+    }
+
+    /// Share an address-space residency ledger with this runner's session
+    /// siblings (step / seeder / verify plans of one decode turn). Admission is
+    /// then charged against the COMBINED footprint of every sharer, so no
+    /// concurrent set of runners over-commits the ceiling. Called when a
+    /// [`GrowableStagedSession`] wires a fresh runner; a standalone runner keeps
+    /// its own ledger.
+    pub(crate) fn share_residency_ledger(&mut self, ledger: SharedResidency) {
+        // Move any footprint this runner already holds onto the shared ledger.
+        ledger.borrow_mut().footprint += self.resident_footprint;
+        self.residency = ledger;
     }
 
     /// Treat the residency budget as a HARD address-space ceiling (the wasm32
@@ -865,6 +908,7 @@ impl<'a> StagedRunner<'a> {
             if let Some((_, weight, footprint)) = &taken {
                 self.resident_bytes -= weight;
                 self.resident_footprint -= footprint;
+                self.residency.borrow_mut().footprint -= footprint;
             }
             let mut runner = if let Some((runner, _, _)) = taken {
                 runner
@@ -961,33 +1005,27 @@ impl<'a> StagedRunner<'a> {
             // gated on it. `.max(weight)` floors it at the weight (κ-dedup can
             // under-report a session that shares content with another).
             let footprint = (runner.resident_bytes() as u64).max(weight);
-            // Any stage could be the next to walk, so keep the running worst
-            // case; the resident set must always leave room for the largest
-            // single walk on top of it. Derived from the model's own stages —
-            // no size is special-cased.
-            self.max_walk_footprint = self.max_walk_footprint.max(footprint);
 
-            // Admit to residency only if the resident set — charged its TRUE
-            // footprint — still leaves headroom for the largest stage to walk.
-            // `residency_budget` is the host's effective memory ceiling for
-            // resident sessions (the wasm32 address space minus a runtime
-            // reserve for activations/K-V/runtime, or `u64::MAX` native). A
-            // model whose stages fit stays resident across tokens AND turns; one
-            // past the headroom is windowed one stage at a time — correct, never
-            // an out-of-memory abort.
             // Two budget regimes. `bound_by_footprint` (the browser, wasm): the
             // budget is a HARD address-space ceiling, so residency must account
             // for the true footprint AND reserve room for the largest single
             // walk — otherwise resident float-head sessions' retained F32 scratch
-            // accumulates into an allocation abort. Default (native, and the
-            // κ-store-bandwidth residency witnesses): the budget is a bandwidth
-            // cache limit denominated in WEIGHT bytes — residency saves stage
-            // re-materialization, and a 64-bit host has no address ceiling to
-            // respect. Both are parametric: every quantity is measured from the
-            // model's own stages.
+            // accumulates into an allocation abort. Crucially the footprint is
+            // charged against the SHARED ledger, so the step / seeder / verify
+            // runners of one decode turn never over-commit the ceiling between
+            // them. Default (native, and the κ-store-bandwidth residency
+            // witnesses): the budget is a bandwidth cache limit denominated in
+            // WEIGHT bytes — residency saves stage re-materialization, and a
+            // 64-bit host has no address ceiling to respect. Both are
+            // parametric: every quantity is measured from the model's own
+            // stages, no size is special-cased.
             let within_budget = if self.bound_by_footprint {
-                self.resident_footprint + footprint + self.max_walk_footprint
-                    <= self.residency_budget
+                let mut ledger = self.residency.borrow_mut();
+                // Any stage of any sibling runner could be the next to walk;
+                // keep the shared worst case so the combined resident set always
+                // leaves room for the largest single walk on top of it.
+                ledger.max_walk = ledger.max_walk.max(footprint);
+                ledger.footprint + footprint + ledger.max_walk <= self.residency_budget
             } else {
                 self.resident_bytes + weight <= self.residency_budget
             };
@@ -1000,6 +1038,10 @@ impl<'a> StagedRunner<'a> {
             if admissible {
                 self.resident_bytes += weight;
                 self.resident_footprint += footprint;
+                let mut ledger = self.residency.borrow_mut();
+                ledger.footprint += footprint;
+                ledger.peak = ledger.peak.max(ledger.footprint);
+                drop(ledger);
                 self.resident[stage] = Some((runner, weight, footprint));
             } else if weight > 0 && self.resident_bytes > 0 {
                 tracing::debug!(
@@ -1040,6 +1082,19 @@ impl<'a> StagedRunner<'a> {
             }
         }
         bail!("the staged pipeline executed no stages")
+    }
+}
+
+impl Drop for StagedRunner<'_> {
+    fn drop(&mut self) {
+        // Return this runner's whole share to the shared ledger so a dropped
+        // sibling (e.g. the prefill seeder retired on window growth) frees its
+        // resident footprint for the survivors. `saturating_sub` guards a
+        // ledger already reset out from under us.
+        if self.resident_footprint > 0 {
+            let mut ledger = self.residency.borrow_mut();
+            ledger.footprint = ledger.footprint.saturating_sub(self.resident_footprint);
+        }
     }
 }
 
@@ -1168,6 +1223,10 @@ pub struct GrowableStagedSession {
     on_window: Option<Box<dyn FnMut(usize, bool)>>,
     residency_budget: u64,
     bound_by_footprint: bool,
+    /// The one address-space residency ledger every runner this session wires
+    /// (step / seeder / verify) shares, so their COMBINED footprint — not each
+    /// runner's alone — is what admission is charged against.
+    residency: SharedResidency,
     admission_probe: Option<std::rc::Rc<dyn Fn(u64) -> bool>>,
     verified: std::rc::Rc<std::cell::RefCell<std::collections::HashSet<String>>>,
     derived_store: Option<Box<dyn DerivedStore>>,
@@ -1232,6 +1291,7 @@ impl GrowableStagedSession {
             on_window: None,
             residency_budget: 0,
             bound_by_footprint: false,
+            residency: SharedResidency::default(),
             admission_probe: None,
             verified: std::rc::Rc::new(std::cell::RefCell::new(std::collections::HashSet::new())),
             derived_store: None,
@@ -1312,6 +1372,14 @@ impl GrowableStagedSession {
         if let Some((_, runner)) = self.current.as_mut() {
             runner.set_bound_by_footprint(bounded);
         }
+    }
+
+    /// High-water COMBINED resident footprint across every runner this session
+    /// has wired (step + seeder + verify) — the peak address space its resident
+    /// stage sessions have held at once. A witness asserts this never exceeds
+    /// the ceiling; only meaningful under [`Self::set_bound_by_footprint`].
+    pub fn peak_resident_footprint(&self) -> u64 {
+        self.residency.borrow().peak
     }
 
     /// Install a per-stage observer forwarded into every regrown runner:
@@ -1395,6 +1463,9 @@ impl GrowableStagedSession {
         }
         runner.set_residency_budget(self.residency_budget);
         runner.set_bound_by_footprint(self.bound_by_footprint);
+        // Share the ONE address-space ledger: the step, seeder, and verify
+        // runners of a decode turn are charged against their combined footprint.
+        runner.share_residency_ledger(std::rc::Rc::clone(&self.residency));
         runner.share_verified_set(std::rc::Rc::clone(&self.verified));
         runner.set_expected_stage_bytes(expected);
         if let Some(probe) = &self.admission_probe {

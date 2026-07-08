@@ -36,6 +36,12 @@ Feature: κ-store bandwidth is paid per window, never per token
     Then the address-ceiling run rematerializes more than the weight-cache run at the same budget
     And both ceiling and weight-cache completions are identical and non-empty
 
+  Scenario: concurrent decode runners share one address-space ceiling
+    When a decode turn runs a step plan and a prefill seeder under one hard ceiling
+    Then the seeder's residency is accounted in the same ledger as the step plan's
+    When the same decode turn runs under a ceiling that holds only part of it
+    Then the combined resident footprint never exceeds that ceiling
+
   Scenario: the resident set survives across chat turns
     When two completions are generated over one warm session within the budget
     Then the second completion adds no stage materializations

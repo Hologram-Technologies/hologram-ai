@@ -1422,12 +1422,18 @@ impl DecodeChatSession {
                 hologram_ai::engine::geometric_window(1, self.context_length as usize) as u64;
             let chunk = base.min(bucket as u64);
             if chunk >= 2 {
-                match self
-                    .growable
-                    .borrow_mut()
-                    .chunk_runner_for(bucket, chunk)
-                    .and_then(|seeder| session.set_seeder(seeder))
-                {
+                let built = self.growable.borrow_mut().chunk_runner_for(bucket, chunk);
+                match built.and_then(|mut seeder| {
+                    // The seeder is a ONE-SHOT prefill accelerator (ceil(n/chunk)
+                    // passes per turn); the step runner is the hot decode loop
+                    // (one pass per token). Stream the seeder so it does not hold
+                    // residency the step runner needs — the shared ledger keeps
+                    // the two within one ceiling, and this gives the residency to
+                    // the runner that reuses it. Parametric: a priority, not a
+                    // size.
+                    seeder.set_residency_budget(0);
+                    session.set_seeder(seeder)
+                }) {
                     Ok(()) => {}
                     Err(e) => web_sys::console::warn_1(&JsValue::from_str(&format!(
                         "prefill seeder unavailable (stepping instead): {e:#}"

@@ -952,6 +952,11 @@ struct BddWorld {
     residency_run: Option<ResidencyRun>,
     // The same budget under a hard address ceiling (footprint-bounded admission).
     residency_run_bounded: Option<ResidencyRun>,
+    // Shared residency ledger across concurrent decode runners: (peak, completion)
+    // with the prefill seeder present and step-only, plus the shared budget.
+    shared_ledger_with_seeder: Option<(u64, Vec<i64>)>,
+    shared_ledger_step_only: Option<(u64, Vec<i64>)>,
+    shared_ledger_budget: u64,
     // S3 — total algebraic path (row `total-algebraic-path`, open/measured)
     float_dispatch_tally: Option<(usize, usize)>,
     // S3 — session verified-κ (row `session-verified-kappa`)
@@ -3011,6 +3016,51 @@ fn run_with_residency_bounded(
     }
 }
 
+/// Drive a footprint-bounded decode turn over a `GrowableStagedSession`: a step
+/// plan (chunk 1) and — when `with_seeder` — a chunked-prefill seeder, BOTH
+/// wired by the same session so they share its one address-space residency
+/// ledger. Returns the peak COMBINED resident footprint and the greedy
+/// continuation. The two runners are what the browser holds at once; a per-
+/// runner budget would let them jointly over-commit the ceiling.
+fn run_shared_ledger_decode(
+    store_path: &std::path::Path,
+    budget: u64,
+    with_seeder: bool,
+) -> (u64, Vec<i64>) {
+    let windows = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let mut session = growable_staged_session(store_path, windows);
+    session.set_residency_budget(budget);
+    session.set_bound_by_footprint(true);
+
+    let toks: Vec<i64> = STG_TOKENS.to_vec();
+    let want = toks.len();
+    let bucket = hologram_ai::engine::geometric_window(want.max(1), STG_WINDOW as usize);
+
+    let step = session
+        .decode_runner_for(want)
+        .expect("the step runner builds");
+    let mut decode =
+        DecodeSession::new(step, 10000.0, STG_WINDOW).expect("the decode session opens");
+    if with_seeder {
+        let chunk = 4u64.min(bucket as u64);
+        if chunk >= 2 {
+            let seeder = session
+                .chunk_runner_for(want, chunk)
+                .expect("the seeder runner builds");
+            decode.set_seeder(seeder).expect("the seeder installs");
+        }
+    }
+
+    let mut row = decode.feed(&toks).expect("the prompt prefills");
+    let mut generated = Vec::new();
+    for _ in 0..4 {
+        let n = argmax(&row) as i64;
+        generated.push(n);
+        row = decode.step(n).expect("the decode session steps");
+    }
+    (session.peak_resident_footprint(), generated)
+}
+
 #[when("a completion is generated with a residency budget that holds the whole model")]
 async fn when_residency_full(w: &mut BddWorld) {
     let store = w.staged_store.as_ref().expect("the fixture κ-store");
@@ -3097,6 +3147,85 @@ async fn then_residency_footprint_identical(w: &mut BddWorld) {
         weight.completion, bounded.completion,
         "windowing a stage is a projection of speed, never of meaning — the \
          completion must be byte-identical"
+    );
+}
+
+#[when("a decode turn runs a step plan and a prefill seeder under one hard ceiling")]
+async fn when_shared_ledger_decode(w: &mut BddWorld) {
+    let store = w.staged_store.as_ref().expect("the fixture κ-store");
+    // Measure the step plan's own resident footprint, then the step plan PLUS
+    // the concurrent seeder, under a ceiling generous enough to hold both.
+    let step_only = run_shared_ledger_decode(&store.path, u64::MAX, false);
+    let with_seeder = run_shared_ledger_decode(&store.path, u64::MAX, true);
+    w.shared_ledger_step_only = Some(step_only);
+    w.shared_ledger_with_seeder = Some(with_seeder);
+    w.shared_ledger_budget = u64::MAX;
+}
+
+#[then("the seeder's residency is accounted in the same ledger as the step plan's")]
+async fn then_shared_ledger_accounts_both(w: &mut BddWorld) {
+    let (peak_both, _) = w
+        .shared_ledger_with_seeder
+        .as_ref()
+        .expect("the seeded run");
+    let (peak_step, _) = w
+        .shared_ledger_step_only
+        .as_ref()
+        .expect("the step-only run");
+    // If each runner kept its OWN ledger, the session's ledger would not see the
+    // seeder and the two peaks would match. A strictly larger combined peak
+    // proves the seeder is charged against the SAME address-space ledger.
+    assert!(
+        peak_both > peak_step,
+        "the concurrent seeder's footprint (combined {peak_both}) must exceed the \
+         step plan's alone ({peak_step}) — proof they share one address-space \
+         ledger, not per-runner budgets that would jointly over-commit the ceiling"
+    );
+    assert!(
+        *peak_step > 0,
+        "the shared ledger must track resident footprint"
+    );
+}
+
+#[when("the same decode turn runs under a ceiling that holds only part of it")]
+async fn when_shared_ledger_tight(w: &mut BddWorld) {
+    let store = w.staged_store.as_ref().expect("the fixture κ-store");
+    let (peak_both, _) = w
+        .shared_ledger_with_seeder
+        .as_ref()
+        .expect("the seeded run");
+    // A ceiling below the combined footprint: the shared gate must window some
+    // stages so the COMBINED resident set stays under it.
+    let budget = (peak_both * 3 / 4).max(1);
+    let tight = run_shared_ledger_decode(&store.path, budget, true);
+    w.shared_ledger_with_seeder = Some(tight);
+    w.shared_ledger_budget = budget;
+}
+
+#[then("the combined resident footprint never exceeds that ceiling")]
+async fn then_shared_ledger_bounded(w: &mut BddWorld) {
+    let (peak, completion) = w.shared_ledger_with_seeder.as_ref().expect("the tight run");
+    let (_, reference) = w
+        .shared_ledger_step_only
+        .as_ref()
+        .expect("the reference run");
+    assert!(
+        *peak <= w.shared_ledger_budget,
+        "the combined resident footprint ({peak}) must never exceed the shared \
+         ceiling ({}) — no concurrent runner over-commits the address space",
+        w.shared_ledger_budget
+    );
+    assert!(
+        *peak > 0,
+        "the shared ledger must still track under pressure"
+    );
+    assert!(
+        !completion.is_empty(),
+        "the windowed turn must still generate"
+    );
+    assert_eq!(
+        completion, reference,
+        "windowing under the shared ceiling must not change the tokens"
     );
 }
 
