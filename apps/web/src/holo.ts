@@ -229,6 +229,8 @@ export async function createStagedSession(
         evaporate: (key: string) => void;
       }
     | undefined,
+  weightBudget: number | undefined,
+  sizeKappa: ((kappa: string) => number | undefined) | undefined,
   tokenizer: Uint8Array,
   onProgress?: (line: string) => void,
 ): Promise<StagedSession> {
@@ -248,6 +250,8 @@ export async function createStagedSession(
     derived?.load,
     derived?.store,
     derived?.evaporate,
+    weightBudget,
+    sizeKappa,
     tokenizer,
     onProgress,
   );
@@ -272,6 +276,8 @@ export async function createDecodeSession(
         evaporate: (key: string) => void;
       }
     | undefined,
+  weightBudget: number | undefined,
+  sizeKappa: ((kappa: string) => number | undefined) | undefined,
   tokenizer: Uint8Array,
   onProgress?: (line: string) => void,
 ): Promise<StagedSession> {
@@ -291,6 +297,8 @@ export async function createDecodeSession(
     derived?.load,
     derived?.store,
     derived?.evaporate,
+    weightBudget,
+    sizeKappa,
     tokenizer,
     onProgress,
   );

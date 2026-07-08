@@ -24,3 +24,11 @@ Feature: The hermetic browser journey
     When the user sends handshake message 1
     Then assistant turn 1 streams a non-empty completion
     And the staged completion matches reference turn 1
+
+  Scenario: the weight-tier pager reproduces the reference
+    Given a forced single-layer execution window
+    And a small weight-paging budget
+    When the fixture model is downloaded
+    And the user sends handshake message 1
+    Then assistant turn 1 streams a non-empty completion
+    And the staged completion matches reference turn 1

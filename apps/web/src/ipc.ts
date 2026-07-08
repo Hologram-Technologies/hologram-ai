@@ -665,6 +665,13 @@ export async function generate(opts: GenerateOpts): Promise<number> {
       // one position per step, never a window-sized forward. The knob
       // reverts to the whole-window plan for witnesses and diagnosis.
       decodePlan: localStorage.getItem("hologram_decode_plan") !== "0",
+      // The weight-tier pager (row `lazy-constant-residency`): opt-in via the
+      // knob (MB), so a stage whose weights exceed the heap window pages them
+      // from the OPFS κ-store rather than pinning the whole stage resident.
+      weightBudget: (() => {
+        const mb = Number(localStorage.getItem("hologram_weight_budget") ?? "");
+        return Number.isFinite(mb) && mb > 0 ? Math.floor(mb * 1024 * 1024) : undefined;
+      })(),
     });
   });
 }

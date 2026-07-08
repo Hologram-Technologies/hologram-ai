@@ -497,6 +497,11 @@ struct JsKappaStore {
     /// `read({at})` or a ranged provenance GET), never the whole tensor.
     /// Absent, or returning null, falls back to whole-resolve + slice.
     resolve_range: Option<js_sys::Function>,
+    /// Optional size stat `(kappa) => number | null` — the weight-tier pager
+    /// (row `lazy-constant-residency`) sizes a paged constant's slot from an
+    /// OPFS `getFile().size`, never reading the body. Absent falls back to
+    /// resolve-and-measure.
+    size: Option<js_sys::Function>,
 }
 
 impl hologram_ai::materialize::KappaStore for JsKappaStore {
@@ -547,7 +552,29 @@ impl hologram_ai::materialize::KappaStore for JsKappaStore {
         );
         Ok(bytes[start..end].to_vec())
     }
+
+    fn content_size(&mut self, kappa: &str) -> anyhow::Result<u64> {
+        if let Some(f) = &self.size {
+            let value = f
+                .call1(&JsValue::NULL, &JsValue::from_str(kappa))
+                .map_err(|e| anyhow::anyhow!("κ size stat threw for `{kappa}`: {e:?}"))?;
+            if let Some(n) = value.as_f64() {
+                return Ok(n as u64);
+            }
+        }
+        Ok(self.resolve(kappa)?.len() as u64)
+    }
 }
+
+/// A `Send` wrapper over an OPFS resolve callback for the weight-tier pager's
+/// provider (row `lazy-constant-residency`). hologram's `load_paged` requires
+/// `WeightProvider: Send + Sync`; the browser runs single-threaded, so the JS
+/// function is never actually shared across threads and the `unsafe impl` is
+/// sound — a wasm-only escape hatch, exactly as the store callbacks are.
+struct SendResolve(js_sys::Function);
+// SAFETY: wasm32 is single-threaded; the callback is only ever invoked on the
+// one wasm thread that created it.
+unsafe impl Send for SendResolve {}
 
 /// A derived-artifact store backed by JS callbacks (row
 /// `derived-artifact-kappa`): `load(key)` returns
@@ -617,6 +644,7 @@ pub fn materialize(
         resolve: resolve.clone(),
         invalidate,
         resolve_range: None,
+        size: None,
     };
     hologram_ai::materialize::materialize_archive(holo, &mut store)
         .map_err(|e| err(format!("materialize: {e:#}")))
@@ -985,6 +1013,8 @@ fn build_growable_session(
     derived_load: Option<js_sys::Function>,
     derived_store: Option<js_sys::Function>,
     derived_evaporate: Option<js_sys::Function>,
+    weight_budget: Option<u32>,
+    size_kappa: Option<js_sys::Function>,
     on_progress: Option<js_sys::Function>,
 ) -> Result<hologram_ai::staged::GrowableStagedSession, JsValue> {
     let rows = parse_manifest(keys_js, tensor_shapes_js, tensor_dtypes_js)?;
@@ -996,6 +1026,7 @@ fn build_growable_session(
         resolve: resolve_kappa.clone(),
         invalidate: invalidate_kappa,
         resolve_range: resolve_kappa_range,
+        size: size_kappa,
     });
 
     let mut session = hologram_ai::staged::GrowableStagedSession::new(
@@ -1043,6 +1074,31 @@ fn build_growable_session(
         session.set_admission_probe(std::rc::Rc::new(|margin: u64| {
             (core::arch::wasm32::memory_size(0) as u64) * 65536 + margin < STRUCTURAL_CEILING
         }));
+    }
+
+    // Weight-tier paging (row `lazy-constant-residency`): each stage loads
+    // PAGED against `weight_budget` resident bytes, so a stage whose weights
+    // exceed the wasm heap window still runs — the arena is a bounded window
+    // over the OPFS κ-store. The provider's resolver is a fresh clone of the
+    // OPFS callback per stage, wrapped `Send` (wasm is single-threaded).
+    if let Some(budget) = weight_budget {
+        let base = resolve_kappa.clone();
+        session.set_weight_paging(
+            budget as usize,
+            std::rc::Rc::new(move || {
+                let f = SendResolve(base.clone());
+                Box::new(move |kappa: &str| {
+                    let v = f
+                        .0
+                        .call1(&JsValue::NULL, &JsValue::from_str(kappa))
+                        .map_err(|e| anyhow::anyhow!("κ resolver threw for `{kappa}`: {e:?}"))?;
+                    if v.is_null() || v.is_undefined() {
+                        anyhow::bail!("κ `{kappa}` not present in store");
+                    }
+                    Ok(js_sys::Uint8Array::new(&v).to_vec())
+                }) as hologram_ai::runner::KappaResolve
+            }),
+        );
     }
 
     if let Some(progress) = on_progress {
@@ -1103,6 +1159,8 @@ impl StagedChatSession {
         derived_load: Option<js_sys::Function>,
         derived_store: Option<js_sys::Function>,
         derived_evaporate: Option<js_sys::Function>,
+        weight_budget: Option<u32>,
+        size_kappa: Option<js_sys::Function>,
         tokenizer_json: Vec<u8>,
         on_progress: Option<js_sys::Function>,
     ) -> Result<StagedChatSession, JsValue> {
@@ -1122,6 +1180,8 @@ impl StagedChatSession {
             derived_load,
             derived_store,
             derived_evaporate,
+            weight_budget,
+            size_kappa,
             on_progress,
         )?;
         Ok(StagedChatSession { session, tokenizer })
@@ -1219,6 +1279,8 @@ impl DecodeChatSession {
         derived_load: Option<js_sys::Function>,
         derived_store: Option<js_sys::Function>,
         derived_evaporate: Option<js_sys::Function>,
+        weight_budget: Option<u32>,
+        size_kappa: Option<js_sys::Function>,
         tokenizer_json: Vec<u8>,
         on_progress: Option<js_sys::Function>,
     ) -> Result<DecodeChatSession, JsValue> {
@@ -1238,6 +1300,8 @@ impl DecodeChatSession {
             derived_load,
             derived_store,
             derived_evaporate,
+            weight_budget,
+            size_kappa,
             on_progress,
         )?;
         let context_length = hologram_ai::SessionProvider::max_window(&growable) as u64;

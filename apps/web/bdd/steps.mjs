@@ -617,6 +617,16 @@ Given("a forced single-layer execution window", async function () {
   });
 });
 
+Given("a small weight-paging budget", async function () {
+  // The weight-tier pager (row `lazy-constant-residency`): 1 MB of resident
+  // paged-weight bytes per stage, well below the fixture's weight set, so
+  // each stage pages its weights from the OPFS κ-store and evicts under the
+  // budget instead of pinning them whole.
+  await this.page.evaluate(() => {
+    localStorage.setItem("hologram_weight_budget", "1");
+  });
+});
+
 Then("the model directory holds a staged k-form bundle", async function () {
   const meta = await this.opfsModelFile("handshake-tiny", "stages.json");
   assert.ok(meta, "stages.json missing — the download did not compile staged");

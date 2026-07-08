@@ -385,6 +385,7 @@ async function warmStagedSession(
   tokenizerBytes: Uint8Array,
   onProgress: (line: string) => void,
   plan: "decode" | "window",
+  weightBudget: number | undefined,
 ): Promise<StagedSession> {
   if (warm && warm.modelDir === modelDirName && warm.plan === plan) {
     onProgress("session warm — resident window carries across turns");
@@ -436,6 +437,16 @@ async function warmStagedSession(
       // provenance; a κ that resolves nowhere aborts naming the label.
     }
   }
+  // Weight-tier pager (row `lazy-constant-residency`): when a budget is set,
+  // each stage loads paged against it, sizing paged constants from the open
+  // sync handle's `getSize()` (an OPFS stat, never a body read).
+  const sizeKappa = weightBudget
+    ? (kappa: string) => kappaHandles.get(kappa)?.getSize()
+    : undefined;
+  if (weightBudget) {
+    onProgress(`weight-tier paging: stages resident within ${(weightBudget / (1024 * 1024)).toFixed(0)} MB`);
+  }
+
   const create = plan === "decode" ? createDecodeSession : createStagedSession;
   const session = await create(
     configJson,
@@ -447,6 +458,8 @@ async function warmStagedSession(
     overlayRangeResolver(inMemoryArtifacts, kappaRangeResolver(kappaHandles, sources)),
     quant.length ? quant : undefined,
     derivedStore(derivedEntries, modelDir),
+    weightBudget,
+    sizeKappa,
     tokenizerBytes,
     onProgress,
   );
@@ -455,7 +468,8 @@ async function warmStagedSession(
 }
 
 self.onmessage = async (e) => {
-  const { holoBytes, modelDir, staged, prompt, genOpts, tokenizerBytes, decodePlan } = e.data;
+  const { holoBytes, modelDir, staged, prompt, genOpts, tokenizerBytes, decodePlan, weightBudget } =
+    e.data;
 
   try {
     if (staged) {
@@ -469,6 +483,7 @@ self.onmessage = async (e) => {
           self.postMessage({ type: "progress", line });
         },
         decodePlan === false ? "window" : "decode",
+        typeof weightBudget === "number" && weightBudget > 0 ? weightBudget : undefined,
       );
       const result = session.generate(prompt, genOpts as never, (text: string) => {
         self.postMessage({ type: "token", text });
