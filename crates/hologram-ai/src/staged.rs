@@ -488,11 +488,32 @@ pub struct StagedRunner<'a> {
     /// across forward passes — `0` (the default) is strict windowing: every
     /// pass rematerializes every stage. See [`Self::set_residency_budget`].
     residency_budget: u64,
-    /// Materialized stage sessions held under the budget, with their weight
-    /// bytes. `None` = not resident (drops after its pass).
-    resident: Vec<Option<(HoloRunner, u64)>>,
-    /// Weight bytes currently held by `resident`.
+    /// Materialized stage sessions held under the budget, with `(weight_bytes,
+    /// footprint_bytes)`. `weight_bytes` is the packed archive size (the
+    /// weight-residency metric the witnesses assert); `footprint_bytes` is the
+    /// session's TRUE runtime footprint (weights PLUS the intermediates the
+    /// substrate buffer pool keeps resident — e.g. a float LM-head chunk's
+    /// whole-panel F32 Cast+Transpose image, many times its packed weight).
+    /// `None` = not resident (drops after its pass, freeing that footprint).
+    resident: Vec<Option<(HoloRunner, u64, u64)>>,
+    /// Weight bytes currently held by `resident` (the cache metric).
     resident_bytes: u64,
+    /// TRUE runtime footprint currently held by `resident` — what residency
+    /// actually costs the address space. Admission is gated on this, not on the
+    /// packed weight bytes, so a session whose retained transient the budget
+    /// cannot hold is windowed instead of pinned into an allocation abort.
+    resident_footprint: u64,
+    /// Largest single-stage runtime footprint observed — the worst-case walk.
+    /// Admission reserves this much headroom so the currently-executing stage
+    /// always fits on top of the resident set (parametric: derived from the
+    /// model's own stages, never a fixed constant).
+    max_walk_footprint: u64,
+    /// When set, the residency budget is a HARD address-space ceiling (the
+    /// wasm32 tab): admission is gated on the session's true runtime footprint
+    /// (weights + retained transients) plus a largest-walk reserve, not on the
+    /// packed weight bytes. Default `false` — the budget is a κ-store-bandwidth
+    /// cache limit and a 64-bit host has no address ceiling to respect.
+    bound_by_footprint: bool,
     /// Stage materializations performed over this runner's lifetime — the
     /// bandwidth instrument (`resident` hits don't count).
     materialization_count: u64,
@@ -663,6 +684,9 @@ impl<'a> StagedRunner<'a> {
             residency_budget: 0,
             resident: (0..stage_count).map(|_| None).collect(),
             resident_bytes: 0,
+            resident_footprint: 0,
+            max_walk_footprint: 0,
+            bound_by_footprint: false,
             last_dispatched: 0,
             last_skipped: 0,
             materialization_count: 0,
@@ -751,7 +775,19 @@ impl<'a> StagedRunner<'a> {
                 *slot = None;
             }
             self.resident_bytes = 0;
+            self.resident_footprint = 0;
         }
+    }
+
+    /// Treat the residency budget as a HARD address-space ceiling (the wasm32
+    /// tab), gating admission on each session's true runtime footprint plus a
+    /// largest-walk reserve rather than its packed weight bytes. Set by a
+    /// 32-bit host where a resident session's retained transients (a float
+    /// LM-head chunk's F32 image) count against the same ceiling as its
+    /// weights. Off by default: a 64-bit host has no such ceiling and residency
+    /// is a pure κ-store-bandwidth cache denominated in weight bytes.
+    pub fn set_bound_by_footprint(&mut self, bounded: bool) {
+        self.bound_by_footprint = bounded;
     }
 
     /// Stage materializations performed so far — κ-store bandwidth in units
@@ -826,10 +862,11 @@ impl<'a> StagedRunner<'a> {
             // no κ-store traffic for this stage. Taking the slot removes its
             // bytes from the held tally until (re-)admission below.
             let taken = self.resident[stage].take();
-            if let Some((_, b)) = &taken {
-                self.resident_bytes -= b;
+            if let Some((_, weight, footprint)) = &taken {
+                self.resident_bytes -= weight;
+                self.resident_footprint -= footprint;
             }
-            let mut runner = if let Some((runner, _)) = taken {
+            let mut runner = if let Some((runner, _, _)) = taken {
                 runner
             } else {
                 let archive = (self.resolve_stage)(stage)
@@ -911,35 +948,71 @@ impl<'a> StagedRunner<'a> {
             self.last_dispatched += runner.last_dispatched() as u64;
             self.last_skipped += runner.last_skipped() as u64;
 
-            // Keep the session resident while it fits the budget; otherwise
-            // it drops here, before the next stage materializes — the
-            // residency window. `resident[stage]` was `take`n above, so
-            // `resident_bytes` counts it at most once.
-            let bytes = self.stage_weight_bytes[stage];
-            let margin = self.admission_margin();
-            // Residency is bounded by the SESSION'S OWN tracked footprint (the
-            // resident weight set), not a grow-only heap peak: `residency_budget`
-            // is the host's effective weight-residency ceiling (the wasm32
-            // address space minus a runtime reserve that covers activations, K/V,
-            // the largest-stage transient, and the runtime; or `u64::MAX`
-            // native). So a model whose weights fit stays resident across tokens
-            // AND turns; one past the headroom falls back to windowing.
-            let admissible = bytes > 0
-                && self.resident_bytes + bytes <= self.residency_budget
-                && self.admission_probe.as_ref().is_none_or(|p| p(margin));
+            // Keep the session resident while it fits the budget; otherwise it
+            // drops here, before the next stage materializes — the residency
+            // window. `resident[stage]` was `take`n above, so each tally counts
+            // it at most once.
+            let weight = self.stage_weight_bytes[stage];
+            // The session's TRUE runtime footprint: its weights PLUS the
+            // intermediates the substrate buffer pool retains from the last walk
+            // (for a float LM-head chunk, a whole-panel F32 Cast+Transpose image
+            // several times its packed weight). Residency costs the address
+            // space this much — NOT the packed weight bytes — so admission is
+            // gated on it. `.max(weight)` floors it at the weight (κ-dedup can
+            // under-report a session that shares content with another).
+            let footprint = (runner.resident_bytes() as u64).max(weight);
+            // Any stage could be the next to walk, so keep the running worst
+            // case; the resident set must always leave room for the largest
+            // single walk on top of it. Derived from the model's own stages —
+            // no size is special-cased.
+            self.max_walk_footprint = self.max_walk_footprint.max(footprint);
+
+            // Admit to residency only if the resident set — charged its TRUE
+            // footprint — still leaves headroom for the largest stage to walk.
+            // `residency_budget` is the host's effective memory ceiling for
+            // resident sessions (the wasm32 address space minus a runtime
+            // reserve for activations/K-V/runtime, or `u64::MAX` native). A
+            // model whose stages fit stays resident across tokens AND turns; one
+            // past the headroom is windowed one stage at a time — correct, never
+            // an out-of-memory abort.
+            // Two budget regimes. `bound_by_footprint` (the browser, wasm): the
+            // budget is a HARD address-space ceiling, so residency must account
+            // for the true footprint AND reserve room for the largest single
+            // walk — otherwise resident float-head sessions' retained F32 scratch
+            // accumulates into an allocation abort. Default (native, and the
+            // κ-store-bandwidth residency witnesses): the budget is a bandwidth
+            // cache limit denominated in WEIGHT bytes — residency saves stage
+            // re-materialization, and a 64-bit host has no address ceiling to
+            // respect. Both are parametric: every quantity is measured from the
+            // model's own stages.
+            let within_budget = if self.bound_by_footprint {
+                self.resident_footprint + footprint + self.max_walk_footprint
+                    <= self.residency_budget
+            } else {
+                self.resident_bytes + weight <= self.residency_budget
+            };
+            let admissible = weight > 0
+                && within_budget
+                && self
+                    .admission_probe
+                    .as_ref()
+                    .is_none_or(|p| p(self.admission_margin()));
             if admissible {
-                self.resident[stage] = Some((runner, bytes));
-                self.resident_bytes += bytes;
-            } else if bytes > 0 && self.resident_bytes > 0 {
+                self.resident_bytes += weight;
+                self.resident_footprint += footprint;
+                self.resident[stage] = Some((runner, weight, footprint));
+            } else if weight > 0 && self.resident_bytes > 0 {
                 tracing::debug!(
                     stage,
-                    margin,
+                    footprint,
                     "residency full — the stage streams per pass (projection, not refusal)"
                 );
             }
+            // Peak WEIGHT residency — the cache metric the witnesses assert —
+            // tracks the packed weight bytes, not the execution transient.
             self.peak_resident_weight_bytes = self
                 .peak_resident_weight_bytes
-                .max(self.resident_bytes.max(bytes));
+                .max(self.resident_bytes.max(weight));
 
             if stage + 1 == self.stage_count {
                 // Pipeline outputs: the final stage's own outputs, then the
@@ -1094,6 +1167,7 @@ pub struct GrowableStagedSession {
     on_stage: Option<SharedStageObserver>,
     on_window: Option<Box<dyn FnMut(usize, bool)>>,
     residency_budget: u64,
+    bound_by_footprint: bool,
     admission_probe: Option<std::rc::Rc<dyn Fn(u64) -> bool>>,
     verified: std::rc::Rc<std::cell::RefCell<std::collections::HashSet<String>>>,
     derived_store: Option<Box<dyn DerivedStore>>,
@@ -1157,6 +1231,7 @@ impl GrowableStagedSession {
             on_stage: None,
             on_window: None,
             residency_budget: 0,
+            bound_by_footprint: false,
             admission_probe: None,
             verified: std::rc::Rc::new(std::cell::RefCell::new(std::collections::HashSet::new())),
             derived_store: None,
@@ -1223,6 +1298,19 @@ impl GrowableStagedSession {
         self.residency_budget = bytes;
         if let Some((_, runner)) = self.current.as_mut() {
             runner.set_residency_budget(bytes);
+        }
+    }
+
+    /// Treat the residency budget as a hard address-space ceiling (the wasm32
+    /// tab), forwarded into every regrown runner: admission is then gated on
+    /// each stage session's true runtime footprint plus a largest-walk reserve,
+    /// so resident float-head chunks' retained F32 transients cannot accumulate
+    /// into an allocation abort. Off by default (a 64-bit host, weight-cache
+    /// residency). See [`StagedRunner::set_bound_by_footprint`].
+    pub fn set_bound_by_footprint(&mut self, bounded: bool) {
+        self.bound_by_footprint = bounded;
+        if let Some((_, runner)) = self.current.as_mut() {
+            runner.set_bound_by_footprint(bounded);
         }
     }
 
@@ -1306,6 +1394,7 @@ impl GrowableStagedSession {
             }));
         }
         runner.set_residency_budget(self.residency_budget);
+        runner.set_bound_by_footprint(self.bound_by_footprint);
         runner.share_verified_set(std::rc::Rc::clone(&self.verified));
         runner.set_expected_stage_bytes(expected);
         if let Some(probe) = &self.admission_probe {

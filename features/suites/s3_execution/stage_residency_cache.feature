@@ -31,6 +31,11 @@ Feature: κ-store bandwidth is paid per window, never per token
     When the same greedy completion is generated with and without a residency budget
     Then both completions are identical and non-empty
 
+  Scenario: a hard address ceiling charges the true footprint, not the weight
+    When a completion is generated under a hard address ceiling that holds the whole model's weights
+    Then the address-ceiling run rematerializes more than the weight-cache run at the same budget
+    And both ceiling and weight-cache completions are identical and non-empty
+
   Scenario: the resident set survives across chat turns
     When two completions are generated over one warm session within the budget
     Then the second completion adds no stage materializations

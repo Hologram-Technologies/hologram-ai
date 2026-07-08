@@ -950,6 +950,8 @@ struct BddWorld {
     staged_growth_err: Option<String>,
     // S3 — stage residency cache (row `stage-residency-cache`)
     residency_run: Option<ResidencyRun>,
+    // The same budget under a hard address ceiling (footprint-bounded admission).
+    residency_run_bounded: Option<ResidencyRun>,
     // S3 — total algebraic path (row `total-algebraic-path`, open/measured)
     float_dispatch_tally: Option<(usize, usize)>,
     // S3 — session verified-κ (row `session-verified-kappa`)
@@ -2965,12 +2967,24 @@ struct ResidencyRun {
 
 /// Greedy 8-token generation over the fixture stages at `budget` residency.
 fn run_with_residency(store_path: &std::path::Path, budget: u64) -> ResidencyRun {
+    run_with_residency_bounded(store_path, budget, false)
+}
+
+/// As [`run_with_residency`], but `bound_by_footprint` treats the budget as a
+/// hard address ceiling — admission then charges each stage's TRUE runtime
+/// footprint (weights + retained transients) instead of its packed weight.
+fn run_with_residency_bounded(
+    store_path: &std::path::Path,
+    budget: u64,
+    bound_by_footprint: bool,
+) -> ResidencyRun {
     use hologram_ai::commands::generate::{generate_stream, GenConfig};
     let kit = staged_kit();
     let mut runner =
         StagedRunner::from_archives(kit.stages.clone(), Box::new(DirKappaStore::new(store_path)))
             .expect("the staged runner builds");
     runner.set_residency_budget(budget);
+    runner.set_bound_by_footprint(bound_by_footprint);
     let cfg = GenConfig {
         max_tokens: Some(8),
         temperature: 0.0,
@@ -3033,6 +3047,56 @@ async fn then_residency_strict(w: &mut BddWorld) {
         run.materializations,
         (run.stage_count * run.passes) as u64,
         "a zero budget must rematerialize every stage every pass"
+    );
+}
+
+#[when(
+    "a completion is generated under a hard address ceiling that holds the whole model's weights"
+)]
+async fn when_residency_footprint_ceiling(w: &mut BddWorld) {
+    let store = w.staged_store.as_ref().expect("the fixture κ-store");
+    let kit = staged_kit();
+    // A budget that holds every stage's WEIGHT twice over: weight-bounded
+    // residency keeps them all resident. The SAME budget under a hard address
+    // ceiling must account for each session's retained transients too.
+    let budget = kit.total_weight_bytes * 2;
+    w.residency_run = Some(run_with_residency_bounded(&store.path, budget, false));
+    w.residency_run_bounded = Some(run_with_residency_bounded(&store.path, budget, true));
+}
+
+#[then("the address-ceiling run rematerializes more than the weight-cache run at the same budget")]
+async fn then_residency_footprint_stricter(w: &mut BddWorld) {
+    let weight = w.residency_run.as_ref().expect("the weight-cache run");
+    let bounded = w.residency_run_bounded.as_ref().expect("the ceiling run");
+    // The weight-cache run holds the whole model resident (once per stage);
+    // charging the true footprint under the same budget admits fewer stages, so
+    // more re-materialize. This is the memory-safety margin that keeps a float
+    // LM-head chunk's retained F32 image from accumulating past the ceiling.
+    assert!(
+        bounded.materializations > weight.materializations,
+        "a hard ceiling must charge the true footprint and window more ({} vs {}) — \
+         otherwise resident transients accumulate into an allocation abort",
+        bounded.materializations,
+        weight.materializations
+    );
+    assert_eq!(
+        weight.materializations, weight.stage_count as u64,
+        "the weight-cache run should hold the whole model resident (once per stage)"
+    );
+}
+
+#[then("both ceiling and weight-cache completions are identical and non-empty")]
+async fn then_residency_footprint_identical(w: &mut BddWorld) {
+    let weight = w.residency_run.as_ref().expect("the weight-cache run");
+    let bounded = w.residency_run_bounded.as_ref().expect("the ceiling run");
+    assert!(
+        !bounded.completion.is_empty(),
+        "the ceiling run must produce output"
+    );
+    assert_eq!(
+        weight.completion, bounded.completion,
+        "windowing a stage is a projection of speed, never of meaning — the \
+         completion must be byte-identical"
     );
 }
 

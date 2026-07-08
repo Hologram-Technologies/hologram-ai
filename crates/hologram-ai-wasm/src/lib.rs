@@ -1109,6 +1109,14 @@ fn build_growable_session(
         const STRUCTURAL_CEILING: u64 = 4 << 30;
         const RUNTIME_RESERVE: u64 = 1 << 30; // 1 GiB: activations + K/V + runtime
         session.set_residency_budget(STRUCTURAL_CEILING - RUNTIME_RESERVE);
+        // The budget is a HARD 32-bit address ceiling here: gate residency on
+        // each stage's TRUE footprint (weights + the transients the buffer pool
+        // retains — a float LM-head chunk's F32 image is several times its
+        // packed weight) plus a largest-walk reserve. Without this, resident
+        // head chunks' retained F32 scratch accumulates past 4 GiB → an opaque
+        // `RuntimeError: unreachable` allocation abort on a large-vocabulary
+        // model whose float head does not fit alongside the resident layers.
+        session.set_bound_by_footprint(true);
     }
 
     // Weight-tier paging (row `lazy-constant-residency`): each stage loads
