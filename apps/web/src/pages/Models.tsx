@@ -248,8 +248,8 @@ export function Models() {
         <h2 style={{ fontSize: 16, marginTop: 32, marginBottom: 16 }}>My Models</h2>
         {myModels.length === 0 ? (
           <p className="meta" style={{ marginTop: 0 }}>
-            No models yet. Search HuggingFace above, or pick a featured starting
-            point below — anything you download appears here.
+            No models yet. Search HuggingFace above and add any supported model —
+            it appears here once you download it. The app ships no default models.
           </p>
         ) : (
           <div className="list">{myModels.map(renderModelItem)}</div>

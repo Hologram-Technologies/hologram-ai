@@ -121,6 +121,28 @@ class HologramWorld {
         },
         [hfBase, JSON.stringify([entry])],
       );
+    } else {
+      // The app ships NO default models (catalogue.json is empty — arbitrary
+      // models only), so the live journey adds its target as a user would: a
+      // custom entry. Its chat template + stops are DERIVED from the model's own
+      // tokenizer_config at run time, so the entry carries no per-model boilerplate.
+      const entry = {
+        id: "smollm2-135m-instruct",
+        hfId: "HuggingFaceTB/SmolLM2-135M-Instruct",
+        displayName: "SmolLM2 135M Instruct",
+        description: "Live-journey target (user-added).",
+        modality: "text-chat",
+        size: "135M",
+        approxArchiveMb: 0,
+        quantize: "int8",
+        promptTemplate: null,
+        stop: [],
+        chatTurnSeparator: null,
+      };
+      await this.page.addInitScript(
+        (entryJson) => localStorage.setItem("hologram_catalogue_custom", entryJson),
+        JSON.stringify([entry]),
+      );
     }
     await this.page.goto(this.appUrl, { waitUntil: "networkidle" });
   }
