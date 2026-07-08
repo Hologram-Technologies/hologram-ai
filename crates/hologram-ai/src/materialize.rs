@@ -442,6 +442,14 @@ impl WeightBindingTable {
     pub fn is_empty(&self) -> bool {
         self.bindings.is_empty()
     }
+
+    /// Insert a fingerprint→(κ, size) binding — the paged-archive builder's
+    /// own path, exposed to the crate's tests so a provider can be exercised
+    /// without a full archive.
+    #[cfg(test)]
+    pub(crate) fn insert_binding(&mut self, fingerprint: [u8; 32], kappa: String, size: u64) {
+        self.bindings.insert(fingerprint, (kappa, size));
+    }
 }
 
 /// Build a **paged** archive from a k-form archive: rewrite each WHOLE-κ weight
@@ -712,6 +720,43 @@ fn sort_weights_section(body: &[u8]) -> Result<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn kappa_digest_is_the_content_fingerprint_and_mints_the_same_label() {
+        // The load-bearing pager identity: a paged constant fingerprinted with
+        // `kappa_digest(κ)` mints the SAME ContentLabel the fully-resident path
+        // mints from the body — so derivation keys and outputs are identical,
+        // residency orthogonal to identity.
+        for body in [
+            &b""[..],
+            b"w",
+            b"a-larger-weight-body-0123456789",
+            &[0xABu8; 257],
+        ] {
+            let kappa = kappa_of(body);
+            let digest = kappa_digest(&kappa).expect("well-formed κ decodes");
+            assert_eq!(
+                digest,
+                hologram_archive::WeightFingerprint::of(body).0,
+                "kappa_digest equals the weight fingerprint"
+            );
+            assert_eq!(
+                hologram_archive::WeightFingerprint(digest).content_label(),
+                hologram_archive::address::address_bytes(body),
+                "the paged slot's label equals the resident path's address"
+            );
+        }
+    }
+
+    #[test]
+    fn kappa_digest_rejects_malformed_labels() {
+        assert!(kappa_digest("sha256:abcd").is_err(), "wrong scheme");
+        assert!(kappa_digest("blake3:xyz").is_err(), "short/non-hex digest");
+        assert!(
+            kappa_digest(&format!("blake3:{}", "g".repeat(64))).is_err(),
+            "non-hex digits"
+        );
+    }
 
     #[test]
     fn kappa_of_is_prefixed_blake3_hex() {

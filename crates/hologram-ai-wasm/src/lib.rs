@@ -566,15 +566,32 @@ impl hologram_ai::materialize::KappaStore for JsKappaStore {
     }
 }
 
-/// A `Send` wrapper over an OPFS resolve callback for the weight-tier pager's
+/// A `Send` κ-store over the OPFS callbacks for the weight-tier pager's
 /// provider (row `lazy-constant-residency`). hologram's `load_paged` requires
 /// `WeightProvider: Send + Sync`; the browser runs single-threaded, so the JS
-/// function is never actually shared across threads and the `unsafe impl` is
-/// sound — a wasm-only escape hatch, exactly as the store callbacks are.
-struct SendResolve(js_sys::Function);
-// SAFETY: wasm32 is single-threaded; the callback is only ever invoked on the
-// one wasm thread that created it.
-unsafe impl Send for SendResolve {}
+/// callbacks are never actually shared across threads and the `unsafe impl` is
+/// sound — a wasm-only escape hatch, exactly as the store callbacks are. It
+/// delegates to a full [`JsKappaStore`], so the provider inherits resolve,
+/// invalidate (the unpin/recover hook), the ranged seek, and the size stat.
+struct SendStore(JsKappaStore);
+// SAFETY: wasm32 is single-threaded; the callbacks are only ever invoked on
+// the one wasm thread that created them.
+unsafe impl Send for SendStore {}
+
+impl hologram_ai::materialize::KappaStore for SendStore {
+    fn resolve(&mut self, kappa: &str) -> anyhow::Result<Vec<u8>> {
+        self.0.resolve(kappa)
+    }
+    fn invalidate(&mut self, kappa: &str) {
+        self.0.invalidate(kappa)
+    }
+    fn resolve_range(&mut self, kappa: &str, offset: u64, len: u64) -> anyhow::Result<Vec<u8>> {
+        self.0.resolve_range(kappa, offset, len)
+    }
+    fn content_size(&mut self, kappa: &str) -> anyhow::Result<u64> {
+        self.0.content_size(kappa)
+    }
+}
 
 /// A derived-artifact store backed by JS callbacks (row
 /// `derived-artifact-kappa`): `load(key)` returns
@@ -1022,6 +1039,19 @@ fn build_growable_session(
     let layers_per_stage = std::num::NonZeroU64::new(u64::from(layers_per_stage))
         .ok_or_else(|| err("layers_per_stage must be at least 1"))?;
 
+    // Clone the OPFS callbacks the paged provider needs BEFORE they move into
+    // the main store (the paged store is independent per hologram's Send
+    // requirement, but drives the same OPFS tiers).
+    let paging_cbs = weight_budget.map(|budget| {
+        (
+            budget,
+            resolve_kappa.clone(),
+            invalidate_kappa.clone(),
+            resolve_kappa_range.clone(),
+            size_kappa.clone(),
+        )
+    });
+
     let store = Box::new(JsKappaStore {
         resolve: resolve_kappa.clone(),
         invalidate: invalidate_kappa,
@@ -1079,24 +1109,19 @@ fn build_growable_session(
     // Weight-tier paging (row `lazy-constant-residency`): each stage loads
     // PAGED against `weight_budget` resident bytes, so a stage whose weights
     // exceed the wasm heap window still runs — the arena is a bounded window
-    // over the OPFS κ-store. The provider's resolver is a fresh clone of the
-    // OPFS callback per stage, wrapped `Send` (wasm is single-threaded).
-    if let Some(budget) = weight_budget {
-        let base = resolve_kappa.clone();
+    // over the OPFS κ-store. The provider's store is a fresh clone of the OPFS
+    // callbacks per stage, wrapped `Send` (wasm is single-threaded), so it
+    // inherits verify/invalidate/seek/size from `JsKappaStore`.
+    if let Some((budget, resolve, invalidate, resolve_range, size)) = paging_cbs {
         session.set_weight_paging(
             budget as usize,
             std::rc::Rc::new(move || {
-                let f = SendResolve(base.clone());
-                Box::new(move |kappa: &str| {
-                    let v = f
-                        .0
-                        .call1(&JsValue::NULL, &JsValue::from_str(kappa))
-                        .map_err(|e| anyhow::anyhow!("κ resolver threw for `{kappa}`: {e:?}"))?;
-                    if v.is_null() || v.is_undefined() {
-                        anyhow::bail!("κ `{kappa}` not present in store");
-                    }
-                    Ok(js_sys::Uint8Array::new(&v).to_vec())
-                }) as hologram_ai::runner::KappaResolve
+                Box::new(SendStore(JsKappaStore {
+                    resolve: resolve.clone(),
+                    invalidate: invalidate.clone(),
+                    resolve_range: resolve_range.clone(),
+                    size: size.clone(),
+                })) as hologram_ai::runner::PagedStore
             }),
         );
     }
@@ -1374,19 +1399,27 @@ impl DecodeChatSession {
         // the derived store; a failed build degrades prefill to steps — a
         // projection, never a refusal.
         if session.seeder_chunk().is_none() {
-            const PREFILL_CHUNK: u64 = 32;
+            // Parametric prefill chunk: the system's own geometric window base
+            // (`geometric_window(1, context)` = min(MIN_WINDOW, context)),
+            // capped by the bucket (the seeder's past span) — cache-friendly
+            // and derived from the window policy, never a magic width. A
+            // context below 2 has no seeder (prefill is one step per token).
             let bucket = session.geometry().bucket;
-            let chunk = PREFILL_CHUNK.min(self.context_length).max(2);
-            match self
-                .growable
-                .borrow_mut()
-                .chunk_runner_for(bucket, chunk)
-                .and_then(|seeder| session.set_seeder(seeder))
-            {
-                Ok(()) => {}
-                Err(e) => web_sys::console::warn_1(&JsValue::from_str(&format!(
-                    "prefill seeder unavailable (stepping instead): {e:#}"
-                ))),
+            let base =
+                hologram_ai::engine::geometric_window(1, self.context_length as usize) as u64;
+            let chunk = base.min(bucket as u64);
+            if chunk >= 2 {
+                match self
+                    .growable
+                    .borrow_mut()
+                    .chunk_runner_for(bucket, chunk)
+                    .and_then(|seeder| session.set_seeder(seeder))
+                {
+                    Ok(()) => {}
+                    Err(e) => web_sys::console::warn_1(&JsValue::from_str(&format!(
+                        "prefill seeder unavailable (stepping instead): {e:#}"
+                    ))),
+                }
             }
         }
 

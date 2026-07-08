@@ -3996,7 +3996,7 @@ async fn given_paged_staged_fixture(w: &mut BddWorld) {
 
 #[when("the staged pipeline is executed paged and fully resident")]
 async fn when_paged_staged(w: &mut BddWorld) {
-    use hologram_ai::runner::KappaResolve;
+    use hologram_ai::runner::PagedStore;
     let kit = staged_kit();
     let pr = w
         .paged_residency
@@ -4027,8 +4027,8 @@ async fn when_paged_staged(w: &mut BddWorld) {
     }
     let budget = ((largest + distinct.values().sum::<u64>()) / 2) as usize;
 
-    // Paged staged pipeline: each stage loads paged, the provider's resolver
-    // a fresh DirKappaStore over the same store path.
+    // Paged staged pipeline: each stage loads paged, the provider's store a
+    // fresh DirKappaStore over the same store path.
     let mut paged = StagedRunner::from_archives(
         kit.stages.clone(),
         Box::new(DirKappaStore::new(&pr.store.path)),
@@ -4037,10 +4037,7 @@ async fn when_paged_staged(w: &mut BddWorld) {
     let path = pr.store.path.clone();
     paged.set_weight_paging(
         budget,
-        Box::new(move || {
-            let path = path.clone();
-            Box::new(move |kappa: &str| DirKappaStore::new(&path).resolve(kappa)) as KappaResolve
-        }),
+        Box::new(move || Box::new(DirKappaStore::new(&path)) as PagedStore),
     );
     let got = paged.execute(&[&ids, &lp]).expect("paged staged pass")[0]
         .bytes

@@ -100,6 +100,21 @@ impl DecodeGeometry {
         );
         let heads = cq.shape[0] / chunk;
 
+        // The engine trusts the geometry it reads from the ports, so validate
+        // the two structural invariants the RoPE and GQA emission assume,
+        // rather than dividing silently: the rotate-half pairing needs an even
+        // head dim, and the per-kv-group query slicing needs an integral
+        // grouping. A plan that violated either would produce wrong numbers,
+        // not an error — so fail loud here.
+        ensure!(
+            head_dim % 2 == 0,
+            "decode plan head_dim {head_dim} is odd — rotate-half RoPE pairs j ± d/2 and needs an even head dim"
+        );
+        ensure!(
+            kv_heads > 0 && heads % kv_heads == 0,
+            "decode plan head grouping {heads}/{kv_heads} is not integral"
+        );
+
         let logits = outputs
             .iter()
             .find(|p| p.name == "logits")
@@ -328,6 +343,25 @@ pub struct DecodeSession<S: LmSession> {
     state: DecodeState,
 }
 
+/// Bytes for one layer's carried K (or V) buffer: `kv_heads · bucket ·
+/// head_dim · 4`, in CHECKED arithmetic — a bucket whose f32 K/V exceeds the
+/// host's address space (`usize::MAX`, 4 GiB on wasm32) fails loud here naming
+/// the shape, rather than wrapping into a silently-undersized buffer. The
+/// bound is the target's own address space, never an arbitrary ceiling.
+fn kv_buffer_bytes(geom: &DecodeGeometry) -> Result<usize> {
+    geom.kv_heads
+        .checked_mul(geom.bucket)
+        .and_then(|n| n.checked_mul(geom.head_dim))
+        .and_then(|n| n.checked_mul(4))
+        .with_context(|| {
+            format!(
+                "the carried K/V buffer ({} kv · {} bucket · {} head_dim · 4 B) exceeds this \
+                 host's address space",
+                geom.kv_heads, geom.bucket, geom.head_dim
+            )
+        })
+}
+
 impl<S: LmSession> DecodeSession<S> {
     /// Open a session over a compiled step plan (`chunk = 1`). `rope_theta`
     /// comes from the model's own config (the graph consumes rope as runtime
@@ -340,7 +374,7 @@ impl<S: LmSession> DecodeSession<S> {
             "the session's main runner must be the step plan (chunk 1), got chunk {}",
             geom.chunk
         );
-        let kv_bytes = geom.kv_heads * geom.bucket * geom.head_dim * 4;
+        let kv_bytes = kv_buffer_bytes(&geom)?;
         Ok(Self {
             runner,
             geom,
@@ -461,7 +495,12 @@ impl<S: LmSession> DecodeSession<S> {
                 self.geom.bucket
             );
         };
-        let new_bucket = ((self.geom.bucket as u64) * 2).min(self.context_length);
+        // The next bucket comes from the SAME geometric policy the rebuild
+        // closure uses (`engine::geometric_window`), so the rebuilt runner's
+        // bucket matches `new_bucket` by construction — never a re-implemented
+        // `* 2` that could silently drift from the window policy.
+        let cap = self.context_length.min(usize::MAX as u64) as usize;
+        let new_bucket = crate::engine::geometric_window(self.geom.bucket + 1, cap) as u64;
         ensure!(
             new_bucket > self.geom.bucket as u64,
             "decode bucket cannot grow past the model's context ({})",
@@ -480,12 +519,15 @@ impl<S: LmSession> DecodeSession<S> {
             self.geom
         );
 
+        // Checked before allocating: the wider bucket's f32 K/V must fit the
+        // host's address space (same loud bound as `new`).
+        let wide_bytes = kv_buffer_bytes(&geom)?;
         let row = self.geom.head_dim * 4;
         let (old_b, new_b) = (self.geom.bucket, geom.bucket);
         let realized = self.state.cur_len;
         let widen = |buffers: &mut Vec<Vec<u8>>, kv: usize| {
             for buf in buffers.iter_mut() {
-                let mut wide = vec![0u8; kv * new_b * row];
+                let mut wide = vec![0u8; wide_bytes];
                 for j in 0..kv {
                     let src = j * old_b * row;
                     let dst = j * new_b * row;
@@ -555,5 +597,42 @@ impl<S: LmSession> DecodeSession<S> {
             rest = later;
         }
         row.context("feed processed no tokens")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn geom(kv_heads: usize, bucket: usize, head_dim: usize) -> DecodeGeometry {
+        DecodeGeometry {
+            layers: 2,
+            kv_heads,
+            heads: kv_heads * 2,
+            head_dim,
+            bucket,
+            chunk: 1,
+            vocab: 32,
+        }
+    }
+
+    #[test]
+    fn kv_buffer_bytes_is_exact_for_a_normal_geometry() {
+        let g = geom(2, 128, 16);
+        assert_eq!(kv_buffer_bytes(&g).unwrap(), 2 * 128 * 16 * 4);
+    }
+
+    #[test]
+    fn kv_buffer_bytes_fails_loud_on_address_space_overflow() {
+        // A bucket whose f32 K/V exceeds usize must fail loud naming the shape,
+        // never wrap into a silently-undersized buffer. Only reachable when
+        // usize is 64-bit here, but the CHECK is what matters (the wasm32
+        // build hits it at a realistic 4 GiB bucket).
+        let g = geom(8, usize::MAX / 64, 128);
+        let err = kv_buffer_bytes(&g).expect_err("must overflow");
+        assert!(
+            err.to_string().contains("address space"),
+            "error names the address-space bound: {err}"
+        );
     }
 }

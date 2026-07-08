@@ -352,17 +352,18 @@ impl KappaStore for CountingStore<'_> {
 /// k-forms (structure + κ-bindings), so resolving one moves no parameters.
 pub type StageResolver<'a> = Box<dyn FnMut(usize) -> Result<Vec<u8>> + 'a>;
 
-/// A factory producing a fresh `Send` κ-resolver — one per paged stage
-/// session, backing the weight provider independently of the runner's own
-/// `store`. Native: a resolver over a `DirKappaStore` path. Browser: a
-/// resolver over a cloned OPFS callback (single-threaded, so `Send`-safe).
-pub type ResolverFactory<'a> = Box<dyn Fn() -> crate::runner::KappaResolve + 'a>;
+/// A factory producing a fresh `Send` κ-store — one per paged stage session,
+/// backing the weight provider independently of the runner's own `store`.
+/// Native: a `DirKappaStore` over the same path. Browser: a cloned OPFS
+/// store (single-threaded, so `Send`-safe). The provider inherits the
+/// store's verify/invalidate/seek tiers.
+pub type ResolverFactory<'a> = Box<dyn Fn() -> crate::runner::PagedStore + 'a>;
 
 /// Weight-tier paging configuration (row `lazy-constant-residency`).
 struct PagedWeights<'a> {
     /// Resident paged-weight byte budget per stage session (`0` = unbounded).
     budget: usize,
-    /// Produces the provider's κ-resolver, `Send` per hologram's `load_paged`.
+    /// Produces the provider's κ-store, `Send` per hologram's `load_paged`.
     make_resolver: ResolverFactory<'a>,
 }
 
@@ -1048,7 +1049,7 @@ pub struct GrowableStagedSession {
     /// producing the provider's `Send` κ-resolver (independent of this
     /// session's store). A model whose stage weights exceed the window then
     /// runs — the arena is a bounded window over the κ-store.
-    weight_paging: Option<(usize, std::rc::Rc<dyn Fn() -> crate::runner::KappaResolve>)>,
+    weight_paging: Option<(usize, std::rc::Rc<dyn Fn() -> crate::runner::PagedStore>)>,
     current: Option<(usize, StagedRunner<'static>)>,
 }
 
@@ -1071,10 +1072,18 @@ impl GrowableStagedSession {
     ) -> Result<Self> {
         let config: serde_json::Value =
             serde_json::from_str(&config_json).context("parsing config.json")?;
+        // The model's own trained context is the window ceiling — required, not
+        // fabricated: an absent `max_position_embeddings` cannot silently
+        // become `u64::MAX` (which would let the window grow until OOM). The
+        // parametric builder requires this key, so a graph reaches here only
+        // with it present.
         let model_context = config
             .get("max_position_embeddings")
             .and_then(|v| v.as_u64())
-            .unwrap_or(u64::MAX);
+            .context(
+                "config.json is missing `max_position_embeddings` — the model's trained context \
+                 is the window ceiling and cannot be fabricated",
+            )?;
         let max_window = context_length.unwrap_or(model_context).min(model_context) as usize;
         ensure!(max_window >= 1, "the model declares no usable context");
         Ok(Self {
@@ -1259,7 +1268,7 @@ impl GrowableStagedSession {
     pub fn set_weight_paging(
         &mut self,
         budget: usize,
-        make_resolver: std::rc::Rc<dyn Fn() -> crate::runner::KappaResolve>,
+        make_resolver: std::rc::Rc<dyn Fn() -> crate::runner::PagedStore>,
     ) {
         self.weight_paging = Some((budget, make_resolver));
     }

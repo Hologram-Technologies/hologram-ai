@@ -8,7 +8,7 @@
 //! decode steps is structural (content-addressed elision), so each step simply
 //! re-executes the graph with the next input.
 
-use anyhow::{Context, Result};
+use anyhow::{ensure, Context, Result};
 use hologram_archive::{ContentLabel, WeightFingerprint, WeightProvider};
 use hologram_backend::CpuBackend;
 use hologram_exec::{BufferArena, InferenceSession, InputBuffer, OutputBuffer};
@@ -87,18 +87,16 @@ impl HoloRunner {
     /// Build a paged runner directly from a k-form archive and its κ-store: turn
     /// the whole-κ constants into paged references ([`crate::materialize::paged_archive`]),
     /// wrap the store as a [`KappaWeightProvider`], and load against `budget`.
-    /// The store is consumed as a resolver closure; ranged (sub-tensor) bindings
-    /// are materialized inline at build (verified once), the dominant
-    /// whole-tensor weights page on demand.
+    /// The store backs the provider (page-in with verify-once and
+    /// invalidate-and-recover); ranged (sub-tensor) bindings are materialized
+    /// inline at build (verified once), the dominant whole-tensor weights page
+    /// on demand.
     pub fn from_kform_paged<S>(kform: &[u8], mut store: S, budget: usize) -> anyhow::Result<Self>
     where
         S: crate::materialize::KappaStore + Send + 'static,
     {
         let (paged, table) = crate::materialize::paged_archive(kform, &mut store)?;
-        let provider = Arc::new(KappaWeightProvider::new(
-            table,
-            Box::new(move |kappa: &str| store.resolve(kappa)),
-        ));
+        let provider = Arc::new(KappaWeightProvider::new(table, Box::new(store)));
         Self::from_paged(paged, provider, budget)
     }
 
@@ -283,26 +281,30 @@ impl HoloRunner {
 /// eviction) is read-only I/O — corrupted content fails loud, never executes.
 pub struct KappaWeightProvider {
     table: WeightBindingTable,
-    inner: Mutex<Resolver>,
+    inner: Mutex<PagedStoreState>,
 }
 
-/// A resolver over the κ-store: returns a κ's whole content, or fails naming it.
-pub type KappaResolve = Box<dyn FnMut(&str) -> Result<Vec<u8>> + Send>;
+/// A κ-store the paged provider backs onto — the SAME
+/// [`KappaStore`](crate::materialize::KappaStore) trait the resident path
+/// uses, so the provider inherits `invalidate` (the unpin hook) and can
+/// recover a corrupted κ exactly as `patch_constants` does, rather than
+/// dead-ending the paged load.
+pub type PagedStore = Box<dyn crate::materialize::KappaStore + Send>;
 
-struct Resolver {
-    resolve: KappaResolve,
+struct PagedStoreState {
+    store: PagedStore,
     verified: std::collections::HashSet<String>,
 }
 
 impl KappaWeightProvider {
-    /// Build from a fingerprint→κ [`WeightBindingTable`] and a resolver closure
-    /// over the κ-store. The closure returns a κ's whole content; the provider
-    /// owns verification and residency.
-    pub fn new(table: WeightBindingTable, resolve: KappaResolve) -> Self {
+    /// Build from a fingerprint→κ [`WeightBindingTable`] and the κ-store the
+    /// weights page from. The provider owns verification and residency; the
+    /// store owns resolution and its own cache tiers.
+    pub fn new(table: WeightBindingTable, store: PagedStore) -> Self {
         Self {
             table,
-            inner: Mutex::new(Resolver {
-                resolve,
+            inner: Mutex::new(PagedStoreState {
+                store,
                 verified: std::collections::HashSet::new(),
             }),
         }
@@ -315,27 +317,54 @@ impl KappaWeightProvider {
     }
 }
 
+/// Resolve `kappa` (expected whole length `size`) with the trust-boundary law:
+/// a κ verified this session is read-only I/O; a first-touch κ is verified, and
+/// on a hash mismatch it UNPINS (invalidate) and re-resolves once from a deeper
+/// tier — corrupted content degrades to a re-stream, never a dead-end, and
+/// never executes unverified (row `saturation-residency`).
+fn resolve_verified(state: &mut PagedStoreState, kappa: &str, size: u64) -> Result<Vec<u8>> {
+    if state.verified.contains(kappa) {
+        // Session-verified: move only the bytes (a seekable store seeks).
+        return state.store.resolve_range(kappa, 0, size);
+    }
+    let bytes = state.store.resolve(kappa)?;
+    if kappa_of(&bytes) == kappa {
+        state.verified.insert(kappa.to_string());
+        return Ok(bytes);
+    }
+    // Unpin the corrupted entry and recover once from the deeper tier.
+    state.store.invalidate(kappa);
+    let recovered = state.store.resolve(kappa)?;
+    ensure!(
+        kappa_of(&recovered) == kappa,
+        "κ integrity failure for `{kappa}`: paged content does not re-hash to its label"
+    );
+    state.verified.insert(kappa.to_string());
+    Ok(recovered)
+}
+
 impl WeightProvider for KappaWeightProvider {
     fn size(&self, fp: WeightFingerprint) -> Option<usize> {
-        self.table.resolve(&fp.0).map(|(_, size)| size as usize)
+        // A κ whose whole length exceeds this host's address space cannot be a
+        // slot; return None so the load fails loud rather than truncating u64→
+        // usize into a wrong slot size.
+        self.table
+            .resolve(&fp.0)
+            .and_then(|(_, size)| usize::try_from(size).ok())
     }
 
     fn get_range(&self, fp: WeightFingerprint, offset: usize, len: usize) -> Option<Cow<'_, [u8]>> {
         let (kappa, size) = self.table.resolve(&fp.0)?;
-        if offset.checked_add(len)? > size as usize {
+        let usize_size = usize::try_from(size).ok()?;
+        if offset.checked_add(len)? > usize_size {
             return None;
         }
-        let mut inner = self.inner.lock().expect("weight provider mutex poisoned");
-        let bytes = (inner.resolve)(kappa).ok()?;
-        if bytes.len() != size as usize {
-            return None;
-        }
-        // Verify at the trust-boundary crossing, once per κ per session.
-        if !inner.verified.contains(kappa) {
-            if kappa_of(&bytes) != kappa {
-                return None; // fail closed — never serve unverified content
-            }
-            inner.verified.insert(kappa.to_string());
+        // Poison-tolerant: a panic in a prior resolver leaves the lock
+        // recoverable rather than turning every later page-in into a panic.
+        let mut state = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let bytes = resolve_verified(&mut state, kappa, size).ok()?;
+        if bytes.len() != usize_size {
+            return None; // the store's stat disagreed with the body — fail closed
         }
         Some(Cow::Owned(bytes[offset..offset + len].to_vec()))
     }
@@ -373,5 +402,114 @@ fn dtype_byte_width(tag: u8) -> usize {
         8 => 4,         // F32
         3 | 5 | 9 => 8, // U64, I64, F64
         _ => 4,
+    }
+}
+
+#[cfg(test)]
+mod pager_tests {
+    use super::*;
+    use crate::materialize::{kappa_of, KappaStore, WeightBindingTable};
+
+    /// A κ-store with a shallow cache tier over a deep tier, so corruption in
+    /// the cache RECOVERS from the deep tier after an `invalidate` — the
+    /// `saturation-residency` law the paged provider must uphold.
+    struct TwoTier {
+        good: Vec<u8>,
+        cache_corrupt: bool,
+        resolves: usize,
+    }
+    impl KappaStore for TwoTier {
+        fn resolve(&mut self, _kappa: &str) -> Result<Vec<u8>> {
+            self.resolves += 1;
+            if self.cache_corrupt {
+                Ok(b"corrupt-cache-bytes-wrong-length!".to_vec())
+            } else {
+                Ok(self.good.clone())
+            }
+        }
+        fn invalidate(&mut self, _kappa: &str) {
+            self.cache_corrupt = false; // the deep tier recovers
+        }
+    }
+
+    fn provider_for(store: PagedStore, body: &[u8]) -> KappaWeightProvider {
+        let mut table = WeightBindingTable::default();
+        let fp = hologram_archive::WeightFingerprint::of(body);
+        table.insert_binding(fp.0, kappa_of(body), body.len() as u64);
+        KappaWeightProvider::new(table, store)
+    }
+
+    #[test]
+    fn provider_recovers_a_corrupt_kappa_by_invalidate_and_re_resolve() {
+        let body = b"the-real-weight-body".to_vec();
+        let store = TwoTier {
+            good: body.clone(),
+            cache_corrupt: true,
+            resolves: 0,
+        };
+        let provider = provider_for(Box::new(store), &body);
+        let fp = hologram_archive::WeightFingerprint::of(&body);
+        let got = provider
+            .get_range(fp, 0, body.len())
+            .expect("corruption recovers from the deep tier");
+        assert_eq!(
+            got.as_ref(),
+            &body[..],
+            "recovered content is the real body"
+        );
+    }
+
+    #[test]
+    fn provider_fails_closed_on_a_missing_kappa() {
+        struct Empty;
+        impl KappaStore for Empty {
+            fn resolve(&mut self, kappa: &str) -> Result<Vec<u8>> {
+                anyhow::bail!("κ `{kappa}` not present in store")
+            }
+        }
+        let body = b"weight".to_vec();
+        let provider = provider_for(Box::new(Empty), &body);
+        let fp = hologram_archive::WeightFingerprint::of(&body);
+        assert!(
+            provider.get_range(fp, 0, body.len()).is_none(),
+            "a missing κ fails closed (None), never a wrong or unverified body"
+        );
+    }
+
+    #[test]
+    fn provider_serves_a_zero_byte_weight() {
+        struct Zero;
+        impl KappaStore for Zero {
+            fn resolve(&mut self, _kappa: &str) -> Result<Vec<u8>> {
+                Ok(Vec::new())
+            }
+        }
+        let body: &[u8] = &[];
+        let provider = provider_for(Box::new(Zero), body);
+        let fp = hologram_archive::WeightFingerprint::of(body);
+        let got = provider
+            .get_range(fp, 0, 0)
+            .expect("a 0-byte weight resolves");
+        assert!(got.as_ref().is_empty());
+    }
+
+    #[test]
+    fn provider_fails_closed_when_the_stat_disagrees_with_the_body() {
+        // A store whose content_size (already in the table) disagrees with the
+        // resolved body length must fail closed, never serve a mismatched slot.
+        struct WrongLen;
+        impl KappaStore for WrongLen {
+            fn resolve(&mut self, _kappa: &str) -> Result<Vec<u8>> {
+                Ok(vec![0u8; 8]) // real body is 8 bytes …
+            }
+        }
+        let mut table = WeightBindingTable::default();
+        let fp = hologram_archive::WeightFingerprint::of(&[0u8; 8]);
+        table.insert_binding(fp.0, kappa_of(&[0u8; 8]), 16); // … but the stat said 16
+        let provider = KappaWeightProvider::new(table, Box::new(WrongLen));
+        assert!(
+            provider.get_range(fp, 0, 8).is_none(),
+            "a stat/body length disagreement fails closed"
+        );
     }
 }

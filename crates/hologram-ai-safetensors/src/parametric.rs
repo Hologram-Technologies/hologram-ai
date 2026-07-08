@@ -184,10 +184,17 @@ fn require_u64(config: &Value, key: &str) -> Result<u64> {
     })
 }
 
-fn require_f64(config: &Value, key: &str) -> Result<f64> {
-    config.get(key).and_then(Value::as_f64).ok_or_else(|| {
-        anyhow!("config.json is missing required key `{key}` (or it is not a number)")
-    })
+/// A float config value with a transformers-convention default when the key
+/// is ABSENT — a config that omits it (relying on the library default) is a
+/// valid model, not a rejection. A key that is present but malformed still
+/// fails loud (a wrong value is not a default).
+fn default_f64(config: &Value, key: &str, default: f64) -> Result<f64> {
+    match config.get(key) {
+        None | Some(Value::Null) => Ok(default),
+        Some(v) => v
+            .as_f64()
+            .ok_or_else(|| anyhow!("config.json key `{key}` is present but not a number")),
+    }
 }
 
 /// A boolean config flag; absent means `false` (the transformers default for
@@ -203,8 +210,11 @@ impl ModelConfig {
         let num_attention_heads = require_u64(config, "num_attention_heads")?;
         let vocab_size = require_u64(config, "vocab_size")?;
         let intermediate_size = require_u64(config, "intermediate_size")?;
-        let rms_norm_eps = require_f64(config, "rms_norm_eps")? as f32;
-        let rope_theta = require_f64(config, "rope_theta")? as f32;
+        // Transformers convention: a config that omits these relies on the
+        // library defaults (`rms_norm_eps = 1e-6`, `rope_theta = 10000.0`) —
+        // a valid model, not a rejection. A present-but-malformed value fails.
+        let rms_norm_eps = default_f64(config, "rms_norm_eps", 1e-6)? as f32;
+        let rope_theta = default_f64(config, "rope_theta", 10_000.0)? as f32;
         let max_position_embeddings = require_u64(config, "max_position_embeddings")?;
         ensure!(
             num_attention_heads > 0,
@@ -2394,6 +2404,38 @@ mod tests {
         assert!(
             err.to_string().contains("hidden_size"),
             "error should name the missing key: {err}"
+        );
+    }
+
+    #[test]
+    fn config_omitting_rope_theta_and_eps_builds_on_transformers_defaults() {
+        // A valid model whose config omits rope_theta / rms_norm_eps relies on
+        // the transformers library defaults — it must build, not be rejected.
+        let mut config = tiny_llama_config();
+        let obj = config.as_object_mut().expect("config is an object");
+        obj.remove("rope_theta");
+        obj.remove("rms_norm_eps");
+        let keys = decoder_keys(2, false, false);
+        let dtypes = vec![DType::F32; keys.len()];
+        build_parametric_graph_from_manifest(&config, &keys, &dtypes, None)
+            .expect("a config omitting rope_theta / rms_norm_eps builds on the defaults");
+
+        let cfg = ModelConfig::from_json(&config).expect("config extracts");
+        assert_eq!(cfg.rope_theta, 10_000.0, "rope_theta defaults to 10000");
+        assert_eq!(cfg.rms_norm_eps, 1e-6, "rms_norm_eps defaults to 1e-6");
+    }
+
+    #[test]
+    fn config_with_malformed_rope_theta_still_fails_loud() {
+        // A default covers ABSENCE, never a present-but-wrong value.
+        let mut config = tiny_llama_config();
+        config["rope_theta"] = serde_json::json!("not-a-number");
+        let err = ModelConfig::from_json(&config)
+            .err()
+            .expect("a malformed rope_theta must fail");
+        assert!(
+            err.to_string().contains("rope_theta"),
+            "error names the malformed key: {err}"
         );
     }
 
