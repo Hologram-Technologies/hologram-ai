@@ -1021,6 +1021,12 @@ struct DecoderRecipe<'a> {
     cfg: ModelConfig,
     manifest: TensorManifest<'a>,
     context_length: u64,
+    /// The head emits logits at EVERY sequence position instead of gathering
+    /// the last (row `speculative-decode`, the verify pass). A single-position
+    /// decode/generation step keeps this `false` — it consumes exactly one row,
+    /// so the head stays O(vocab·d). A verify pass over `K` drafted positions
+    /// sets it `true` to read every position's logits in one `M=K` forward.
+    all_positions_head: bool,
 }
 
 impl<'a> DecoderRecipe<'a> {
@@ -1043,6 +1049,7 @@ impl<'a> DecoderRecipe<'a> {
             cfg,
             manifest,
             context_length,
+            all_positions_head: false,
         })
     }
 
@@ -1697,7 +1704,13 @@ impl<'a> DecoderRecipe<'a> {
         let manifest = &self.manifest;
 
         let norm_out = self.emit_final_norm(builder, dims, current);
-        let norm_out = gather_last_position(builder, dims, norm_out);
+        // The verify pass reads every position's logits (all `K` drafted rows);
+        // a single-position step gathers just the sampler's row.
+        let norm_out = if self.all_positions_head {
+            norm_out
+        } else {
+            gather_last_position(builder, dims, norm_out)
+        };
 
         // The tied head is transposed by the shared linear-layer wiring
         // ([vocab, hidden] → [hidden, vocab]) for the matmul orientation.
@@ -1843,6 +1856,36 @@ pub fn build_parametric_chunk_graph_from_manifest(
     chunk: u64,
 ) -> Result<AiGraph> {
     let recipe = DecoderRecipe::prepare(config, keys, dtypes, None)?;
+    build_chunk_graph_with(&recipe, bucket, chunk)
+}
+
+/// The **verify pass** of row `speculative-decode`: the chunk graph at `seq =
+/// chunk` whose head emits logits at EVERY position (`[1, chunk, vocab]`)
+/// instead of gathering the last. One `M = chunk` forward yields the model's
+/// distribution at each of the `chunk` drafted positions — the batched matmul
+/// shape the substrate runs efficiently (see the `decode_shape` bench), so `K`
+/// speculative positions verify in a single pass rather than `K` single-`M`
+/// steps. K/V is emitted per position exactly as the chunk pass does, so the
+/// accepted prefix's K/V is spliced by the same machinery; the graph is
+/// otherwise byte-identical to the chunk graph, so its per-position logits
+/// equal a single-position decode at each position.
+pub fn build_parametric_verify_graph_from_manifest(
+    config: &Value,
+    keys: &[String],
+    dtypes: &[DType],
+    bucket: u64,
+    chunk: u64,
+) -> Result<AiGraph> {
+    let mut recipe = DecoderRecipe::prepare(config, keys, dtypes, None)?;
+    recipe.all_positions_head = true;
+    build_chunk_graph_with(&recipe, bucket, chunk)
+}
+
+/// Shared body of the chunk and verify graphs: embedding → layers → head →
+/// decode-attention rewrite → decode metadata. The recipe's `all_positions_head`
+/// decides whether the head gathers the sampler row (chunk/decode) or emits
+/// every position (verify).
+fn build_chunk_graph_with(recipe: &DecoderRecipe, bucket: u64, chunk: u64) -> Result<AiGraph> {
     ensure!(bucket > 0, "decode bucket must be non-empty");
     ensure!(chunk > 0, "decode chunk must be non-empty");
 

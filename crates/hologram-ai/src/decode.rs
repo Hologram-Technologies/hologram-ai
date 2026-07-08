@@ -155,6 +155,21 @@ struct DecodeState {
     steps: u64,
 }
 
+/// The owned per-pass input buffers — everything but the carried K/V, which the
+/// binder splices in by reference. Shared by `pass` (the gather-head decode /
+/// generation step) and `verify_pass` (the all-positions verify pass): both
+/// feed byte-identical decode inputs, differing only in which head the runner
+/// carries and how their logits are read.
+struct PassBuffers {
+    ids: Vec<u8>,
+    cos_q: Vec<u8>,
+    sin_q: Vec<u8>,
+    cos_k: Vec<u8>,
+    sin_k: Vec<u8>,
+    mask_b: Vec<u8>,
+    lp: [u8; 8],
+}
+
 impl DecodeState {
     /// Standard non-interleaved RoPE rows for absolute positions
     /// `base..base+chunk` (`[chunk · head_dim]`, halves duplicated so
@@ -187,14 +202,10 @@ impl DecodeState {
         out
     }
 
-    /// One pass of `real = tokens.len()` positions through `runner` (whose
-    /// geometry is `geom`; `real ≤ geom.chunk`, padded up to the chunk).
-    fn pass(
-        &mut self,
-        runner: &mut impl LmSession,
-        geom: DecodeGeometry,
-        tokens: &[i64],
-    ) -> Result<Vec<f32>> {
+    /// Build the per-pass input buffers for `tokens` at the current position
+    /// (`real ≤ geom.chunk`, padded up to the chunk; pad rows are masked below
+    /// the realized length until overwritten).
+    fn pass_buffers(&self, geom: DecodeGeometry, tokens: &[i64]) -> Result<PassBuffers> {
         let real = tokens.len();
         ensure!(
             0 < real && real <= geom.chunk,
@@ -204,8 +215,6 @@ impl DecodeState {
         let (chunk, pos) = (geom.chunk, self.cur_len);
         let g = geom.heads / geom.kv_heads;
 
-        // ids: real tokens, padded to the chunk (pad rows are unreachable —
-        // masked below the realized length until overwritten).
         let mut ids_v = vec![0i64; chunk];
         ids_v[..real].copy_from_slice(tokens);
         let ids: Vec<u8> = ids_v.iter().flat_map(|v| v.to_le_bytes()).collect();
@@ -238,38 +247,74 @@ impl DecodeState {
         }
         let mask_b: Vec<u8> = mask.iter().flat_map(|v| v.to_le_bytes()).collect();
 
-        // The head gathers the LAST REAL position's row (seq-C plans declare
-        // `last_pos`; the seq-1 plan is already at the sampler's position).
+        // The gather head takes the LAST REAL position's row; the verify head
+        // has no `last_pos` port, so this is simply unbound there.
         let lp = ((real - 1) as i64).to_le_bytes();
+        Ok(PassBuffers {
+            ids,
+            cos_q,
+            sin_q,
+            cos_k,
+            sin_k,
+            mask_b,
+            lp,
+        })
+    }
 
-        // Bind by port NAME — the ports are the plan's contract.
-        let port_info = runner.input_port_info();
+    /// Bind the decode input ports by NAME — buffers by value, carried K/V by
+    /// reference. The port set is the plan's contract; the same binder serves
+    /// the gather and verify passes (verify's graph omits `last_pos`).
+    fn bind_inputs<'b>(
+        port_info: &[crate::runner::PortInfo],
+        b: &'b PassBuffers,
+        past_k: &'b [Vec<u8>],
+        past_v: &'b [Vec<u8>],
+    ) -> Result<Vec<&'b [u8]>> {
         let mut inputs: Vec<&[u8]> = Vec::with_capacity(port_info.len());
-        for port in &port_info {
+        for port in port_info {
             let buf: &[u8] = match port.name.as_str() {
-                "input_ids" => &ids,
-                "rope_cos_q" => &cos_q,
-                "rope_sin_q" => &sin_q,
-                "rope_cos_k" => &cos_k,
-                "rope_sin_k" => &sin_k,
-                "decode_mask" => &mask_b,
-                "last_pos" => &lp,
+                "input_ids" => &b.ids,
+                "rope_cos_q" => &b.cos_q,
+                "rope_sin_q" => &b.sin_q,
+                "rope_cos_k" => &b.cos_k,
+                "rope_sin_k" => &b.sin_k,
+                "decode_mask" => &b.mask_b,
+                "last_pos" => &b.lp,
                 name => {
                     let (kind, layer) = name
                         .rsplit_once('_')
                         .and_then(|(k, l)| l.parse::<usize>().ok().map(|l| (k, l)))
                         .with_context(|| format!("unexpected decode input port `{name}`"))?;
                     match kind {
-                        "past_k" => &self.past_k[layer],
-                        "past_v" => &self.past_v[layer],
+                        "past_k" => &past_k[layer],
+                        "past_v" => &past_v[layer],
                         _ => bail!("unexpected decode input port `{name}`"),
                     }
                 }
             };
             inputs.push(buf);
         }
+        Ok(inputs)
+    }
 
-        let outputs = runner.execute(&inputs)?;
+    /// One pass of `real = tokens.len()` positions through `runner` (whose
+    /// geometry is `geom`; `real ≤ geom.chunk`, padded up to the chunk). Reads
+    /// the gather head's single logit row and splices the new K/V into the
+    /// carried past, advancing the realized length.
+    fn pass(
+        &mut self,
+        runner: &mut impl LmSession,
+        geom: DecodeGeometry,
+        tokens: &[i64],
+    ) -> Result<Vec<f32>> {
+        let real = tokens.len();
+        let (chunk, pos) = (geom.chunk, self.cur_len);
+        let outputs = {
+            let bufs = self.pass_buffers(geom, tokens)?;
+            let port_info = runner.input_port_info();
+            let inputs = Self::bind_inputs(&port_info, &bufs, &self.past_k, &self.past_v)?;
+            runner.execute(&inputs)?
+        };
         let out_ports = runner.output_port_info();
         ensure!(
             outputs.len() == out_ports.len(),
@@ -283,12 +328,7 @@ impl DecodeState {
         for (port, out) in out_ports.iter().zip(outputs.iter()) {
             match port.name.as_str() {
                 "logits" => {
-                    logits = Some(
-                        out.bytes
-                            .chunks_exact(4)
-                            .map(|c| f32::from_le_bytes(c.try_into().unwrap()))
-                            .collect(),
-                    );
+                    logits = Some(le_f32_vec(&out.bytes));
                 }
                 name => {
                     let (kind, layer) = name
@@ -323,6 +363,58 @@ impl DecodeState {
         self.steps += 1;
         logits.context("decode pass produced no logits output")
     }
+
+    /// A **verify pass** (row `speculative-decode`): run `tokens` through a
+    /// runner carrying the all-positions verify head and return the logits at
+    /// EACH of the `real` positions (`[real][vocab]`). Identical decode inputs
+    /// to [`pass`] over the same carried past, so position `i`'s row equals a
+    /// single-position decode at that absolute position — but all `real` rows
+    /// come from ONE `M=real` forward. The carried state is NOT advanced: a
+    /// verify is a speculative probe; the caller accepts a prefix and commits it
+    /// through [`pass`]/`feed`.
+    fn verify_pass(
+        &self,
+        runner: &mut impl LmSession,
+        geom: DecodeGeometry,
+        tokens: &[i64],
+    ) -> Result<Vec<Vec<f32>>> {
+        let real = tokens.len();
+        let outputs = {
+            let bufs = self.pass_buffers(geom, tokens)?;
+            let port_info = runner.input_port_info();
+            let inputs = Self::bind_inputs(&port_info, &bufs, &self.past_k, &self.past_v)?;
+            runner.execute(&inputs)?
+        };
+        let out_ports = runner.output_port_info();
+        let logits = out_ports
+            .iter()
+            .zip(outputs.iter())
+            .find(|(p, _)| p.name == "logits")
+            .map(|(_, o)| &o.bytes)
+            .context("verify pass produced no logits output")?;
+        // The all-positions head emits `[1, chunk, vocab]` — vocab is derived
+        // from the output (discover's element_count folds in the chunk), and the
+        // logits must tile evenly into `chunk` rows.
+        ensure!(
+            logits.len() % (geom.chunk * 4) == 0,
+            "verify logits {} bytes not a whole [chunk={}, vocab] tensor",
+            logits.len(),
+            geom.chunk
+        );
+        let vocab = logits.len() / (geom.chunk * 4);
+        // Rows 0..real are the real positions (pad rows are discarded).
+        Ok((0..real)
+            .map(|i| le_f32_vec(&logits[i * vocab * 4..(i + 1) * vocab * 4]))
+            .collect())
+    }
+}
+
+/// Decode a little-endian f32 byte slice into a vector.
+fn le_f32_vec(bytes: &[u8]) -> Vec<f32> {
+    bytes
+        .chunks_exact(4)
+        .map(|c| f32::from_le_bytes(c.try_into().unwrap()))
+        .collect()
 }
 
 /// A generation session over the decode plan — generic over the
@@ -425,6 +517,35 @@ impl<S: LmSession> DecodeSession<S> {
     /// Whether a chunked-prefill seeder is installed (and its chunk).
     pub fn seeder_chunk(&self) -> Option<usize> {
         self.seeder.as_ref().map(|(_, g)| g.chunk)
+    }
+
+    /// Run a **verify pass** (row `speculative-decode`) over `tokens` on a
+    /// runner carrying the all-positions verify head, returning the model's
+    /// logits at EACH position (`[tokens.len()][vocab]`) from ONE
+    /// `M = tokens.len()` forward — the batched matmul shape the substrate runs
+    /// efficiently. The session state is UNCHANGED: a verify is a speculative
+    /// probe over the current carried past; the caller accepts a prefix and
+    /// commits it with `step`/`feed`. The verify runner shares this session's
+    /// decode geometry (same bucket/layers/heads); its chunk is the draft
+    /// length `K`, so `tokens.len() ≤ K`.
+    pub fn verify(&self, verify_runner: &mut S, tokens: &[i64]) -> Result<Vec<Vec<f32>>> {
+        let geom = DecodeGeometry::discover(verify_runner)?;
+        ensure!(
+            geom.bucket == self.geom.bucket
+                && geom.layers == self.geom.layers
+                && geom.kv_heads == self.geom.kv_heads
+                && geom.heads == self.geom.heads
+                && geom.head_dim == self.geom.head_dim,
+            "verify runner geometry {geom:?} does not match the session's {:?}",
+            self.geom
+        );
+        ensure!(
+            !tokens.is_empty() && tokens.len() <= geom.chunk,
+            "a verify pass drafts 1..={} tokens, got {}",
+            geom.chunk,
+            tokens.len()
+        );
+        self.state.verify_pass(verify_runner, geom, tokens)
     }
 
     pub fn geometry(&self) -> DecodeGeometry {

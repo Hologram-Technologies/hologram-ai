@@ -505,6 +505,71 @@ fn chunked_prefill_matches_stepped_prefill() {
     );
 }
 
+/// Build the verify-pass graph (row `speculative-decode`) with inline params:
+/// the chunk graph whose head emits logits at EVERY position.
+fn build_verify_graph(bucket: u64, chunk: u64) -> AiGraph {
+    let tensors = fixture_tensors();
+    let keys: Vec<String> = tensors.iter().map(|(n, _, _)| n.clone()).collect();
+    let dtypes = vec![DType::F32; keys.len()];
+    let mut graph =
+        hologram_ai_safetensors::parametric::build_parametric_verify_graph_from_manifest(
+            &config_json(),
+            &keys,
+            &dtypes,
+            bucket,
+            chunk,
+        )
+        .expect("verify graph builds");
+    let mut name_to_id: HashMap<String, u32> = HashMap::new();
+    for (id, name) in &graph.tensor_names {
+        name_to_id.insert(name.clone(), *id);
+    }
+    for (name, dims, bytes) in &tensors {
+        let id = *name_to_id.get(name).expect("manifest tensor in graph");
+        let info = TensorInfo::new(DType::F32, shape_from_concrete(dims));
+        graph.tensor_info.insert(id, info.clone());
+        graph
+            .params
+            .insert(id, AiParam::inline(bytes.clone(), info));
+    }
+    graph
+}
+
+#[test]
+fn verify_pass_logits_match_reference_per_position() {
+    // The verify pass (row `speculative-decode`) runs all K tokens through ONE
+    // M=K forward and reads the model's logits at EVERY position. Each
+    // position's row must equal the naive from-scratch reference at that
+    // position — the very value a single-position decode produces one step at a
+    // time — so a K-token draft can be verified in one batched pass.
+    let toks: Vec<i64> = TOKENS.iter().map(|&t| t as i64).collect();
+    let k = toks.len() as u64;
+    let bucket = 8u64; // ≥ K: the fresh session's past is empty.
+
+    let session = decode_session(bucket);
+    let mut verify = HoloRunner::from_bytes(compile(build_verify_graph(bucket, k)))
+        .expect("verify archive loads");
+    let rows = session
+        .verify(&mut verify, &toks)
+        .expect("verify pass runs");
+    assert_eq!(rows.len(), toks.len(), "one logit row per drafted position");
+
+    let reference = reference_logits(&TOKENS);
+    let mut max_abs = 0f32;
+    for (t, (got_row, ref_row)) in rows.iter().zip(&reference).enumerate() {
+        assert_eq!(got_row.len(), VOCAB, "verify logits are [.., vocab]");
+        for (i, (&got, &want)) in got_row.iter().zip(ref_row).enumerate() {
+            let diff = (got - want).abs();
+            max_abs = max_abs.max(diff);
+            assert!(
+                diff <= 1e-4 + 1e-3 * want.abs(),
+                "verify logits[pos {t}][tok {i}]: {got} vs reference {want} (|Δ| = {diff})"
+            );
+        }
+    }
+    eprintln!("verify pass: {k}-position logits match the reference, max |Δ| = {max_abs:e}");
+}
+
 #[test]
 fn decode_plan_bucket_growth_preserves_parity() {
     // Bucket 2 with 6 tokens: growth (2 → 4 → 8) fires twice mid-sequence;
