@@ -977,6 +977,8 @@ struct BddWorld {
     quant_derive: Option<(usize, u64, u64)>,
     quant_completions: Option<(String, String)>,
     quant_evicted: Option<(String, TrafficJournal)>,
+    // S4 — quantized decode floor (row `performance-contract`)
+    quant_decode: Option<QuantDecodePerf>,
     // S3 — idle derivation (row `idle-derivation`)
     idle_state: Option<IdleDeriveState>,
     // S3 — admission margin (row `stage-residency-cache`)
@@ -4535,8 +4537,12 @@ struct QuantKit {
     map: hologram_ai::quantized::QuantMap,
 }
 
-#[given("a decoder fixture with quantizable projection weights in a κ-store")]
-async fn given_quant_fixture(w: &mut BddWorld) {
+/// Build the quantizable decoder fixture: the staged manifest's weights in a
+/// fresh κ-store under `store_label`, with every rank-2 projection crystallized
+/// to its int8 artifact and recorded in a [`QuantMap`]. Shared by the
+/// `quantized-transit` correctness rows and the `performance-contract`
+/// quantized-decode floor probe.
+fn build_quant_kit(store_label: &str) -> QuantKit {
     let manifest = staged_manifest(false);
     let (keys, shapes): (Vec<String>, Vec<Vec<u64>>) = manifest.into_iter().unzip();
     let kappas: Vec<String> = keys
@@ -4546,7 +4552,7 @@ async fn given_quant_fixture(w: &mut BddWorld) {
         .collect();
     let dtypes = vec![DType::F32; keys.len()];
 
-    let store = StoreDir::new("quantized-transit");
+    let store = StoreDir::new(store_label);
     let mut dir = DirKappaStore::new(&store.path);
     for (name, dims) in keys.iter().zip(&shapes) {
         dir.insert(&quant_tensor_bytes(name, dims))
@@ -4582,7 +4588,7 @@ async fn given_quant_fixture(w: &mut BddWorld) {
         "every projection weight has distinct content — one κ each"
     );
 
-    w.quant = Some(QuantKit {
+    QuantKit {
         store,
         keys,
         kappas,
@@ -4590,7 +4596,12 @@ async fn given_quant_fixture(w: &mut BddWorld) {
         dtypes,
         config: staged_config(false),
         map,
-    });
+    }
+}
+
+#[given("a decoder fixture with quantizable projection weights in a κ-store")]
+async fn given_quant_fixture(w: &mut BddWorld) {
+    w.quant = Some(build_quant_kit("quantized-transit"));
 }
 
 #[when("the projection weights derive their quantized artifacts twice")]
@@ -4714,6 +4725,217 @@ async fn then_quant_parity(w: &mut BddWorld) {
         "staged and monolithic execution must agree on the quantized tier"
     );
     println!("[quantized-transit] staged == monolithic on the quantized tier: {staged:?}");
+}
+
+// ─── S4 — quantized decode floor (row `performance-contract`, target lane) ────
+
+/// The quantized-decode probe: an int8 decode-step session and its F32 twin
+/// over the SAME fixture weights, the weight bytes each streams per pass, and
+/// (filled by the timing step) the per-step measurements and both greedy
+/// completions — so the probe reports the streamed-byte reduction the
+/// quantized decode buys against the weight-streaming floor, and proves the
+/// int8 walk still reproduces the F32 completion.
+struct QuantDecodePerf {
+    _store: StoreDir,
+    f32_session: DecodeSession<HoloRunner>,
+    quant_session: DecodeSession<HoloRunner>,
+    f32_bytes: u64,
+    quant_bytes: u64,
+    bucket: usize,
+    bandwidth: f64,
+    steps: Vec<PerfStep>,
+    f32_completion: Vec<i64>,
+    quant_completion: Vec<i64>,
+}
+
+/// Build a decode-step archive over the quantizable fixture's κ-store,
+/// optionally rewriting the projection matmuls onto their int8 artifacts.
+/// Returns the archive and the manifest weight bytes it streams per pass (the
+/// int8 artifact where quantized, the F32 blob otherwise — a fair per-tensor
+/// comparison over the identical weight set).
+fn quant_decode_archive(kit: &QuantKit, bucket: u64, quantize: bool) -> (Vec<u8>, u64) {
+    let mut graph =
+        build_parametric_decode_graph_from_manifest(&kit.config, &kit.keys, &kit.dtypes, bucket)
+            .expect("the decode-step graph builds");
+    let name_to_id: HashMap<String, u32> = graph
+        .tensor_names
+        .iter()
+        .map(|(id, name)| (name.clone(), *id))
+        .collect();
+    for (i, key) in kit.keys.iter().enumerate() {
+        let id = *name_to_id.get(key).expect("manifest tensor in the graph");
+        let info = ti(DType::F32, &kit.shapes[i]);
+        graph.tensor_info.insert(id, info.clone());
+        graph.params.insert(
+            id,
+            AiParam::External {
+                kappa: kit.kappas[i].clone(),
+                info,
+                range: None,
+            },
+        );
+    }
+    if quantize {
+        let rewritten =
+            hologram_ai_common::lower::quantize_external_matmul_weights(&mut graph, &kit.map)
+                .expect("the quantize pass runs");
+        assert_eq!(
+            rewritten,
+            kit.map.len(),
+            "every crystallized projection rewrites onto its artifact"
+        );
+    }
+    // Weight bytes streamed per pass, per manifest tensor: the int8 artifact
+    // where the projection was quantized, its F32 blob otherwise.
+    let mut dir = DirKappaStore::new(&kit.store.path);
+    let mut bytes = 0u64;
+    for (i, key) in kit.keys.iter().enumerate() {
+        let sz = match kit.map.get(&kit.kappas[i]) {
+            Some((artifact, _, _)) if quantize => {
+                dir.resolve(artifact).expect("the artifact resolves").len()
+            }
+            _ => quant_tensor_bytes(key, &kit.shapes[i]).len(),
+        };
+        bytes += sz as u64;
+    }
+    let kform = compile_graph(graph);
+    let archive = materialize_archive(&kform, &mut dir).expect("the decode archive materializes");
+    (archive, bytes)
+}
+
+#[given(
+    expr = "a quantized decode-step archive over the quantizable fixture with a bucket of {int} rows"
+)]
+async fn given_quant_decode_kit(w: &mut BddWorld, bucket: usize) {
+    let kit = build_quant_kit("perf-quant-decode");
+    let (f32_archive, f32_bytes) = quant_decode_archive(&kit, bucket as u64, false);
+    let (quant_archive, quant_bytes) = quant_decode_archive(&kit, bucket as u64, true);
+    let theta = kit.config["rope_theta"]
+        .as_f64()
+        .expect("the fixture declares rope_theta") as f32;
+    let f32_session = DecodeSession::new(
+        HoloRunner::from_bytes(f32_archive).expect("the F32 decode archive loads"),
+        theta,
+        STG_WINDOW,
+    )
+    .expect("the F32 decode session opens");
+    let quant_session = DecodeSession::new(
+        HoloRunner::from_bytes(quant_archive).expect("the quantized decode archive loads"),
+        theta,
+        STG_WINDOW,
+    )
+    .expect("the quantized decode session opens");
+    w.quant_decode = Some(QuantDecodePerf {
+        _store: kit.store,
+        f32_session,
+        quant_session,
+        f32_bytes,
+        quant_bytes,
+        bucket,
+        bandwidth: 0.0,
+        steps: Vec::new(),
+        f32_completion: Vec::new(),
+        quant_completion: Vec::new(),
+    });
+}
+
+#[when(
+    expr = "the environment stream bandwidth is calibrated and {int} quantized decode-plan steps are timed"
+)]
+async fn when_perf_quant_decode(w: &mut BddWorld, steps: usize) {
+    let bandwidth = calibrate_stream_bandwidth();
+    let qd = w.quant_decode.as_mut().expect("the quantized decode kit");
+    qd.bandwidth = bandwidth;
+    // Time the int8 decode walk, capturing its greedy completion.
+    let mut tok: i64 = 1;
+    for _ in 0..steps {
+        let t = Instant::now();
+        let row = qd.quant_session.step(tok).expect("a quantized decode step");
+        let secs = t.elapsed().as_secs_f64();
+        tok = argmax(&row) as i64;
+        qd.quant_completion.push(tok);
+        qd.steps.push(PerfStep {
+            secs,
+            dispatched: qd.quant_session.last_dispatched(),
+            skipped: qd.quant_session.last_skipped(),
+            materializations: 0,
+        });
+    }
+    // The F32 twin over identical weights: the correctness oracle for the walk.
+    let mut tok: i64 = 1;
+    for _ in 0..steps {
+        let row = qd.f32_session.step(tok).expect("an F32 decode step");
+        tok = argmax(&row) as i64;
+        qd.f32_completion.push(tok);
+    }
+}
+
+#[then("the quantized decode-plan floor and its reduction against the F32 stream are reported")]
+async fn then_perf_quant_decode(w: &mut BddWorld) {
+    let qd = w
+        .quant_decode
+        .as_ref()
+        .expect("the quantized decode probe ran");
+    assert!(!qd.steps.is_empty(), "steps were timed");
+    for (i, s) in qd.steps.iter().enumerate() {
+        assert!(
+            s.dispatched + s.skipped > 0,
+            "step {i}: the walk reports its kernels"
+        );
+    }
+    // The lever is real and measured: int8 streams strictly fewer weight bytes,
+    // so its weight-streaming floor is strictly lower.
+    assert!(
+        qd.quant_bytes < qd.f32_bytes,
+        "the quantized pass must stream fewer weight bytes: {} vs F32 {}",
+        qd.quant_bytes,
+        qd.f32_bytes
+    );
+    // The int8 walk must still RUN and produce a live completion (a wiring
+    // failure would empty it or diverge into garbage, not merely round).
+    assert_eq!(
+        qd.quant_completion.len(),
+        qd.f32_completion.len(),
+        "the quantized walk must run every step"
+    );
+    assert!(
+        !qd.quant_completion.is_empty(),
+        "the quantized decode must produce a completion"
+    );
+    // Faithfulness is REPORTED, not asserted: int8 is a lossy tier, so an exact
+    // match with F32 is not owed on a tiny synthetic fixture (real-scale
+    // faithfulness is the deployed journey's job, against the model's own
+    // tokenizer — never against our own F32 output).
+    let matched = qd.quant_completion == qd.f32_completion;
+    let f32_floor = qd.f32_bytes as f64 / qd.bandwidth;
+    let quant_floor = qd.quant_bytes as f64 / qd.bandwidth;
+    println!(
+        "[performance-contract] quantized decode-plan: bucket {}, {:.3} MB int8 weights/pass vs \
+         {:.3} MB F32 ({:.2}x fewer bytes); floor {:.3} ms/token vs F32 {:.3} ms/token \
+         (bandwidth {:.2} GB/s); int8 completion == F32: {matched}",
+        qd.bucket,
+        qd.quant_bytes as f64 / 1e6,
+        qd.f32_bytes as f64 / 1e6,
+        qd.f32_bytes as f64 / qd.quant_bytes as f64,
+        quant_floor * 1e3,
+        f32_floor * 1e3,
+        qd.bandwidth / 1e9,
+    );
+    println!(
+        "[performance-contract] quantized decode-plan completions: int8 {:?} vs F32 {:?}",
+        qd.quant_completion, qd.f32_completion
+    );
+    for (i, s) in qd.steps.iter().enumerate() {
+        println!(
+            "[performance-contract] quantized decode-plan step {}: {:.1} ms/token, \
+             ratio {:.1}x quant floor, dispatched {}, elided {}",
+            i + 1,
+            s.secs * 1e3,
+            s.secs / quant_floor,
+            s.dispatched,
+            s.skipped,
+        );
+    }
 }
 
 #[when("the quantized staged session generates with the wide projection blobs evicted")]

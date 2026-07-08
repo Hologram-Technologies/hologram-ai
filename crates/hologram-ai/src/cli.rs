@@ -90,12 +90,10 @@ fn compile(
 ) -> anyhow::Result<()> {
     let quant_strategy = parse_quant(quantize.as_deref())?;
     let compiler = ModelCompiler {
-        mmap: true,
         seq_len_override: seq_len,
         quant_strategy,
         spatial_scale,
-        patch_budget_ratio: Some(0.75),
-        address_model: false,
+        ..ModelCompiler::default()
     };
 
     let stem = name.unwrap_or_else(|| {

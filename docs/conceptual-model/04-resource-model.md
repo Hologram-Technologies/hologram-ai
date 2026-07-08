@@ -603,3 +603,56 @@ shipped catalogue entry):
   substrate's single-position kernel throughput in wasm — the
   kernel-floor axis, owned upstream; the decode path's in-repo levers
   are exhausted.
+
+## Measured (2026-07-08 — benchmark sweep and the quantized decode floor)
+
+A full benchmark sweep re-confirms where the cost lives and isolates the one
+in-repo lever left over the decode floor.
+
+- **The content-addressing thesis holds exactly** (`cargo bench --bench
+  scaling`, matmul 64/128/256/512). Compile is O(1) in size (~25–35 µs, flat —
+  compile tracks structure, never weight bytes); a whole-graph memo hit is O(1)
+  in size (~156 ns, flat across every size); cold recompute throughput RISES
+  with size (25 → 43 → 81 → 156 Gelem/s), so a small op is dispatch-overhead
+  bound and a large op is compute bound. This last curve is the whole story of
+  the two decode residuals below.
+
+- **The decode plan is the right structure** (`performance-contract` target
+  lane). At fixture scale the staged whole-window plan reads 292–642× floor;
+  the decode plan reads 27–65× — a ~10× collapse, window-independent, matching
+  the design. What remains at fixture scale is ~127 tiny-kernel dispatches per
+  step: the substrate matmul is 2-D only, so the grouped attention MUST emit
+  per-kv-head, and each tiny op runs on the low end of that Gelem/s curve. This
+  is a *small-model* artifact — at real scale each of those matmuls is large
+  and lands on the high end of the curve, so dispatch overhead amortizes and
+  the residual shifts to streaming the weights (the deployed 0.5B numbers
+  above: per-token cost is window-independent and weights-side).
+
+- **The floor is the weight stream; the one in-repo lever is streaming fewer
+  bytes.** The decode floor is `weight_bytes / bandwidth` — the memory
+  roofline for one single-position forward, which must read every weight once
+  (no row reuse across steps: that IS the kernel floor, substrate-owned). This
+  repository does not own the kernel; it owns the byte count. The new
+  `performance-contract` scenario measures the quantized decode plan against
+  its F32 twin over the identical fixture weights: **0.245 MB int8 vs 0.558 MB
+  F32 per pass — 2.28× fewer bytes, floor 0.010 vs 0.023 ms/token.** The factor
+  is 2.28× rather than ~4× because only the projection matmuls quantize; the
+  embedding stays wide (its Gather consumes the whole table), and on a tiny
+  fixture the embedding is a large share — at real depth the projections
+  dominate and the reduction approaches the int8 ~4×. int8 is a LOSSY tier: on
+  this synthetic fixture the greedy int8 completion diverges from F32 at two
+  near-tied argmax positions (`[478,501,511,478,…]` vs `[504,501,511,504,…]`),
+  so the probe REPORTS the match and never asserts it — real-scale faithfulness
+  is the deployed journey's job against the model's own tokenizer, not equality
+  with our own F32 output on a toy. The quantized decode path is wired end to
+  end (native `compile_chunk_stages` takes the quant map; the browser
+  `DecodeChatSession` sets it from `stages.json`); this scenario makes its
+  floor reduction a measured, regression-guarded number.
+
+Conclusion: there is no un-addressed in-repo bottleneck on the decode path.
+The structure is optimal (O(1) compile and reuse), the byte-count lever
+(quantized decode) is wired and now measured, and the residual above the
+reduced floor is the substrate's single-position kernel throughput — a
+read-only upstream dependency. The next byte-count lever is quantizing the
+head/embedding (int4 via the substrate Q0 carry chain), a follow-on, not a
+defect in what ships.

@@ -210,8 +210,10 @@ pub struct ModelCompiler {
     /// before the compiled graph runs. Positions are preserved for correct
     /// positional encoding.
     ///
-    /// Range: `(0.0, 1.0]`. Default: `Some(0.75)`.
-    /// Set to `None` to disable patch pruning entirely.
+    /// Range: `(0.0, 1.0]`. Default: `None` — patch pruning is OFF unless the
+    /// caller opts in. Pruning drops patches (a lossy accuracy/throughput
+    /// trade), so it is never a silent default: a ViT keeps all its patches
+    /// unless a ratio is explicitly requested.
     pub patch_budget_ratio: Option<f32>,
     /// Mint the model's uor-addr κ-label (MA dedup/warm-start identity) during
     /// compile. **Off by default**: it canonicalizes the *entire* model via
@@ -228,7 +230,7 @@ impl Default for ModelCompiler {
             seq_len_override: None,
             spatial_scale: None,
             quant_strategy: hologram_ai_common::lower::QuantStrategy::Auto,
-            patch_budget_ratio: Some(0.75),
+            patch_budget_ratio: None,
             address_model: false,
         }
     }

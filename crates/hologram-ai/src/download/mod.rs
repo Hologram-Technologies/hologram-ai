@@ -48,6 +48,7 @@ pub enum DownloadFormat {
 
 // ── Format resolution ────────────────────────────────────────────────────────
 
+#[derive(Debug)]
 enum ResolvedDownload {
     Onnx { filenames: Vec<String> },
     Safetensors { filenames: Vec<String> },
@@ -57,15 +58,19 @@ fn resolve_format(
     info: &ModelInfo,
     format: &DownloadFormat,
     _quantization: Option<&str>,
-) -> ResolvedDownload {
+) -> anyhow::Result<ResolvedDownload> {
     match format {
         DownloadFormat::Onnx | DownloadFormat::Auto => {
             if let Some(r) = try_resolve_onnx(info) {
-                r
+                Ok(r)
             } else if let Some(r) = try_resolve_safetensors(info) {
-                r
+                Ok(r)
             } else {
-                panic!("No ONNX or Safetensors files found in the repository.");
+                anyhow::bail!(
+                    "no ONNX or Safetensors weights found in `{}` — the repository carries \
+                     neither format the downloader can compile",
+                    info.id
+                );
             }
         }
     }
@@ -129,7 +134,7 @@ async fn run_async(args: DownloadArgs) -> anyhow::Result<()> {
         .unwrap_or_else(|| PathBuf::from("models").join(model_name));
     std::fs::create_dir_all(&output_dir)?;
 
-    let resolved = resolve_format(&info, &args.format, args.quantization.as_deref());
+    let resolved = resolve_format(&info, &args.format, args.quantization.as_deref())?;
 
     match resolved {
         ResolvedDownload::Onnx { filenames } => {
@@ -302,22 +307,28 @@ mod tests {
     #[test]
     fn resolve_falls_back_to_onnx() {
         let info = mock_info(&["model.onnx"]);
-        let resolved = resolve_format(&info, &DownloadFormat::Auto, None);
+        let resolved = resolve_format(&info, &DownloadFormat::Auto, None).expect("onnx resolves");
         assert!(matches!(resolved, ResolvedDownload::Onnx { .. }));
     }
 
     #[test]
-    #[should_panic(expected = "No ONNX or Safetensors files found in the repository.")]
-    fn resolve_triggers_panic_when_no_formats() {
+    fn resolve_fails_loud_when_no_formats() {
         let info = mock_info(&["pytorch_model.bin"]);
-        resolve_format(&info, &DownloadFormat::Auto, None);
+        let err = resolve_format(&info, &DownloadFormat::Auto, None)
+            .expect_err("a repo with neither format must fail, not panic");
+        assert!(
+            err.to_string().contains("neither format"),
+            "the error explains the missing formats: {err}"
+        );
     }
 
     #[test]
-    #[should_panic(expected = "No ONNX or Safetensors files found in the repository.")]
-    fn resolve_explicit_onnx_with_no_onnx_triggers_panic() {
+    fn resolve_explicit_onnx_with_no_onnx_fails_loud() {
         let info = mock_info(&["pytorch_model.bin"]);
-        resolve_format(&info, &DownloadFormat::Onnx, None);
+        assert!(
+            resolve_format(&info, &DownloadFormat::Onnx, None).is_err(),
+            "an explicit ONNX request with no ONNX must fail loud"
+        );
     }
 
     #[test]
