@@ -1,16 +1,20 @@
 //! PV — peak-memory reproduction of the browser (wasm) decode pipeline at
-//! Qwen2.5-1.5B *config scale*, driven NATIVELY so the suite can see what
-//! busts the wasm 4 GiB address-space ceiling.
+//! multi-billion-parameter *config scale*, swept ACROSS decoder families and
+//! driven NATIVELY so the suite can see what busts the wasm 4 GiB
+//! address-space ceiling — parametric in the family AND the scale, fit to no
+//! single model.
 //!
 //! The browser (wasm32) aborts with `RuntimeError: unreachable` — an allocation
-//! abort — on the FIRST DECODE STEP of Qwen2.5-1.5B: all ~34 staged decode
-//! stages materialize, one token emits, then wasm memory cannot grow past
-//! 4 GiB. Fixture-scale conformance tests (hidden 64, 2 layers) never approach
-//! that ceiling, so the suite is blind to it. This harness drives the SAME
-//! pipeline (a `GrowableStagedSession` with `residency_budget = 3 GiB` and
-//! `bound_by_footprint(true)`, an int8-quantized decode step runner at a
-//! 64-token bucket, a chunked-prefill seeder sharing the session's one
-//! residency ledger) at the real 1.5B config shapes and MEASURES the true peak:
+//! abort — on the FIRST DECODE STEP of a large model: all staged decode stages
+//! materialize, one token emits, then wasm memory cannot grow past 4 GiB.
+//! Fixture-scale conformance tests (hidden 64, 2 layers) never approach that
+//! ceiling, so the suite is blind to it. This harness drives the SAME pipeline
+//! (a `GrowableStagedSession` with `residency_budget = 3 GiB` and
+//! `bound_by_footprint(true)`, an int8-quantized decode step runner, a
+//! chunked-prefill seeder sharing the session's one residency ledger) at a
+//! representative large config — over EACH faithful family (Llama, Qwen2,
+//! Mistral, Phi3: tied vs untied head, fused vs separate qkv/gate-up, with and
+//! without q/k/v bias) — and MEASURES the true peak for each:
 //!
 //!   * `rss_bytes()` — process RSS from `/proc/self/statm`, sampled at every
 //!     stage materialization and every decode step (materialization is the
@@ -33,11 +37,15 @@
 //!     --test decode_memory_large -- --nocapture --test-threads=1
 //!
 //! `HOLOGRAM_AI_DECODE_LAYERS` (default `4`) sets the transformer-layer count —
-//! the scale knob (all other Qwen2.5-1.5B dims are fixed, so the head/embed cost
-//! is constant and only the per-layer weights + per-layer stage modules scale).
-//! Set `HOLOGRAM_AI_DECODE_LAYERS=28` for the FULL 1.5B config, or a
+//! the scale knob applied to the shared `Dims::LARGE` template (no per-model
+//! numbers). Set `HOLOGRAM_AI_DECODE_LAYERS=28` for a full large config, or a
 //! comma-separated sweep `HOLOGRAM_AI_DECODE_LAYERS=4,8,16,28` to print the
-//! memory-vs-scale trend and locate the 4 GiB crossing.
+//! memory-vs-scale trend and locate the 4 GiB crossing. `HOLOGRAM_AI_FAMILIES`
+//! (default all four) restricts which families are swept.
+
+mod common;
+
+use common::families::{dummy_bf16_bytes, is_norm, Dims, FamilyScale, FAITHFUL_FAMILIES};
 
 use std::cell::RefCell;
 use std::num::NonZeroU64;
@@ -159,134 +167,10 @@ fn mem_available_bytes() -> u64 {
         .unwrap_or(0)
 }
 
-// ─────────────────────── Qwen2.5-1.5B config + manifest ──────────────────────
-
-/// Qwen2.5-1.5B quantities (from the model's own config.json). `layers` is the
-/// scale knob; every other dimension is fixed so the head/embed footprint —
-/// the constant term — is exactly the real model's.
-struct QwenScale {
-    hidden_size: u64,
-    layers: u64,
-    num_attention_heads: u64,
-    num_key_value_heads: u64,
-    head_dim: u64,
-    intermediate_size: u64,
-    vocab_size: u64,
-    max_position_embeddings: u64,
-    rope_theta: f64,
-    rms_norm_eps: f64,
-}
-
-impl QwenScale {
-    fn at(layers: u64) -> Self {
-        Self {
-            hidden_size: 1536,
-            layers,
-            num_attention_heads: 12,
-            num_key_value_heads: 2,
-            head_dim: 128,
-            intermediate_size: 8960,
-            vocab_size: 151936,
-            max_position_embeddings: 32768,
-            rope_theta: 1_000_000.0,
-            rms_norm_eps: 1e-6,
-        }
-    }
-
-    fn config_json(&self) -> String {
-        serde_json::json!({
-            "architectures": ["Qwen2ForCausalLM"],
-            "hidden_size": self.hidden_size,
-            "intermediate_size": self.intermediate_size,
-            "num_hidden_layers": self.layers,
-            "num_attention_heads": self.num_attention_heads,
-            "num_key_value_heads": self.num_key_value_heads,
-            "head_dim": self.head_dim,
-            "vocab_size": self.vocab_size,
-            "rms_norm_eps": self.rms_norm_eps,
-            "rope_theta": self.rope_theta,
-            "max_position_embeddings": self.max_position_embeddings,
-            "tie_word_embeddings": true,
-            "torch_dtype": "bfloat16",
-        })
-        .to_string()
-    }
-
-    /// The Qwen2 tensor manifest: tied embedding (no `lm_head.weight`), attention
-    /// q/k/v biases, one gated-SwiGLU MLP per layer — the real published layout.
-    fn manifest(&self) -> Vec<(String, Vec<u64>)> {
-        let h = self.hidden_size;
-        let q_out = self.num_attention_heads * self.head_dim; // 1536
-        let kv_out = self.num_key_value_heads * self.head_dim; // 256
-        let i = self.intermediate_size;
-        let mut m: Vec<(String, Vec<u64>)> = vec![
-            ("model.embed_tokens.weight".into(), vec![self.vocab_size, h]),
-            ("model.norm.weight".into(), vec![h]),
-        ];
-        for l in 0..self.layers {
-            let p = format!("model.layers.{l}");
-            m.push((format!("{p}.input_layernorm.weight"), vec![h]));
-            m.push((format!("{p}.post_attention_layernorm.weight"), vec![h]));
-            m.push((format!("{p}.self_attn.q_proj.weight"), vec![q_out, h]));
-            m.push((format!("{p}.self_attn.k_proj.weight"), vec![kv_out, h]));
-            m.push((format!("{p}.self_attn.v_proj.weight"), vec![kv_out, h]));
-            m.push((format!("{p}.self_attn.o_proj.weight"), vec![h, q_out]));
-            m.push((format!("{p}.mlp.gate_proj.weight"), vec![i, h]));
-            m.push((format!("{p}.mlp.up_proj.weight"), vec![i, h]));
-            m.push((format!("{p}.mlp.down_proj.weight"), vec![h, i]));
-            m.push((format!("{p}.self_attn.q_proj.bias"), vec![q_out]));
-            m.push((format!("{p}.self_attn.k_proj.bias"), vec![kv_out]));
-            m.push((format!("{p}.self_attn.v_proj.bias"), vec![kv_out]));
-        }
-        m
-    }
-}
-
-/// FNV-1a 64-bit of the tensor name — a per-tensor seed so every tensor's dummy
-/// bytes are a DISTINCT pseudo-random stream. Content addressing deduplicates
-/// identical bytes, so identically-shaped dummy weights (q_proj vs o_proj) would
-/// otherwise collapse to one κ and UNDER-count resident memory. Distinct seeds
-/// keep every weight its own κ — the real model's every-weight-distinct memory.
-fn name_seed(name: &str) -> u64 {
-    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
-    for b in name.as_bytes() {
-        h ^= u64::from(*b);
-        h = h.wrapping_mul(0x0000_0100_0000_01b3);
-    }
-    h | 1 // nonzero xorshift seed
-}
-
-/// Deterministic dummy bf16 (2-byte LE) weight bytes. VALUES do not matter (the
-/// SHAPES drive the memory); they only need to be finite, bounded (so the
-/// forward does not NaN), and DISTINCT per tensor (so κs do not dedup). Norm
-/// weights are 1.0 (keeps rms_norm well-conditioned; norms are tiny so their
-/// dedup is immaterial); everything else is an xorshift64 stream in [-0.5, 0.5].
-fn dummy_tensor_bytes(name: &str, dims: &[u64]) -> Vec<u8> {
-    let n: u64 = dims.iter().product();
-    let norm = name.contains("layernorm") || name.ends_with(".norm.weight");
-    let mut out = Vec::with_capacity(n as usize * 2);
-    if norm {
-        let bf16 = (1.0f32.to_bits() >> 16) as u16;
-        for _ in 0..n {
-            out.extend_from_slice(&bf16.to_le_bytes());
-        }
-        return out;
-    }
-    let mut state = name_seed(name);
-    for _ in 0..n {
-        state ^= state << 13;
-        state ^= state >> 7;
-        state ^= state << 17;
-        let u = ((state >> 40) & 0xFF) as f32 / 255.0 - 0.5; // [-0.5, 0.5]
-        let bf16 = (u.to_bits() >> 16) as u16;
-        out.extend_from_slice(&bf16.to_le_bytes());
-    }
-    out
-}
-
 // ─────────────────────────────── measurement ─────────────────────────────────
 
 struct ScaleResult {
+    arch: &'static str,
     layers: u64,
     total_params: u64,
     manifest_tensors: usize,
@@ -307,12 +191,13 @@ struct ScaleResult {
     per_stage_rss: Vec<(usize, usize, u64, u64)>, // (stage, count, weight_bytes, rss)
 }
 
-/// Build a Qwen2.5-1.5B-config model at `layers` transformer layers, compile the
-/// int8-quantized staged decode pipeline (the browser path), drive a short
-/// prefill + a few decode steps under the 3 GiB footprint-bounded ledger, and
-/// measure the peak.
-fn measure_scale(layers: u64) -> ScaleResult {
-    let scale = QwenScale::at(layers);
+/// Build `scale` (a decoder family at a chosen scale), compile the int8-
+/// quantized staged decode pipeline (the browser path), drive a short prefill +
+/// a few decode steps under the 3 GiB footprint-bounded ledger, and measure the
+/// peak. Parametric in the family and the layer count.
+fn measure_scale(scale: FamilyScale) -> ScaleResult {
+    let arch = scale.arch();
+    let layers = scale.dims.layers;
     let config_json = scale.config_json();
     let manifest = scale.manifest();
     let (keys, shapes): (Vec<String>, Vec<Vec<u64>>) = manifest.into_iter().unzip();
@@ -321,14 +206,16 @@ fn measure_scale(layers: u64) -> ScaleResult {
 
     let total_params: u64 = shapes.iter().map(|d| d.iter().product::<u64>()).sum();
     eprintln!(
-        "\n╔═ layers={layers}  ({} tensors, {:.3}B params at Qwen2.5-1.5B config shapes) ═╗",
+        "\n╔═ {arch}  layers={layers}  ({} tensors, {:.3}B params) ═╗",
         keys.len(),
         total_params as f64 / 1e9
     );
 
     // ── κ-store: seed the wide bf16 weights (the download's byte set) ──────────
-    let store_dir =
-        std::env::temp_dir().join(format!("hai-decode-mem-{}-l{layers}", std::process::id()));
+    let store_dir = std::env::temp_dir().join(format!(
+        "hai-decode-mem-{}-{arch}-l{layers}",
+        std::process::id()
+    ));
     std::fs::create_dir_all(&store_dir).expect("creating κ-store temp dir");
     let mut dir = DirKappaStore::new(&store_dir);
 
@@ -336,7 +223,7 @@ fn measure_scale(layers: u64) -> ScaleResult {
     let mut kappas: Vec<String> = Vec::with_capacity(keys.len());
     let mut wide_weight_bytes: u64 = 0;
     for (name, dims) in keys.iter().zip(&shapes) {
-        let bytes = dummy_tensor_bytes(name, dims);
+        let bytes = dummy_bf16_bytes(name, dims);
         wide_weight_bytes += bytes.len() as u64;
         let kappa = dir.insert(&bytes).expect("persisting a dummy weight");
         kappas.push(kappa);
@@ -350,7 +237,7 @@ fn measure_scale(layers: u64) -> ScaleResult {
     let big: Vec<&String> = keys
         .iter()
         .zip(&kappas)
-        .filter(|(name, _)| !(name.contains("layernorm") || name.ends_with(".norm.weight")))
+        .filter(|(name, _)| !is_norm(name))
         .map(|(_, k)| k)
         .collect();
     let distinct: std::collections::HashSet<&&String> = big.iter().collect();
@@ -409,7 +296,7 @@ fn measure_scale(layers: u64) -> ScaleResult {
     //    for the decode step runner and the chunked-prefill seeder. Weightless
     //    k-forms, but this is the "34 stage modules × 2 runners" the wasm engine
     //    compiles into executable modules — the ledger does not track them. ─────
-    let ctx = scale.max_position_embeddings as usize;
+    let ctx = scale.dims.max_position_embeddings as usize;
     let want = 16usize; // short prompt
     let bucket = hologram_ai::engine::geometric_window(want.max(1), ctx);
     let chunk = (hologram_ai::engine::geometric_window(1, ctx) as u64).min(bucket as u64);
@@ -495,7 +382,7 @@ fn measure_scale(layers: u64) -> ScaleResult {
     let step = session
         .decode_runner_for(want)
         .expect("the decode step runner builds");
-    let mut decode = DecodeSession::new(step, scale.rope_theta as f32, ctx as u64)
+    let mut decode = DecodeSession::new(step, scale.dims.rope_theta as f32, ctx as u64)
         .expect("the decode session opens");
     if chunk >= 2 {
         let seeder = session
@@ -512,7 +399,7 @@ fn measure_scale(layers: u64) -> ScaleResult {
     // The FIRST feed materializes every stage (the spike the browser aborts on);
     // subsequent steps run warm off the resident set.
     let toks: Vec<i64> = (0..want as u64)
-        .map(|i| ((i * 2_654_435_761) % scale.vocab_size) as i64)
+        .map(|i| ((i * 2_654_435_761) % scale.dims.vocab_size) as i64)
         .collect();
 
     counting::reset();
@@ -548,6 +435,7 @@ fn measure_scale(layers: u64) -> ScaleResult {
     let _ = std::fs::remove_dir_all(&store_dir);
 
     ScaleResult {
+        arch,
         layers,
         total_params,
         manifest_tensors: keys.len(),
@@ -669,9 +557,9 @@ fn report(r: &ScaleResult) {
 }
 
 #[test]
-fn decode_peak_memory_at_qwen_1_5b_config() {
+fn decode_peak_memory_across_families() {
     if std::env::var("HOLOGRAM_AI_LARGE").as_deref() != Ok("1") {
-        eprintln!("SKIP: set HOLOGRAM_AI_LARGE=1 to run the 1.5B-config decode-memory harness");
+        eprintln!("SKIP: set HOLOGRAM_AI_LARGE=1 to run the large-config decode-memory sweep");
         return;
     }
     counting::assert_allocator_installed();
@@ -682,36 +570,75 @@ fn decode_peak_memory_at_qwen_1_5b_config() {
             .filter_map(|t| t.trim().parse::<u64>().ok())
             .filter(|&l| l >= 1)
             .collect(),
-        None => vec![4], // reduced default; set 28 for the full 1.5B config
+        None => vec![4], // reduced default; set a larger count for the full sweep
     };
     assert!(
         !layer_list.is_empty(),
         "HOLOGRAM_AI_DECODE_LAYERS parsed to no layers"
     );
 
+    // Scale tier: `large` ≈ 20 B params, `xl` ≈ 500 B+ (its single embed tensor
+    // alone exceeds the residency budget — the weight-tier paging frontier). The
+    // layer knob turns depth down for a feasible native run; the WIDTH (the
+    // ceiling-driving embed/head/per-layer stages) stays at the tier's scale.
+    let dims = match std::env::var("HOLOGRAM_AI_TIER").ok().as_deref() {
+        Some("xl") | Some("extra-large") | Some("extra_large") => Dims::EXTRA_LARGE,
+        _ => Dims::LARGE,
+    };
+
+    // Which families to sweep — default ALL faithful families (the point is that
+    // memory is bounded for every layout, not one). `HOLOGRAM_AI_FAMILIES` (a
+    // comma-separated arch-name substring filter) narrows it on a small box.
+    let family_filter = std::env::var("HOLOGRAM_AI_FAMILIES").ok();
+    let families: Vec<_> = FAITHFUL_FAMILIES
+        .iter()
+        .filter(|l| {
+            family_filter
+                .as_ref()
+                .is_none_or(|f| f.split(',').any(|t| l.arch.contains(t.trim())))
+        })
+        .collect();
+    assert!(
+        !families.is_empty(),
+        "HOLOGRAM_AI_FAMILIES matched no faithful family"
+    );
+
     eprintln!(
         "box: MemAvailable {:.1} GiB. wasm ceiling = {:.0} GiB (STRUCTURAL_CEILING); \
          residency budget = {:.0} GiB (ceiling − 1 GiB reserve), bound_by_footprint = true.\n\
-         Full Qwen2.5-1.5B is 28 layers. Sweeping layers = {:?}.",
+         Sweeping families {:?} × layers {:?} on the shared Dims::LARGE template.",
         gib(mem_available_bytes()),
         gib(STRUCTURAL_CEILING),
         gib(RESIDENCY_BUDGET),
-        layer_list
+        families.iter().map(|l| l.arch).collect::<Vec<_>>(),
+        layer_list,
     );
 
     let mut results = Vec::new();
-    for &layers in &layer_list {
-        results.push(measure_scale(layers));
+    for layout in &families {
+        for &layers in &layer_list {
+            let scale = FamilyScale::new(**layout, dims.with_layers(layers));
+            results.push(measure_scale(scale));
+        }
     }
 
     eprintln!("\n════════════════════ memory-vs-scale summary ════════════════════");
     eprintln!(
-        "{:>6}  {:>9}  {:>7}  {:>10}  {:>10}  {:>11}  {:>10}  {:>9}",
-        "layers", "params", "stages", "wide bf16", "int8 art", "RSS peak", "ledger", "delta"
+        "{:>20}  {:>6}  {:>9}  {:>7}  {:>10}  {:>10}  {:>11}  {:>10}  {:>9}",
+        "family",
+        "layers",
+        "params",
+        "stages",
+        "wide bf16",
+        "int8 art",
+        "RSS peak",
+        "ledger",
+        "delta"
     );
     for r in &results {
         eprintln!(
-            "{:>6}  {:>7.3}B  {:>7}  {:>8.3}Gi  {:>8.3}Gi  {:>9.3}Gi  {:>8.3}Gi  {:>7.3}Gi",
+            "{:>20}  {:>6}  {:>7.3}B  {:>7}  {:>8.3}Gi  {:>8.3}Gi  {:>9.3}Gi  {:>8.3}Gi  {:>7.3}Gi",
+            r.arch,
             r.layers,
             r.total_params as f64 / 1e9,
             r.stage_count,
@@ -727,20 +654,21 @@ fn decode_peak_memory_at_qwen_1_5b_config() {
     }
 
     // The contract the wasm build enforces structurally (an allocation abort):
-    // the peak must stay under the 4 GiB address-space ceiling. If it exceeds,
-    // FAIL loud with the breakdown so the fix can target the right term —
-    // resident weights (the ledger) or the untracked module/scratch memory.
+    // the peak must stay under the 4 GiB address-space ceiling for EVERY family.
+    // If any exceeds, FAIL loud with the breakdown so the fix targets the right
+    // term — resident weights (the ledger) or untracked module/scratch memory.
     let worst = results
         .iter()
         .max_by_key(|r| r.rss_peak)
         .expect("at least one scale ran");
     assert!(
         worst.rss_peak <= STRUCTURAL_CEILING,
-        "decode peak RSS {:.3} GiB at {} layers EXCEEDS the wasm 4 GiB ceiling by {:.3} GiB. \
+        "decode peak RSS {:.3} GiB for {} at {} layers EXCEEDS the wasm 4 GiB ceiling by {:.3} GiB. \
          Breakdown: ledger-tracked resident footprint {:.3} GiB, UNTRACKED (compiled modules \
          + F32 head scratch + activations + runtime) {:.3} GiB. \
          {} decode stages × 2 runners compiled to {:.1} MiB of archives.",
         gib(worst.rss_peak),
+        worst.arch,
         worst.layers,
         gib(worst.rss_peak - STRUCTURAL_CEILING),
         gib(worst.resident_footprint),

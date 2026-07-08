@@ -1,5 +1,9 @@
 //! Shared test utilities for hologram-ai integration tests.
 
+/// Parametric decoder-family definitions (config + manifest + weights) shared by
+/// the family-coverage decode test and the parametric family memory sweep.
+pub mod families;
+
 use std::path::PathBuf;
 
 /// Resolve a path relative to the workspace root.
