@@ -498,13 +498,60 @@ async function readModelFile(dirName: string, fileName: string): Promise<Uint8Ar
 /** Load a model's session bounds once (context window + its own tokenizer) for
  * template-aware trimming — the model's own limits are the only limits (row
  * `session-window`). Read off the hot path (a load-time effect), never per send. */
+/** A special token as it appears in `tokenizer_config.json`: a bare string, or
+ * an `AddedToken` object with a `content` field. Anything else has no token. */
+function tokenString(v: unknown): string | undefined {
+  if (typeof v === "string") return v;
+  if (v && typeof v === "object" && typeof (v as { content?: unknown }).content === "string") {
+    return (v as { content: string }).content;
+  }
+  return undefined;
+}
+
+/** The model's chat config DERIVED from its own `tokenizer_config.json` — never
+ * hard-coded per model. `chat_template` is the model's Jinja template (rendered
+ * with the conversation by the caller); `eos`/`bos` are its special tokens. A
+ * model that ships no `chat_template` (a base, non-chat model) returns none and
+ * the caller falls back to the catalogue's template. */
+export interface ModelChat {
+  chatTemplate?: string;
+  eosToken?: string;
+  bosToken?: string;
+}
+
+async function loadModelChat(dirName: string): Promise<ModelChat> {
+  const raw = await readModelFile(dirName, "tokenizer_config.json");
+  if (!raw) return {};
+  try {
+    const cfg = JSON.parse(new TextDecoder().decode(raw));
+    // `chat_template` is usually a string; some repos ship an array of named
+    // templates ({name, template}) — take the `default`, else the first.
+    let chatTemplate: string | undefined;
+    if (typeof cfg.chat_template === "string") {
+      chatTemplate = cfg.chat_template;
+    } else if (Array.isArray(cfg.chat_template)) {
+      const named = cfg.chat_template as Array<{ name?: string; template?: string }>;
+      chatTemplate =
+        named.find((t) => t.name === "default")?.template ?? named[0]?.template;
+    }
+    return {
+      chatTemplate,
+      eosToken: tokenString(cfg.eos_token),
+      bosToken: tokenString(cfg.bos_token),
+    };
+  } catch {
+    return {};
+  }
+}
+
 export async function loadSessionMeta(
   archivePath: string,
-): Promise<{ contextLength: number | null; tokenizer?: Uint8Array }> {
+): Promise<{ contextLength: number | null; tokenizer?: Uint8Array } & ModelChat> {
   const dirName = archivePath.split("/")[1];
   const { contextLength } = await sessionInfo(archivePath);
   const tokenizer = (await readModelFile(dirName, "tokenizer.json")) ?? undefined;
-  return { contextLength, tokenizer };
+  const chat = await loadModelChat(dirName);
+  return { contextLength, tokenizer, ...chat };
 }
 
 /** The compiled model's own context window (from model-meta.json / stages.json). */

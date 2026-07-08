@@ -14,6 +14,7 @@
     "bdd:live": "pnpm build && cucumber-js --config bdd/cucumber.mjs --profile live"
   },
   "dependencies": {
+    "@huggingface/jinja": "^0.5.9",
     "katex": "^0.17.0",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
@@ -24,6 +25,7 @@
     "remark-math": "^6.0.0"
   },
   "devDependencies": {
+    "@cucumber/cucumber": "^10.9.0",
     "@types/react": "^18.3.1",
     "@types/react-dom": "^18.3.1",
     "@vitejs/plugin-react": "^4.3.1",
@@ -31,8 +33,7 @@
     "playwright": "^1.61.1",
     "typescript": "^5.5.0",
     "vite": "^5.4.8",
-    "vitest": "^2.1.9",
-    "@cucumber/cucumber": "^10.9.0"
+    "vitest": "^2.1.9"
   },
   "pnpm": {
     "onlyBuiltDependencies": [

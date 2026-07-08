@@ -1,7 +1,9 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { renderChatTemplate } from "../chatTemplate";
 import {
   CompiledArchive,
   loadSessionMeta,
+  type ModelChat,
   KnownModelStatus,
   cancelGeneration,
   generate,
@@ -122,6 +124,20 @@ function buildMultiTurnPrompt(messages: Message[], separator: string): string {
   return parts.join("");
 }
 
+// Render the conversation with the MODEL'S OWN chat template (from its
+// tokenizer_config.json), the way transformers does — so ANY instruct model
+// gets its correct prompt format and end token, never a hard-coded per-model
+// template. Returns `null` when the model ships no chat template (a base model)
+// or the template can't render, and the caller falls back to the catalogue's
+// prompt-template plumbing.
+function renderChat(history: Message[], meta: ModelChat | null): { prompt: string; stop: string[] } | null {
+  return renderChatTemplate(
+    meta?.chatTemplate,
+    history.map((m) => ({ role: m.role, content: m.text })),
+    { eosToken: meta?.eosToken, bosToken: meta?.bosToken },
+  );
+}
+
 // Resolve which catalogue entry (if any) corresponds to the selected
 // archive path, by matching the archive's filename stem against the
 // catalogue id, or its parent dir against the model's HF repo name.
@@ -148,7 +164,9 @@ export function Chat() {
   const [temperature, setTemperature] = useState(0.7);
   const [running, setRunning] = useState(false);
   const [messages, setMessages] = useState<Message[]>([]);
-  const [sessionMeta, setSessionMeta] = useState<{ contextLength: number | null; tokenizer?: Uint8Array } | null>(null);
+  const [sessionMeta, setSessionMeta] = useState<
+    ({ contextLength: number | null; tokenizer?: Uint8Array } & ModelChat) | null
+  >(null);
   // Narration of the work behind the first token (window compiles, stage
   // materialization) — shown in the streaming placeholder so a large model's
   // honest startup is visible, never a silent hang.
@@ -159,10 +177,37 @@ export function Chat() {
   useEffect(() => {
     listCompiledArchives().then((a) => {
       setArchives(a);
-      if (a.length && !archive) setArchive(a[0].path);
+      if (a.length && !archive) {
+        // Restore the model selected before the last reload, if still present.
+        const saved = localStorage.getItem("hologram_chat_archive");
+        setArchive(saved && a.some((x) => x.path === saved) ? saved : a[0].path);
+      }
     });
     listKnownModels().then(setKnownModels);
   }, []);
+
+  // Persistence across reloads: remember the selected model and carry each
+  // model's conversation. Switching models loads THAT model's history; a reload
+  // restores it. Kept in localStorage (data, never code) keyed by archive.
+  useEffect(() => {
+    if (!archive) return;
+    localStorage.setItem("hologram_chat_archive", archive);
+    try {
+      const saved = localStorage.getItem(`hologram_chat:${archive}`);
+      setMessages(saved ? (JSON.parse(saved) as Message[]) : []);
+    } catch {
+      setMessages([]);
+    }
+  }, [archive]);
+
+  useEffect(() => {
+    if (!archive) return;
+    try {
+      localStorage.setItem(`hologram_chat:${archive}`, JSON.stringify(messages));
+    } catch {
+      // Storage full/unavailable — the session still works in memory.
+    }
+  }, [messages, archive]);
 
   // Load the model's own context window + tokenizer once per archive (never in
   // the send hot path). This is what bounds the session — the model's limits.
@@ -259,46 +304,68 @@ export function Chat() {
       ),
       { role: "user", text: userText },
     ];
-    // Session trimming (row session-window): the model's own context is the
-    // only limit — a transcript that outgrows it drops oldest turn pairs so
-    // the conversation continues rather than dead-ending. Uses the model's
-    // own context + tokenizer, loaded once when the archive is selected
-    // (`sessionMeta`) — never OPFS/wasm in the click hot path.
-    let workingHistory = history;
-    let promptForModel = buildMultiTurnPrompt(workingHistory, turnSeparator);
+    // The PARAMETRIC path: render the conversation with the model's OWN chat
+    // template (from its tokenizer_config.json), so any instruct model gets its
+    // correct format + stop token — never a hard-coded per-model template. A
+    // base model with no chat template falls back to the catalogue's
+    // prompt-template plumbing. Session trimming (row session-window): the
+    // model's own context is the only limit — a transcript that outgrows it
+    // drops oldest turn pairs so the conversation continues rather than
+    // dead-ending. Uses the model's own context + tokenizer (`sessionMeta`).
     const ctx = sessionMeta?.contextLength ?? null;
     const tok = sessionMeta?.tokenizer;
-    if (ctx && tok) {
+    let promptForModel: string;
+    let stopStrings: string[];
+    let promptTemplateForGen: string | undefined;
+
+    const rendered = renderChat(history, sessionMeta);
+    if (rendered) {
+      // The model's own template — the rendered text IS the full prompt, so no
+      // extra `{prompt}` wrap; stop on the model's own eos.
+      promptForModel = rendered.prompt;
+      stopStrings = rendered.stop.length ? rendered.stop : ["\nUser:", "\nAssistant:"];
+      promptTemplateForGen = undefined;
+      if (ctx && tok) {
+        let working = history;
+        try {
+          while ((await countTokens(tok, promptForModel)) > ctx && working.length > 2) {
+            working = working.slice(2);
+            const r = renderChat(working, sessionMeta);
+            if (!r) break;
+            promptForModel = r.prompt;
+          }
+        } catch {
+          // Counting unavailable: send untrimmed — the engine fails loud if the
+          // prompt exceeds the model's context.
+        }
+      }
+    } else {
+      // Fallback: the catalogue's separator + prompt template (base models, or
+      // a template that couldn't render).
+      let workingHistory = history;
+      promptForModel = buildMultiTurnPrompt(workingHistory, turnSeparator);
       const applyTemplate = (t: string | null | undefined, slot: string) =>
         t ? (t.includes("{prompt}") ? t.replace("{prompt}", slot) : t + slot) : slot;
-      try {
-        let tokens = await countTokens(tok, applyTemplate(selectedKnown?.promptTemplate, promptForModel));
-        while (tokens > ctx && workingHistory.length > 2) {
-          workingHistory = workingHistory.slice(2); // oldest user+assistant pair
-          promptForModel = buildMultiTurnPrompt(workingHistory, turnSeparator);
-          tokens = await countTokens(tok, applyTemplate(selectedKnown?.promptTemplate, promptForModel));
+      if (ctx && tok) {
+        try {
+          let tokens = await countTokens(tok, applyTemplate(selectedKnown?.promptTemplate, promptForModel));
+          while (tokens > ctx && workingHistory.length > 2) {
+            workingHistory = workingHistory.slice(2);
+            promptForModel = buildMultiTurnPrompt(workingHistory, turnSeparator);
+            tokens = await countTokens(tok, applyTemplate(selectedKnown?.promptTemplate, promptForModel));
+          }
+        } catch {
+          // Counting unavailable: send untrimmed.
         }
-      } catch {
-        // Counting unavailable: send untrimmed — the engine still fails loud
-        // if the prompt exceeds the model's context.
       }
+      stopStrings = selectedKnown?.stop?.length ? selectedKnown.stop : ["\nUser:", "\nAssistant:"];
+      promptTemplateForGen = selectedKnown?.promptTemplate ?? undefined;
     }
 
     setMessages((prev) => [...prev, { role: "user", text: userText }]);
     setPrompt("");
     setRunning(true);
     streamingRef.current = "";
-    // Stop strings: catalogue archives ship their native stop tokens
-    // (e.g. Qwen2 ChatML's `<|im_end|>`); for non-catalogue / generic-
-    // separator fallback, pass `\nUser:` / `\nAssistant:` so base models
-    // can't keep writing fake turns past end-of-response.
-    const stopStrings = selectedKnown?.stop?.length
-      ? selectedKnown.stop
-      : ["\nUser:", "\nAssistant:"];
-    // Prompt template: templates are no longer baked into the `.holo` at
-    // compile time, so we forward the catalogue's `prompt_template`
-    // (containing `{prompt}`) every run. The CLI substitutes our
-    // multi-turn `promptForModel` into the `{prompt}` slot.
     try {
       await generate({
         archive,
@@ -308,7 +375,7 @@ export function Chat() {
         maxTokens: selectedKnown?.maxTokens,
         temperature,
         stop: stopStrings,
-        promptTemplate: selectedKnown?.promptTemplate ?? undefined,
+        promptTemplate: promptTemplateForGen,
       });
       // Commit the final streamed text SYNCHRONOUSLY: the token stream's
       // debounced flush may still be pending, and the next turn's history

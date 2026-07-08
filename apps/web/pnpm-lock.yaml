@@ -8,6 +8,9 @@ importers:
 
   .:
     dependencies:
+      '@huggingface/jinja':
+        specifier: ^0.5.9
+        version: 0.5.9
       katex:
         specifier: ^0.17.0
         version: 0.17.0
@@ -333,6 +336,10 @@ packages:
     engines: {node: '>=12'}
     cpu: [x64]
     os: [win32]
+
+  '@huggingface/jinja@0.5.9':
+    resolution: {integrity: sha512-uWTG+l3VJRsl7EXxYizuL3P+cCPoc3cRqbWWRcQN0FhejRfbdq0RNhCmbY/YDtnTcz9icdLYuLDjsnz4d8JMuw==}
+    engines: {node: '>=18'}
 
   '@inquirer/ansi@2.0.7':
     resolution: {integrity: sha512-3eTuUO1vH2cZm2ZKHeQxnOqlTi9EfZDGgIe3BL3I4u+rJHocr9Fz86M4fjYABPvFnQG/gGK551HqDiIcETwU6Q==}
@@ -2235,6 +2242,8 @@ snapshots:
 
   '@esbuild/win32-x64@0.21.5':
     optional: true
+
+  '@huggingface/jinja@0.5.9': {}
 
   '@inquirer/ansi@2.0.7': {}
 
