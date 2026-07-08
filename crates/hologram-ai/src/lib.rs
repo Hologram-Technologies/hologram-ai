@@ -18,6 +18,7 @@ pub mod engine;
 pub mod materialize;
 pub mod quantized;
 pub mod runner;
+pub mod speculative;
 pub mod staged;
 pub mod validate;
 

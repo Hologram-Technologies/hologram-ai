@@ -44,7 +44,8 @@ use hologram_ai_model::{Executor, Model, Tier, UseCaseExpects};
 use hologram_ai_quant::{dequant_q4_0, dequant_q8_0};
 use hologram_ai_safetensors::parametric::{
     build_parametric_decode_graph_from_manifest, build_parametric_graph_from_manifest,
-    build_parametric_stage_graphs, selected_family, supported_families,
+    build_parametric_stage_graphs, build_parametric_verify_graph_from_manifest, selected_family,
+    supported_families,
 };
 use hologram_ai_tokenizer::{NativeTokenizer, Tokenizer};
 use serde::Deserialize;
@@ -979,6 +980,10 @@ struct BddWorld {
     quant_evicted: Option<(String, TrafficJournal)>,
     // S4 — quantized decode floor (row `performance-contract`)
     quant_decode: Option<QuantDecodePerf>,
+    // S3 — speculative decode (row `speculative-decode`)
+    spec_fixture: Option<(StoreDir, usize)>, // κ-store + bucket
+    spec_completions: Option<(String, String)>, // (plain, speculative)
+    spec_passes: Option<(u64, usize)>,       // (speculative forward passes, tokens)
     // S3 — idle derivation (row `idle-derivation`)
     idle_state: Option<IdleDeriveState>,
     // S3 — admission margin (row `stage-residency-cache`)
@@ -3885,6 +3890,166 @@ fn decode_archive(store: &Path, bucket: u64) -> Vec<u8> {
     let kform = compile_graph(graph);
     let mut dir = DirKappaStore::new(store);
     materialize_archive(&kform, &mut dir).expect("the decode archive materializes")
+}
+
+// ─────────────── S3 — speculative decode (row `speculative-decode`) ───────────
+
+/// Compile the verify-pass k-form (all-positions head, chunk = K) over the
+/// staged fixture and materialize it from `store` — the verify twin of the
+/// decode archive.
+fn verify_archive(store: &Path, bucket: u64, chunk: u64) -> Vec<u8> {
+    let manifest = staged_manifest(false);
+    let (keys, shapes): (Vec<String>, Vec<Vec<u64>>) = manifest.into_iter().unzip();
+    let dtypes = vec![DType::F32; keys.len()];
+    let mut graph = build_parametric_verify_graph_from_manifest(
+        &staged_config(false),
+        &keys,
+        &dtypes,
+        bucket,
+        chunk,
+    )
+    .expect("the verify graph builds");
+    let name_to_id: HashMap<String, u32> = graph
+        .tensor_names
+        .iter()
+        .map(|(id, name)| (name.clone(), *id))
+        .collect();
+    for (name, dims) in keys.iter().zip(&shapes) {
+        let id = *name_to_id.get(name).expect("manifest tensor in the graph");
+        let info = ti(DType::F32, dims);
+        graph.tensor_info.insert(id, info.clone());
+        graph.params.insert(
+            id,
+            AiParam::External {
+                kappa: kappa_of(&staged_tensor_bytes(name, dims)),
+                info,
+                range: None,
+            },
+        );
+    }
+    let kform = compile_graph(graph);
+    let mut dir = DirKappaStore::new(store);
+    materialize_archive(&kform, &mut dir).expect("the verify archive materializes")
+}
+
+fn spec_decode_session(store: &Path, bucket: u64) -> DecodeSession<HoloRunner> {
+    let theta = staged_config(false)["rope_theta"]
+        .as_f64()
+        .expect("the fixture declares rope_theta") as f32;
+    let runner =
+        HoloRunner::from_bytes(decode_archive(store, bucket)).expect("decode archive loads");
+    DecodeSession::new(runner, theta, STG_WINDOW).expect("the decode session opens")
+}
+
+const SPEC_NGRAM: usize = 3;
+const SPEC_DRAFT: usize = 4; // the verify runner's chunk K
+const SPEC_MAX_TOKENS: usize = 48; // long enough for the fixture's cycle to dominate
+
+#[given(
+    expr = "a decode session and a verify runner over the staged fixture with a bucket of {int} rows"
+)]
+async fn given_spec_fixture(w: &mut BddWorld, bucket: usize) {
+    w.spec_fixture = Some((staged_store("speculative"), bucket));
+}
+
+#[when("the fixture is decoded once by plain steps and once by speculative decode")]
+async fn when_spec_vs_plain(w: &mut BddWorld) {
+    use hologram_ai::commands::generate::{
+        generate_stream_decode, generate_stream_speculative, GenConfig,
+    };
+    let (store, bucket) = w.spec_fixture.as_ref().expect("the speculative fixture");
+    let cfg = GenConfig {
+        max_tokens: Some(SPEC_MAX_TOKENS),
+        temperature: 0.0,
+        ..Default::default()
+    };
+    let prompt = "1";
+
+    let mut plain = spec_decode_session(&store.path, *bucket as u64);
+    let mut sink = Vec::new();
+    let plain_text = generate_stream_decode(&mut plain, &DecimalTok, prompt, &cfg, &mut sink)
+        .expect("plain step decode completes");
+
+    let mut spec = spec_decode_session(&store.path, *bucket as u64);
+    let mut verify = HoloRunner::from_bytes(verify_archive(
+        &store.path,
+        *bucket as u64,
+        SPEC_DRAFT as u64,
+    ))
+    .expect("verify archive loads");
+    let mut sink = Vec::new();
+    let spec_text = generate_stream_speculative(
+        &mut spec,
+        &mut verify,
+        &DecimalTok,
+        prompt,
+        &cfg,
+        SPEC_NGRAM,
+        SPEC_DRAFT,
+        &mut sink,
+    )
+    .expect("speculative decode completes");
+
+    w.spec_completions = Some((plain_text, spec_text));
+}
+
+#[then("both runs emit the identical tokens")]
+async fn then_spec_identical(w: &mut BddWorld) {
+    let (plain, spec) = w.spec_completions.as_ref().expect("both decode runs ran");
+    assert!(!spec.is_empty(), "speculative decode must generate");
+    assert_eq!(
+        plain, spec,
+        "speculative decode must reproduce plain step decode exactly"
+    );
+    println!("[speculative-decode] identical to plain step decode: {spec:?}");
+}
+
+#[when("a recurring fixture continuation is decoded by speculative decode")]
+async fn when_spec_passes(w: &mut BddWorld) {
+    use hologram_ai::commands::generate::{generate_stream_speculative, GenConfig};
+    let (store, bucket) = w.spec_fixture.as_ref().expect("the speculative fixture");
+    let cfg = GenConfig {
+        max_tokens: Some(SPEC_MAX_TOKENS),
+        temperature: 0.0,
+        ..Default::default()
+    };
+    let mut spec = spec_decode_session(&store.path, *bucket as u64);
+    let mut verify = HoloRunner::from_bytes(verify_archive(
+        &store.path,
+        *bucket as u64,
+        SPEC_DRAFT as u64,
+    ))
+    .expect("verify archive loads");
+    let mut sink = Vec::new();
+    let text = generate_stream_speculative(
+        &mut spec,
+        &mut verify,
+        &DecimalTok,
+        "1",
+        &cfg,
+        SPEC_NGRAM,
+        SPEC_DRAFT,
+        &mut sink,
+    )
+    .expect("speculative decode completes");
+    let tokens = DecimalTok.encode(&text).len();
+    w.spec_passes = Some((spec.steps_taken(), tokens));
+}
+
+#[then("it emits every token in fewer forward passes than tokens")]
+async fn then_spec_fewer_passes(w: &mut BddWorld) {
+    let (passes, tokens) = w
+        .spec_passes
+        .expect("the speculative run recorded its passes");
+    assert!(tokens > 0, "speculative decode generated tokens");
+    assert!(
+        passes < tokens as u64,
+        "speculative decode used {passes} forward passes for {tokens} tokens — not fewer"
+    );
+    println!(
+        "[speculative-decode] {passes} forward passes for {tokens} tokens \
+         (a recurring stretch commits several tokens per two passes)"
+    );
 }
 
 #[given(expr = "a decode-step archive over the staged fixture with a bucket of {int} rows")]

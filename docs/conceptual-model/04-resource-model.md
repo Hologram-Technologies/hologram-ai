@@ -389,36 +389,27 @@ its own measured cost; no aggregate canonicalization claim.
 - Kernel-floor performance contract: native hardware-counter witness
   (L1-dcache table-access miss ratio ~0 after warmup) once Q0-tier kernels
   carry these workloads; structural-only until then.
-- S3/S4 `speculative-decode` (batched-verify generation): the decode step is
-  the substrate's worst matmul shape (`M=1`; the `decode_shape` bench measures a
-  `M=8` pass at ~1/7 the wall-clock of a single `M=1` step). The lever is to
-  stop feeding the kernel `M=1` work — draft `K` tokens from a PARAMETRIC,
-  zero-weight source and verify them in one `M=K` pass, accepting the longest
-  correct prefix. Staged realization, each increment shippable:
-  1. A multi-position verify head — a decode/chunk graph that emits logits at
-     ALL `K` positions (the chunked-prefill `M=K` machinery already produces the
-     per-position hidden states and K/V; today the head gathers only the last).
-     Witness: verify-pass logits at each position == step-decode logits there.
-  2. Prompt-lookup drafting — draft the next `K` tokens by matching the last
-     `g` realized tokens against their most recent earlier occurrence in the
-     realized sequence (prompt + generation) and copying what followed. No draft
-     model, no training — parametric over any model/input; `K=0` fallback (plain
-     single-step) when no match, so never worse than today.
-  3. Greedy accept + rewind — accept `draft[i]` while `argmax(logits[i]) ==
-     draft[i]`, append the model's argmax at the first divergence (the bonus
-     token), and `rewind_to` the accepted length (the K/V for accepted positions
-     is already spliced by the verify pass; `DecodeSession::rewind_to` exists).
-     For temperature 0 this is OUTPUT-IDENTICAL to step-decode — a pure speedup.
-     Witness: speculative-greedy completion == step-greedy, byte-identical;
-     forward passes < tokens on a draftable fixture; the handshake reproduces.
-  4. Browser wiring (`generate.worker` + `DecodeChatSession`); the deployed
-     probe reports acceptance rate and passes/token.
-  Faithfulness/limits, never over-claimed: v1 is GREEDY only (temperature-0);
-  speculative SAMPLING (the Leviathan/Chen accept rule that preserves the
-  distribution for temperature > 0) and draft-MODEL drafting are follow-ons.
-  The win is input-dependent — high on structured/repetitive text (code, JSON,
-  retrieval), low on free-form prose — so the acceptance rate is REPORTED, never
-  asserted as a universal speedup.
+- `speculative-decode` (row S3, build — NATIVE shipped, browser tier open):
+  the decode step is the substrate's worst matmul shape (`M=1`; the
+  `decode_shape` bench measures an `M=8` pass at ~1/7 the wall-clock of a single
+  `M=1` step), so the lever is to stop feeding the kernel `M=1` work. The next
+  tokens are drafted from the realized sequence's own recurrence (the tokens
+  that followed the current suffix's most recent earlier occurrence — zero
+  weights, no draft model), verified in ONE `M=K` pass whose head emits logits
+  at every drafted position, and only the longest prefix the model would itself
+  greedily produce is accepted — its K/V spliced from that same pass, one
+  correcting bonus token committed. The native path is built and witnessed
+  (`build_parametric_verify_graph_from_manifest`, `DecodeSession::{verify,
+  draft_verify}`, `generate_stream_speculative`, the `speculative-decode`
+  feature): the greedy completion is byte-identical to single-position decode
+  and a recurring stretch commits in fewer forward passes than tokens (measured
+  37/48 on the fixture — modest on a tiny synthetic cycle, larger on real
+  repetitive text). OPEN: the browser tier (`generate.worker` +
+  `DecodeChatSession`, the deployed probe reporting acceptance rate). Limits,
+  never over-claimed: v1 is GREEDY only (temperature 0); speculative SAMPLING
+  (the Leviathan/Chen accept rule for temperature > 0) and draft-MODEL drafting
+  are follow-ons; the win is input-dependent, so the acceptance rate is
+  REPORTED, never asserted as a universal speedup.
 - Measured, never asserted: dedup ratio per corpus; elision ratio per
   workload; stage-granularity optimum per environment.
 
@@ -712,5 +703,5 @@ lever for GENERATION is the same trick: a **batched-verify (speculative) decode
 step** — draft `K` tokens from a cheap parametric source, verify them in one
 `M=K` pass, accept the longest correct prefix — turning `K` pathological `M=1`
 steps into one efficient GEMM-shaped pass, output-identical to greedy
-step-decode. See the candidate row `speculative-decode`. The head/embedding
+step-decode. Built as row `speculative-decode` (native). The head/embedding
 int4 byte-count lever remains a separate follow-on.

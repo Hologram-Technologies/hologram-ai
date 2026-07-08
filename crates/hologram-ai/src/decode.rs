@@ -370,8 +370,8 @@ impl DecodeState {
     /// to [`pass`] over the same carried past, so position `i`'s row equals a
     /// single-position decode at that absolute position — but all `real` rows
     /// come from ONE `M=real` forward. The carried state is NOT advanced: a
-    /// verify is a speculative probe; the caller accepts a prefix and commits it
-    /// through [`pass`]/`feed`.
+    /// verify is a trial pass, and only the prefix the model itself would have
+    /// produced is later committed (through [`pass`]/`feed`).
     fn verify_pass(
         &self,
         runner: &mut impl LmSession,
@@ -407,6 +407,97 @@ impl DecodeState {
             .map(|i| le_f32_vec(&logits[i * vocab * 4..(i + 1) * vocab * 4]))
             .collect())
     }
+
+    /// One **speculative-decode** batch (row `speculative-decode`): run the
+    /// `draft` through the verify runner in ONE `M = draft.len()` forward, then
+    /// GREEDILY accept the longest prefix the model would itself produce.
+    ///
+    /// `prev_row` is the logits after the currently-realized sequence (so the
+    /// first correct token is `argmax(prev_row)`). A draft token is accepted iff
+    /// it equals the model's own next token at that position; at the first
+    /// mismatch (or after the whole draft) the model's own token is the
+    /// `bonus` — the caller commits it with a plain [`pass`] to advance the K/V
+    /// and get the next `prev_row`. The accepted prefix's K/V is spliced from
+    /// this same pass (identical to what stepping those tokens would produce —
+    /// see [`verify_pass`]), so they are never recomputed. Returns
+    /// `(accepted, bonus)`; the realized length advances by the accepted count.
+    fn draft_verify(
+        &mut self,
+        runner: &mut impl LmSession,
+        geom: DecodeGeometry,
+        prev_row: &[f32],
+        draft: &[i64],
+    ) -> Result<(Vec<i64>, i64)> {
+        let k = draft.len();
+        let pos = self.cur_len;
+        let row = geom.head_dim * 4;
+        let outputs = {
+            let bufs = self.pass_buffers(geom, draft)?;
+            let port_info = runner.input_port_info();
+            let inputs = Self::bind_inputs(&port_info, &bufs, &self.past_k, &self.past_v)?;
+            runner.execute(&inputs)?
+        };
+        let out_ports = runner.output_port_info();
+        let logits = out_ports
+            .iter()
+            .zip(outputs.iter())
+            .find(|(p, _)| p.name == "logits")
+            .map(|(_, o)| o.bytes.as_slice())
+            .context("verify pass produced no logits output")?;
+        ensure!(
+            logits.len() % (geom.chunk * 4) == 0,
+            "verify logits {} bytes not a whole [chunk={}, vocab] tensor",
+            logits.len(),
+            geom.chunk
+        );
+        let vocab = logits.len() / (geom.chunk * 4);
+
+        // Greedy acceptance: the first correct token is argmax(prev_row); accept
+        // draft[i] while it equals the model's own token, then advance to the
+        // model's token at the next position. `bonus` ends as the model's token
+        // at the divergence point (or after the whole draft).
+        let mut bonus = argmax(prev_row) as i64;
+        let mut accepted = 0usize;
+        while accepted < k {
+            if draft[accepted] != bonus {
+                break;
+            }
+            let next = le_f32_vec(&logits[accepted * vocab * 4..(accepted + 1) * vocab * 4]);
+            bonus = argmax(&next) as i64;
+            accepted += 1;
+        }
+
+        // Splice the accepted prefix's K/V (rows 0..accepted) into the carried
+        // bucket at pos..pos+accepted — head-major, one contiguous copy per kv
+        // head; the rejected draft rows never leave the output buffer.
+        if accepted > 0 {
+            for (port, out) in out_ports.iter().zip(outputs.iter()) {
+                if port.name == "logits" {
+                    continue;
+                }
+                let (kind, layer) = port
+                    .name
+                    .rsplit_once('_')
+                    .and_then(|(kd, l)| l.parse::<usize>().ok().map(|l| (kd, l)))
+                    .with_context(|| format!("unexpected decode output port `{}`", port.name))?;
+                let target = match kind {
+                    "k_new" => &mut self.past_k[layer],
+                    "v_new" => &mut self.past_v[layer],
+                    _ => bail!("unexpected decode output port `{}`", port.name),
+                };
+                for h in 0..geom.kv_heads {
+                    let src = h * geom.chunk * row;
+                    let dst = (h * geom.bucket + pos) * row;
+                    target[dst..dst + accepted * row]
+                        .copy_from_slice(&out.bytes[src..src + accepted * row]);
+                }
+            }
+        }
+        self.cur_len += accepted;
+        self.tokens.extend_from_slice(&draft[..accepted]);
+        self.steps += 1;
+        Ok((draft[..accepted].to_vec(), bonus))
+    }
 }
 
 /// Decode a little-endian f32 byte slice into a vector.
@@ -415,6 +506,22 @@ fn le_f32_vec(bytes: &[u8]) -> Vec<f32> {
         .chunks_exact(4)
         .map(|c| f32::from_le_bytes(c.try_into().unwrap()))
         .collect()
+}
+
+/// Greedy argmax over a logit row — the FIRST maximal index (strict `>`), byte
+/// for byte the rule the sampler uses (`commands::generate::argmax`), so the
+/// token a speculative pass accepts is exactly the one a single greedy step
+/// would pick, even where the logits tie.
+fn argmax(row: &[f32]) -> usize {
+    let mut best = 0usize;
+    let mut best_v = f32::NEG_INFINITY;
+    for (i, &v) in row.iter().enumerate() {
+        if v > best_v {
+            best_v = v;
+            best = i;
+        }
+    }
+    best
 }
 
 /// A generation session over the decode plan — generic over the
@@ -523,12 +630,40 @@ impl<S: LmSession> DecodeSession<S> {
     /// runner carrying the all-positions verify head, returning the model's
     /// logits at EACH position (`[tokens.len()][vocab]`) from ONE
     /// `M = tokens.len()` forward — the batched matmul shape the substrate runs
-    /// efficiently. The session state is UNCHANGED: a verify is a speculative
-    /// probe over the current carried past; the caller accepts a prefix and
-    /// commits it with `step`/`feed`. The verify runner shares this session's
+    /// efficiently. The session state is UNCHANGED: a verify is a trial pass over
+    /// the current carried past; only the prefix the model itself would have
+    /// produced is committed, with `step`/`feed`. The verify runner shares this session's
     /// decode geometry (same bucket/layers/heads); its chunk is the draft
     /// length `K`, so `tokens.len() ≤ K`.
     pub fn verify(&self, verify_runner: &mut S, tokens: &[i64]) -> Result<Vec<Vec<f32>>> {
+        let geom = self.verify_geometry(verify_runner, tokens.len())?;
+        self.state.verify_pass(verify_runner, geom, tokens)
+    }
+
+    /// One **speculative-decode** batch (row `speculative-decode`): verify
+    /// `draft` in one `M = draft.len()` pass and greedily accept the longest
+    /// prefix the model itself would produce, advancing the session by the
+    /// accepted count and splicing their K/V from the same pass. `prev_row` is
+    /// the logits after the currently-realized sequence. Returns
+    /// `(accepted, bonus)`; the caller commits `bonus` with [`step`] to advance
+    /// past it and obtain the next `prev_row`. Output-identical to stepping the
+    /// accepted tokens one at a time — a batched shortcut, never a change in
+    /// meaning.
+    pub fn draft_verify(
+        &mut self,
+        verify_runner: &mut S,
+        prev_row: &[f32],
+        draft: &[i64],
+    ) -> Result<(Vec<i64>, i64)> {
+        let geom = self.verify_geometry(verify_runner, draft.len())?;
+        self.state
+            .draft_verify(verify_runner, geom, prev_row, draft)
+    }
+
+    /// Discover and validate a verify runner's geometry: it must share this
+    /// session's bucket/layers/heads (its chunk `K` is the draft width), and the
+    /// draft length must fit in one pass.
+    fn verify_geometry(&self, verify_runner: &mut S, draft_len: usize) -> Result<DecodeGeometry> {
         let geom = DecodeGeometry::discover(verify_runner)?;
         ensure!(
             geom.bucket == self.geom.bucket
@@ -540,12 +675,12 @@ impl<S: LmSession> DecodeSession<S> {
             self.geom
         );
         ensure!(
-            !tokens.is_empty() && tokens.len() <= geom.chunk,
+            draft_len > 0 && draft_len <= geom.chunk,
             "a verify pass drafts 1..={} tokens, got {}",
             geom.chunk,
-            tokens.len()
+            draft_len
         );
-        self.state.verify_pass(verify_runner, geom, tokens)
+        Ok(geom)
     }
 
     pub fn geometry(&self) -> DecodeGeometry {

@@ -333,6 +333,16 @@ executor = "rust"
 feature = "features/suites/s3_execution/chunked_prefill.feature"
 
 [[row]]
+id = "speculative-decode"
+statement = "A draftable stretch is decoded in batches without changing the output: the next tokens are drafted from the realized sequence's own recurrence (the tokens that followed the current suffix's most recent earlier occurrence — zero weights, no draft model), verified in ONE M=K pass whose head emits logits at every drafted position (the substrate's efficient batched matmul shape, not K single-position steps), and only the longest prefix the model would itself greedily produce is accepted — its K/V spliced from that same pass and one correcting bonus token committed — so the greedy completion is byte-identical to single-position decode. No recurrence means an empty draft and a plain step (never worse); a draft that verifies commits several tokens per two passes, so over a recurring stretch the forward-pass count falls below the token count. No unverified token is ever emitted."
+stage = "S3"
+status = "build"
+oracles = ["journey-reference"]
+tier = "suite"
+executor = "rust"
+feature = "features/suites/s3_execution/speculative_decode.feature"
+
+[[row]]
 id = "quantized-rest"
 statement = "A quant-tiered model rests quantized: the download derives each fully-retirable projection's matmul-ready int8 artifact in the browser and evaporates its wide blob — the wide form transits once and rests nowhere (recorded provenance keeps it recoverable; a missing artifact re-derives at session warm, fail-closed on its recorded κ) — the κ-store holds the quantized form, and the chat journey completes on it with the tier stated in the narration, never silently."
 stage = "S1"

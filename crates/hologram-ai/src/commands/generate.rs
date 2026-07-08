@@ -28,11 +28,12 @@
 
 use std::io::Write;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{bail, ensure, Context, Result};
 use hologram_ai_tokenizer::Tokenizer;
 
 use crate::decode::DecodeSession;
 use crate::engine::{LmSession, SessionProvider};
+use crate::speculative::prompt_lookup_draft;
 
 /// Sampling / stopping configuration for one generation request.
 #[derive(Debug, Clone)]
@@ -516,6 +517,124 @@ pub fn generate_stream_decode<S: LmSession>(
         }
     }
 
+    Ok(tokenizer.decode(&generated))
+}
+
+/// Greedy generation over the decode plan with **speculative decode** (row
+/// `speculative-decode`): each iteration drafts the next tokens from the
+/// realized sequence's own recurrence, verifies them in ONE `M = K` pass on
+/// `verify_runner`, accepts the longest prefix the model itself would produce
+/// (its K/V spliced from that pass), and commits one correcting bonus token.
+/// Byte-identical to [`generate_stream_decode`] at temperature 0 — a batched
+/// shortcut over the same greedy path — but a recurring stretch commits several
+/// tokens per two passes. `max_draft` must not exceed `verify_runner`'s chunk.
+#[allow(clippy::too_many_arguments)]
+pub fn generate_stream_speculative<S: LmSession>(
+    session: &mut DecodeSession<S>,
+    verify_runner: &mut S,
+    tokenizer: &dyn Tokenizer,
+    prompt: &str,
+    cfg: &GenConfig,
+    ngram_max: usize,
+    max_draft: usize,
+    out: &mut dyn Write,
+) -> Result<String> {
+    ensure!(
+        cfg.temperature <= 0.0,
+        "speculative decode is greedy (temperature 0); got {}",
+        cfg.temperature
+    );
+    let eos = cfg.eos.unwrap_or_else(|| tokenizer.eos_token_id());
+    let max_window = session.context_len() as usize;
+
+    let prompt_tokens = tokenizer.encode(prompt);
+    if prompt_tokens.is_empty() {
+        bail!("prompt encoded to zero tokens");
+    }
+    if prompt_tokens.len() > max_window {
+        bail!(
+            "prompt is {} tokens but the model's context length is {}",
+            prompt_tokens.len(),
+            max_window
+        );
+    }
+
+    // Prefill exactly as the plain decode: rewind to the shared prefix, feed the
+    // novel suffix; only the last row feeds the first draft's acceptance.
+    let common = prompt_tokens
+        .iter()
+        .zip(session.realized_tokens())
+        .take_while(|(&p, &r)| p as i64 == r)
+        .count()
+        .min(prompt_tokens.len() - 1);
+    session.rewind_to(common);
+    let suffix: Vec<i64> = prompt_tokens[common..].iter().map(|&t| t as i64).collect();
+    let mut row = session.feed(&suffix).context("decode prefill failed")?;
+
+    let remaining_window = max_window - prompt_tokens.len();
+    let budget = cfg
+        .max_tokens
+        .map_or(remaining_window, |n| n.min(remaining_window));
+    let draft_cap = max_draft.max(1);
+
+    let mut generated: Vec<u32> = Vec::new();
+    let mut emitted = 0usize;
+
+    // Emit one token: stream its text delta, honor stop strings and eos, and
+    // report whether to end. Shared by the drafted and plain paths so both stop
+    // on exactly the same conditions.
+    let mut emit = |next: i64, generated: &mut Vec<u32>, emitted: &mut usize| -> bool {
+        if next == eos as i64 {
+            return true;
+        }
+        generated.push(next as u32);
+        let text = tokenizer.decode(generated);
+        if let Some(delta) = text.get(*emitted..) {
+            if !delta.is_empty() {
+                out.write_all(delta.as_bytes()).ok();
+                out.flush().ok();
+                *emitted = text.len();
+            }
+        }
+        if cfg
+            .stop
+            .iter()
+            .any(|s| !s.is_empty() && text.contains(s.as_str()))
+        {
+            return true;
+        }
+        generated.len() >= budget
+    };
+
+    while generated.len() < budget {
+        let cap = draft_cap.min(budget - generated.len());
+        let draft = prompt_lookup_draft(session.realized_tokens(), ngram_max, cap);
+        if draft.is_empty() {
+            // No recurrence: a plain single-position step (never worse).
+            let next = argmax(&row) as i64;
+            if emit(next, &mut generated, &mut emitted) {
+                break;
+            }
+            row = session.step(next).context("decode step failed")?;
+        } else {
+            // Verify the draft in one M=K pass; accept the model's own prefix.
+            let (accepted, bonus) = session
+                .draft_verify(verify_runner, &row, &draft)
+                .context("speculative verify pass failed")?;
+            let mut stop = false;
+            for t in accepted.into_iter().chain(std::iter::once(bonus)) {
+                if emit(t, &mut generated, &mut emitted) {
+                    stop = true;
+                    break;
+                }
+            }
+            if stop {
+                break;
+            }
+            // Commit the bonus's K/V and get the next acceptance row.
+            row = session.step(bonus).context("decode step failed")?;
+        }
+    }
     Ok(tokenizer.decode(&generated))
 }
 

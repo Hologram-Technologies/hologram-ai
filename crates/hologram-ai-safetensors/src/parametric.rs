@@ -1864,7 +1864,7 @@ pub fn build_parametric_chunk_graph_from_manifest(
 /// instead of gathering the last. One `M = chunk` forward yields the model's
 /// distribution at each of the `chunk` drafted positions — the batched matmul
 /// shape the substrate runs efficiently (see the `decode_shape` bench), so `K`
-/// speculative positions verify in a single pass rather than `K` single-`M`
+/// drafted positions verify in a single pass rather than `K` single-`M`
 /// steps. K/V is emitted per position exactly as the chunk pass does, so the
 /// accepted prefix's K/V is spliced by the same machinery; the graph is
 /// otherwise byte-identical to the chunk graph, so its per-position logits
