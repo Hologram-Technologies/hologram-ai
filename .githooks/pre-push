@@ -53,4 +53,16 @@ pnpm run build
 echo "10. Running web app tests..."
 pnpm run test
 
+echo "11. Browser BDD (the CI/Deploy journey gate: hermetic download→compile→run→handshake)..."
+# Rust changes reach the browser only through the wasm binding, so rebuild it
+# before driving the journey — this is exactly what caught a residency
+# regression the vitest suite could not see. Guarded so a machine without
+# wasm-pack or the Playwright browser still pushes (CI runs it authoritatively).
+if command -v wasm-pack >/dev/null 2>&1 && ls "$HOME/.cache/ms-playwright"/chromium-* >/dev/null 2>&1; then
+    pnpm run wasm
+    pnpm run bdd
+else
+    echo "   (skipped: wasm-pack or the Playwright Chromium is not installed — CI runs the browser BDD authoritatively)"
+fi
+
 echo "Pre-push checks passed successfully!"

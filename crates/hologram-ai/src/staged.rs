@@ -822,6 +822,30 @@ impl<'a> StagedRunner<'a> {
         self.residency = ledger;
     }
 
+    /// Drop every resident stage session — returning its share to the shared
+    /// ledger — WITHOUT changing the budget, so the stages re-materialize on the
+    /// next pass. Reclaims an idle auxiliary runner's residency for a hot
+    /// sibling (the prefill seeder yielding to the step runner under memory
+    /// pressure). A no-op when nothing is resident.
+    pub fn evict_resident(&mut self) {
+        for slot in self.resident.iter_mut() {
+            *slot = None;
+        }
+        self.resident_bytes = 0;
+        self.residency.borrow_mut().footprint -= self.resident_footprint;
+        self.resident_footprint = 0;
+    }
+
+    /// This runner's own resident footprint (weights + retained transients).
+    pub fn resident_footprint(&self) -> u64 {
+        self.resident_footprint
+    }
+
+    /// The residency budget (address ceiling under `bound_by_footprint`).
+    pub fn residency_budget(&self) -> u64 {
+        self.residency_budget
+    }
+
     /// Treat the residency budget as a HARD address-space ceiling (the wasm32
     /// tab), gating admission on each session's true runtime footprint plus a
     /// largest-walk reserve rather than its packed weight bytes. Set by a
@@ -1125,6 +1149,14 @@ impl LmSession for StagedRunner<'_> {
 
     fn pass_skipped(&self) -> u64 {
         self.last_skipped
+    }
+
+    fn residency_pressure(&self) -> (u64, u64) {
+        (self.resident_footprint, self.residency_budget)
+    }
+
+    fn evict_resident(&mut self) {
+        StagedRunner::evict_resident(self)
     }
 }
 

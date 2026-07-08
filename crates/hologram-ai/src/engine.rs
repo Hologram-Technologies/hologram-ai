@@ -89,6 +89,20 @@ pub trait LmSession {
     fn pass_skipped(&self) -> u64 {
         0
     }
+
+    /// The runtime footprint this session's resident stages hold against a hard
+    /// address ceiling, and that ceiling. `(0, 0)` for a session with no
+    /// address-bounded staged residency (the default) — reclaim is then a
+    /// no-op. A staged runner reports its true resident footprint and budget so
+    /// an idle auxiliary (the prefill seeder) can be reclaimed for a hot
+    /// sibling when the two would not both fit.
+    fn residency_pressure(&self) -> (u64, u64) {
+        (0, 0)
+    }
+
+    /// Drop every resident stage session (they re-materialize on the next
+    /// pass), reclaiming the address space for a hot sibling. Default no-op.
+    fn evict_resident(&mut self) {}
 }
 
 impl LmSession for HoloRunner {

@@ -852,6 +852,22 @@ impl<S: LmSession> DecodeSession<S> {
             });
             rest = later;
         }
+        // Reclaim the prefill seeder's residency for the hot step runner when
+        // the two would not both fit under a hard address ceiling: the seeder is
+        // idle for the rest of the turn, so windowing the step plan on every
+        // generated token is far costlier than re-seeding the next prefill. `2×`
+        // because the step plan is the SAME model as the seeder — keeping the
+        // seeder resident denies the step plan an equal-sized resident set.
+        // Where both fit (a small model, or a 64-bit host whose budget is
+        // effectively unbounded), nothing is reclaimed and the warm turn stays
+        // warm. Parametric: the threshold is the model's own footprint against
+        // its own ceiling, never a fixed size.
+        if let Some((seeder, _)) = self.seeder.as_mut() {
+            let (footprint, budget) = seeder.residency_pressure();
+            if budget > 0 && footprint.saturating_mul(2) > budget {
+                seeder.evict_resident();
+            }
+        }
         row.context("feed processed no tokens")
     }
 }
