@@ -981,8 +981,6 @@ pub struct GenOpts {
     /// absolute position, so the output is byte-identical to plain decode at
     /// that temperature (greedy when temperature ≤ 0).
     pub speculative_draft: Option<usize>,
-    /// The drafter's max n-gram context length (default 3 when speculating).
-    pub speculative_ngram: Option<usize>,
 }
 
 impl GenOpts {
@@ -1652,7 +1650,6 @@ impl DecodeChatSession {
         // never meaning.
         let draft = opts.speculative_draft.unwrap_or(0);
         if draft >= 2 {
-            let ngram = opts.speculative_ngram.unwrap_or(3);
             let bucket = session.geometry().bucket;
             match self
                 .growable
@@ -1683,8 +1680,7 @@ impl DecodeChatSession {
                         self.draft_session = Some(drafter.into_session());
                         r
                     } else {
-                        let mut drafter =
-                            hologram_ai::speculative::PromptLookupDrafter { ngram_max: ngram };
+                        let mut drafter = hologram_ai::speculative::PromptLookupDrafter;
                         hologram_ai::commands::generate::generate_stream_speculative(
                             session,
                             &mut verify,

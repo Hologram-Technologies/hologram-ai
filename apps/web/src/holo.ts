@@ -408,8 +408,6 @@ export interface GenOpts {
    * the accept rule samples per absolute position, so the output is
    * byte-identical to plain decode at that temperature. */
   speculative_draft?: number;
-  /** The drafter's max n-gram context length (default 3 when speculating). */
-  speculative_ngram?: number;
 }
 
 /**

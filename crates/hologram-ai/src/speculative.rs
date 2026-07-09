@@ -15,9 +15,10 @@
 //! so a drafter changes the acceptance rate, never the output:
 //!
 //! - **prompt-lookup** ([`PromptLookupDrafter`]): the next tokens are guessed by
-//!   finding the most recent earlier occurrence of the current suffix in the
-//!   realized sequence and copying what followed it. No draft model, no
-//!   training, no weights — parametric over any model and any input. It shines
+//!   finding the most recent earlier occurrence of the LONGEST recurring suffix
+//!   of the realized sequence and copying what followed it. No draft model, no
+//!   training, no weights, and no n-gram cap — parametric over any model and any
+//!   input, at O(n) per draft. It shines
 //!   on structured/repetitive text (code, JSON, retrieval, format echoing) and
 //!   returns nothing on novel text, so the caller falls back to one plain step.
 //! - **draft model** ([`ModelDrafter`]): a small second model (sharing the
@@ -92,14 +93,14 @@ pub fn draft_pairing_refusal(
 }
 
 /// The zero-weight prompt-lookup drafter (the shipped default): stateless — it
-/// reads the realized sequence and needs no prefill or commit.
-pub struct PromptLookupDrafter {
-    pub ngram_max: usize,
-}
+/// reads the realized sequence and needs no prefill or commit. It carries no
+/// tuning parameter: the context it drafts from is the LONGEST recurrence the
+/// sequence itself contains.
+pub struct PromptLookupDrafter;
 
 impl Drafter for PromptLookupDrafter {
     fn propose(&mut self, realized: &[i64], cap: usize) -> Result<Vec<i64>> {
-        Ok(prompt_lookup_draft(realized, self.ngram_max, cap))
+        Ok(prompt_lookup_draft(realized, cap))
     }
     fn commit(&mut self, _accepted: usize, _bonus: i64) -> Result<()> {
         Ok(())
@@ -187,35 +188,76 @@ fn argmax(row: &[f32]) -> u32 {
 
 /// Draft up to `max_draft` continuation tokens for `seq` by prompt-lookup.
 ///
-/// For the largest suffix length `g ∈ [1, ngram_max]` that occurs earlier in
-/// `seq`, take the most recent such earlier occurrence and copy the up-to-
-/// `max_draft` tokens that followed it. A longer matched suffix is a more
-/// specific context, so it is tried first (higher acceptance). Returns an empty
-/// draft when nothing matches — the signal to fall back to a single decode step.
+/// The drafting context is the LONGEST suffix of `seq` that occurs earlier in
+/// `seq` at all — there is no n-gram cap, because a cap is a guess about how
+/// much context an arbitrary input recurs over. Among earlier occurrences of
+/// that longest suffix the MOST RECENT is used (the freshest continuation), and
+/// the up-to-`max_draft` tokens that followed it are the draft. Returns an empty
+/// draft when the suffix never recurs — the signal to fall back to a single
+/// decode step.
+///
+/// Found in O(n) time and space with the Z-function of the REVERSED sequence:
+/// `z[i]` is the longest common prefix of `rev` and `rev[i..]`, i.e. the longest
+/// common SUFFIX of `seq` and `seq[..n-i]` — an earlier occurrence ending at
+/// `n - i`. Scanning `i` ascending and keeping strictly longer matches yields the
+/// longest suffix, tie-broken toward the most recent occurrence. (The former
+/// capped scan was `O(n² · g)`, which an arbitrarily long realized sequence
+/// cannot afford.)
 ///
 /// This never affects correctness, only speed: every drafted token is verified
 /// and a wrong one is rejected. It is a pure function of the realized sequence.
-pub fn prompt_lookup_draft(seq: &[i64], ngram_max: usize, max_draft: usize) -> Vec<i64> {
+pub fn prompt_lookup_draft(seq: &[i64], max_draft: usize) -> Vec<i64> {
     let n = seq.len();
-    if n < 2 || max_draft == 0 || ngram_max == 0 {
+    if n < 2 || max_draft == 0 {
         return Vec::new();
     }
-    // Longest matching suffix first: a more specific context accepts better.
-    let g_max = ngram_max.min(n - 1);
-    for g in (1..=g_max).rev() {
-        let needle = &seq[n - g..];
-        // Most recent earlier occurrence first (skip the trailing suffix itself).
-        for start in (0..n - g).rev() {
-            if &seq[start..start + g] == needle {
-                let from = start + g;
-                let take = max_draft.min(n - from);
-                if take > 0 {
-                    return seq[from..from + take].to_vec();
-                }
-            }
+    let rev: Vec<i64> = seq.iter().rev().copied().collect();
+    let z = z_function(&rev);
+
+    // `best_end` is the EXCLUSIVE end of the earlier occurrence of the longest
+    // recurring suffix; the draft is what followed it.
+    let (mut best_len, mut best_end) = (0usize, 0usize);
+    for (i, &zi) in z.iter().enumerate().skip(1) {
+        // The occurrence must fit entirely before the position it ends at.
+        let len = zi.min(n - i);
+        if len > best_len {
+            best_len = len;
+            best_end = n - i;
         }
     }
-    Vec::new()
+    if best_len == 0 {
+        return Vec::new();
+    }
+    let take = max_draft.min(n - best_end);
+    if take == 0 {
+        return Vec::new();
+    }
+    seq[best_end..best_end + take].to_vec()
+}
+
+/// `z[i]` = length of the longest common prefix of `s` and `s[i..]` (`z[0] = n`).
+/// Linear time, the standard two-pointer construction.
+fn z_function(s: &[i64]) -> Vec<usize> {
+    let n = s.len();
+    let mut z = vec![0usize; n];
+    if n == 0 {
+        return z;
+    }
+    z[0] = n;
+    let (mut l, mut r) = (0usize, 0usize);
+    for i in 1..n {
+        if i < r {
+            z[i] = (r - i).min(z[i - l]);
+        }
+        while i + z[i] < n && s[z[i]] == s[i + z[i]] {
+            z[i] += 1;
+        }
+        if i + z[i] > r {
+            l = i;
+            r = i + z[i];
+        }
+    }
+    z
 }
 
 #[cfg(test)]
@@ -224,20 +266,18 @@ mod tests {
 
     #[test]
     fn empty_or_trivial_sequence_drafts_nothing() {
-        assert!(prompt_lookup_draft(&[], 3, 4).is_empty());
-        assert!(prompt_lookup_draft(&[7], 3, 4).is_empty());
-        // A budget or ngram of zero disables drafting.
-        assert!(prompt_lookup_draft(&[1, 2, 3], 0, 4).is_empty());
-        assert!(prompt_lookup_draft(&[1, 2, 3], 3, 0).is_empty());
+        assert!(prompt_lookup_draft(&[], 4).is_empty());
+        assert!(prompt_lookup_draft(&[7], 4).is_empty());
+        // A zero draft budget disables drafting.
+        assert!(prompt_lookup_draft(&[1, 2, 3], 0).is_empty());
     }
 
     #[test]
     fn repeated_suffix_drafts_its_earlier_continuation() {
         // "a b c d ... a b" → the suffix `a b` last continued with `c d e`.
         let seq = [10, 20, 30, 40, 99, 10, 20];
-        let draft = prompt_lookup_draft(&seq, 3, 3);
         assert_eq!(
-            draft,
+            prompt_lookup_draft(&seq, 3),
             vec![30, 40, 99],
             "drafts what followed the earlier `10,20`"
         );
@@ -246,77 +286,64 @@ mod tests {
     #[test]
     fn longest_suffix_wins_over_a_shorter_ambiguous_one() {
         // The 2-gram `2 3` occurred once (→ 4); the 1-gram `3` also occurred
-        // earlier (→ 4 as well). The longer, more specific match is used.
+        // earlier. The longer, more specific match is used.
         let seq = [1, 2, 3, 4, 5, 2, 3];
-        let draft = prompt_lookup_draft(&seq, 3, 2);
-        assert_eq!(draft, vec![4, 5], "the 2-gram `2,3` context drafts `4,5`");
+        assert_eq!(prompt_lookup_draft(&seq, 2), vec![4, 5]);
     }
 
     #[test]
     fn most_recent_occurrence_is_preferred() {
-        // `7` appears after position 0 (→ 1) and position 3 (→ 8). The most
-        // recent earlier occurrence (index 3) drafts its follower.
+        // `7` appears after position 0 (→ 1) and position 3 (→ 8). Among equally
+        // long matches the freshest is used.
         let seq = [7, 1, 2, 7, 8, 9, 7];
-        let draft = prompt_lookup_draft(&seq, 1, 1);
-        assert_eq!(draft, vec![8], "the freshest match for `7` drafts `8`");
+        assert_eq!(prompt_lookup_draft(&seq, 1), vec![8]);
     }
 
     #[test]
     fn max_draft_caps_the_length() {
         let seq = [5, 6, 7, 8, 9, 5, 6];
-        assert_eq!(prompt_lookup_draft(&seq, 3, 2), vec![7, 8]);
-        assert_eq!(prompt_lookup_draft(&seq, 3, 10), vec![7, 8, 9, 5, 6]);
+        assert_eq!(prompt_lookup_draft(&seq, 2), vec![7, 8]);
+        assert_eq!(prompt_lookup_draft(&seq, 10), vec![7, 8, 9, 5, 6]);
     }
 
     #[test]
     fn novel_suffix_drafts_nothing() {
         // The trailing `42` never occurred earlier → no draft, fall back to a step.
         let seq = [1, 2, 3, 4, 42];
-        assert!(prompt_lookup_draft(&seq, 3, 4).is_empty());
-    }
-
-    // ── draft-pairing compatibility policy (row `speculative-draft-pairing`) ──
-
-    #[test]
-    fn an_equal_or_larger_draft_is_compatible() {
-        // Same-family self-pairing: identical vocab + context — the guaranteed
-        // case the browser witness uses.
-        assert!(draft_pairing_refusal(512, 128, 512, 128).is_none());
-        // A draft that COVERS the target (larger vocab, longer context) is fine —
-        // every target id indexes the draft and the sequence never overflows it.
-        assert!(draft_pairing_refusal(512, 128, 1024, 4096).is_none());
+        assert!(prompt_lookup_draft(&seq, 4).is_empty());
     }
 
     #[test]
-    fn a_narrower_vocabulary_is_refused() {
-        // A target id ≥ the draft's vocab would index the draft's embedding out
-        // of range — refuse, naming both sizes.
-        let reason = draft_pairing_refusal(512, 128, 400, 128).expect("refused");
-        assert!(reason.contains("400") && reason.contains("512"), "{reason}");
-        assert!(reason.contains("vocabulary"), "{reason}");
+    fn a_longer_context_beats_a_more_recent_shorter_one() {
+        // The suffix `1,2,3` recurs (ending at 3) and continued with `7,8`.
+        // The SHORTER suffix `2,3` has a MORE RECENT earlier occurrence (ending
+        // at 7) that continued with `9`. Specificity wins: the longest recurring
+        // context is the right one. A 2-token n-gram cap would have drafted `9`.
+        let seq = [1, 2, 3, 7, 8, 2, 3, 9, 1, 2, 3];
+        assert_eq!(prompt_lookup_draft(&seq, 2), vec![7, 8]);
     }
 
     #[test]
-    fn a_shorter_context_is_refused() {
-        // The target's realized sequence grows to 128; a 64-context draft would
-        // abort its forward when it crossed 64 — refuse before it can.
-        let reason = draft_pairing_refusal(512, 128, 512, 64).expect("refused");
-        assert!(reason.contains("64") && reason.contains("128"), "{reason}");
-        assert!(reason.contains("context"), "{reason}");
+    fn the_drafter_has_no_context_cap_and_stays_linear() {
+        // An arbitrarily long recurrence is matched in full — no n-gram ceiling.
+        // 4096 tokens is far past any cap a tuning constant would have imposed,
+        // and the O(n) search returns immediately.
+        let period: Vec<i64> = (0..4096).collect();
+        let mut seq = period.clone();
+        seq.push(-1); // a separator so the recurrence is the whole period
+        seq.extend_from_slice(&period);
+        // The longest recurring suffix is the entire 4096-token period, whose
+        // earlier occurrence ended just before the separator.
+        assert_eq!(prompt_lookup_draft(&seq, 1), vec![-1]);
     }
 
     #[test]
-    fn an_unknown_target_vocabulary_is_refused() {
-        // Vocab 0 = the config declared none; coverage cannot be verified, so
-        // refuse rather than risk an out-of-range draft Gather.
-        assert!(draft_pairing_refusal(0, 128, 512, 128).is_some());
-    }
-
-    #[test]
-    fn the_vocabulary_check_precedes_the_context_check() {
-        // Both incompatible: the message names the vocabulary (the first gate),
-        // deterministically — a stable refusal reason, never order-dependent.
-        let reason = draft_pairing_refusal(512, 128, 400, 64).expect("refused");
-        assert!(reason.contains("vocabulary"), "{reason}");
+    fn z_function_matches_a_naive_reference() {
+        let s: Vec<i64> = [1, 2, 1, 2, 1, 3, 1, 2, 1].to_vec();
+        let z = z_function(&s);
+        for i in 0..s.len() {
+            let naive = (0..s.len() - i).take_while(|&k| s[k] == s[i + k]).count();
+            assert_eq!(z[i], naive, "z[{i}]");
+        }
     }
 }

@@ -6,10 +6,10 @@ Feature: Speculative decode batches a drafted continuation without changing the 
   tokens and VERIFYING them in one M = K pass whose head emits logits at every
   drafted position. The draft SOURCE is parametric — the verify/accept loop is
   drafter-agnostic — so either a zero-weight PROMPT-LOOKUP (the tokens that
-  followed the current suffix's most recent earlier occurrence) or a small
-  DRAFT MODEL (a second decode session proposing the continuation from its own
-  cheaper forward) plugs into the same loop, changing only the acceptance rate,
-  never the output. Only the longest prefix the model would ITSELF
+  followed the most recent earlier occurrence of the LONGEST recurring suffix of
+  the realized sequence — no n-gram cap, found in O(n)) or a small DRAFT MODEL (a
+  second decode session proposing the continuation from its own cheaper forward)
+  plugs into the same loop, changing only the acceptance rate, never the output. Only the longest prefix the model would ITSELF
   produce under the SAMPLER is accepted; its K/V is spliced from that same pass
   and one correcting bonus token is committed. The accept rule is the caller's
   own next-token rule — greedy argmax, or a per-ABSOLUTE-position sample — the

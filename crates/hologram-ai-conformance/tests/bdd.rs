@@ -4298,7 +4298,6 @@ fn spec_decode_session(store: &Path, bucket: u64) -> DecodeSession<HoloRunner> {
     DecodeSession::new(runner, theta, STG_WINDOW).expect("the decode session opens")
 }
 
-const SPEC_NGRAM: usize = 3;
 const SPEC_DRAFT: usize = 4; // the verify runner's chunk K
 const SPEC_MAX_TOKENS: usize = 48; // long enough for the fixture's cycle to dominate
 
@@ -4341,9 +4340,7 @@ async fn when_spec_vs_plain(w: &mut BddWorld) {
         &DecimalTok,
         prompt,
         &cfg,
-        &mut hologram_ai::speculative::PromptLookupDrafter {
-            ngram_max: SPEC_NGRAM,
-        },
+        &mut hologram_ai::speculative::PromptLookupDrafter,
         SPEC_DRAFT,
         &mut sink,
     )
@@ -4391,9 +4388,7 @@ async fn when_spec_vs_plain_sampled(w: &mut BddWorld, temperature: f64) {
         &DecimalTok,
         prompt,
         &cfg,
-        &mut hologram_ai::speculative::PromptLookupDrafter {
-            ngram_max: SPEC_NGRAM,
-        },
+        &mut hologram_ai::speculative::PromptLookupDrafter,
         SPEC_DRAFT,
         &mut sink,
     )
@@ -4490,9 +4485,7 @@ async fn when_spec_passes(w: &mut BddWorld) {
         &DecimalTok,
         "1",
         &cfg,
-        &mut hologram_ai::speculative::PromptLookupDrafter {
-            ngram_max: SPEC_NGRAM,
-        },
+        &mut hologram_ai::speculative::PromptLookupDrafter,
         SPEC_DRAFT,
         &mut sink,
     )
@@ -4550,9 +4543,7 @@ async fn when_spec_across_boundary(w: &mut BddWorld) {
         &DecimalTok,
         "1",
         &cfg,
-        &mut hologram_ai::speculative::PromptLookupDrafter {
-            ngram_max: SPEC_NGRAM,
-        },
+        &mut hologram_ai::speculative::PromptLookupDrafter,
         SPEC_DRAFT,
         &mut sink,
     )
