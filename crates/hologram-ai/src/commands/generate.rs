@@ -33,7 +33,6 @@ use hologram_ai_tokenizer::Tokenizer;
 
 use crate::decode::DecodeSession;
 use crate::engine::{LmSession, SessionProvider};
-use crate::speculative::prompt_lookup_draft;
 
 /// Sampling / stopping configuration for one generation request.
 #[derive(Debug, Clone)]
@@ -557,14 +556,18 @@ pub fn generate_stream_decode<S: LmSession>(
     Ok(tokenizer.decode(&generated))
 }
 
-/// Greedy generation over the decode plan with **speculative decode** (row
-/// `speculative-decode`): each iteration drafts the next tokens from the
-/// realized sequence's own recurrence, verifies them in ONE `M = K` pass on
-/// `verify_runner`, accepts the longest prefix the model itself would produce
-/// (its K/V spliced from that pass), and commits one correcting bonus token.
-/// Byte-identical to [`generate_stream_decode`] at temperature 0 — a batched
-/// shortcut over the same greedy path — but a recurring stretch commits several
-/// tokens per two passes. `max_draft` must not exceed `verify_runner`'s chunk.
+/// Generation over the decode plan with **speculative decode** (row
+/// `speculative-decode`): each iteration asks `drafter` for the next tokens,
+/// verifies them in ONE `M = K` pass on `verify_runner`, accepts the longest
+/// prefix the model itself would produce under the sampler (its K/V spliced from
+/// that pass), and commits one correcting bonus token. Byte-identical to
+/// [`generate_stream_decode`] at the same temperature and seed — a batched
+/// shortcut over the same path — while a well-predicted stretch commits several
+/// tokens per two passes. `drafter` is the draft SOURCE — a zero-weight
+/// [`prompt-lookup`](crate::speculative::PromptLookupDrafter) or a small
+/// [`draft model`](crate::speculative::ModelDrafter); it changes only the
+/// acceptance rate, never the output. `max_draft` must not exceed
+/// `verify_runner`'s chunk.
 #[allow(clippy::too_many_arguments)]
 pub fn generate_stream_speculative<S: LmSession>(
     session: &mut DecodeSession<S>,
@@ -572,7 +575,7 @@ pub fn generate_stream_speculative<S: LmSession>(
     tokenizer: &dyn Tokenizer,
     prompt: &str,
     cfg: &GenConfig,
-    ngram_max: usize,
+    drafter: &mut dyn crate::speculative::Drafter,
     max_draft: usize,
     out: &mut dyn Write,
 ) -> Result<String> {
@@ -610,6 +613,12 @@ pub fn generate_stream_speculative<S: LmSession>(
     session.rewind_to(common);
     let suffix: Vec<i64> = prompt_tokens[common..].iter().map(|&t| t as i64).collect();
     let mut row = session.feed(&suffix).context("decode prefill failed")?;
+    // Prime the drafter to the same prompt (a draft model prefills its own K/V;
+    // prompt-lookup is a no-op) so its proposals share the target's context.
+    let prompt_i64: Vec<i64> = prompt_tokens.iter().map(|&t| t as i64).collect();
+    drafter
+        .prefill(&prompt_i64)
+        .context("drafter prefill failed")?;
 
     let remaining_window = max_window - prompt_tokens.len();
     let budget = cfg
@@ -654,7 +663,7 @@ pub fn generate_stream_speculative<S: LmSession>(
     while generated.len() < budget {
         let cap = draft_cap.min(budget - generated.len());
         let draft = if speculate {
-            prompt_lookup_draft(session.realized_tokens(), ngram_max, cap)
+            drafter.propose(session.realized_tokens(), cap)?
         } else {
             Vec::new()
         };
@@ -670,6 +679,7 @@ pub fn generate_stream_speculative<S: LmSession>(
             }
             false => match session.draft_verify(verify_runner, &row, &draft, &mut next_token) {
                 Ok((accepted, bonus)) => {
+                    let n_accepted = accepted.len();
                     let mut stop = false;
                     for t in accepted.into_iter().chain(std::iter::once(bonus)) {
                         if emit(t, &mut generated, &mut emitted) {
@@ -680,8 +690,12 @@ pub fn generate_stream_speculative<S: LmSession>(
                     if stop {
                         break;
                     }
-                    // Commit the bonus's K/V and get the next acceptance row.
+                    // Commit the bonus's K/V and get the next acceptance row, then
+                    // sync the drafter to the same committed sequence.
                     row = session.step(bonus).context("decode step failed")?;
+                    drafter
+                        .commit(n_accepted, bonus)
+                        .context("drafter commit failed")?;
                 }
                 Err(e) => {
                     // The verify runner went stale (e.g. the decode bucket grew

@@ -4341,7 +4341,9 @@ async fn when_spec_vs_plain(w: &mut BddWorld) {
         &DecimalTok,
         prompt,
         &cfg,
-        SPEC_NGRAM,
+        &mut hologram_ai::speculative::PromptLookupDrafter {
+            ngram_max: SPEC_NGRAM,
+        },
         SPEC_DRAFT,
         &mut sink,
     )
@@ -4389,11 +4391,67 @@ async fn when_spec_vs_plain_sampled(w: &mut BddWorld, temperature: f64) {
         &DecimalTok,
         prompt,
         &cfg,
-        SPEC_NGRAM,
+        &mut hologram_ai::speculative::PromptLookupDrafter {
+            ngram_max: SPEC_NGRAM,
+        },
         SPEC_DRAFT,
         &mut sink,
     )
     .expect("speculative sampled decode completes");
+
+    w.spec_completions = Some((plain_text, spec_text));
+}
+
+#[when(
+    expr = "the fixture is decoded once plainly and once by speculative decode with a draft model at temperature {float}"
+)]
+async fn when_spec_draft_model(w: &mut BddWorld, temperature: f64) {
+    use hologram_ai::commands::generate::{
+        generate_stream_decode, generate_stream_speculative, GenConfig,
+    };
+    use hologram_ai::speculative::ModelDrafter;
+    let (store, bucket) = w.spec_fixture.as_ref().expect("the speculative fixture");
+    // Sampled target (temperature) + a GREEDY-proposing draft ⇒ they diverge at
+    // some positions, so acceptance is PARTIAL — exercising the drafter's rewind
+    // -and-step sync — yet the committed sequence is the target's own, byte for
+    // byte identical to plain sampled decode.
+    let cfg = GenConfig {
+        max_tokens: Some(SPEC_MAX_TOKENS),
+        temperature: temperature as f32,
+        top_k: Some(8),
+        seed: 0x0DBA_F7ED_1234_5678,
+        ..Default::default()
+    };
+    let prompt = "1";
+
+    let mut plain = spec_decode_session(&store.path, *bucket as u64);
+    let mut sink = Vec::new();
+    let plain_text = generate_stream_decode(&mut plain, &DecimalTok, prompt, &cfg, &mut sink)
+        .expect("plain decode completes");
+
+    // The DRAFT MODEL: a second decode session (self-draft over the same fixture)
+    // proposes; the target verifies. The output is the TARGET's, not the draft's.
+    let mut target = spec_decode_session(&store.path, *bucket as u64);
+    let draft = spec_decode_session(&store.path, *bucket as u64);
+    let mut drafter = ModelDrafter::new(draft);
+    let mut verify = HoloRunner::from_bytes(verify_archive(
+        &store.path,
+        *bucket as u64,
+        SPEC_DRAFT as u64,
+    ))
+    .expect("verify archive loads");
+    let mut sink = Vec::new();
+    let spec_text = generate_stream_speculative(
+        &mut target,
+        &mut verify,
+        &DecimalTok,
+        prompt,
+        &cfg,
+        &mut drafter,
+        SPEC_DRAFT,
+        &mut sink,
+    )
+    .expect("draft-model speculative completes");
 
     w.spec_completions = Some((plain_text, spec_text));
 }
@@ -4432,7 +4490,9 @@ async fn when_spec_passes(w: &mut BddWorld) {
         &DecimalTok,
         "1",
         &cfg,
-        SPEC_NGRAM,
+        &mut hologram_ai::speculative::PromptLookupDrafter {
+            ngram_max: SPEC_NGRAM,
+        },
         SPEC_DRAFT,
         &mut sink,
     )

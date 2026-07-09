@@ -1534,13 +1534,17 @@ impl DecodeChatSession {
                 .verify_runner_for(bucket, draft as u64)
             {
                 Ok(mut verify) => {
+                    // The browser drafts by zero-weight prompt-lookup (a draft
+                    // model would be a paired second session — a follow-on).
+                    let mut drafter =
+                        hologram_ai::speculative::PromptLookupDrafter { ngram_max: ngram };
                     hologram_ai::commands::generate::generate_stream_speculative(
                         session,
                         &mut verify,
                         &self.tokenizer,
                         &templated,
                         &cfg,
-                        ngram,
+                        &mut drafter,
                         draft,
                         &mut sink,
                     )
