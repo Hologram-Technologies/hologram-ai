@@ -1358,6 +1358,21 @@ pub struct DecodeChatSession {
     tokenizer: NativeTokenizer,
     rope_theta: f32,
     context_length: u64,
+    /// The model's own vocabulary size (from config.json) — the pairing guard:
+    /// a paired draft must cover the target's vocabulary, because the draft
+    /// consumes the TARGET's token ids (row `speculative-draft-pairing`).
+    vocab_size: u64,
+    /// A catalogue-paired speculative DRAFT model, once `attach_draft`ed: its own
+    /// growable (the archive factory sharing this target's residency ledger), and
+    /// the runtime constants its lazily-built decode session needs. `None` until
+    /// a draft is paired — then speculative decode drafts from this model instead
+    /// of by prompt-lookup.
+    draft_growable:
+        Option<std::rc::Rc<std::cell::RefCell<hologram_ai::staged::GrowableStagedSession>>>,
+    draft_session:
+        Option<hologram_ai::decode::DecodeSession<hologram_ai::staged::StagedRunner<'static>>>,
+    draft_rope_theta: f32,
+    draft_context_length: u64,
 }
 
 #[wasm_bindgen]
@@ -1415,13 +1430,67 @@ impl DecodeChatSession {
             .get("rope_theta")
             .and_then(|v| v.as_f64())
             .unwrap_or(10000.0) as f32;
+        // The vocabulary the pairing guard compares (a draft must cover it). A
+        // config without `vocab_size` cannot be pairing-checked, so a later
+        // `attach_draft` refuses rather than risk an out-of-range draft Gather.
+        let vocab_size = config
+            .get("vocab_size")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
         Ok(DecodeChatSession {
             growable: std::rc::Rc::new(std::cell::RefCell::new(growable)),
             session: None,
             tokenizer,
             rope_theta,
             context_length,
+            vocab_size,
+            draft_growable: None,
+            draft_session: None,
+            draft_rope_theta: 0.0,
+            draft_context_length: 0,
         })
+    }
+
+    /// Pair a speculative DRAFT model with this target (row
+    /// `speculative-draft-pairing`): `draft` is a second `DecodeChatSession`
+    /// built from the paired model's own dir, whose growable this session absorbs
+    /// so speculative decode drafts from the paired model (`ModelDrafter`) rather
+    /// than by prompt-lookup. Consumes `draft` — its growable lives on inside
+    /// this target; its own tokenizer is discarded (the draft consumes the
+    /// TARGET's token ids, never tokenizing text itself).
+    ///
+    /// Two invariants make the pairing SAFE, not merely fast:
+    ///
+    ///  * VOCABULARY. The draft embeds the target's token ids, so its vocabulary
+    ///    must COVER the target's; an incompatible (or unknown) vocabulary is
+    ///    refused (`Err`) and the caller falls back to prompt-lookup. Because the
+    ///    output is the target's byte for byte regardless of the drafter, this
+    ///    guard is about avoiding an out-of-range draft Gather, never correctness.
+    ///  * RESIDENCY. The draft's growable adopts THIS target's residency ledger
+    ///    (`share_residency_with`) BEFORE either wires a runner (both build
+    ///    lazily on first `generate`), so the pair charges ONE combined footprint
+    ///    and never over-commits the wasm 4 GiB ceiling.
+    pub fn attach_draft(&mut self, draft: DecodeChatSession) -> Result<(), JsValue> {
+        if self.vocab_size == 0 || draft.vocab_size < self.vocab_size {
+            return Err(err(format!(
+                "draft model vocabulary ({}) does not cover the target's ({}) — refusing the \
+                 pairing (the draft would index its embedding out of range); drafting by \
+                 prompt-lookup instead",
+                draft.vocab_size, self.vocab_size
+            )));
+        }
+        // Share ONE residency ledger across the pair before either builds a
+        // runner — the draft's admission is then charged against the combined
+        // footprint. Two distinct `Rc<RefCell<…>>`, so no double borrow.
+        {
+            let mut target = self.growable.borrow_mut();
+            let mut paired = draft.growable.borrow_mut();
+            target.share_residency_with(&mut paired);
+        }
+        self.draft_growable = Some(std::rc::Rc::clone(&draft.growable));
+        self.draft_rope_theta = draft.rope_theta;
+        self.draft_context_length = draft.context_length;
+        Ok(())
     }
 
     /// One chat turn over the decode loop — prompt prefill as decode steps,
@@ -1466,6 +1535,43 @@ impl DecodeChatSession {
                 g.borrow_mut().decode_runner_for(bucket as usize)
             }));
             self.session = Some(session);
+        }
+
+        // Build the paired draft model's decode session (row
+        // `speculative-draft-pairing`), once, on the first turn a draft is
+        // present: sized to the prompt (capped by the DRAFT's own context) and
+        // grown through its own rebuild closure. It shares the target's
+        // residency ledger (adopted at `attach_draft`, before this first runner).
+        // A draft that cannot build degrades to prompt-lookup — a projection of
+        // speed, never a refusal of the turn.
+        if self.draft_session.is_none() {
+            if let Some(dg) = self.draft_growable.clone() {
+                let dctx = self.draft_context_length;
+                let dtheta = self.draft_rope_theta;
+                let dwant = self
+                    .tokenizer
+                    .encode(&templated)
+                    .len()
+                    .max(1)
+                    .min(dctx.max(1) as usize);
+                let built = (|| -> anyhow::Result<
+                    hologram_ai::decode::DecodeSession<hologram_ai::staged::StagedRunner<'static>>,
+                > {
+                    let drunner = dg.borrow_mut().decode_runner_for(dwant)?;
+                    let dg2 = std::rc::Rc::clone(&dg);
+                    Ok(
+                        hologram_ai::decode::DecodeSession::new(drunner, dtheta, dctx)?.with_rebuild(
+                            Box::new(move |bucket| dg2.borrow_mut().decode_runner_for(bucket as usize)),
+                        ),
+                    )
+                })();
+                match built {
+                    Ok(s) => self.draft_session = Some(s),
+                    Err(e) => web_sys::console::warn_1(&JsValue::from_str(&format!(
+                        "paired draft model unavailable (drafting by prompt-lookup instead): {e:#}"
+                    ))),
+                }
+            }
         }
 
         let session = self.session.as_mut().expect("session just ensured");
@@ -1534,21 +1640,43 @@ impl DecodeChatSession {
                 .verify_runner_for(bucket, draft as u64)
             {
                 Ok(mut verify) => {
-                    // The browser drafts by zero-weight prompt-lookup (a draft
-                    // model would be a paired second session — a follow-on).
-                    let mut drafter =
-                        hologram_ai::speculative::PromptLookupDrafter { ngram_max: ngram };
-                    hologram_ai::commands::generate::generate_stream_speculative(
-                        session,
-                        &mut verify,
-                        &self.tokenizer,
-                        &templated,
-                        &cfg,
-                        &mut drafter,
-                        draft,
-                        &mut sink,
-                    )
-                    .map_err(|e| err(format!("speculative decode: {e:#}")))?;
+                    // The drafter is parametric (row `speculative-draft-pairing`):
+                    // a catalogue-paired DRAFT MODEL when one is attached, else
+                    // the zero-weight prompt-lookup default. Either way the output
+                    // is the target's byte for byte — the drafter only changes the
+                    // acceptance rate. The warm draft session is taken into the
+                    // per-turn drafter and reclaimed by `into_session`, so its
+                    // resident pipeline survives across turns like the target's.
+                    let result = if let Some(draft_session) = self.draft_session.take() {
+                        let mut drafter =
+                            hologram_ai::speculative::ModelDrafter::new(draft_session);
+                        let r = hologram_ai::commands::generate::generate_stream_speculative(
+                            session,
+                            &mut verify,
+                            &self.tokenizer,
+                            &templated,
+                            &cfg,
+                            &mut drafter,
+                            draft,
+                            &mut sink,
+                        );
+                        self.draft_session = Some(drafter.into_session());
+                        r
+                    } else {
+                        let mut drafter =
+                            hologram_ai::speculative::PromptLookupDrafter { ngram_max: ngram };
+                        hologram_ai::commands::generate::generate_stream_speculative(
+                            session,
+                            &mut verify,
+                            &self.tokenizer,
+                            &templated,
+                            &cfg,
+                            &mut drafter,
+                            draft,
+                            &mut sink,
+                        )
+                    };
+                    result.map_err(|e| err(format!("speculative decode: {e:#}")))?;
                     return String::from_utf8(sink.buffer).map_err(err);
                 }
                 Err(e) => web_sys::console::warn_1(&JsValue::from_str(&format!(

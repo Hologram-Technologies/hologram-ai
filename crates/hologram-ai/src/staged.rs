@@ -1457,6 +1457,31 @@ impl GrowableStagedSession {
         self.residency.borrow().peak
     }
 
+    /// Share this session's address-space residency ledger with `other`, so a
+    /// paired second model — a speculative DRAFT model (row
+    /// `speculative-draft-pairing`) — and this target charge admission against
+    /// ONE combined footprint. Without this, two `bound_by_footprint` sessions
+    /// each gate residency against their own budget and, together, over-commit
+    /// the wasm 4 GiB ceiling (the `RuntimeError: unreachable` allocation
+    /// abort). This extends the one-ledger law that already binds a decode
+    /// turn's step/seeder/verify runners across the model PAIR: whichever runner
+    /// of either model admits a stage checks the COMBINED footprint, so their sum
+    /// never exceeds the ceiling.
+    ///
+    /// Called before either session wires a runner (both build lazily); any
+    /// footprint `other` already holds migrates onto the shared ledger, so it is
+    /// safe to call after growth too.
+    pub fn share_residency_with(&mut self, other: &mut GrowableStagedSession) {
+        let ledger = std::rc::Rc::clone(&self.residency);
+        // Re-point `other`'s current runner (if it already wired one) so its
+        // held footprint moves onto the shared ledger rather than being
+        // double-counted or stranded.
+        if let Some((_, runner)) = other.current.as_mut() {
+            runner.share_residency_ledger(std::rc::Rc::clone(&ledger));
+        }
+        other.residency = ledger;
+    }
+
     /// Install a per-stage observer forwarded into every regrown runner:
     /// `(stage, stage_count, weight_bytes)` after each stage materializes.
     pub fn set_stage_observer(&mut self, f: Box<dyn FnMut(usize, usize, u64)>) {

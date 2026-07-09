@@ -627,6 +627,46 @@ Given("speculative decode is enabled", async function () {
   });
 });
 
+Given("the fixture model is paired with itself as its own draft", async function () {
+  // Catalogue pairing (row `speculative-draft-pairing`): set the fixture entry's
+  // `draftModel` to its OWN hfId — a self-pairing is a guaranteed
+  // vocabulary-compatible draft, so the browser wiring (paired resolution,
+  // second-session build, `attach_draft` with its shared residency ledger, the
+  // `ModelDrafter`) is witnessed without a second fixture model. The world's own
+  // init script re-installs the base entry on every navigation, so this appends
+  // AFTER it and reloads to take effect before the download reads the catalogue.
+  await this.page.addInitScript((draftHfId) => {
+    const cat = JSON.parse(localStorage.getItem("hologram_catalogue_custom") ?? "[]");
+    for (const e of cat) if (e.hfId === draftHfId) e.draftModel = draftHfId;
+    localStorage.setItem("hologram_catalogue_custom", JSON.stringify(cat));
+  }, FIXTURE_REPO);
+  await this.page.reload({ waitUntil: "networkidle" });
+});
+
+Then("the paired draft model is present in local storage", async function () {
+  // The pairing is configured (the catalogue names the draft) AND the paired
+  // draft's compiled artifact is resolvable — a self-pairing shares the target's
+  // own dir, compiled by the download.
+  const paired = await this.page.evaluate((draftHfId) => {
+    const cat = JSON.parse(localStorage.getItem("hologram_catalogue_custom") ?? "[]");
+    return cat.some((e) => e.draftModel === draftHfId);
+  }, FIXTURE_REPO);
+  assert.ok(paired, "the catalogue must pair the fixture with its draft model");
+  const stages = await this.opfsModelFile("handshake-tiny", "stages.json");
+  assert.ok(stages, "the paired draft dir must hold the compiled stages.json");
+});
+
+Then("the drafter reports the paired draft model attached", async function () {
+  // The worker built the paired draft as a second session and `attach_draft`ed
+  // it (vocab guard passed, one shared residency ledger) — the drafter is the
+  // paired model, not prompt-lookup.
+  const log = await statusLog(this);
+  assert.ok(
+    log.some((l) => l.includes("draft model attached")),
+    `the worker must build and attach the paired draft model:\n${log.join("\n")}`,
+  );
+});
+
 Given("a small weight-paging budget", async function () {
   // The weight-tier pager (row `lazy-constant-residency`): 1 MB of resident
   // paged-weight bytes per stage, well below the fixture's weight set, so

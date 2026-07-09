@@ -293,18 +293,31 @@ let warm: {
   plan: "decode" | "window";
   session: StagedSession;
   handles: Map<string, OpenHandle>;
+  /** The paired speculative DRAFT model this session was warmed with (row
+   * `speculative-draft-pairing`), if any. Its session is OWNED by `session`
+   * (absorbed by `attach_draft`), so it is not freed separately — but its OPFS
+   * κ handles were opened by this worker and must be closed on disposal. */
+  draftModelDir?: string;
+  draftHandles?: Map<string, OpenHandle>;
 } | null = null;
 
-function disposeWarm() {
-  if (!warm) return;
-  for (const handle of warm.handles.values()) {
+function closeHandles(handles: Map<string, OpenHandle> | undefined) {
+  if (!handles) return;
+  for (const handle of handles.values()) {
     try {
       handle.close();
     } catch {
       // already closed by an invalidation — disposal proceeds
     }
   }
+}
+
+function disposeWarm() {
+  if (!warm) return;
+  closeHandles(warm.handles);
+  closeHandles(warm.draftHandles);
   try {
+    // Freeing the target frees the draft growable it owns (Rc drop).
     warm.session.free();
   } catch {
     // wasm object already freed
@@ -389,24 +402,17 @@ async function ensureQuantArtifacts(
   return inMemory;
 }
 
-async function warmStagedSession(
+/** Build ONE staged/decode session from a model's OPFS dir (manifest, κ-store,
+ * quant tier, derived store, weight-tier paging) and return it with the OPFS
+ * sync handles it holds — WITHOUT touching the warm cache. The shared back half
+ * of `warmStagedSession`, so the target and its paired draft build identically. */
+async function buildSession(
   modelDirName: string,
   tokenizerBytes: Uint8Array,
   onProgress: (line: string) => void,
   plan: "decode" | "window",
   weightBudget: number | undefined,
-): Promise<StagedSession> {
-  if (warm && warm.modelDir === modelDirName && warm.plan === plan) {
-    onProgress("session warm — resident window carries across turns");
-    return warm.session;
-  }
-  disposeWarm();
-  onProgress(
-    plan === "decode"
-      ? "session cold — building the decode-plan session (one position per token)"
-      : "session cold — building the staged session",
-  );
-
+): Promise<{ session: StagedSession; handles: Map<string, OpenHandle> }> {
   const root = await navigator.storage.getDirectory();
   const models = await root.getDirectoryHandle("models");
   const modelDir = await models.getDirectoryHandle(modelDirName);
@@ -472,13 +478,87 @@ async function warmStagedSession(
     tokenizerBytes,
     onProgress,
   );
-  warm = { modelDir: modelDirName, plan, session, handles: kappaHandles };
+  return { session, handles: kappaHandles };
+}
+
+async function warmStagedSession(
+  modelDirName: string,
+  tokenizerBytes: Uint8Array,
+  onProgress: (line: string) => void,
+  plan: "decode" | "window",
+  weightBudget: number | undefined,
+  draftModelDir: string | undefined,
+): Promise<StagedSession> {
+  if (
+    warm &&
+    warm.modelDir === modelDirName &&
+    warm.plan === plan &&
+    warm.draftModelDir === draftModelDir
+  ) {
+    onProgress("session warm — resident window carries across turns");
+    return warm.session;
+  }
+  disposeWarm();
+  onProgress(
+    plan === "decode"
+      ? "session cold — building the decode-plan session (one position per token)"
+      : "session cold — building the staged session",
+  );
+
+  const { session, handles } = await buildSession(
+    modelDirName,
+    tokenizerBytes,
+    onProgress,
+    plan,
+    weightBudget,
+  );
+
+  // Speculative draft pairing (row `speculative-draft-pairing`): build the
+  // paired draft as a SECOND session and `attach_draft` it, so speculative
+  // decode drafts from the paired model. The attach shares ONE residency ledger
+  // across the pair (no over-commit) and refuses an incompatible vocabulary — a
+  // failure at any point degrades to prompt-lookup, never a dead-ended turn. The
+  // draft's tokenizer is irrelevant (it consumes the target's ids), so the
+  // target's tokenizer bytes construct it. Only the decode plan speculates.
+  let draftHandles: Map<string, OpenHandle> | undefined;
+  if (draftModelDir && plan === "decode" && typeof session.attach_draft === "function") {
+    try {
+      onProgress(`draft model: building the paired speculative drafter (${draftModelDir})…`);
+      const draft = await buildSession(
+        draftModelDir,
+        tokenizerBytes,
+        onProgress,
+        plan,
+        weightBudget,
+      );
+      // `attach_draft` CONSUMES the draft session (its growable lives on inside
+      // the target); keep its κ handles open for the target's lifetime.
+      session.attach_draft(draft.session);
+      draftHandles = draft.handles;
+      onProgress("draft model attached — speculative decode drafts from the paired model");
+    } catch (e) {
+      closeHandles(draftHandles);
+      draftHandles = undefined;
+      onProgress(`draft model unavailable (drafting by prompt-lookup instead): ${e}`);
+    }
+  }
+
+  warm = { modelDir: modelDirName, plan, session, handles, draftModelDir, draftHandles };
   return session;
 }
 
 self.onmessage = async (e) => {
-  const { holoBytes, modelDir, staged, prompt, genOpts, tokenizerBytes, decodePlan, weightBudget } =
-    e.data;
+  const {
+    holoBytes,
+    modelDir,
+    staged,
+    prompt,
+    genOpts,
+    tokenizerBytes,
+    decodePlan,
+    weightBudget,
+    draftModelDir,
+  } = e.data;
 
   try {
     if (staged) {
@@ -493,6 +573,7 @@ self.onmessage = async (e) => {
         },
         decodePlan === false ? "window" : "decode",
         typeof weightBudget === "number" && weightBudget > 0 ? weightBudget : undefined,
+        typeof draftModelDir === "string" && draftModelDir ? draftModelDir : undefined,
       );
       const result = session.generate(prompt, genOpts as never, (text: string) => {
         self.postMessage({ type: "token", text });

@@ -346,6 +346,14 @@ export interface StagedSession {
   materialization_count(): bigint;
   derived_hits(): bigint;
   prederive_next_window(): number | undefined;
+  /** Pair a speculative DRAFT model (row `speculative-draft-pairing`): `draft`
+   * is a second decode session built from the paired model's dir, whose growable
+   * this session absorbs so speculative decode drafts from the paired model
+   * (`ModelDrafter`) instead of by prompt-lookup. Consumes `draft`. Throws if the
+   * draft's vocabulary does not cover this target's — the caller then falls back
+   * to prompt-lookup. Only the decode session exposes it (the only plan that
+   * speculates); optional so a window session need not. */
+  attach_draft?(draft: StagedSession): void;
   free(): void;
 }
 

@@ -93,6 +93,17 @@ impl<S: LmSession> ModelDrafter<S> {
             start: 0,
         }
     }
+
+    /// Reclaim the wrapped draft session after a turn. The drafter is
+    /// constructed per turn (it borrows the target's realized sequence through
+    /// `propose`/`commit`), but the draft session it owns — a compiled decode
+    /// pipeline with resident stages — is expensive to rebuild. A warm caller
+    /// (the browser's `DecodeChatSession`) `take`s the session into a fresh
+    /// drafter each turn and returns it here, so the draft's residency survives
+    /// across turns exactly as the target's does (row `speculative-draft-pairing`).
+    pub fn into_session(self) -> DecodeSession<S> {
+        self.session
+    }
 }
 
 impl<S: LmSession> Drafter for ModelDrafter<S> {

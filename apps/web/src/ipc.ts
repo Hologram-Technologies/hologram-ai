@@ -25,6 +25,14 @@ export interface KnownModelStatus {
   stop: string[];
   chatTurnSeparator: string | null;
   maxTokens?: number;
+  /** A paired speculative DRAFT model (row `speculative-draft-pairing`): an
+   * hfId whose small model drafts continuations for this target under
+   * speculative decode. DATA, never code — the pairing is a catalogue statement.
+   * Downloading this target downloads the paired draft too, and selecting it
+   * makes the drafter available. Same-family (shared tokenizer/vocab) so the
+   * draft covers the target's vocabulary; a self-pairing (`= hfId`) is a valid
+   * guaranteed-compatible draft. Absent ⇒ speculative decode uses prompt-lookup. */
+  draftModel?: string;
   localDir: string | null;
   downloaded: boolean;
   compiledArchive: string | null;
@@ -258,13 +266,12 @@ function getDownloadWorker(): Worker {
   return downloadWorker;
 }
 
-export async function downloadKnownModel(id: string): Promise<number> {
-  const catalogue = await getCatalogue();
-  const model = catalogue.find(m => m.id === id);
-  if (!model) throw new Error("Unknown model");
-  
+// One model's download+compile, keyed by hfId (structural `model`) — the shared
+// core of `downloadKnownModel`, so a target and its paired draft download the
+// identical parametric way.
+async function downloadOne(model: { hfId: string; quantize: string }): Promise<void> {
   emitLine("models://download-line", { stream: "stdout", line: `Downloading and Compiling ${model.hfId}...` });
-  
+
   const localName = model.hfId.split("/").pop() || model.hfId;
   const root = await getOpfsDir();
   const modelsDir = await root.getDirectoryHandle("models", { create: true });
@@ -469,6 +476,35 @@ export async function downloadKnownModel(id: string): Promise<number> {
     emitLine("models://download-progress", { stream: "stderr", line: "Please use a model with safetensors." });
     throw new Error("Model lacks safetensors export.");
   }
+}
+
+export async function downloadKnownModel(id: string): Promise<number> {
+  const catalogue = await getCatalogue();
+  const model = catalogue.find(m => m.id === id);
+  if (!model) throw new Error("Unknown model");
+
+  await downloadOne(model);
+
+  // Speculative draft pairing (row `speculative-draft-pairing`): a target that
+  // names a `draftModel` downloads its paired draft too, the same parametric
+  // way, so selecting the target makes the drafter available. A self-pairing
+  // (`draftModel === hfId`) shares the target's own dir — no second download. A
+  // draft-download failure is surfaced but NEVER fails the target: speculative
+  // decode degrades to prompt-lookup, the journey never dead-ends.
+  if (model.draftModel && model.draftModel !== model.hfId) {
+    try {
+      emitLine("models://download-line", {
+        stream: "stdout",
+        line: `Downloading paired draft model ${model.draftModel}...`,
+      });
+      await downloadOne({ hfId: model.draftModel, quantize: model.quantize });
+    } catch (e) {
+      emitLine("models://download-line", {
+        stream: "stderr",
+        line: `Paired draft model ${model.draftModel} did not download (speculative decode falls back to prompt-lookup): ${e}`,
+      });
+    }
+  }
   return 0;
 }
 
@@ -650,9 +686,30 @@ export interface GenerateOpts {
   eos?: number;
 }
 
-// Removed unused variable
-
 let activeWorker: Worker | null = null;
+
+/** The local dir of the target's paired speculative DRAFT model (row
+ * `speculative-draft-pairing`), if the catalogue pairs one AND it is compiled
+ * locally. Returns undefined otherwise — the worker then drafts by prompt-lookup.
+ * `targetDirName` is the target's model dir (its hfId's leaf). A draft is usable
+ * only when STAGED (the decode-session drafter reads `stages.json`); a
+ * self-pairing points at the target's own — compiled — dir. */
+async function resolveDraftModelDir(targetDirName: string): Promise<string | undefined> {
+  const catalogue = await getCatalogue();
+  const target = catalogue.find((m) => (m.hfId.split("/").pop() || m.hfId) === targetDirName);
+  const draftHfId = target?.draftModel;
+  if (!draftHfId) return undefined;
+  const draftDirName = draftHfId.split("/").pop() || draftHfId;
+  try {
+    const root = await getOpfsDir();
+    const modelsDir = await root.getDirectoryHandle("models");
+    const draftDir = await modelsDir.getDirectoryHandle(draftDirName);
+    await draftDir.getFileHandle("stages.json");
+    return draftDirName;
+  } catch {
+    return undefined;
+  }
+}
 
 export async function generate(opts: GenerateOpts): Promise<number> {
   // ... read holoBytes ...
@@ -716,6 +773,15 @@ export async function generate(opts: GenerateOpts): Promise<number> {
   if (Number.isFinite(specKnob) && specKnob >= 2) {
     genOpts.speculative_draft = Math.floor(specKnob);
   }
+
+  // Speculative draft pairing (row `speculative-draft-pairing`): only when
+  // speculating, resolve the target's paired draft model dir (if the catalogue
+  // pairs one AND it is compiled locally) so the worker builds and attaches it
+  // as the drafter. Absent/uncompiled ⇒ the worker drafts by prompt-lookup —
+  // never load-bearing, so this only ever adds speed.
+  const draftModelDir = genOpts.speculative_draft
+    ? await resolveDraftModelDir(archiveParts[1])
+    : undefined;
 
   emitLine("chat://line", { stream: "stdout", line: "" });
   
@@ -782,6 +848,10 @@ export async function generate(opts: GenerateOpts): Promise<number> {
         const mb = Number(localStorage.getItem("hologram_weight_budget") ?? "");
         return Number.isFinite(mb) && mb > 0 ? Math.floor(mb * 1024 * 1024) : undefined;
       })(),
+      // The paired speculative draft model's dir (row `speculative-draft-pairing`),
+      // resolved above only when speculating and only when a compiled draft is
+      // present — else undefined and the worker drafts by prompt-lookup.
+      draftModelDir,
     });
   });
 }
