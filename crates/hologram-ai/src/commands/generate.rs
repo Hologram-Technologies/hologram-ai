@@ -655,10 +655,10 @@ pub fn generate_stream_speculative<S: LmSession>(
         generated.len() >= budget
     };
 
-    // Speculation degrades to plain decode if the verify runner ever goes
-    // stale (e.g. the decode bucket grew mid-generation past the verify
-    // runner's bucket): a projection of speed, never of meaning, so a failure
-    // to verify is never worse than not speculating.
+    // Speculation is a projection of speed, never of meaning: it retires to
+    // plain decode — never worse — the moment it would leave the current bucket
+    // (proactively, below) or a verify pass fails. Once retired it stays retired
+    // for the turn (the verify runner is not rebuilt at a wider bucket).
     let mut speculate = true;
     while generated.len() < budget {
         let cap = draft_cap.min(budget - generated.len());
@@ -713,17 +713,14 @@ pub fn generate_stream_speculative<S: LmSession>(
                         .context("drafter commit failed")?;
                 }
                 Err(e) => {
-                    // The verify runner went stale (e.g. the decode bucket grew
-                    // past it) — retire speculation and keep decoding plainly
-                    // (never worse). Surfaced, not swallowed, so a genuine
-                    // misconfiguration is visible rather than a silent slowdown.
+                    // A genuine verify FAILURE — the bucket-growth staleness is
+                    // handled proactively above, so this is an execution error or
+                    // a real misconfiguration. Retire to plain decode (never
+                    // worse) and surface it rather than swallow a silent slowdown.
                     tracing::warn!("speculative verify failed, decoding plainly: {e:#}");
                     speculate = false;
-                    // The retired verify runner is never used again this turn;
-                    // free its resident stages so ~a model's worth of weights
-                    // does not linger against the address ceiling for the rest of
-                    // the (now plain) decode. No-op on a 64-bit host / unbounded
-                    // budget, where nothing was gated on footprint.
+                    // Free the retired verify runner's resident stages — never
+                    // used again this turn (no-op on an unbounded budget).
                     verify_runner.evict_resident();
                 }
             },
