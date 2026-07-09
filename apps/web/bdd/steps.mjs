@@ -667,6 +667,38 @@ Then("the drafter reports the paired draft model attached", async function () {
   );
 });
 
+Given("the fixture is staged at its full context", async function () {
+  // A stage-plan budget that FORCES staging (the decode-plan path) yet keeps the
+  // fixture at its OWN context (128) — unlike the aggressive knob that shrinks
+  // it to 64 (leaving no room to grow). So the decode bucket starts at 64 and
+  // can regrow to 128 mid-turn. Remove any stale compile so the download
+  // recompiles under this budget (the κ-store keeps the tensors — dedup).
+  await this.page.evaluate(async () => {
+    localStorage.setItem("hologram_stage_window", "1000000");
+    const root = await navigator.storage.getDirectory();
+    try {
+      const models = await root.getDirectoryHandle("models");
+      await models.removeEntry("handshake-tiny", { recursive: true });
+    } catch {
+      // No prior compile in this storage partition — nothing to remove.
+    }
+  });
+});
+
+Then("the decode bucket regrew to a wider window during the journey", async function () {
+  const log = await statusLog(this);
+  // The window observer narrates each (re)built window; a window WIDER than the
+  // initial 64 proves a geometric growth ran through the real wasm decode path —
+  // the exact transition that aborted a large model before the residency handoff.
+  // A warm two-turn transcript accumulates past the 64-row bucket (context is the
+  // model's own 128 here, not the shrunk-to-64 forced-staging config).
+  const grew = log.some((l) => /\b(128|256|512)-token window\b/.test(l));
+  assert.ok(
+    grew,
+    `the decode bucket must have grown past its initial 64 rows:\n${log.join("\n")}`,
+  );
+});
+
 Given("a small weight-paging budget", async function () {
   // The weight-tier pager (row `lazy-constant-residency`): 1 MB of resident
   // paged-weight bytes per stage, well below the fixture's weight set, so

@@ -575,6 +575,16 @@ executor = "browser"
 feature = "features/suites/s4_application/speculative_draft_pairing.feature"
 
 [[row]]
+id = "decode-bucket-growth"
+statement = "A browser decode session that outgrows its fixed K/V bucket regrows it geometrically (64 → 128 → …) and keeps streaming: the regrowth frees the outgoing runner's resident stages and the stale prefill seeder BEFORE compiling the wider bucket, so the grow-only wasm linear memory never holds the old resident set and the new bucket's compilation at once (the over-commit that aborted a large model with a bare RuntimeError:unreachable). The residency invariant is witnessed natively (footprint zero at each rebuild); this witnesses the real wasm decode path crossing a bucket boundary and streaming on."
+stage = "S4"
+status = "build"
+oracles = ["journey-reference"]
+tier = "suite"
+executor = "browser"
+feature = "features/suites/s4_application/decode_bucket_growth.feature"
+
+[[row]]
 id = "live-model-journey"
 statement = "The full journey (download → compile → run → handshake) completes in real Chromium on the pinned SmolLM2-135M-Instruct."
 stage = "S4"
