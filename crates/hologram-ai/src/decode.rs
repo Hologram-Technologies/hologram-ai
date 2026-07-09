@@ -740,12 +740,12 @@ impl<S: LmSession> DecodeSession<S> {
     /// copy every layer's realized rows into the wider buffers. Drops the
     /// seeder — its bucket went stale; the owner re-installs one lazily.
     fn grow(&mut self) -> Result<()> {
-        let Some(rebuild) = self.rebuild.as_mut() else {
+        if self.rebuild.is_none() {
             bail!(
                 "decode bucket ({}) exhausted and the session has no rebuild source",
                 self.geom.bucket
             );
-        };
+        }
         // The next bucket comes from the SAME geometric policy the rebuild
         // closure uses (`engine::geometric_window`), so the rebuilt runner's
         // bucket matches `new_bucket` by construction — never a re-implemented
@@ -757,6 +757,25 @@ impl<S: LmSession> DecodeSession<S> {
             "decode bucket cannot grow past the model's context ({})",
             self.context_length
         );
+        // Free BOTH auxiliary residencies BEFORE compiling and materializing the
+        // wider bucket: the prefill SEEDER (dropped — its bucket goes stale on
+        // growth anyway) and the OUTGOING step runner (evicted — it is replaced
+        // below). Until they are freed the wasm linear memory (which never
+        // shrinks) must hold the old resident set AND the new bucket's stage
+        // compilation at once, and that peak is what aborts growth at scale — a
+        // bare `RuntimeError: unreachable` (a `memory.grow` past the 4 GiB
+        // ceiling that the residency ledger cannot foresee, because compilation /
+        // module memory is not stage-weight residency). Freeing first lets the
+        // allocator REUSE that space for the new bucket instead of growing past
+        // the ceiling. Harmless where memory is ample (native / 64-bit: the old
+        // runner is dropped moments later regardless); on a rebuild failure the
+        // old runner survives and simply re-materializes on next use.
+        self.seeder = None;
+        self.runner.evict_resident();
+        let rebuild = self
+            .rebuild
+            .as_mut()
+            .expect("rebuild source present (checked above)");
         let runner = rebuild(new_bucket)?;
         let geom = DecodeGeometry::discover(&runner)?;
         ensure!(
@@ -792,7 +811,8 @@ impl<S: LmSession> DecodeSession<S> {
         widen(&mut self.state.past_v, geom.kv_heads);
         self.runner = runner;
         self.geom = geom;
-        self.seeder = None;
+        // The seeder was already dropped before the rebuild (freeing its
+        // residency for the wider bucket's compilation); nothing to clear here.
         Ok(())
     }
 

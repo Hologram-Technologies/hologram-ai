@@ -1457,6 +1457,16 @@ impl GrowableStagedSession {
         self.residency.borrow().peak
     }
 
+    /// The CURRENT combined resident footprint on the shared ledger (not the
+    /// high-water). Unlike [`Self::peak_resident_footprint`] this falls when a
+    /// runner is evicted/dropped, so a witness can observe that the outgoing
+    /// runner's residency is freed BEFORE a bucket regrows (row
+    /// `lazy-constant-residency`): growth must not hold the old resident set
+    /// while it compiles the wider bucket.
+    pub fn resident_footprint(&self) -> u64 {
+        self.residency.borrow().footprint
+    }
+
     /// Share this session's address-space residency ledger with `other`, so a
     /// paired second model — a speculative DRAFT model (row
     /// `speculative-draft-pairing`) — and this target charge admission against

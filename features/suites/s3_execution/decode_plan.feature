@@ -12,6 +12,14 @@ Feature: The per-token pass computes one position
   absolute position and the additive decode_mask that erases unrealized
   bucket rows inside the softmax — so one compiled artifact serves every
   step, and bucket exhaustion is a geometric recompile, never a ceiling.
+  That recompile hands off residency rather than stacking it: before the wider
+  bucket's stages are compiled and materialized, the OUTGOING runner's resident
+  stages (and the now-stale prefill seeder) are freed, so the grow-only wasm
+  linear memory never holds the old resident set AND the new bucket's
+  compilation at once — the over-commit that otherwise aborts a large model's
+  first growth with a bare `RuntimeError: unreachable`. Witnessed natively
+  (`tests/decode_growth_residency.rs`): the resident footprint is zero at the
+  instant each wider bucket is built.
 
   Scenario: the decode plan matches the whole-window plan at every position
     Given a decode-step archive over the staged fixture with a bucket of 8 rows
