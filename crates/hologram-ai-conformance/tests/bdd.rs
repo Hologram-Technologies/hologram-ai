@@ -4501,6 +4501,66 @@ async fn when_spec_passes(w: &mut BddWorld) {
     w.spec_passes = Some((spec.steps_taken(), tokens));
 }
 
+#[when("the fixture is decoded across a bucket boundary by plain steps and by speculative decode")]
+async fn when_spec_across_boundary(w: &mut BddWorld) {
+    use hologram_ai::commands::generate::{
+        generate_stream_decode, generate_stream_speculative, GenConfig,
+    };
+    let (store, bucket) = w.spec_fixture.as_ref().expect("the speculative fixture");
+    // Enough tokens to regrow the small initial bucket several times. With a
+    // recurring draft (prompt-lookup accepts its full width), a splice would
+    // reach past the fixed bucket rows at a boundary WITHOUT the retire-before-
+    // boundary guard — a K/V overflow (panic or corruption); WITH it the
+    // speculation retires at the boundary and plain steps regrow the bucket, so
+    // the completion stays byte-identical to plain decode.
+    let cfg = GenConfig {
+        max_tokens: Some(32),
+        temperature: 0.0,
+        ..Default::default()
+    };
+    let theta = staged_config(false)["rope_theta"]
+        .as_f64()
+        .expect("the fixture declares rope_theta") as f32;
+    let growing = |path: &Path, b: u64| -> DecodeSession<HoloRunner> {
+        let runner = HoloRunner::from_bytes(decode_archive(path, b)).expect("decode archive loads");
+        let rp = path.to_path_buf();
+        DecodeSession::new(runner, theta, STG_WINDOW)
+            .expect("the decode session opens")
+            .with_rebuild(Box::new(move |bb| {
+                HoloRunner::from_bytes(decode_archive(&rp, bb))
+            }))
+    };
+
+    let mut plain = growing(&store.path, *bucket as u64);
+    let mut sink = Vec::new();
+    let plain_text = generate_stream_decode(&mut plain, &DecimalTok, "1", &cfg, &mut sink)
+        .expect("plain step decode grows and completes");
+
+    let mut spec = growing(&store.path, *bucket as u64);
+    let mut verify = HoloRunner::from_bytes(verify_archive(
+        &store.path,
+        *bucket as u64,
+        SPEC_DRAFT as u64,
+    ))
+    .expect("verify archive loads");
+    let mut sink = Vec::new();
+    let spec_text = generate_stream_speculative(
+        &mut spec,
+        &mut verify,
+        &DecimalTok,
+        "1",
+        &cfg,
+        &mut hologram_ai::speculative::PromptLookupDrafter {
+            ngram_max: SPEC_NGRAM,
+        },
+        SPEC_DRAFT,
+        &mut sink,
+    )
+    .expect("speculative decode retires at the boundary and completes without overflow");
+
+    w.spec_completions = Some((plain_text, spec_text));
+}
+
 #[then("it emits every token in fewer forward passes than tokens")]
 async fn then_spec_fewer_passes(w: &mut BddWorld) {
     let (passes, tokens) = w

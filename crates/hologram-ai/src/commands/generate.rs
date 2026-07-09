@@ -662,6 +662,21 @@ pub fn generate_stream_speculative<S: LmSession>(
     let mut speculate = true;
     while generated.len() < budget {
         let cap = draft_cap.min(budget - generated.len());
+        // Speculation must stay STRICTLY within the current bucket. `draft_verify`
+        // splices the accepted prefix into FIXED bucket rows `pos..pos+accepted`
+        // (it never grows), so a batch that reached the bucket would overflow the
+        // K/V buffer; and the bonus step must not regrow the bucket while the
+        // verify runner — a full resident plan — is co-resident with the step
+        // runner's rebuild of the wider bucket (the wasm 4 GiB over-commit). Both
+        // are avoided by retiring the moment the next batch (≤ cap accepted + 1
+        // bonus) would reach the bucket: a growth would stale the verify runner
+        // anyway, so retire PROACTIVELY and free it here, letting the plain steps
+        // below regrow the bucket safely. The output is unchanged — the target's
+        // own tokens, byte for byte — only the acceptance boundary moves.
+        if speculate && session.realized_len() + cap + 1 > session.geometry().bucket {
+            verify_runner.evict_resident();
+            speculate = false;
+        }
         let draft = if speculate {
             drafter.propose(session.realized_tokens(), cap)?
         } else {

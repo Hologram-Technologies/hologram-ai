@@ -19,8 +19,13 @@ Feature: Speculative decode batches a drafted continuation without changing the 
   unverified is ever emitted, and a sampled run reproduces plain sampled decode
   token-for-token given the same seed. A recurring stretch still commits several
   tokens per two passes, dropping the forward-pass count below the token count.
-  No recurrence is a plain step, never worse. Validated against the plain
-  step-decode oracle over the fixture, never a canonical constant.
+  No recurrence is a plain step, never worse. Speculation stays STRICTLY within
+  the carried bucket: a verified batch splices its accepted K/V into fixed bucket
+  rows, so the moment the next batch would reach the bucket the drafter retires —
+  freeing the verify runner — and plain steps regrow the bucket, never a splice
+  past its rows nor a verify plan co-resident with the wider bucket's build.
+  Validated against the plain step-decode oracle over the fixture, never a
+  canonical constant.
 
   Scenario: speculative decode reproduces plain step decode byte for byte
     Given a decode session and a verify runner over the staged fixture with a bucket of 64 rows
@@ -41,6 +46,11 @@ Feature: Speculative decode batches a drafted continuation without changing the 
     Given a decode session and a verify runner over the staged fixture with a bucket of 64 rows
     When a recurring fixture continuation is decoded by speculative decode
     Then it emits every token in fewer forward passes than tokens
+
+  Scenario: speculative decode retires at a bucket boundary and reproduces plain decode
+    Given a decode session and a verify runner over the staged fixture with a bucket of 8 rows
+    When the fixture is decoded across a bucket boundary by plain steps and by speculative decode
+    Then both runs emit the identical tokens
 
   Scenario: the verify head is parametric over any vocabulary
     When a large-vocabulary draft is verified by the whole head and the chunked staged head
