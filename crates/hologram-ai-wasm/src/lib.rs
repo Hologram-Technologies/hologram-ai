@@ -977,7 +977,9 @@ pub struct GenOpts {
     /// Speculative decode (row `speculative-decode`): the draft width `K` (also
     /// the verify pass's chunk). `None`/`0`/`1` decode plainly; `≥ 2` drafts the
     /// next tokens from the realized sequence's recurrence and verifies them in
-    /// one `M = K` pass. Greedy only, so it engages solely at temperature 0.
+    /// one `M = K` pass. Works at ANY temperature — the accept rule samples per
+    /// absolute position, so the output is byte-identical to plain decode at
+    /// that temperature (greedy when temperature ≤ 0).
     pub speculative_draft: Option<usize>,
     /// The drafter's max n-gram context length (default 3 when speculating).
     pub speculative_ngram: Option<usize>,
@@ -1514,14 +1516,16 @@ impl DecodeChatSession {
             callback: callback.as_ref(),
         };
 
-        // Speculative decode (row `speculative-decode`): a `K ≥ 2` draft, greedy
-        // only. Build a verify runner at the session's OWN bucket (they share the
-        // carried past) and draft the next K tokens from the realized sequence's
-        // recurrence, verifying them in one M=K pass. A failed/absent verify
-        // runner falls back to plain decode — a projection of speed, never
-        // meaning.
+        // Speculative decode (row `speculative-decode`): a `K ≥ 2` draft at ANY
+        // temperature. Build a verify runner at the session's OWN bucket (they
+        // share the carried past) and draft the next K tokens from the realized
+        // sequence's recurrence, verifying them in one M=K pass. The accept rule
+        // is per-position sampling (greedy when temperature ≤ 0), so the output
+        // is byte-identical to plain decode at that temperature. A failed/absent
+        // verify runner falls back to plain decode — a projection of speed,
+        // never meaning.
         let draft = opts.speculative_draft.unwrap_or(0);
-        if draft >= 2 && cfg.temperature <= 0.0 {
+        if draft >= 2 {
             let ngram = opts.speculative_ngram.unwrap_or(3);
             let bucket = session.geometry().bucket;
             match self

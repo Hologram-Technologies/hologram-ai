@@ -410,16 +410,22 @@ impl DecodeState {
 
     /// One **speculative-decode** batch (row `speculative-decode`): run the
     /// `draft` through the verify runner in ONE `M = draft.len()` forward, then
-    /// GREEDILY accept the longest prefix the model would itself produce.
+    /// accept the longest prefix the model would itself produce under
+    /// `next_token`.
     ///
-    /// `prev_row` is the logits after the currently-realized sequence (so the
-    /// first correct token is `argmax(prev_row)`). A draft token is accepted iff
-    /// it equals the model's own next token at that position; at the first
-    /// mismatch (or after the whole draft) the model's own token is the
-    /// `bonus` — the caller commits it with a plain [`pass`] to advance the K/V
-    /// and get the next `prev_row`. The accepted prefix's K/V is spliced from
-    /// this same pass (identical to what stepping those tokens would produce —
-    /// see [`verify_pass`]), so they are never recomputed. Returns
+    /// `next_token(logits, position)` is the caller's own token rule — `argmax`
+    /// for greedy, or a per-position-seeded sample for temperature — the SAME
+    /// rule plain decode applies. `prev_row` is the logits after the
+    /// currently-realized sequence, so the model's token at the first position
+    /// is `next_token(prev_row, cur_len)`. A draft token is accepted iff it
+    /// equals the model's own token at that position; at the first mismatch (or
+    /// after the whole draft) the model's own token is the `bonus` — the caller
+    /// commits it with a plain [`pass`] to advance the K/V and get the next
+    /// `prev_row`. Because `next_token` is a pure function of `(logits, position)`
+    /// and every accepted position shares the plain path's prefix, the committed
+    /// sequence is byte-identical to stepping one token at a time under the same
+    /// rule — greedy OR sampled. The accepted prefix's K/V is spliced from this
+    /// same pass (see [`verify_pass`]), so they are never recomputed. Returns
     /// `(accepted, bonus)`; the realized length advances by the accepted count.
     fn draft_verify(
         &mut self,
@@ -427,6 +433,7 @@ impl DecodeState {
         geom: DecodeGeometry,
         prev_row: &[f32],
         draft: &[i64],
+        next_token: &mut dyn FnMut(&[f32], u64) -> i64,
     ) -> Result<(Vec<i64>, i64)> {
         let k = draft.len();
         let pos = self.cur_len;
@@ -452,18 +459,19 @@ impl DecodeState {
         );
         let vocab = logits.len() / (geom.chunk * 4);
 
-        // Greedy acceptance: the first correct token is argmax(prev_row); accept
-        // draft[i] while it equals the model's own token, then advance to the
-        // model's token at the next position. `bonus` ends as the model's token
-        // at the divergence point (or after the whole draft).
-        let mut bonus = argmax(prev_row) as i64;
+        // Acceptance under the caller's rule: the model's token at position `pos`
+        // is next_token(prev_row, pos); accept draft[i] while it equals the
+        // model's token, then advance to the model's token at the next position
+        // (from this pass's logit row for that draft position). `bonus` ends as
+        // the model's token at the divergence point (or after the whole draft).
+        let mut bonus = next_token(prev_row, pos as u64);
         let mut accepted = 0usize;
         while accepted < k {
             if draft[accepted] != bonus {
                 break;
             }
             let next = le_f32_vec(&logits[accepted * vocab * 4..(accepted + 1) * vocab * 4]);
-            bonus = argmax(&next) as i64;
+            bonus = next_token(&next, (pos + accepted + 1) as u64);
             accepted += 1;
         }
 
@@ -506,22 +514,6 @@ fn le_f32_vec(bytes: &[u8]) -> Vec<f32> {
         .chunks_exact(4)
         .map(|c| f32::from_le_bytes(c.try_into().unwrap()))
         .collect()
-}
-
-/// Greedy argmax over a logit row — the FIRST maximal index (strict `>`), byte
-/// for byte the rule the sampler uses (`commands::generate::argmax`), so the
-/// token a speculative pass accepts is exactly the one a single greedy step
-/// would pick, even where the logits tie.
-fn argmax(row: &[f32]) -> usize {
-    let mut best = 0usize;
-    let mut best_v = f32::NEG_INFINITY;
-    for (i, &v) in row.iter().enumerate() {
-        if v > best_v {
-            best_v = v;
-            best = i;
-        }
-    }
-    best
 }
 
 /// A generation session over the decode plan — generic over the
@@ -641,23 +633,26 @@ impl<S: LmSession> DecodeSession<S> {
     }
 
     /// One **speculative-decode** batch (row `speculative-decode`): verify
-    /// `draft` in one `M = draft.len()` pass and greedily accept the longest
-    /// prefix the model itself would produce, advancing the session by the
-    /// accepted count and splicing their K/V from the same pass. `prev_row` is
-    /// the logits after the currently-realized sequence. Returns
+    /// `draft` in one `M = draft.len()` pass and accept the longest prefix the
+    /// model itself would produce under `next_token`, advancing the session by
+    /// the accepted count and splicing their K/V from the same pass. `prev_row`
+    /// is the logits after the currently-realized sequence; `next_token(logits,
+    /// position)` is the caller's own token rule (argmax, or a per-position
+    /// sample), applied identically here and on the plain step. Returns
     /// `(accepted, bonus)`; the caller commits `bonus` with `step` to advance
     /// past it and obtain the next `prev_row`. Output-identical to stepping the
-    /// accepted tokens one at a time — a batched shortcut, never a change in
-    /// meaning.
+    /// accepted tokens one at a time under the same rule — a batched shortcut,
+    /// never a change in meaning (greedy OR sampled).
     pub fn draft_verify(
         &mut self,
         verify_runner: &mut S,
         prev_row: &[f32],
         draft: &[i64],
+        next_token: &mut dyn FnMut(&[f32], u64) -> i64,
     ) -> Result<(Vec<i64>, i64)> {
         let geom = self.verify_geometry(verify_runner, draft.len())?;
         self.state
-            .draft_verify(verify_runner, geom, prev_row, draft)
+            .draft_verify(verify_runner, geom, prev_row, draft, next_token)
     }
 
     /// Discover and validate a verify runner's geometry: it must share this

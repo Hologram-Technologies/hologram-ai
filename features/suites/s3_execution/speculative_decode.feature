@@ -7,17 +7,26 @@ Feature: Speculative decode batches a drafted continuation without changing the 
   tokens that followed the current suffix's most recent earlier occurrence, a
   zero-weight lookup — and VERIFIED in one M = K pass whose head emits logits at
   every drafted position. Only the longest prefix the model would ITSELF
-  greedily produce is accepted; its K/V is spliced from that same pass and one
-  correcting bonus token is committed. So the greedy completion is byte-identical
-  to single-position decode — nothing unverified is ever emitted — while a
-  recurring stretch commits several tokens per two passes, dropping the
-  forward-pass count below the token count. No recurrence is a plain step, never
-  worse. Validated against the plain step-decode oracle over the fixture, never a
-  canonical constant.
+  produce under the SAMPLER is accepted; its K/V is spliced from that same pass
+  and one correcting bonus token is committed. The accept rule is the caller's
+  own next-token rule — greedy argmax, or a per-ABSOLUTE-position sample — the
+  same rule plain decode applies. Because that rule is a pure function of
+  (logits, position), not of the decode PATH, the completion is byte-identical
+  to single-position decode AT ANY TEMPERATURE, not only greedy: nothing
+  unverified is ever emitted, and a sampled run reproduces plain sampled decode
+  token-for-token given the same seed. A recurring stretch still commits several
+  tokens per two passes, dropping the forward-pass count below the token count.
+  No recurrence is a plain step, never worse. Validated against the plain
+  step-decode oracle over the fixture, never a canonical constant.
 
   Scenario: speculative decode reproduces plain step decode byte for byte
     Given a decode session and a verify runner over the staged fixture with a bucket of 64 rows
     When the fixture is decoded once by plain steps and once by speculative decode
+    Then both runs emit the identical tokens
+
+  Scenario: sampled speculative decode reproduces plain sampled decode byte for byte
+    Given a decode session and a verify runner over the staged fixture with a bucket of 64 rows
+    When the fixture is decoded once by plain sampled steps and once by speculative sampled decode at temperature 0.8
     Then both runs emit the identical tokens
 
   Scenario: a recurring stretch commits in fewer forward passes than tokens

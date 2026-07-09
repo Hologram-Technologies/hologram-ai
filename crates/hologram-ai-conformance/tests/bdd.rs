@@ -4350,6 +4350,54 @@ async fn when_spec_vs_plain(w: &mut BddWorld) {
     w.spec_completions = Some((plain_text, spec_text));
 }
 
+#[when(
+    expr = "the fixture is decoded once by plain sampled steps and once by speculative sampled decode at temperature {float}"
+)]
+async fn when_spec_vs_plain_sampled(w: &mut BddWorld, temperature: f64) {
+    use hologram_ai::commands::generate::{
+        generate_stream_decode, generate_stream_speculative, GenConfig,
+    };
+    let (store, bucket) = w.spec_fixture.as_ref().expect("the speculative fixture");
+    // temperature > 0 with a fixed seed + a non-degenerate top-k window: the two
+    // paths sample per ABSOLUTE position, so they must draw the identical token
+    // at every position — the sampled analog of the greedy byte-identity.
+    let cfg = GenConfig {
+        max_tokens: Some(SPEC_MAX_TOKENS),
+        temperature: temperature as f32,
+        top_k: Some(8),
+        seed: 0xC0FF_EE12_3456_789A,
+        ..Default::default()
+    };
+    let prompt = "1";
+
+    let mut plain = spec_decode_session(&store.path, *bucket as u64);
+    let mut sink = Vec::new();
+    let plain_text = generate_stream_decode(&mut plain, &DecimalTok, prompt, &cfg, &mut sink)
+        .expect("plain sampled decode completes");
+
+    let mut spec = spec_decode_session(&store.path, *bucket as u64);
+    let mut verify = HoloRunner::from_bytes(verify_archive(
+        &store.path,
+        *bucket as u64,
+        SPEC_DRAFT as u64,
+    ))
+    .expect("verify archive loads");
+    let mut sink = Vec::new();
+    let spec_text = generate_stream_speculative(
+        &mut spec,
+        &mut verify,
+        &DecimalTok,
+        prompt,
+        &cfg,
+        SPEC_NGRAM,
+        SPEC_DRAFT,
+        &mut sink,
+    )
+    .expect("speculative sampled decode completes");
+
+    w.spec_completions = Some((plain_text, spec_text));
+}
+
 #[then("both runs emit the identical tokens")]
 async fn then_spec_identical(w: &mut BddWorld) {
     let (plain, spec) = w.spec_completions.as_ref().expect("both decode runs ran");

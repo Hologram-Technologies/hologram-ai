@@ -707,9 +707,11 @@ export async function generate(opts: GenerateOpts): Promise<number> {
     eos: opts.eos,
   };
   // Speculative decode (row `speculative-decode`): opt-in via the
-  // `hologram_speculative` knob = draft width K (>= 2). Greedy only, so it takes
-  // effect at temperature 0; a stale/absent verify pipeline falls back to plain
-  // decode. Off by default — the decode plan is unchanged unless the knob is set.
+  // `hologram_speculative` knob = draft width K (>= 2). Works at ANY temperature
+  // (the accept rule samples per absolute position — byte-identical to plain
+  // decode at that temperature); a stale/absent verify pipeline falls back to
+  // plain decode. Off by default — the verify pipeline costs residency and
+  // prompt-lookup drafting only speeds up repetitive text, so it is a knob.
   const specKnob = Number(localStorage.getItem("hologram_speculative") ?? "");
   if (Number.isFinite(specKnob) && specKnob >= 2) {
     genOpts.speculative_draft = Math.floor(specKnob);

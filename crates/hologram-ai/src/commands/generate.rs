@@ -28,7 +28,7 @@
 
 use std::io::Write;
 
-use anyhow::{bail, ensure, Context, Result};
+use anyhow::{bail, Context, Result};
 use hologram_ai_tokenizer::Tokenizer;
 
 use crate::decode::DecodeSession;
@@ -266,6 +266,34 @@ fn next_unit(state: &mut u64) -> f64 {
     (z >> 11) as f64 / (1u64 << 53) as f64
 }
 
+/// A per-absolute-position RNG state (SplitMix64 mixing the seed and position).
+/// The sampler's draw depends only on `(seed, position)`, NEVER on the decode
+/// PATH — so plain and speculative sampled decode draw the identical token at
+/// every position (the sampled byte-identity witness), and a run reproduces
+/// regardless of how many tokens each pass batched.
+fn position_rng(seed: u64, position: u64) -> u64 {
+    let mut z = seed ^ position.wrapping_mul(0x9E3779B97F4A7C15);
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58476D1CE4E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D049BB133111EB);
+    z ^ (z >> 31)
+}
+
+/// [`sample`] seeded by the token's ABSOLUTE position (via [`position_rng`]).
+/// Greedy (`temperature <= 0`) is argmax and ignores the seed; sampling draws
+/// from the per-position stream, so the token at a position is a pure function
+/// of `(logits, seed, position)` — path-independent, which is what lets
+/// speculative decode reproduce plain sampled decode exactly.
+fn sample_at(
+    logits: &[f32],
+    temperature: f32,
+    top_k: Option<usize>,
+    seed: u64,
+    position: u64,
+) -> u32 {
+    let mut rng = position_rng(seed, position);
+    sample(logits, temperature, top_k, &mut rng)
+}
+
 /// Temperature + optional top-k sampling over a logit row.
 fn sample(logits: &[f32], temperature: f32, top_k: Option<usize>, rng: &mut u64) -> u32 {
     if temperature <= 0.0 {
@@ -347,7 +375,6 @@ pub fn generate_stream(
     let mut sequence: Vec<u32> = prompt_tokens;
     let mut generated: Vec<u32> = Vec::new();
     let mut emitted = 0usize; // chars of `generated` text already streamed
-    let mut rng = cfg.seed;
 
     for _ in 0..budget {
         // The window is the running sequence — the budget keeps it within the
@@ -397,7 +424,9 @@ pub fn generate_stream(
         // the last real position of a whole-window head.
         let pos = if lm.single_position { 0 } else { cur_len - 1 };
         let row = &logits[pos * lm.vocab..(pos + 1) * lm.vocab];
-        let next = sample(row, cfg.temperature, cfg.top_k, &mut rng);
+        // Position-indexed sampling (see `sample_at`): the draw is a function of
+        // the absolute position, not the running RNG stream.
+        let next = sample_at(row, cfg.temperature, cfg.top_k, cfg.seed, cur_len as u64);
 
         if next == eos {
             break;
@@ -485,10 +514,18 @@ pub fn generate_stream_decode<S: LmSession>(
     let budget = cfg.max_tokens.map_or(remaining, |n| n.min(remaining));
     let mut generated: Vec<u32> = Vec::new();
     let mut emitted = 0usize;
-    let mut rng = cfg.seed;
 
     for step in 0..budget {
-        let next = sample(&row, cfg.temperature, cfg.top_k, &mut rng);
+        // Position-indexed sampling: the token at this absolute position is a
+        // pure function of (logits, seed, position) — the same law speculative
+        // decode samples by, so the two paths agree token-for-token.
+        let next = sample_at(
+            &row,
+            cfg.temperature,
+            cfg.top_k,
+            cfg.seed,
+            session.realized_len() as u64,
+        );
         if next == eos {
             break;
         }
@@ -539,13 +576,16 @@ pub fn generate_stream_speculative<S: LmSession>(
     max_draft: usize,
     out: &mut dyn Write,
 ) -> Result<String> {
-    ensure!(
-        cfg.temperature <= 0.0,
-        "speculative decode is greedy (temperature 0); got {}",
-        cfg.temperature
-    );
     let eos = cfg.eos.unwrap_or_else(|| tokenizer.eos_token_id());
     let max_window = session.context_len() as usize;
+    // The token rule, shared by the draft-verify acceptance and the plain-step
+    // fallback: greedy argmax, or a per-position sample. Because it is a pure
+    // function of (logits, absolute position), speculative and plain decode
+    // draw the identical token at every position — the batched shortcut is
+    // byte-identical at ANY temperature, not just greedy.
+    let mut next_token = |logits: &[f32], pos: u64| {
+        sample_at(logits, cfg.temperature, cfg.top_k, cfg.seed, pos) as i64
+    };
 
     let prompt_tokens = tokenizer.encode(prompt);
     if prompt_tokens.is_empty() {
@@ -620,14 +660,15 @@ pub fn generate_stream_speculative<S: LmSession>(
         };
         match draft.is_empty() {
             true => {
-                // No recurrence (or speculation retired): a plain step.
-                let next = argmax(&row) as i64;
+                // No recurrence (or speculation retired): a plain step under the
+                // SAME token rule the verify path uses, at this absolute position.
+                let next = next_token(&row, session.realized_len() as u64);
                 if emit(next, &mut generated, &mut emitted) {
                     break;
                 }
                 row = session.step(next).context("decode step failed")?;
             }
-            false => match session.draft_verify(verify_runner, &row, &draft) {
+            false => match session.draft_verify(verify_runner, &row, &draft, &mut next_token) {
                 Ok((accepted, bonus)) => {
                     let mut stop = false;
                     for t in accepted.into_iter().chain(std::iter::once(bonus)) {

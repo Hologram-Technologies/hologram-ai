@@ -396,7 +396,9 @@ export interface GenOpts {
   seed?: number;
   /** Speculative decode (row `speculative-decode`): draft width K (also the
    * verify chunk). `>= 2` drafts the next tokens from the realized sequence's
-   * recurrence and verifies them in one M=K pass; greedy only (temperature 0). */
+   * recurrence and verifies them in one M=K pass. Works at ANY temperature —
+   * the accept rule samples per absolute position, so the output is
+   * byte-identical to plain decode at that temperature. */
   speculative_draft?: number;
   /** The drafter's max n-gram context length (default 3 when speculating). */
   speculative_ngram?: number;
