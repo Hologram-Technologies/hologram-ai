@@ -1468,22 +1468,19 @@ impl DecodeChatSession {
 
         let session = self.session.as_mut().expect("session just ensured");
 
-        // Chunked-prefill seeder (row `chunked-prefill`): a prompt suffix
-        // seeds in ceil(n/chunk) passes instead of n — one weight stream per
-        // chunk. Installed lazily (growth drops it), cached per bucket in
-        // the derived store; a failed build degrades prefill to steps — a
-        // projection, never a refusal.
-        // The chunked-prefill seeder amortizes the WEIGHT STREAM across the
-        // prompt — its whole benefit. But when the decode plan's weights fit
-        // residency, stepping the prompt streams them ONCE (they stay resident
-        // for generation too), so the seeder's separate full stage
-        // materialization is pure redundant TTFT overhead at the first token.
-        // Install it ONLY in the streaming regime (weights don't fit); the
-        // over-estimate makes "fits" sound, so a large model that genuinely
-        // needs the amortization always keeps its seeder. Parametric: the
-        // model's own resident footprint against its own address ceiling.
-        if session.seeder_chunk().is_none() && !self.growable.borrow().decode_weights_fit_resident()
-        {
+        // Chunked-prefill seeder (row `chunked-prefill`): the prompt suffix
+        // seeds in ceil(n/chunk) BATCHED passes instead of n single-position
+        // steps. The dominant benefit is compute, not the weight stream — an
+        // M=chunk forward processes many positions in ~one pass, so prefill is
+        // ~10x faster than stepping even when the weights are fully resident
+        // (measured: 24-token prefill 10.8s stepping vs 1.1s seeded, INCLUDING
+        // the seeder's own materialization — `tests/decode_perf.rs`). So install
+        // it whenever the model is chunkable, NOT gated on residency; the
+        // seeder's contention-reclaim (see `feed`) frees its residency after
+        // prefill when it cannot coexist with the step runner. Installed lazily
+        // (growth drops it), cached per bucket in the derived store; a failed
+        // build degrades prefill to steps — a projection, never a refusal.
+        if session.seeder_chunk().is_none() {
             // Parametric prefill chunk: the system's own geometric window base
             // (`geometric_window(1, context)` = min(MIN_WINDOW, context)),
             // capped by the bucket (the seeder's past span) — cache-friendly

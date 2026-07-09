@@ -88,10 +88,6 @@ struct Outcome {
     stage_count: usize,
     tokens: Vec<i64>,
     final_logits: Vec<f32>,
-    /// Whether the int8 decode plan's weights fit the residency budget — the
-    /// signal the browser uses to SKIP the redundant chunked-prefill seeder
-    /// (stepping streams the resident weights once).
-    fits_resident: bool,
 }
 
 /// Build a footprint-bounded staged decode session for `scale` — the
@@ -183,7 +179,6 @@ fn drive(scale: &FamilyScale, quantize_head: bool) -> Outcome {
     session.set_residency_budget(1 << 30); // 1 GiB — ample for the int8 model
     session.set_bound_by_footprint(true);
     session.set_quant_map(quant);
-    let fits_resident = session.decode_weights_fit_resident();
 
     let ctx = scale.dims.max_position_embeddings as usize;
     let want = PROMPT.len();
@@ -224,7 +219,6 @@ fn drive(scale: &FamilyScale, quantize_head: bool) -> Outcome {
         stage_count,
         tokens,
         final_logits: row,
-        fits_resident,
     }
 }
 
@@ -263,15 +257,6 @@ fn quantized_head_stays_resident_across_decode_steps() {
                 .iter()
                 .all(|&t| (t as u64) < scale.dims.vocab_size),
             "{arch}: a generated token is out of vocabulary range"
-        );
-        // The int8 model fits the (generous) budget, so the browser correctly
-        // SKIPS the redundant chunked-prefill seeder: stepping the prompt on this
-        // resident step runner streams the weights once, and no separate full
-        // stage materialization is paid at the first token.
-        assert!(
-            out.fits_resident,
-            "{arch}: the int8 decode plan must be classified resident so the redundant \
-             prefill seeder is skipped"
         );
 
         // Reproducible run to run (a broken residency/splice shows as drift).
@@ -314,82 +299,6 @@ fn int8_head_logits_track_the_float_head() {
         );
         eprintln!("[quantized-head] {arch}: int8-vs-float head logits cosine = {sim:.5}");
     }
-}
-
-/// The prefill-seeder gate is a sound residency test: the model's own resident
-/// weight estimate against its own budget. Quantization SHRINKS that estimate
-/// (int8 + scales vs bf16), moving a model into the resident regime where the
-/// seeder's separate materialization is redundant and correctly skipped; and
-/// the verdict flips with the budget — a streaming-regime (weights exceed the
-/// ceiling) model always keeps its seeder. Reads only shapes/dtypes + the quant
-/// map (no κ-store reads, no decode), so it needs no crystallized artifacts.
-#[test]
-fn seeder_gate_tracks_the_resident_weight_estimate() {
-    let scale = FamilyScale::new(QWEN2, chunked_head_dims());
-    let (keys, shapes): (Vec<String>, Vec<Vec<u64>>) = scale.manifest().into_iter().unzip();
-    let dtypes = vec![DType::BF16; keys.len()];
-    // Synthetic κs: the gate never resolves them (it reads shapes/dtypes + map).
-    let kappas: Vec<String> = keys.iter().map(|k| format!("kappa-{k}")).collect();
-    let one = NonZeroU64::new(1).expect("1 is non-zero");
-    let store_dir = unique_store_dir("gate");
-    std::fs::create_dir_all(&store_dir).expect("temp dir");
-
-    let build = || {
-        GrowableStagedSession::new(
-            scale.config_json(),
-            keys.clone(),
-            kappas.clone(),
-            shapes.clone(),
-            dtypes.clone(),
-            None,
-            one,
-            Box::new(DirKappaStore::new(&store_dir)),
-        )
-        .expect("growable session")
-    };
-
-    // Wide (bf16) estimate.
-    let mut wide = build();
-    wide.set_bound_by_footprint(true);
-    let est_wide = wide.estimated_resident_weight_bytes();
-    assert!(est_wide > 0, "the estimate must be positive");
-
-    // int8 estimate (synthetic quant map — the gate reads only (out,in) from it):
-    // every rank-2 projection retired to int8.
-    let mut quant = QuantMap::new();
-    for (i, (k, shape)) in keys.iter().zip(&shapes).enumerate() {
-        if shape.len() == 2 && k != "model.embed_tokens.weight" {
-            quant.insert(kappas[i].clone(), (format!("art-{i}"), shape[0], shape[1]));
-        }
-    }
-    let mut int8 = build();
-    int8.set_bound_by_footprint(true);
-    int8.set_quant_map(quant);
-    let est_int8 = int8.estimated_resident_weight_bytes();
-    assert!(
-        est_int8 < est_wide,
-        "quantization must shrink the resident estimate (int8 {est_int8} !< bf16 {est_wide}) — \
-         that shrink is what moves a model into the seeder-skip resident regime"
-    );
-
-    // The verdict flips with the budget (monotone): fits above, streams below.
-    int8.set_residency_budget(est_int8.saturating_mul(2));
-    assert!(
-        int8.decode_weights_fit_resident(),
-        "a budget above the weights → resident → seeder skipped"
-    );
-    int8.set_residency_budget(est_int8 / 2);
-    assert!(
-        !int8.decode_weights_fit_resident(),
-        "a budget below the weights → streaming → seeder installed (never mis-skipped)"
-    );
-    // Off by default without the wasm hard ceiling: not a residency question.
-    int8.set_bound_by_footprint(false);
-    int8.set_residency_budget(est_int8.saturating_mul(2));
-    assert!(
-        !int8.decode_weights_fit_resident(),
-        "without a hard address ceiling the seeder decision is not a residency question"
-    );
 }
 
 /// The VERIFY (speculative-decode, all-positions) head joins the int8 tier under

@@ -1457,58 +1457,6 @@ impl GrowableStagedSession {
         self.residency.borrow().peak
     }
 
-    /// An UPPER bound on the resident WEIGHT bytes of this session's decode
-    /// plan: every crystallized int8 artifact (projections AND head chunks) at
-    /// its packed size (`out·in` int8 + `4·out` f32 scales), plus every manifest
-    /// weight NOT wholly retired onto an artifact — its κ absent from the quant
-    /// map's whole-tensor keys — at its wide size. A tied head's embedding stays
-    /// wide for the Gather (counted wide) and also has chunk artifacts (counted
-    /// packed); an untied head consumed only by chunks is conservatively
-    /// double-counted. The bound therefore only ever OVER-estimates, so a "fits"
-    /// verdict from it is sound. Weight-only (K/V and activations live in the
-    /// runtime reserve), hence bucket-independent.
-    pub fn estimated_resident_weight_bytes(&self) -> u64 {
-        let mut total = 0u64;
-        let mut retired: std::collections::HashSet<&str> = std::collections::HashSet::new();
-        if let Some(quant) = &self.quant {
-            for (key, (_, out, inf)) in quant.iter() {
-                // Packed int8 artifact: q_i8(out·in) ‖ scales_f32(4·out).
-                total = total.saturating_add(
-                    out.saturating_mul(*inf)
-                        .saturating_add(out.saturating_mul(4)),
-                );
-                // A whole-tensor key (no `@offset+len`) retires its κ's wide form.
-                if !key.contains('@') {
-                    retired.insert(key.as_str());
-                }
-            }
-        }
-        for ((kappa, shape), dtype) in self.kappas.iter().zip(&self.shapes).zip(&self.dtypes) {
-            if retired.contains(kappa.as_str()) {
-                continue; // wholly quantized — the wide form never materializes
-            }
-            let elems: u64 = shape.iter().product();
-            total =
-                total.saturating_add(elems.saturating_mul(dtype.byte_size().unwrap_or(2) as u64));
-        }
-        total
-    }
-
-    /// Whether the decode plan's resident weight set fits the residency budget —
-    /// so stepping the prompt streams the weights ONCE (they stay resident) and a
-    /// separate chunked-prefill seeder's own full stage materialization is
-    /// redundant overhead at the first token. Uses the sound over-estimate
-    /// [`Self::estimated_resident_weight_bytes`], so a `true` here never
-    /// mis-skips a seeder that a streaming-regime (weights-don't-fit) model
-    /// genuinely needs. Only meaningful under [`Self::set_bound_by_footprint`]
-    /// with a positive budget (the wasm address ceiling); elsewhere returns
-    /// `false` (the seeder decision is not a residency question).
-    pub fn decode_weights_fit_resident(&self) -> bool {
-        self.bound_by_footprint
-            && self.residency_budget > 0
-            && self.estimated_resident_weight_bytes() <= self.residency_budget
-    }
-
     /// Install a per-stage observer forwarded into every regrown runner:
     /// `(stage, stage_count, weight_bytes)` after each stage materializes.
     pub fn set_stage_observer(&mut self, f: Box<dyn FnMut(usize, usize, u64)>) {
