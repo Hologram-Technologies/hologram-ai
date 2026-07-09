@@ -52,6 +52,45 @@ pub trait Drafter {
     fn commit(&mut self, accepted: usize, bonus: i64) -> Result<()>;
 }
 
+/// Why a TARGET↔DRAFT pairing is refused, or `None` when the draft is
+/// compatible (row `speculative-draft-pairing`). The draft consumes the
+/// TARGET's token ids and carries the target's realized sequence, so it must
+/// cover BOTH the target's vocabulary (every target id indexes the draft's
+/// embedding) and its context (a shorter-context draft would abort its own
+/// forward the moment the sequence crossed its window). A refusal is not an
+/// error — the caller falls back to prompt-lookup — and because the output is
+/// the target's regardless of the drafter, this policy only avoids an
+/// out-of-range Gather or a mid-turn window abort, never affects correctness.
+///
+/// Pure and parametric (no model identity, no size constant): the single source
+/// of the pairing rule, called by the browser's `attach_draft` and tested here.
+pub fn draft_pairing_refusal(
+    target_vocab: u64,
+    target_context: u64,
+    draft_vocab: u64,
+    draft_context: u64,
+) -> Option<String> {
+    if target_vocab == 0 {
+        return Some(
+            "the target declares no vocabulary size — the draft's coverage cannot be verified"
+                .to_string(),
+        );
+    }
+    if draft_vocab < target_vocab {
+        return Some(format!(
+            "draft vocabulary ({draft_vocab}) does not cover the target's ({target_vocab}) — the \
+             draft would index its embedding out of range"
+        ));
+    }
+    if draft_context < target_context {
+        return Some(format!(
+            "draft context ({draft_context}) is shorter than the target's ({target_context}) — \
+             the target's realized sequence would exceed the draft's window and abort its forward"
+        ));
+    }
+    None
+}
+
 /// The zero-weight prompt-lookup drafter (the shipped default): stateless — it
 /// reads the realized sequence and needs no prefill or commit.
 pub struct PromptLookupDrafter {
@@ -234,5 +273,50 @@ mod tests {
         // The trailing `42` never occurred earlier → no draft, fall back to a step.
         let seq = [1, 2, 3, 4, 42];
         assert!(prompt_lookup_draft(&seq, 3, 4).is_empty());
+    }
+
+    // ── draft-pairing compatibility policy (row `speculative-draft-pairing`) ──
+
+    #[test]
+    fn an_equal_or_larger_draft_is_compatible() {
+        // Same-family self-pairing: identical vocab + context — the guaranteed
+        // case the browser witness uses.
+        assert!(draft_pairing_refusal(512, 128, 512, 128).is_none());
+        // A draft that COVERS the target (larger vocab, longer context) is fine —
+        // every target id indexes the draft and the sequence never overflows it.
+        assert!(draft_pairing_refusal(512, 128, 1024, 4096).is_none());
+    }
+
+    #[test]
+    fn a_narrower_vocabulary_is_refused() {
+        // A target id ≥ the draft's vocab would index the draft's embedding out
+        // of range — refuse, naming both sizes.
+        let reason = draft_pairing_refusal(512, 128, 400, 128).expect("refused");
+        assert!(reason.contains("400") && reason.contains("512"), "{reason}");
+        assert!(reason.contains("vocabulary"), "{reason}");
+    }
+
+    #[test]
+    fn a_shorter_context_is_refused() {
+        // The target's realized sequence grows to 128; a 64-context draft would
+        // abort its forward when it crossed 64 — refuse before it can.
+        let reason = draft_pairing_refusal(512, 128, 512, 64).expect("refused");
+        assert!(reason.contains("64") && reason.contains("128"), "{reason}");
+        assert!(reason.contains("context"), "{reason}");
+    }
+
+    #[test]
+    fn an_unknown_target_vocabulary_is_refused() {
+        // Vocab 0 = the config declared none; coverage cannot be verified, so
+        // refuse rather than risk an out-of-range draft Gather.
+        assert!(draft_pairing_refusal(0, 128, 512, 128).is_some());
+    }
+
+    #[test]
+    fn the_vocabulary_check_precedes_the_context_check() {
+        // Both incompatible: the message names the vocabulary (the first gate),
+        // deterministically — a stable refusal reason, never order-dependent.
+        let reason = draft_pairing_refusal(512, 128, 400, 64).expect("refused");
+        assert!(reason.contains("vocabulary"), "{reason}");
     }
 }

@@ -704,6 +704,12 @@ pub fn generate_stream_speculative<S: LmSession>(
                     // misconfiguration is visible rather than a silent slowdown.
                     tracing::warn!("speculative verify failed, decoding plainly: {e:#}");
                     speculate = false;
+                    // The retired verify runner is never used again this turn;
+                    // free its resident stages so ~a model's worth of weights
+                    // does not linger against the address ceiling for the rest of
+                    // the (now plain) decode. No-op on a 64-bit host / unbounded
+                    // budget, where nothing was gated on footprint.
+                    verify_runner.evict_resident();
                 }
             },
         }

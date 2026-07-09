@@ -1471,26 +1471,17 @@ impl DecodeChatSession {
     ///    lazily on first `generate`), so the pair charges ONE combined footprint
     ///    and never over-commits the wasm 4 GiB ceiling.
     pub fn attach_draft(&mut self, draft: DecodeChatSession) -> Result<(), JsValue> {
-        if self.vocab_size == 0 || draft.vocab_size < self.vocab_size {
+        // The pairing compatibility policy (vocabulary + context) lives in the
+        // native crate as a pure, tested function — the ONE source of the rule.
+        // A refusal degrades to prompt-lookup; it never affects correctness.
+        if let Some(reason) = hologram_ai::speculative::draft_pairing_refusal(
+            self.vocab_size,
+            self.context_length,
+            draft.vocab_size,
+            draft.context_length,
+        ) {
             return Err(err(format!(
-                "draft model vocabulary ({}) does not cover the target's ({}) — refusing the \
-                 pairing (the draft would index its embedding out of range); drafting by \
-                 prompt-lookup instead",
-                draft.vocab_size, self.vocab_size
-            )));
-        }
-        // The draft carries the SAME realized sequence as the target, which grows
-        // to the target's context. A draft with a SHORTER context would abort its
-        // own forward the moment the sequence crossed its window (mid-prefill for a
-        // long prompt, or mid-generation) — a hard turn failure, not a slow one. So
-        // refuse a draft that cannot keep up; prompt-lookup drafts instead. (A
-        // guaranteed-compatible same-family draft shares the target's context.)
-        if draft.context_length < self.context_length {
-            return Err(err(format!(
-                "draft model context ({}) is shorter than the target's ({}) — refusing the \
-                 pairing (the target's realized sequence would exceed the draft's window and \
-                 abort its forward); drafting by prompt-lookup instead",
-                draft.context_length, self.context_length
+                "refusing the draft pairing: {reason}; drafting by prompt-lookup instead"
             )));
         }
         // Share ONE residency ledger across the pair before either builds a

@@ -130,3 +130,75 @@ fn growth_frees_the_outgoing_runner_before_rebuilding() {
         recorded.len()
     );
 }
+
+/// Every growth — not just the first — frees ALL auxiliary residency: the
+/// outgoing step runner AND the prefill seeder, across MULTIPLE consecutive
+/// growths (64 → 128 → 256). This exercises the seeder-drop path (a warm turn's
+/// step runner and seeder are both resident until growth) and proves the handoff
+/// holds at every bucket transition, not only the first.
+#[test]
+fn every_growth_frees_the_step_runner_and_the_seeder() {
+    // One layer keeps ~130 single-position steps fast while still staging.
+    let scale = FamilyScale::llama(Dims::MODEST.with_layers(1));
+    let ctx = scale.dims.max_position_embeddings as usize;
+    let session = Rc::new(RefCell::new(build_session(&scale)));
+    let at_rebuild: Rc<RefCell<Vec<u64>>> = Rc::new(RefCell::new(Vec::new()));
+
+    let step = session
+        .borrow_mut()
+        .decode_runner_for(1)
+        .expect("initial step runner");
+    let g = Rc::clone(&session);
+    let rec = Rc::clone(&at_rebuild);
+    let mut decode = DecodeSession::new(step, scale.dims.rope_theta as f32, ctx as u64)
+        .expect("decode session")
+        .with_rebuild(Box::new(move |bucket| {
+            rec.borrow_mut().push(g.borrow().resident_footprint());
+            g.borrow_mut().decode_runner_for(bucket as usize)
+        }));
+
+    // Install a prefill SEEDER (chunk > 1) so BOTH a step runner and a seeder are
+    // resident before the first growth — growth must free both.
+    let bucket0 = decode.geometry().bucket;
+    let chunk = (hologram_ai::engine::geometric_window(1, ctx) as u64).min(bucket0 as u64);
+    assert!(
+        chunk >= 2,
+        "the seeder chunk must batch more than one position"
+    );
+    let seeder = session
+        .borrow_mut()
+        .chunk_runner_for(1, chunk)
+        .expect("prefill seeder");
+    decode.set_seeder(seeder).expect("install the seeder");
+
+    decode
+        .feed(&[1, 2, 3])
+        .expect("prefill materializes step + seeder");
+    assert!(
+        session.borrow().resident_footprint() > 0,
+        "step runner and seeder must be resident before growth"
+    );
+
+    // Step past TWO bucket boundaries (64 → 128 → 256).
+    for t in 0..(bucket0 as i64 * 2 + 8) {
+        decode.step((t % 7) + 1).expect("decode step");
+    }
+
+    let recorded = at_rebuild.borrow();
+    assert!(
+        recorded.len() >= 2,
+        "expected at least two growths (64 → 128 → 256), saw {}",
+        recorded.len()
+    );
+    for (i, &footprint) in recorded.iter().enumerate() {
+        assert_eq!(
+            footprint, 0,
+            "growth #{i}: ALL auxiliary residency (step runner + seeder) must be freed before \
+             the wider bucket is compiled — {footprint} bytes still resident"
+        );
+    }
+    eprintln!(
+        "[growth-residency] {} growths with a seeder installed, footprint at rebuild always 0",
+        recorded.len()
+    );
+}
