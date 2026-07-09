@@ -51,6 +51,31 @@ pub fn geometric_window(want: usize, max_window: usize) -> usize {
     w.min(max_window.max(1))
 }
 
+/// The initial decode bucket for a fresh turn: the window that holds the prompt
+/// AND the generation the caller has DECLARED (`max_tokens`), so a turn whose
+/// length is known up front never regrows mid-way. A regrow re-materializes
+/// every stage (the wider bucket is a different compiled graph) — on a
+/// weight-heavy model that is the dominant cost of the turn — so paying for the
+/// declared span once, up front, is strictly better than paying for it again
+/// part-way through.
+///
+/// `generation_budget` is the caller's own bound (`0` when it declares none).
+/// With no bound the sequence may run to the model's context, and sizing for
+/// that would pin a context-sized K/V that no environment can hold at scale — so
+/// an unbounded turn simply starts at the prompt's window and climbs the
+/// geometric ladder, which is exactly what that ladder is for.
+///
+/// Purely a function of the caller's own numbers: prompt, declared budget, and
+/// the model's context. No constant, no assumption about how large any of them
+/// are — a 12-token prompt and a million-token prompt take the same path.
+pub fn decode_bucket_for_turn(
+    prompt_len: usize,
+    generation_budget: usize,
+    max_window: usize,
+) -> usize {
+    geometric_window(prompt_len.saturating_add(generation_budget), max_window)
+}
+
 /// One executable LM surface — the named ports plus the forward pass the
 /// generation loop drives. Two realizations:
 ///
@@ -304,5 +329,47 @@ mod tests {
         let p = Policy { max_window: 32 };
         assert_eq!(p.window_for(1), 32);
         assert_eq!(p.window_for(100), 32);
+    }
+
+    #[test]
+    fn a_declared_generation_budget_sizes_the_turn_up_front() {
+        // The bucket holds prompt + the caller's declared span, so a turn whose
+        // length is known never regrows mid-way.
+        assert_eq!(decode_bucket_for_turn(55, 8, 32768), 64); // 63 -> 64
+        assert_eq!(decode_bucket_for_turn(55, 20, 32768), 128); // 75 -> 128, no regrow
+        assert_eq!(decode_bucket_for_turn(1000, 512, 32768), 2048); // 1512 -> 2048
+    }
+
+    #[test]
+    fn an_undeclared_budget_starts_at_the_prompt_and_climbs_the_ladder() {
+        // No declared bound => the turn may run to the context; pinning a
+        // context-sized K/V is not an option at scale, so start at the prompt's
+        // window and let the geometric ladder grow -- its whole purpose.
+        assert_eq!(
+            decode_bucket_for_turn(55, 0, 32768),
+            geometric_window(55, 32768)
+        );
+        assert_eq!(decode_bucket_for_turn(55, 0, 32768), 64);
+        assert_eq!(decode_bucket_for_turn(1, 0, 128), 64);
+    }
+
+    #[test]
+    fn the_rule_is_scale_free() {
+        // Identical shape at every magnitude -- the same relation between prompt,
+        // declared budget, and context. No size is special.
+        let m: usize = 1 << 20; // a 1 M-token context
+        assert_eq!(decode_bucket_for_turn(600_000, 0, m), 1 << 20); // capped at context
+        assert_eq!(decode_bucket_for_turn(300_000, 1_000, m), 1 << 19);
+        assert_eq!(decode_bucket_for_turn(12, 4, m), 64); // MIN_WINDOW floor
+                                                          // Never exceeds the model's own context, at any magnitude.
+        for (p, b, c) in [
+            (1usize, 0usize, 32usize),
+            (10_000, 10_000, 4096),
+            (5, 1 << 40, m),
+        ] {
+            assert!(decode_bucket_for_turn(p, b, c) <= c.max(1));
+        }
+        // Saturating: an absurd declared budget cannot wrap.
+        assert!(decode_bucket_for_turn(usize::MAX, usize::MAX, m) <= m);
     }
 }

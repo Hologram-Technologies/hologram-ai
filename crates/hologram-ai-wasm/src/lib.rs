@@ -1514,16 +1514,26 @@ impl DecodeChatSession {
         let templated = apply_template(opts.prompt_template.as_deref(), prompt);
 
         if self.session.is_none() {
-            // First turn: size the bucket to the prompt up front — one
-            // compile instead of a geometric ladder of them. Later turns
-            // KEEP the session (its carried K/V is the retained prefix) and
-            // grow through the rebuild closure, which copies the rows.
-            let want = self
+            // First turn: size the bucket to the prompt AND the generation the
+            // caller DECLARED (`max_tokens`), so a turn of known length never
+            // regrows mid-way — a regrow re-materializes every stage, which on a
+            // weight-heavy model dominates the turn. An UNDECLARED budget could
+            // run to the context, and pinning a context-sized K/V is impossible
+            // at scale, so it starts at the prompt's window and climbs the
+            // geometric ladder. Later turns KEEP the session (its carried K/V is
+            // the retained prefix) and grow through the rebuild closure, which
+            // copies the rows.
+            let prompt_len = self
                 .tokenizer
                 .encode(&templated)
                 .len()
                 .max(1)
                 .min(self.context_length as usize);
+            let want = hologram_ai::engine::decode_bucket_for_turn(
+                prompt_len,
+                cfg.max_tokens.unwrap_or(0),
+                self.context_length as usize,
+            );
             let runner = self
                 .growable
                 .borrow_mut()
@@ -1553,12 +1563,17 @@ impl DecodeChatSession {
             if let Some(dg) = self.draft_growable.clone() {
                 let dctx = self.draft_context_length;
                 let dtheta = self.draft_rope_theta;
-                let dwant = self
+                let dprompt = self
                     .tokenizer
                     .encode(&templated)
                     .len()
                     .max(1)
                     .min(dctx.max(1) as usize);
+                let dwant = hologram_ai::engine::decode_bucket_for_turn(
+                    dprompt,
+                    cfg.max_tokens.unwrap_or(0),
+                    dctx.max(1) as usize,
+                );
                 let built = (|| -> anyhow::Result<
                     hologram_ai::decode::DecodeSession<hologram_ai::staged::StagedRunner<'static>>,
                 > {

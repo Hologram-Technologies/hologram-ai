@@ -202,3 +202,52 @@ fn every_growth_frees_the_step_runner_and_the_seeder() {
         recorded.len()
     );
 }
+
+/// A DECLARED generation budget sizes the first bucket for the WHOLE turn, so
+/// the turn never regrows mid-way — the full-stage re-materialization the
+/// deployed log paid for. Scale-free: the rule is the same relation between
+/// prompt, declared budget, and context at any magnitude (the numbers here are
+/// only small enough to run fast). An UNDECLARED budget keeps the geometric
+/// ladder — witnessed by the growth tests above, which start at the prompt's
+/// window and cross it.
+#[test]
+fn a_declared_generation_budget_never_regrows_mid_turn() {
+    const GEN_BUDGET: usize = 30;
+    let scale = FamilyScale::llama(Dims::MODEST.with_layers(1));
+    let ctx = scale.dims.max_position_embeddings as usize;
+    let session = Rc::new(RefCell::new(build_session(&scale)));
+    let grew = Rc::new(RefCell::new(false));
+
+    // The prompt ALONE would size a 64 bucket, which `GEN_BUDGET` more tokens
+    // would cross; declaring the budget sizes one 128 bucket for the whole turn.
+    let prompt: Vec<i64> = (0..60).map(|t| (t % 7) + 1).collect();
+    assert_eq!(hologram_ai::engine::geometric_window(prompt.len(), ctx), 64);
+    let want = hologram_ai::engine::decode_bucket_for_turn(prompt.len(), GEN_BUDGET, ctx);
+    assert_eq!(
+        want, 128,
+        "prompt + declared budget sizes one bucket up front"
+    );
+
+    let step = session
+        .borrow_mut()
+        .decode_runner_for(want)
+        .expect("budget-sized step runner");
+    let g = Rc::clone(&session);
+    let flag = Rc::clone(&grew);
+    let mut decode = DecodeSession::new(step, scale.dims.rope_theta as f32, ctx as u64)
+        .expect("decode session")
+        .with_rebuild(Box::new(move |bucket| {
+            *flag.borrow_mut() = true;
+            g.borrow_mut().decode_runner_for(bucket as usize)
+        }));
+
+    decode.feed(&prompt).expect("prefill");
+    for t in 0..GEN_BUDGET as i64 {
+        decode.step((t % 7) + 1).expect("decode step");
+    }
+    assert!(
+        !*grew.borrow(),
+        "a turn generating within its DECLARED budget must never regrow (no re-materialization)"
+    );
+    eprintln!("[growth-residency] declared budget {GEN_BUDGET} sized one {want} bucket; no regrow");
+}

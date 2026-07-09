@@ -19,7 +19,15 @@ Feature: The per-token pass computes one position
   compilation at once — the over-commit that otherwise aborts a large model's
   first growth with a bare `RuntimeError: unreachable`. Witnessed natively
   (`tests/decode_growth_residency.rs`): the resident footprint is zero at the
-  instant each wider bucket is built.
+  instant each wider bucket is built. A fresh turn also avoids the
+  regrow it can foresee: the initial bucket holds the prompt AND the generation
+  the caller DECLARED, so a turn of known length is sized once instead of
+  re-materializing every stage part-way through. An UNDECLARED budget may run to
+  the model's context, and pinning a context-sized K/V is impossible at scale, so
+  it starts at the prompt's window and climbs the ladder — which is what the
+  ladder is for. The rule is the caller's own numbers (prompt, declared budget,
+  context) and nothing else: a twelve-token prompt and a million-token prompt
+  take the identical path.
 
   Scenario: the decode plan matches the whole-window plan at every position
     Given a decode-step archive over the staged fixture with a bucket of 8 rows
