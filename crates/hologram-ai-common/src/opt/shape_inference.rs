@@ -82,16 +82,7 @@ fn infer_custom_output_shapes(
         }
 
         // Attention ops — output shape = [batch, seq, num_heads * head_dim]
-        AiOp::MultiHeadAttention {
-            num_heads: _,
-            head_dim: _,
-            ..
-        }
-        | AiOp::GroupedQueryAttention {
-            num_heads: _,
-            head_dim: _,
-            ..
-        } => {
+        AiOp::MultiHeadAttention { .. } | AiOp::GroupedQueryAttention { .. } => {
             // Output shape = same as Q input shape.
             // Q is [batch, num_heads, seq, head_dim] (heads_first) or
             // [batch, seq, num_heads, head_dim] (seq_first).

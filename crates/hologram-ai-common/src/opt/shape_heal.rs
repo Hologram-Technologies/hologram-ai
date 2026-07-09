@@ -289,11 +289,7 @@ fn heal_shape(
             // Sum the axis dimension across all inputs.
             let mut axis_sum: u64 = 0;
             for s in input_shapes {
-                if let Some(d) = s.get(norm_axis).and_then(|d| d.as_concrete()) {
-                    axis_sum += d;
-                } else {
-                    return None;
-                }
+                axis_sum += s.get(norm_axis).and_then(|d| d.as_concrete())?;
             }
             let mut shape = first.clone();
             shape[norm_axis] = DimExpr::Concrete(axis_sum);

@@ -1,0 +1,10 @@
+# The pre-push gate and CI must run the SAME compiler. `dtolnay/rust-toolchain@stable`
+# tracks whatever stable is on the day the runner boots, so a new clippy lint lands in
+# CI before any local gate can see it — 78718d1 and ff19ed3 both went red that way, on
+# lints the author's older stable did not yet emit. Pinning is the only way the gate
+# can honestly claim it ran what CI runs. Bump this deliberately, in its own commit,
+# with the gate green under the new toolchain.
+[toolchain]
+channel = "1.97.0"
+components = ["clippy", "rustfmt"]
+targets = ["wasm32-unknown-unknown", "thumbv7em-none-eabi"]

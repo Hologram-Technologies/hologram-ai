@@ -79,10 +79,7 @@ fn qwen2_post_concretize_residual_shapes() {
             let info = graph.tensor_info.get(&tid)?;
             let mut n = 1u64;
             for d in info.shape.iter() {
-                match d.as_concrete() {
-                    Some(v) => n = n.checked_mul(v)?,
-                    None => return None,
-                }
+                n = n.checked_mul(d.as_concrete()?)?;
             }
             Some(n)
         };
