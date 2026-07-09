@@ -566,7 +566,7 @@ feature = "features/suites/s4_application/speculative_journey.feature"
 
 [[row]]
 id = "speculative-draft-pairing"
-statement = "A catalogue-paired DRAFT model drives the browser drafter: the pairing is catalogue DATA (`draftModel`), downloading the target downloads the paired draft, and the worker builds it as a second decode session and `attach_draft`s it so speculative decode drafts from the paired model (`ModelDrafter`) instead of prompt-lookup. The pair shares ONE residency ledger (no over-commit of the wasm ceiling) and the draft's vocabulary must cover the target's (else the pairing is refused and prompt-lookup drafts) — the output is the target's byte for byte regardless (witnessed natively), so the pairing changes acceptance, never meaning."
+statement = "A catalogue-paired DRAFT model drives the browser drafter: the pairing is catalogue DATA (`draftModel`), downloading the target downloads the paired draft, and the worker builds it as a second decode session and `attach_draft`s it so speculative decode drafts from the paired model (`ModelDrafter`) instead of prompt-lookup. The pair shares ONE residency ledger (no over-commit of the wasm ceiling) and the draft must cover the target's vocabulary AND context (else the pairing is refused and prompt-lookup drafts) — the output is the target's byte for byte regardless (witnessed natively), so the pairing changes acceptance, never meaning."
 stage = "S4"
 status = "build"
 oracles = ["journey-reference"]

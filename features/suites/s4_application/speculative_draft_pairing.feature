@@ -26,12 +26,14 @@ Feature: A catalogue-paired draft model drives the browser drafter
     turn's step/seeder/verify runners (row `lazy-constant-residency`) across the
     model pair. Neither model over-commits; a pair that does not fit windows,
     never crashes.
-  - VOCABULARY. The draft consumes the TARGET's token ids (it never tokenizes
-    text itself), so every target id must index the draft's embedding. The
-    pairing is admitted only when the draft's vocabulary covers the target's;
-    an incompatible or absent draft is REFUSED and the drafter falls back to
-    prompt-lookup — the journey never dead-ends, and because the output is the
-    target's regardless, correctness is unconditional.
+  - COMPATIBILITY. The draft consumes the TARGET's token ids (it never tokenizes
+    text itself) and carries the target's realized sequence, so it must both
+    cover the target's VOCABULARY (every target id indexes the draft's embedding)
+    and match its CONTEXT (a shorter-context draft would abort its own forward the
+    moment the sequence crossed its window). The pairing is admitted only when
+    both hold; an incompatible or absent draft is REFUSED and the drafter falls
+    back to prompt-lookup — the journey never dead-ends, and because the output is
+    the target's regardless, correctness is unconditional.
 
   Byte-for-byte equality with plain decode under a real draft model is witnessed
   natively (row `speculative-decode`, "a draft model reproduces plain decode

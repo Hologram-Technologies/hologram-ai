@@ -1479,6 +1479,20 @@ impl DecodeChatSession {
                 draft.vocab_size, self.vocab_size
             )));
         }
+        // The draft carries the SAME realized sequence as the target, which grows
+        // to the target's context. A draft with a SHORTER context would abort its
+        // own forward the moment the sequence crossed its window (mid-prefill for a
+        // long prompt, or mid-generation) — a hard turn failure, not a slow one. So
+        // refuse a draft that cannot keep up; prompt-lookup drafts instead. (A
+        // guaranteed-compatible same-family draft shares the target's context.)
+        if draft.context_length < self.context_length {
+            return Err(err(format!(
+                "draft model context ({}) is shorter than the target's ({}) — refusing the \
+                 pairing (the target's realized sequence would exceed the draft's window and \
+                 abort its forward); drafting by prompt-lookup instead",
+                draft.context_length, self.context_length
+            )));
+        }
         // Share ONE residency ledger across the pair before either builds a
         // runner — the draft's admission is then charged against the combined
         // footprint. Two distinct `Rc<RefCell<…>>`, so no double borrow.
