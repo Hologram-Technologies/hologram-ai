@@ -84,28 +84,6 @@ export function environmentBudgetBytes(deviceMemoryGb?: number): number {
   return Math.min(wasmCeiling, device / 2);
 }
 
-/**
- * Largest context length (power of two, ≥ 64) not exceeding the model's own
- * `max_position_embeddings` whose activation estimate fits `budgetShare` of
- * the budget. Activations ≈ context × hidden × layers × 8 lanes × 4 bytes
- * (Q/K/V/attention/MLP intermediates at F32).
- */
-export function chooseContextLength(
-  config: { max_position_embeddings?: number; hidden_size: number; num_hidden_layers: number },
-  budgetBytes: number,
-  budgetShare = 0.25,
-): number {
-  requireNumeric(config, ["hidden_size", "num_hidden_layers"]);
-  const maxPos = resolveMaxPositions(config);
-  const lanes = 8;
-  let context = 64;
-  for (let candidate = 128; candidate <= maxPos; candidate *= 2) {
-    const activations = candidate * config.hidden_size * config.num_hidden_layers * lanes * 4;
-    if (activations > budgetBytes * budgetShare) break;
-    context = candidate;
-  }
-  return Math.min(context, maxPos);
-}
 
 /**
  * The journey estimate for a model: shard storage, F32-inflated runtime
@@ -125,12 +103,6 @@ function requireNumeric(config: Record<string, unknown>, keys: string[]): void {
   }
 }
 
-/**
- * The stage plan: the largest number of decoder layers per stage whose
- * F32-inflated weights fit half the window budget (materialization holds a
- * transient archive copy). The window bounds the STAGE, never the model —
- * the k-representation carries the rest in the OPFS κ-store.
- */
 /** The F32 weight-byte decomposition of a model: per decoder layer, and the
  * embedding/head structural floors (a single tensor cannot be subdivided). */
 export function weightDecomposition(
@@ -159,30 +131,6 @@ export function weightDecomposition(
   };
 }
 
-export function planStages(
-  config: {
-    hidden_size: number;
-    num_hidden_layers: number;
-    vocab_size?: number;
-    tie_word_embeddings?: boolean;
-    torch_dtype?: string;
-  },
-  shardBytes: number,
-  windowBudgetBytes: number,
-): { layersPerStage: number; stageCount: number; stageWeightBytes: number } {
-  const w = weightDecomposition(config, shardBytes);
-  const half = windowBudgetBytes / 2;
-  let layersPerStage = Math.max(1, Math.floor(half / w.layerBytes));
-  layersPerStage = Math.min(layersPerStage, config.num_hidden_layers);
-  const layerStages = Math.ceil(config.num_hidden_layers / layersPerStage);
-  const monolithic =
-    layersPerStage >= config.num_hidden_layers && w.totalBytes <= half;
-  const stageCount = monolithic ? 1 : layerStages + 2; // embedding + blocks + head
-  const stageWeightBytes = Math.round(
-    Math.max(layersPerStage * w.layerBytes, w.embedBytes, w.headBytes),
-  );
-  return { layersPerStage, stageCount, stageWeightBytes };
-}
 
 export function estimateResources(
   config: {

@@ -2,7 +2,6 @@
 // `memory-guard`): pure functions of the model's own configuration.
 import { describe, expect, it } from "vitest";
 import {
-  chooseContextLength,
   dtypeBytes,
   environmentBudgetBytes,
   estimateResources,
@@ -51,16 +50,6 @@ describe("resolveMaxPositions", () => {
   });
 });
 
-describe("chooseContextLength", () => {
-  it("never exceeds the model's own max_position_embeddings", () => {
-    expect(chooseContextLength(TINY, 4 * 1024 ** 3)).toBeLessThanOrEqual(128);
-  });
-  it("shrinks with the budget — a function of config, not a constant", () => {
-    const large = chooseContextLength(HUGE, 4 * 1024 ** 3);
-    const small = chooseContextLength(HUGE, 256 * 1024 ** 2);
-    expect(small).toBeLessThanOrEqual(large);
-  });
-});
 
 describe("estimateResources — the window bounds the stage, never the model", () => {
   it("a tiny model is monolithic and reports its κ-store need", () => {
