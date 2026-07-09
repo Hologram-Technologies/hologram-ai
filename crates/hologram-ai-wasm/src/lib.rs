@@ -1080,6 +1080,67 @@ pub fn generate(
 /// own context); κs resolve through `resolve_kappa` (content-verified at
 /// first touch, invalidate-and-recover on failure); stage archives resolve
 /// from the derived store when present.
+/// One wasm32 linear memory's hard address ceiling. A property of the HOST (32-bit
+/// addressing), not of any model — nothing to derive.
+// Only a host with a HARD address ceiling (wasm32) budgets residency this way;
+// elsewhere there is no ceiling to divide, so the policy is unreferenced.
+#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+const STRUCTURAL_CEILING: u64 = 4 << 30;
+
+/// Headroom the HOST needs beside the resident weight set: the wasm runtime, the
+/// allocator's slack, the JS heap. A property of the host and its allocator — no
+/// model, input, or use-case quantity hides inside it. The two MODEL quantities
+/// that used to be lumped into this reserve are now accounted where they belong:
+/// the session's carried K/V is DERIVED from the model's own attention shape and
+/// its current bucket ([`hologram_ai::decode::DecodeGeometry::carried_kv_bytes`]),
+/// and walk transients are reserved inside the residency ledger (`max_walk`).
+// Only a host with a HARD address ceiling (wasm32) budgets residency this way;
+// elsewhere there is no ceiling to divide, so the policy is unreferenced.
+#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+const HOST_HEADROOM: u64 = 1 << 30;
+
+/// The resident-weight budget under the host ceiling: everything that is NOT
+/// resident stage weights, subtracted. Because `carried_kv_bytes` is the model's
+/// own K/V at its current geometry, the budget SHRINKS as the bucket grows — at a
+/// long context the carried K/V alone runs to gigabytes, and a budget that
+/// ignored it would over-admit straight into an allocation abort.
+// Only a host with a HARD address ceiling (wasm32) budgets residency this way;
+// elsewhere there is no ceiling to divide, so the policy is unreferenced.
+#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+fn decode_residency_budget(carried_kv_bytes: u64) -> u64 {
+    STRUCTURAL_CEILING
+        .saturating_sub(HOST_HEADROOM)
+        .saturating_sub(carried_kv_bytes)
+}
+
+/// A growable staged session shared by the wasm chat sessions.
+type GrowableRc = std::rc::Rc<std::cell::RefCell<hologram_ai::staged::GrowableStagedSession>>;
+
+/// The carried K/V of the decode PAIR — `(target, draft)` — which share one
+/// address space, so admission must charge their sum.
+type KvCharge = std::rc::Rc<std::cell::Cell<(u64, u64)>>;
+
+fn kv_total(charge: &KvCharge) -> u64 {
+    let (target, draft) = charge.get();
+    target.saturating_add(draft)
+}
+
+/// Re-budget residency for every growable that shares this address space, having
+/// charged the pair's carried K/V against the host ceiling. Under a hard address
+/// ceiling (wasm32) this is what keeps a long-context K/V from over-committing;
+/// elsewhere the budget is a κ-store bandwidth cache limit and the K/V lives
+/// outside it, so this is a no-op.
+#[cfg(target_arch = "wasm32")]
+fn charge_carried_kv(growables: &[&GrowableRc], carried_kv_bytes: u64) {
+    let budget = decode_residency_budget(carried_kv_bytes);
+    for g in growables {
+        g.borrow_mut().set_residency_budget(budget);
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn charge_carried_kv(_growables: &[&GrowableRc], _carried_kv_bytes: u64) {}
+
 /// The shared growable-session builder behind [`StagedChatSession`] and
 /// [`DecodeChatSession`]: manifest parsing, the JS κ-store, the quant tier,
 /// the derived-artifact store, wasm heap admission, and progress narration.
@@ -1168,9 +1229,10 @@ fn build_growable_session(
     // the margin, which adapts to the model, is subtracted inside the check.
     #[cfg(target_arch = "wasm32")]
     {
-        const STRUCTURAL_CEILING: u64 = 4 << 30;
-        const RUNTIME_RESERVE: u64 = 1 << 30; // 1 GiB: activations + K/V + runtime
-        session.set_residency_budget(STRUCTURAL_CEILING - RUNTIME_RESERVE);
+        // No decode geometry yet, so no carried K/V to charge; a decode session
+        // re-budgets with its own K/V as soon as its bucket is known, and again
+        // at every regrow (`charge_carried_kv`).
+        session.set_residency_budget(decode_residency_budget(0));
         // The budget is a HARD 32-bit address ceiling here: gate residency on
         // each stage's TRUE footprint (weights + the transients the buffer pool
         // retains — a float LM-head chunk's F32 image is several times its
@@ -1371,6 +1433,9 @@ pub struct DecodeChatSession {
         Option<hologram_ai::decode::DecodeSession<hologram_ai::staged::StagedRunner<'static>>>,
     draft_rope_theta: f32,
     draft_context_length: u64,
+    /// The carried K/V of this decode PAIR, charged against the host ceiling so
+    /// residency admission shrinks as the bucket grows (row `decode-plan`).
+    kv_charge: KvCharge,
 }
 
 #[wasm_bindgen]
@@ -1446,6 +1511,7 @@ impl DecodeChatSession {
             draft_session: None,
             draft_rope_theta: 0.0,
             draft_context_length: 0,
+            kv_charge: std::rc::Rc::new(std::cell::Cell::new((0, 0))),
         })
     }
 
@@ -1537,14 +1603,37 @@ impl DecodeChatSession {
                 .borrow_mut()
                 .decode_runner_for(want)
                 .map_err(|e| err(format!("decode pipeline: {e:#}")))?;
-            let g = std::rc::Rc::clone(&self.growable);
             let session = hologram_ai::decode::DecodeSession::new(
                 runner,
                 self.rope_theta,
                 self.context_length,
             )
-            .map_err(|e| err(format!("decode session: {e:#}")))?
-            .with_rebuild(Box::new(move |bucket| {
+            .map_err(|e| err(format!("decode session: {e:#}")))?;
+
+            // Charge this session's carried K/V — a MODEL quantity, derived from
+            // its own attention shape — against the host ceiling, and re-charge at
+            // every regrow, because the K/V grows with the bucket.
+            let geom = session.geometry();
+            let kv_row = geom
+                .carried_kv_bytes_per_row()
+                .map_err(|e| err(format!("carried K/V: {e:#}")))?;
+            let charge = std::rc::Rc::clone(&self.kv_charge);
+            charge.set((kv_row.saturating_mul(geom.bucket as u64), charge.get().1));
+            let mut sharers: Vec<&GrowableRc> = vec![&self.growable];
+            if let Some(d) = &self.draft_growable {
+                sharers.push(d);
+            }
+            charge_carried_kv(&sharers, kv_total(&charge));
+
+            let g = std::rc::Rc::clone(&self.growable);
+            let dg = self.draft_growable.clone();
+            let session = session.with_rebuild(Box::new(move |bucket| {
+                charge.set((kv_row.saturating_mul(bucket), charge.get().1));
+                let mut sharers: Vec<&GrowableRc> = vec![&g];
+                if let Some(d) = &dg {
+                    sharers.push(d);
+                }
+                charge_carried_kv(&sharers, kv_total(&charge));
                 g.borrow_mut().decode_runner_for(bucket as usize)
             }));
             self.session = Some(session);
@@ -1572,16 +1661,28 @@ impl DecodeChatSession {
                     cfg.max_tokens.unwrap_or(0),
                     dctx.max(1) as usize,
                 );
+                let tg = std::rc::Rc::clone(&self.growable);
+                let charge = std::rc::Rc::clone(&self.kv_charge);
                 let built = (|| -> anyhow::Result<
                     hologram_ai::decode::DecodeSession<hologram_ai::staged::StagedRunner<'static>>,
                 > {
                     let drunner = dg.borrow_mut().decode_runner_for(dwant)?;
+                    let dsession = hologram_ai::decode::DecodeSession::new(drunner, dtheta, dctx)?;
+
+                    // The pair shares ONE address space: charge the DRAFT's own
+                    // carried K/V alongside the target's, at build and at regrow.
+                    let dgeom = dsession.geometry();
+                    let dkv_row = dgeom.carried_kv_bytes_per_row()?;
+                    charge.set((charge.get().0, dkv_row.saturating_mul(dgeom.bucket as u64)));
+                    charge_carried_kv(&[&tg, &dg], kv_total(&charge));
+
                     let dg2 = std::rc::Rc::clone(&dg);
-                    Ok(
-                        hologram_ai::decode::DecodeSession::new(drunner, dtheta, dctx)?.with_rebuild(
-                            Box::new(move |bucket| dg2.borrow_mut().decode_runner_for(bucket as usize)),
-                        ),
-                    )
+                    let tg2 = std::rc::Rc::clone(&tg);
+                    Ok(dsession.with_rebuild(Box::new(move |bucket| {
+                        charge.set((charge.get().0, dkv_row.saturating_mul(bucket)));
+                        charge_carried_kv(&[&tg2, &dg2], kv_total(&charge));
+                        dg2.borrow_mut().decode_runner_for(bucket as usize)
+                    })))
                 })();
                 match built {
                     Ok(s) => self.draft_session = Some(s),
@@ -1913,5 +2014,62 @@ mod tests {
         let expected = holospaces::address(bytes).as_str().to_string();
         let result = compute_kappa(bytes);
         assert_eq!(result, expected);
+    }
+}
+
+#[cfg(test)]
+mod residency_budget_tests {
+    use super::{decode_residency_budget, HOST_HEADROOM, STRUCTURAL_CEILING};
+    use hologram_ai::decode::DecodeGeometry;
+
+    fn geom(bucket: usize) -> DecodeGeometry {
+        DecodeGeometry {
+            layers: 28,
+            kv_heads: 2,
+            heads: 12,
+            head_dim: 128,
+            bucket,
+            chunk: 1,
+            vocab: 151936,
+        }
+    }
+
+    #[test]
+    fn the_budget_shrinks_as_the_carried_kv_grows() {
+        // Nothing carried: the whole ceiling less the HOST's own headroom.
+        assert_eq!(
+            decode_residency_budget(0),
+            STRUCTURAL_CEILING - HOST_HEADROOM
+        );
+        // The model's own K/V is charged, so a wider bucket leaves less room for
+        // resident weights — the term a fixed reserve silently omitted.
+        let small = geom(128).carried_kv_bytes().unwrap();
+        let large = geom(32768).carried_kv_bytes().unwrap();
+        assert!(large > small);
+        assert!(decode_residency_budget(large) < decode_residency_budget(small));
+        assert_eq!(
+            decode_residency_budget(small),
+            STRUCTURAL_CEILING - HOST_HEADROOM - small
+        );
+    }
+
+    #[test]
+    fn a_long_context_kv_dwarfs_any_fixed_reserve() {
+        // The whole point: at a 32 k bucket this model carries ~1.9 GiB of K/V —
+        // nearly twice the host headroom. A budget that lumped K/V into a fixed
+        // reserve would admit weights into memory the K/V already owns.
+        let kv = geom(32768).carried_kv_bytes().unwrap();
+        assert!(
+            kv > HOST_HEADROOM,
+            "carried K/V {kv} must exceed the host headroom"
+        );
+    }
+
+    #[test]
+    fn the_budget_saturates_rather_than_wrapping() {
+        // A carried K/V larger than the whole ceiling yields zero residency, not
+        // an underflowed enormous budget.
+        assert_eq!(decode_residency_budget(u64::MAX), 0);
+        assert_eq!(decode_residency_budget(STRUCTURAL_CEILING), 0);
     }
 }

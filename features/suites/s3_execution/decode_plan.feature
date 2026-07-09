@@ -27,7 +27,14 @@ Feature: The per-token pass computes one position
   it starts at the prompt's window and climbs the ladder — which is what the
   ladder is for. The rule is the caller's own numbers (prompt, declared budget,
   context) and nothing else: a twelve-token prompt and a million-token prompt
-  take the identical path.
+  take the identical path. The bucket the turn settles on is charged where it is
+  spent: the session's carried K/V — `2 · layers · kv_heads · head_dim · 4 B` per
+  bucket row, the model's own attention shape — is subtracted from the host's
+  address ceiling before any stage weight is admitted, and re-charged at every
+  regrow. Only the host's own headroom (runtime, allocator) is a constant; every
+  model quantity is derived. A long context carries GIGABYTES of K/V, so a budget
+  that folded it into a fixed reserve would admit weights into memory the K/V
+  already owns.
 
   Scenario: the decode plan matches the whole-window plan at every position
     Given a decode-step archive over the staged fixture with a bucket of 8 rows

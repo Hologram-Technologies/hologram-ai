@@ -52,6 +52,41 @@ pub struct DecodeGeometry {
 }
 
 impl DecodeGeometry {
+    /// The carried K/V bytes for ONE bucket row, across every layer:
+    /// `2 (K and V) · layers · kv_heads · head_dim · 4 B`. Multiply by the bucket
+    /// to get the session's whole carried K/V. Checked — a geometry whose K/V
+    /// cannot be addressed fails loud naming the shape rather than wrapping.
+    ///
+    /// This is a MODEL quantity, derived from the model's own attention shape.
+    /// Any address-space accounting that omits it is under-counting by a term
+    /// that grows with the bucket: at a 32 k bucket a mid-size model's K/V is
+    /// gigabytes, dwarfing any fixed reserve.
+    pub fn carried_kv_bytes_per_row(&self) -> Result<u64> {
+        let per_row = (self.layers as u64)
+            .checked_mul(2)
+            .and_then(|n| n.checked_mul(self.kv_heads as u64))
+            .and_then(|n| n.checked_mul(self.head_dim as u64))
+            .and_then(|n| n.checked_mul(4));
+        per_row.with_context(|| {
+            format!(
+                "the carried K/V row (2 · {} layers · {} kv · {} head_dim · 4 B) is not addressable",
+                self.layers, self.kv_heads, self.head_dim
+            )
+        })
+    }
+
+    /// The session's whole carried K/V at this geometry: [`Self::carried_kv_bytes_per_row`]
+    /// times the bucket. Checked.
+    pub fn carried_kv_bytes(&self) -> Result<u64> {
+        let per_row = self.carried_kv_bytes_per_row()?;
+        per_row.checked_mul(self.bucket as u64).with_context(|| {
+            format!(
+                "the carried K/V ({per_row} B/row · {} bucket) is not addressable",
+                self.bucket
+            )
+        })
+    }
+
     /// Read the geometry out of a decode plan's port shapes — the ports are
     /// the contract, so no side-channel metadata is trusted over them. Works
     /// over any [`LmSession`]: a monolithic decode archive and the staged
@@ -921,5 +956,62 @@ mod tests {
             err.to_string().contains("address space"),
             "error names the address-space bound: {err}"
         );
+    }
+    #[test]
+    fn carried_kv_bytes_is_derived_from_the_attention_shape() {
+        let g = DecodeGeometry {
+            layers: 28,
+            kv_heads: 2,
+            heads: 12,
+            head_dim: 128,
+            bucket: 128,
+            chunk: 1,
+            vocab: 151936,
+        };
+        // 2 (K and V) · 28 layers · 2 kv · 128 head_dim · 4 B
+        let per_row = 2u64 * 28 * 2 * 128 * 4;
+        assert_eq!(g.carried_kv_bytes_per_row().unwrap(), per_row);
+        assert_eq!(g.carried_kv_bytes().unwrap(), per_row * 128);
+    }
+
+    #[test]
+    fn carried_kv_bytes_scales_linearly_with_the_bucket() {
+        let base = DecodeGeometry {
+            layers: 28,
+            kv_heads: 2,
+            heads: 12,
+            head_dim: 128,
+            bucket: 64,
+            chunk: 1,
+            vocab: 32,
+        };
+        let wide = DecodeGeometry {
+            bucket: 32768,
+            ..base
+        };
+        let per_row = base.carried_kv_bytes_per_row().unwrap();
+        assert_eq!(base.carried_kv_bytes().unwrap(), per_row * 64);
+        assert_eq!(wide.carried_kv_bytes().unwrap(), per_row * 32768);
+        // The point of deriving it: at a long context the carried K/V is
+        // GIGABYTES — larger than any fixed reserve that pretends to cover it.
+        assert!(
+            wide.carried_kv_bytes().unwrap() > (1u64 << 30),
+            "a 32k bucket on this shape carries more than a gibibyte of K/V"
+        );
+    }
+
+    #[test]
+    fn an_unaddressable_kv_geometry_fails_loud() {
+        let g = DecodeGeometry {
+            layers: usize::MAX,
+            kv_heads: usize::MAX,
+            heads: 1,
+            head_dim: usize::MAX,
+            bucket: usize::MAX,
+            chunk: 1,
+            vocab: 1,
+        };
+        assert!(g.carried_kv_bytes_per_row().is_err());
+        assert!(g.carried_kv_bytes().is_err());
     }
 }
