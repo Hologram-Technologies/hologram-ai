@@ -506,6 +506,7 @@ pub fn derive_quantized_artifact(
 ) -> Result<Vec<u8>, JsValue> {
     let dtype = match dtype {
         "F32" => hologram_ai_common::DType::F32,
+        "F16" => hologram_ai_common::DType::F16,
         "BF16" => hologram_ai_common::DType::BF16,
         other => {
             return Err(err(format!(
@@ -1472,7 +1473,17 @@ impl DecodeChatSession {
         // chunk. Installed lazily (growth drops it), cached per bucket in
         // the derived store; a failed build degrades prefill to steps — a
         // projection, never a refusal.
-        if session.seeder_chunk().is_none() {
+        // The chunked-prefill seeder amortizes the WEIGHT STREAM across the
+        // prompt — its whole benefit. But when the decode plan's weights fit
+        // residency, stepping the prompt streams them ONCE (they stay resident
+        // for generation too), so the seeder's separate full stage
+        // materialization is pure redundant TTFT overhead at the first token.
+        // Install it ONLY in the streaming regime (weights don't fit); the
+        // over-estimate makes "fits" sound, so a large model that genuinely
+        // needs the amortization always keeps its seeder. Parametric: the
+        // model's own resident footprint against its own address ceiling.
+        if session.seeder_chunk().is_none() && !self.growable.borrow().decode_weights_fit_resident()
+        {
             // Parametric prefill chunk: the system's own geometric window base
             // (`geometric_window(1, context)` = min(MIN_WINDOW, context)),
             // capped by the bucket (the seeder's past span) — cache-friendly
@@ -1589,6 +1600,44 @@ mod tests {
 
     fn ti(dt: DType, dims: &[u64]) -> TensorInfo {
         TensorInfo::new(dt, shape_from_concrete(dims))
+    }
+
+    /// The `stages.json` quant map round-trips through `parse_quant_json`: a
+    /// whole projection keys by its bare κ, and a head chunk — carrying
+    /// `offset`/`len` — keys by the composite `κ@offset+len` (the one
+    /// `quant_key` law), so the several chunks sharing one wide κ each resolve
+    /// their own artifact. A plain host `#[test]` (not `wasm_bindgen_test`): the
+    /// function is pure Rust, and this is the ranged-persistence seam the browser
+    /// download→session round-trip depends on.
+    #[test]
+    fn parse_quant_json_builds_composite_keys_for_ranged_head_chunks() {
+        let json = r#"[
+            {"wide":"proj-k","artifact":"proj-art","out":4,"in":8},
+            {"wide":"embed-k","artifact":"chunk-art-a","out":3,"in":8,"offset":0,"len":48},
+            {"wide":"embed-k","artifact":"chunk-art-b","out":3,"in":8,"offset":48,"len":48}
+        ]"#;
+        let map = parse_quant_json(Some(json.to_string()))
+            .expect("valid quant JSON parses")
+            .expect("a non-empty map");
+        // Whole projection: bare-κ key.
+        assert_eq!(
+            map.get("proj-k").map(|v| (v.0.as_str(), v.1, v.2)),
+            Some(("proj-art", 4, 8))
+        );
+        // Head chunks: κ@offset+len keys, one artifact each, sharing the wide κ.
+        assert_eq!(
+            map.get("embed-k@0+48").map(|v| v.0.as_str()),
+            Some("chunk-art-a")
+        );
+        assert_eq!(
+            map.get("embed-k@48+48").map(|v| v.0.as_str()),
+            Some("chunk-art-b")
+        );
+        assert_eq!(
+            map.len(),
+            3,
+            "three distinct keys — the two chunks do not collide"
+        );
     }
 
     // [1,4]·[4,4 identity] matmul — for describe/run.

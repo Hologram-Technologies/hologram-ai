@@ -3680,14 +3680,14 @@ async fn then_chunked_head_int8(w: &mut BddWorld) {
     // wide head κ — that would be the bf16 matmul whose whole-panel F32 image
     // thrashes residency; each binds its per-chunk int8 artifact instead.
     let mut wide_head_ranges = 0usize;
-    let mut artifact_hits = 0usize;
+    let mut bound_artifacts: std::collections::HashSet<String> = std::collections::HashSet::new();
     for archive in &q.stages[3..] {
         for req in kappa_requirements(archive).expect("the κ-map parses") {
             if req.kappa == q.head_kappa && req.range.is_some() {
                 wide_head_ranges += 1;
             }
             if q.artifact_kappas.contains(&req.kappa) {
-                artifact_hits += 1;
+                bound_artifacts.insert(req.kappa.clone());
             }
         }
     }
@@ -3695,12 +3695,22 @@ async fn then_chunked_head_int8(w: &mut BddWorld) {
         wide_head_ranges, 0,
         "no head chunk may still bind the wide head κ — the int8 head has no F32 panel"
     );
-    assert!(
-        artifact_hits >= q.artifact_kappas.len(),
-        "every head chunk must bind its per-chunk int8 artifact"
+    // EVERY distinct per-chunk artifact is bound — not merely a count that one
+    // κ hit N times could satisfy: each chunk resolves ITS own artifact.
+    for artifact in &q.artifact_kappas {
+        assert!(
+            bound_artifacts.contains(artifact),
+            "head-chunk artifact κ `{artifact}` is not bound by any head stage"
+        );
+    }
+    assert_eq!(
+        bound_artifacts.len(),
+        q.artifact_kappas.len(),
+        "each of the {} per-chunk artifacts must be bound exactly once across the head stages",
+        q.artifact_kappas.len()
     );
     println!(
-        "[chunked-head] head joined the int8 tier: {} per-chunk artifact(s), no wide head range remains",
+        "[chunked-head] head joined the int8 tier: {} per-chunk artifact(s) each bound, no wide head range remains",
         q.artifact_kappas.len()
     );
 }

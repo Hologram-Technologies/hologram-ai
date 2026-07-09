@@ -57,6 +57,22 @@ fn widen_to_f32(bytes: &[u8], dtype: DType, elems: usize) -> Result<Vec<f32>> {
                 .map(|c| f32::from_bits(u32::from(u16::from_le_bytes([c[0], c[1]])) << 16))
                 .collect())
         }
+        DType::F16 => {
+            // IEEE-754 half: the correct decode (subnormals, inf/NaN) via `half`,
+            // not a bespoke bit shuffle. F16 is a first-class safetensors dtype —
+            // an int8 tier that only knew F32/BF16 rejected every F16 checkpoint.
+            if bytes.len() != elems * 2 {
+                bail!(
+                    "F16 weight is {} bytes, expected {}",
+                    bytes.len(),
+                    elems * 2
+                );
+            }
+            Ok(bytes
+                .chunks_exact(2)
+                .map(|c| half::f16::from_le_bytes([c[0], c[1]]).to_f32())
+                .collect())
+        }
         other => bail!("quantized derivation from {other:?} weights is not defined"),
     }
 }
@@ -170,6 +186,28 @@ mod tests {
         assert_eq!(q[1] as i8, 85); // 4.0 / (6/127) = 84.67 → 85
         let s0 = f32::from_le_bytes([a[6], a[7], a[8], a[9]]);
         assert!((s0 - 3.0 / 127.0).abs() < 1e-7);
+    }
+
+    #[test]
+    fn f16_widens_to_the_same_artifact_as_its_exact_f32() {
+        // F16 is a first-class safetensors dtype; the int8 tier must derive from
+        // it. Values exactly representable in f16 (multiples of 0.5) decode
+        // losslessly, so the F16 artifact must equal the artifact derived from
+        // the identical f32 image — bit for bit. Proves the widening, not just
+        // that it runs.
+        let (out, inf) = (3u64, 4u64);
+        let vals: Vec<f32> = (0..out * inf).map(|k| (k as f32) * 0.5 - 2.0).collect();
+        let f16_bytes: Vec<u8> = vals
+            .iter()
+            .flat_map(|&v| half::f16::from_f32(v).to_le_bytes())
+            .collect();
+        let f32_bytes: Vec<u8> = vals.iter().flat_map(|v| v.to_le_bytes()).collect();
+        let a16 = derive_quantized_artifact(&f16_bytes, DType::F16, out, inf).unwrap();
+        let a32 = derive_quantized_artifact(&f32_bytes, DType::F32, out, inf).unwrap();
+        assert_eq!(
+            a16, a32,
+            "F16 widening must reproduce the exact-f32 artifact for f16-representable values"
+        );
     }
 
     #[test]

@@ -41,7 +41,7 @@ enum Command {
         /// Fixed sequence length for compilation (default: model's context_length).
         #[arg(long, value_name = "N")]
         seq_len: Option<u64>,
-        /// Weight quantization scheme: 'none'/'f32', 'int8', 'int4'.
+        /// Weight quantization scheme: 'none'/'f32' or 'int8'.
         #[arg(long, value_name = "SCHEME")]
         quantize: Option<String>,
         /// Scale spatial dims (H, W) of 4-D inputs by this factor for lower
@@ -121,9 +121,15 @@ fn parse_quant(s: Option<&str>) -> anyhow::Result<QuantStrategy> {
     Ok(match s.map(|s| s.to_ascii_lowercase()).as_deref() {
         None | Some("none") | Some("f32") => QuantStrategy::None,
         Some("int8") => QuantStrategy::Int8,
-        Some("int4") => QuantStrategy::Int4,
+        // int4 is NOT offered: the substrate's int4 dequant-matmul kernel has not
+        // landed, so the strategy would only fail deeper in the pipeline. Reject
+        // it up front rather than advertise a scheme that cannot run — no stub.
+        Some("int4") => anyhow::bail!(
+            "int4 quantization is not yet available (the substrate int4 kernel has not landed); \
+             use int8"
+        ),
         Some(other) => {
-            anyhow::bail!("unknown quantization scheme {other:?} (expected none/int8/int4)")
+            anyhow::bail!("unknown quantization scheme {other:?} (expected none/f32/int8)")
         }
     })
 }

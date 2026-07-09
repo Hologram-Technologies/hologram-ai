@@ -20,10 +20,20 @@
 
 mod common;
 
-use common::families::{dummy_bf16_bytes, is_norm, Dims, FamilyScale, LLAMA, QWEN2};
+use common::families::{dummy_bf16_bytes, is_norm, Dims, FamilyScale, FAITHFUL_FAMILIES, QWEN2};
 
 use std::collections::HashMap;
 use std::num::NonZeroU64;
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+/// A per-call discriminator so concurrently-running tests never share a κ-store
+/// directory (a shared dir races on content-addressed file writes).
+static STORE_SEQ: AtomicUsize = AtomicUsize::new(0);
+
+fn unique_store_dir(tag: &str) -> std::path::PathBuf {
+    let seq = STORE_SEQ.fetch_add(1, Ordering::Relaxed);
+    std::env::temp_dir().join(format!("hai-{tag}-{}-{seq}", std::process::id()))
+}
 
 use hologram_ai::materialize::DirKappaStore;
 use hologram_ai::quantized::{crystallize_quantized, crystallize_quantized_range};
@@ -78,6 +88,10 @@ struct Outcome {
     stage_count: usize,
     tokens: Vec<i64>,
     final_logits: Vec<f32>,
+    /// Whether the int8 decode plan's weights fit the residency budget — the
+    /// signal the browser uses to SKIP the redundant chunked-prefill seeder
+    /// (stepping streams the resident weights once).
+    fits_resident: bool,
 }
 
 /// Build a footprint-bounded staged decode session for `scale` — the
@@ -94,8 +108,9 @@ fn drive(scale: &FamilyScale, quantize_head: bool) -> Outcome {
     let dtypes = vec![DType::BF16; keys.len()];
     let one = NonZeroU64::new(1).expect("1 is non-zero");
 
-    // κ-store: the wide bf16 weights.
-    let store_dir = std::env::temp_dir().join(format!("hai-qhead-{arch}-{}", std::process::id()));
+    // κ-store: the wide bf16 weights. Unique per call — parallel tests must not
+    // share a store dir (they would race on content-addressed writes).
+    let store_dir = unique_store_dir(&format!("qhead-{arch}"));
     std::fs::create_dir_all(&store_dir).expect("creating κ-store temp dir");
     let mut dir = DirKappaStore::new(&store_dir);
     let mut kappas: Vec<String> = Vec::with_capacity(keys.len());
@@ -168,6 +183,7 @@ fn drive(scale: &FamilyScale, quantize_head: bool) -> Outcome {
     session.set_residency_budget(1 << 30); // 1 GiB — ample for the int8 model
     session.set_bound_by_footprint(true);
     session.set_quant_map(quant);
+    let fits_resident = session.decode_weights_fit_resident();
 
     let ctx = scale.dims.max_position_embeddings as usize;
     let want = PROMPT.len();
@@ -208,6 +224,7 @@ fn drive(scale: &FamilyScale, quantize_head: bool) -> Outcome {
         stage_count,
         tokens,
         final_logits: row,
+        fits_resident,
     }
 }
 
@@ -218,7 +235,7 @@ fn drive(scale: &FamilyScale, quantize_head: bool) -> Outcome {
 /// and an untied head (its own weight) alike.
 #[test]
 fn quantized_head_stays_resident_across_decode_steps() {
-    for layout in [QWEN2, LLAMA] {
+    for &layout in FAITHFUL_FAMILIES {
         let scale = FamilyScale::new(layout, chunked_head_dims());
         let arch = scale.arch();
 
@@ -247,6 +264,15 @@ fn quantized_head_stays_resident_across_decode_steps() {
                 .all(|&t| (t as u64) < scale.dims.vocab_size),
             "{arch}: a generated token is out of vocabulary range"
         );
+        // The int8 model fits the (generous) budget, so the browser correctly
+        // SKIPS the redundant chunked-prefill seeder: stepping the prompt on this
+        // resident step runner streams the weights once, and no separate full
+        // stage materialization is paid at the first token.
+        assert!(
+            out.fits_resident,
+            "{arch}: the int8 decode plan must be classified resident so the redundant \
+             prefill seeder is skipped"
+        );
 
         // Reproducible run to run (a broken residency/splice shows as drift).
         let again = drive(&scale, true);
@@ -272,7 +298,7 @@ fn quantized_head_stays_resident_across_decode_steps() {
 /// linear layer does. Verified for tied and untied heads.
 #[test]
 fn int8_head_logits_track_the_float_head() {
-    for layout in [QWEN2, LLAMA] {
+    for &layout in FAITHFUL_FAMILIES {
         let scale = FamilyScale::new(layout, chunked_head_dims());
         let arch = scale.arch();
 
@@ -288,4 +314,178 @@ fn int8_head_logits_track_the_float_head() {
         );
         eprintln!("[quantized-head] {arch}: int8-vs-float head logits cosine = {sim:.5}");
     }
+}
+
+/// The prefill-seeder gate is a sound residency test: the model's own resident
+/// weight estimate against its own budget. Quantization SHRINKS that estimate
+/// (int8 + scales vs bf16), moving a model into the resident regime where the
+/// seeder's separate materialization is redundant and correctly skipped; and
+/// the verdict flips with the budget — a streaming-regime (weights exceed the
+/// ceiling) model always keeps its seeder. Reads only shapes/dtypes + the quant
+/// map (no κ-store reads, no decode), so it needs no crystallized artifacts.
+#[test]
+fn seeder_gate_tracks_the_resident_weight_estimate() {
+    let scale = FamilyScale::new(QWEN2, chunked_head_dims());
+    let (keys, shapes): (Vec<String>, Vec<Vec<u64>>) = scale.manifest().into_iter().unzip();
+    let dtypes = vec![DType::BF16; keys.len()];
+    // Synthetic κs: the gate never resolves them (it reads shapes/dtypes + map).
+    let kappas: Vec<String> = keys.iter().map(|k| format!("kappa-{k}")).collect();
+    let one = NonZeroU64::new(1).expect("1 is non-zero");
+    let store_dir = unique_store_dir("gate");
+    std::fs::create_dir_all(&store_dir).expect("temp dir");
+
+    let build = || {
+        GrowableStagedSession::new(
+            scale.config_json(),
+            keys.clone(),
+            kappas.clone(),
+            shapes.clone(),
+            dtypes.clone(),
+            None,
+            one,
+            Box::new(DirKappaStore::new(&store_dir)),
+        )
+        .expect("growable session")
+    };
+
+    // Wide (bf16) estimate.
+    let mut wide = build();
+    wide.set_bound_by_footprint(true);
+    let est_wide = wide.estimated_resident_weight_bytes();
+    assert!(est_wide > 0, "the estimate must be positive");
+
+    // int8 estimate (synthetic quant map — the gate reads only (out,in) from it):
+    // every rank-2 projection retired to int8.
+    let mut quant = QuantMap::new();
+    for (i, (k, shape)) in keys.iter().zip(&shapes).enumerate() {
+        if shape.len() == 2 && k != "model.embed_tokens.weight" {
+            quant.insert(kappas[i].clone(), (format!("art-{i}"), shape[0], shape[1]));
+        }
+    }
+    let mut int8 = build();
+    int8.set_bound_by_footprint(true);
+    int8.set_quant_map(quant);
+    let est_int8 = int8.estimated_resident_weight_bytes();
+    assert!(
+        est_int8 < est_wide,
+        "quantization must shrink the resident estimate (int8 {est_int8} !< bf16 {est_wide}) — \
+         that shrink is what moves a model into the seeder-skip resident regime"
+    );
+
+    // The verdict flips with the budget (monotone): fits above, streams below.
+    int8.set_residency_budget(est_int8.saturating_mul(2));
+    assert!(
+        int8.decode_weights_fit_resident(),
+        "a budget above the weights → resident → seeder skipped"
+    );
+    int8.set_residency_budget(est_int8 / 2);
+    assert!(
+        !int8.decode_weights_fit_resident(),
+        "a budget below the weights → streaming → seeder installed (never mis-skipped)"
+    );
+    // Off by default without the wasm hard ceiling: not a residency question.
+    int8.set_bound_by_footprint(false);
+    int8.set_residency_budget(est_int8.saturating_mul(2));
+    assert!(
+        !int8.decode_weights_fit_resident(),
+        "without a hard address ceiling the seeder decision is not a residency question"
+    );
+}
+
+/// The VERIFY (speculative-decode, all-positions) head joins the int8 tier under
+/// the SAME κ+range keys as the decode head — the load-bearing cross-plan
+/// alignment. The quant map is derived once from the WINDOW plan
+/// (`head_quant_chunks` → `build_parametric_stage_graphs`) but consumed by the
+/// VERIFY plan (`build_parametric_verify_stage_graphs`); they align only because
+/// the head chunking and byte-range offsets are seq-independent. If they ever
+/// diverged the verify head would silently keep its wide bf16 binding — the
+/// exact F32-panel thrash on the speculative path. This asserts they DON'T.
+#[test]
+fn verify_head_chunks_are_int8_under_the_window_derived_keys() {
+    use hologram_ai::materialize::kappa_requirements;
+    use hologram_ai::staged::compile_verify_stages;
+
+    let scale = FamilyScale::new(QWEN2, chunked_head_dims());
+    let arch = scale.arch();
+    let config_json = scale.config_json();
+    let (keys, shapes): (Vec<String>, Vec<Vec<u64>>) = scale.manifest().into_iter().unzip();
+    let dtypes = vec![DType::BF16; keys.len()];
+    let one = NonZeroU64::new(1).expect("1 is non-zero");
+
+    let store_dir = unique_store_dir("verify");
+    std::fs::create_dir_all(&store_dir).expect("temp dir");
+    let mut dir = DirKappaStore::new(&store_dir);
+    let kappas: Vec<String> = keys
+        .iter()
+        .zip(&shapes)
+        .map(|(name, dims)| dir.insert(&dummy_bf16_bytes(name, dims)).expect("persist"))
+        .collect();
+
+    // WINDOW-plan-derived head-chunk targets → per-chunk int8 artifacts.
+    let targets = head_quant_chunks(&config_json, &keys, &kappas, &shapes, &dtypes, None, one)
+        .expect("head_quant_chunks");
+    assert!(targets.len() >= 2, "{arch}: the head must chunk");
+    let mut quant = QuantMap::new();
+    let mut artifact_kappas = std::collections::HashSet::new();
+    for t in &targets {
+        let entry = crystallize_quantized_range(
+            &mut dir,
+            &t.kappa,
+            t.offset,
+            t.len,
+            DType::BF16,
+            t.out_features,
+            t.in_features,
+        )
+        .expect("crystallize head chunk");
+        artifact_kappas.insert(entry.0.clone());
+        quant.insert(quant_key(&t.kappa, Some((t.offset, t.len))), entry);
+    }
+    let head_kappa = targets[0].kappa.clone();
+
+    // Compile the VERIFY plan with those WINDOW-derived keys.
+    let ctx = scale.dims.max_position_embeddings as usize;
+    let bucket = hologram_ai::engine::geometric_window(PROMPT.len().max(1), ctx) as u64;
+    let draft = 2u64; // a K=2 speculative draft
+    let stages = compile_verify_stages(
+        &config_json,
+        &keys,
+        &kappas,
+        &shapes,
+        &dtypes,
+        bucket,
+        draft,
+        one,
+        Some(&quant),
+    )
+    .expect("verify stages compile");
+
+    // No head-chunk verify stage may still bind a RANGE of the wide head κ; each
+    // binds its per-chunk int8 artifact — proving the window keys matched the
+    // verify plan's ranged bindings.
+    let mut wide_head_ranges = 0usize;
+    let mut artifact_hits = 0usize;
+    for archive in &stages {
+        for req in kappa_requirements(archive).expect("κ-map parses") {
+            if req.kappa == head_kappa && req.range.is_some() {
+                wide_head_ranges += 1;
+            }
+            if artifact_kappas.contains(&req.kappa) {
+                artifact_hits += 1;
+            }
+        }
+    }
+    assert_eq!(
+        wide_head_ranges, 0,
+        "{arch}: the verify head must be int8 — no ranged wide-head binding may survive \
+         (window→verify key misalignment would leave it a bf16 F32-panel matmul)"
+    );
+    assert!(
+        artifact_hits >= targets.len(),
+        "{arch}: every verify head chunk must bind its per-chunk int8 artifact"
+    );
+    eprintln!(
+        "[quantized-head] {arch}: verify head is int8 across {} chunk(s) under the window-derived keys",
+        targets.len()
+    );
 }

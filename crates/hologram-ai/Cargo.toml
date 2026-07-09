@@ -58,6 +58,7 @@ uor-foundation = "0.5.2"
 uor-addr = { version = "0.2", features = ["onnx", "gguf"] }
 
 bytemuck.workspace     = true
+half.workspace         = true
 anyhow.workspace       = true
 thiserror.workspace    = true
 clap.workspace         = true

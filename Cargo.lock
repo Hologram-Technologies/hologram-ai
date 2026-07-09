@@ -1015,6 +1015,7 @@ dependencies = [
  "criterion",
  "dirs",
  "futures",
+ "half",
  "hologram-ai-common",
  "hologram-ai-conformance",
  "hologram-ai-core",
