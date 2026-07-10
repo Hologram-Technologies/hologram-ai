@@ -40,20 +40,23 @@ if (typeof window === "undefined") {
     const request =
       coepCredentialless && r.mode === "no-cors" ? new Request(r, { credentials: "omit" }) : r;
 
+    // Do NOT swallow fetch rejections: let the real network error propagate to
+    // the caller so the download worker's retry logic sees the actual failure
+    // (a `.catch` that resolves to undefined would mask it as a generic
+    // NetworkError — ADR-0018 m10). A 206/Range response is re-served with its
+    // body stream and all headers (ETag/Content-Range) intact.
     event.respondWith(
-      fetch(request)
-        .then((response) => {
-          if (response.status === 0) return response; // opaque — leave as-is
-          const headers = new Headers(response.headers);
-          headers.set("Cross-Origin-Embedder-Policy", "credentialless");
-          headers.set("Cross-Origin-Opener-Policy", "same-origin");
-          return new Response(response.body, {
-            status: response.status,
-            statusText: response.statusText,
-            headers,
-          });
-        })
-        .catch((e) => console.error(e)),
+      fetch(request).then((response) => {
+        if (response.status === 0) return response; // opaque — leave as-is
+        const headers = new Headers(response.headers);
+        headers.set("Cross-Origin-Embedder-Policy", "credentialless");
+        headers.set("Cross-Origin-Opener-Policy", "same-origin");
+        return new Response(response.body, {
+          status: response.status,
+          statusText: response.statusText,
+          headers,
+        });
+      }),
     );
   });
 } else {

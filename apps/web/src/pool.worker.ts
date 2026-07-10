@@ -23,9 +23,17 @@ self.onmessage = (e: MessageEvent<PoolMsg>) => {
   // module's data init (that ran once on the execute/"main" instance). The
   // execute worker gates its first decode on `hologram_pool_workers()` reaching
   // the expected count, because late registration traps in the substrate.
-  const exports = initSync({ module, memory, thread_stack_size: stackSize }) as unknown as {
-    hologram_worker_run: (id: number) => void;
-  };
-  self.postMessage({ registered: id });
-  exports.hologram_worker_run(id); // blocks in the pool loop until shutdown
+  let exports: { hologram_worker_run: (id: number) => void };
+  try {
+    exports = initSync({ module, memory, thread_stack_size: stackSize }) as unknown as {
+      hologram_worker_run: (id: number) => void;
+    };
+  } catch (err) {
+    // Surface the failure so the main thread aborts the pool (else the execute
+    // side would only notice via the readiness timeout). Also rethrow to trip
+    // `onerror`, in case the message channel is not observed.
+    self.postMessage({ error: String(err), id });
+    throw err;
+  }
+  exports.hologram_worker_run(id); // registers (fetch_add), then blocks until shutdown
 };

@@ -13,7 +13,9 @@
     "test": "vitest run --browser.headless",
     "preview": "vite preview",
     "bdd": "pnpm build && cucumber-js --config bdd/cucumber.mjs",
-    "bdd:live": "pnpm build && cucumber-js --config bdd/cucumber.mjs --profile live"
+    "bdd:live": "pnpm build && cucumber-js --config bdd/cucumber.mjs --profile live",
+    "bdd:threads": "pnpm build && node bdd/probe-pool-registration.mjs && node bdd/probe-threads-local.mjs",
+    "bdd:threads:live": "pnpm build && node bdd/probe-threads-live.mjs && node bdd/probe-threads-teardown.mjs"
   },
   "dependencies": {
     "@huggingface/jinja": "^0.5.9",

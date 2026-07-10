@@ -6,10 +6,13 @@
 // cross-origin-isolated AND the caller opted in via `preferThreadedPool()` (the
 // generate/execute worker), we load the MULTI-THREADED build (`./wasm-threads`)
 // — the substrate embedder worker pool over a shared linear memory — else the
-// single-threaded `+simd128` fallback (`./wasm`, byte-identical to before
-// ADR-0018). Both are the SAME crate, so they export the same surface; `G` holds
-// whichever was initialised, and every verb dispatches through it. Build them
-// with `pnpm wasm` and `scripts/build-wasm-threads.sh`.
+// single-threaded `+simd128` fallback (`./wasm`). Both are the SAME crate (so
+// they export the same surface) and now both resolve the backend no_std; the
+// fallback's decode is byte-identical to the threaded path (witnessed) and its
+// output matches the deployed build's on the real-model probe, but note it is a
+// no_std-backend compilation, not literally the pre-ADR-0018 std artifact. `G`
+// holds whichever was initialised, and every verb dispatches through it. Build
+// them with `pnpm wasm` and `scripts/build-wasm-threads.sh`.
 type GlueModule = typeof import("./wasm/hologram_ai_wasm.js");
 let G: GlueModule | null = null;
 
@@ -35,7 +38,25 @@ export interface Output {
 let ready: Promise<unknown> | null = null;
 let preferThreaded = false;
 let threadedActive = false;
-let poolWorkers: Worker[] = [];
+let poolWorkerCount = 0;
+
+/**
+ * Delegates the pool lifecycle to the MAIN thread — which OWNS the workers, so
+ * terminating the execute worker on cancel/error tears the pool down too (this
+ * crate never holds the `Worker` handles). Supplied by the execute worker.
+ * - `spawn`: create the N pool workers over the shared memory (fire-and-forget;
+ *   readiness is observed via the shared `hologram_pool_workers()` atomic).
+ * - `teardown`: tell the main thread to terminate the pool (on fallback, so a
+ *   partially-spawned or timed-out pool does not linger — ADR-0018 M1).
+ * - `failure`: the reason a pool worker failed to instantiate, else null — lets
+ *   the registration poll fail FAST instead of waiting out the timeout (M2).
+ */
+interface PoolDelegates {
+  spawn: (module: WebAssembly.Module, memory: WebAssembly.Memory, n: number, stackSize: number) => void;
+  teardown: () => void;
+  failure: () => string | null;
+}
+let poolDelegates: PoolDelegates | null = null;
 
 /**
  * Opt this context into the multi-threaded decode pool (ADR-0018). Call it
@@ -43,14 +64,20 @@ let poolWorkers: Worker[] = [];
  * the main thread and download worker stay single-threaded (the pool would need
  * a blocking `Atomics.wait`, disallowed on the main thread; and only the `m == 1`
  * decode GEMV parallelises). No-op unless the page is cross-origin-isolated.
+ *
+ * `delegates` route pool-worker ownership to the main thread; without them the
+ * threaded path cannot start and falls back to single-threaded.
  */
-export function preferThreadedPool(v = true): void {
+export function preferThreadedPool(v = true, delegates?: PoolDelegates): void {
   preferThreaded = v;
+  poolDelegates = delegates ?? null;
 }
 
-/** Whether the threaded pool is active and how many workers registered. */
+/** Whether the threaded pool is active and how many workers registered. `workers`
+ * is 0 unless the pool actually engaged — never reports a pool that isn't running
+ * (so a fallback cannot masquerade as a live pool; ADR-0018 m6, [[dark-gates]]). */
 export function poolInfo(): { threaded: boolean; workers: number } {
-  return { threaded: threadedActive, workers: poolWorkers.length };
+  return { threaded: threadedActive, workers: threadedActive ? poolWorkerCount : 0 };
 }
 
 /** Instantiate the wasm module once (runs the panic-hook `start`). */
@@ -67,7 +94,10 @@ async function initGlue(): Promise<unknown> {
     } catch (err) {
       // Fail SOFT to the single-threaded build — a coherent slow decode beats a
       // dead tab. (The V&V asserts the pool DOES engage on the isolated deploy,
-      // so a silent permanent fallback can't hide — see ADR-0018.)
+      // so a silent permanent fallback can't hide — see ADR-0018.) Tear the
+      // (main-owned) pool down first, so a partially-spawned / timed-out pool
+      // does not linger pinning the shared memory (M1).
+      poolDelegates?.teardown();
       console.warn("[holo] threaded pool init failed; using single-threaded build", err);
     }
   }
@@ -79,6 +109,18 @@ async function initGlue(): Promise<unknown> {
 }
 
 async function initThreaded(): Promise<unknown> {
+  const d = poolDelegates;
+  if (!d) throw new Error("threaded pool requested without delegates");
+  // Participants = the N pool workers + the execute worker itself (the pool's
+  // `+1`), so N = logical cores − 1. The host's core count is the ONLY bound —
+  // never a model/input/size parameter, and no arbitrary cap (a 128-core host
+  // uses 127 workers; the substrate's 256 KiB floor + serial fallback keep it
+  // sound when a model's GEMV is too small to split that far). If the resulting
+  // stacks overflow the 4 GiB space, instantiation throws → single-threaded.
+  const n = (navigator.hardwareConcurrency || 2) - 1;
+  // Below 2 participants (n < 1) there is no parallelism — a lone pool worker on
+  // a 1-core host is pure overhead + shared-memory cost, so stay single-threaded.
+  if (n < 1) throw new Error("too few cores for a decode pool");
   const glue = await import("./wasm-threads/hologram_ai_wasm.js");
   const wasmUrl = new URL("./wasm-threads/hologram_ai_wasm_bg.wasm", import.meta.url);
   // Compile ONCE, then instantiate the same module on the execute instance and
@@ -90,30 +132,34 @@ async function initThreaded(): Promise<unknown> {
     module = await WebAssembly.compile(await (await fetch(wasmUrl)).arrayBuffer());
   }
   // Execute/"main" instance: no `thread_stack_size` → it creates the shared
-  // memory and runs the module's one-time data init.
+  // memory and runs the module's one-time data init. It MUST init before the
+  // pool workers so the heap/TLS the workers use is set up.
   const exports = (await glue.default({ module_or_path: module })) as unknown as {
     memory: WebAssembly.Memory;
     hologram_pool_workers: () => number;
   };
   const memory = exports.memory;
-  // Leave one core for the execute worker (it is the pool's `+1` participant).
-  const n = Math.max(1, Math.min((navigator.hardwareConcurrency || 2) - 1, 32));
-  const stackSize = 2 * 1024 * 1024; // 2 MiB per worker (64 KiB-aligned)
-  poolWorkers = [];
-  for (let id = 0; id < n; id++) {
-    const w = new Worker(new URL("./pool.worker.ts", import.meta.url), { type: "module" });
-    w.postMessage({ module, memory, id, stackSize });
-    poolWorkers.push(w);
-  }
-  // Gate the first decode on FULL registration — the substrate traps on a
-  // worker that registers after the first job.
+  const stackSize = 2 * 1024 * 1024; // 2 MiB per worker (a 64 KiB-aligned host default)
+  // The MAIN thread spawns and OWNS the pool workers, so terminating the execute
+  // worker on cancel/error tears the pool down too — otherwise the workers orphan
+  // and each pins the whole (model-sized) shared memory.
+  d.spawn(module, memory, n, stackSize);
+  // Gate the first decode on FULL registration — the substrate traps on a worker
+  // that registers after the first job. Readiness is the shared, race-free
+  // `hologram_pool_workers()` atomic (a worker's `registered` postMessage would
+  // be PREMATURE — it fires before `hologram_worker_run`'s `fetch_add`). We fail
+  // FAST on a worker that failed to instantiate (`d.failure()`), and the timeout
+  // is only a last-resort failsafe — normal registration is sub-second.
   const t0 = Date.now();
   while (exports.hologram_pool_workers() < n) {
-    if (Date.now() - t0 > 10_000) {
+    const why = d.failure();
+    if (why) throw new Error(`decode pool failed to start: ${why}`);
+    if (Date.now() - t0 > 15_000) {
       throw new Error(`pool registration timeout: ${exports.hologram_pool_workers()}/${n}`);
     }
     await new Promise((r) => setTimeout(r, 4));
   }
+  poolWorkerCount = n;
   G = glue as unknown as GlueModule;
   threadedActive = true;
   // Telemetry the V&V asserts on (a silent fallback to single-threaded must not
