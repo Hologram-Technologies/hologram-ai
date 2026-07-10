@@ -241,19 +241,30 @@ pub fn omajor_w8a8_servable(quant_dtype: u8, k: usize, _n: usize) -> bool {
 /// OUTPUT_MAJOR. (We asked for this fix; the substrate commit cites the same
 /// reasoning.)
 ///
-/// **Still `false`, for exactly one commit.** The substrate accepts the
-/// declaration now, but our pipeline turning it on is a *numerics* change: W8A8
-/// per-token activation quantization re-keys every affected κ and re-bases the
-/// reference transcript. That belongs in its own commit, with the byte-exact
-/// oracle deliberately replaced by accuracy agreement — not folded into the
-/// substrate bump, which must stay byte-neutral. The very next commit flips this
-/// to `true` (or removes it) alongside the re-baseline.
+/// **`true` since v0.8.1 — the fused output-major W8A8 decode path is ON.**
+/// Turning it on is a *numerics* change (W8A8 quantizes the activation per token,
+/// a different function from the W8A32 it replaced), so it is not gated by a
+/// byte-exact transcript but by accuracy agreement against full precision:
+/// `int8_w8a8_decode_tracks_full_precision_for_every_family`
+/// (`decode_family_coverage.rs`) decodes each family through both tiers and
+/// requires the quantized path to track bf16 — measured: identical greedy tokens,
+/// logit cosine 0.9994–0.9996, across Llama/Qwen2/Mistral/Phi3. The fixture
+/// transcript is unaffected because that fixture is f32 (never quantized).
+/// Measured payoff: `decode_perf` per-token 19,702 µs (W8A32) → ~10,016 µs (W8A8),
+/// a further ~2× on top of v0.8.0's fused-kernel 23×.
 ///
 /// Because this predicate gates the artifact's byte order *and* the declaration
-/// together, `false` here means `derive_quantized_artifact` keeps authoring
-/// row-major `[in, out]` bytes. Bytes and declaration cannot drift apart while
-/// the flag is off, and cannot drift when it is turned on.
-pub const SUBSTRATE_ACCEPTS_OUTPUT_MAJOR_ON_WEIGHTLESS_CONSTANTS: bool = false;
+/// together, they cannot drift: `true` means `derive_quantized_artifact` authors
+/// output-major `[out, in]` bytes AND the binder declares OUTPUT_MAJOR + W8A8, in
+/// lockstep.
+///
+/// It stays a named constant rather than being inlined so the substrate
+/// dependency is legible and the capability witness
+/// (`a_weightless_kappa_constant_can_declare_output_major`) has something to
+/// guard: if a future substrate regresses the acceptance, that test fails and
+/// this is the one line to flip back — the whole path off, bytes and declaration
+/// together, no half-on state.
+pub const SUBSTRATE_ACCEPTS_OUTPUT_MAJOR_ON_WEIGHTLESS_CONSTANTS: bool = true;
 
 /// The quantized derived-artifact map (row `quantized-transit`): a
 /// [`quant_key`] → `(artifact κ, out_features, in_features)` where the
