@@ -436,8 +436,15 @@ pub fn map_op(ctx: &OpContext<'_>) -> anyhow::Result<Option<AiOp>> {
         "QuantizeLinear" => Quantize {
             scheme: hologram_ai_quant::QuantScheme::Q8_0,
         },
+        // An imported weight's bytes come from the checkpoint, laid out `[k,n]`,
+        // and the import cannot know whether the graph will bind it as a constant
+        // or a κ. Both declarations are therefore the only true ones here. A pass
+        // that later authors the bytes itself — `quantize_external_matmul_weights`
+        // — is where the output-major/W8A8 opt-in belongs.
         "DequantizeLinear" => Dequantize {
             axis: ctx.attr_i_or("axis", 1),
+            layout: hologram_ai_common::ir::WeightLayout::RowMajor,
+            act: hologram_ai_common::ir::ActQuant::W8A32,
         },
 
         // ── Control flow (subgraphs imported by graph_builder) ────────

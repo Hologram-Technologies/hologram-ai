@@ -18,6 +18,10 @@ hologram-ops.workspace     = true
 hologram-graph.workspace   = true
 hologram-exec.workspace    = true
 hologram-archive.workspace = true
+# The output-major/W8A8 declaration predicate reads the substrate's OWN derived
+# facts (`quant_tier`, `mm_act_quant::K_MAX`) rather than restating them. See
+# `lower::quantize::omajor_w8a8_servable`.
+hologram-backend.workspace = true
 holospaces.workspace = true
 
 half.workspace      = true

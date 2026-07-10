@@ -7,7 +7,9 @@
 use std::collections::HashMap;
 
 use hologram_ai::{HoloRunner, ModelCompiler, ModelSource};
-use hologram_ai_common::{shape_from_concrete, AiGraph, AiNode, AiOp, AiParam, DType, TensorInfo};
+use hologram_ai_common::{
+    shape_from_concrete, ActQuant, AiGraph, AiNode, AiOp, AiParam, DType, TensorInfo, WeightLayout,
+};
 
 const K: usize = 64;
 const N: usize = 48;
@@ -87,7 +89,16 @@ fn assemble(
     AiGraph {
         name: "quant_arb".into(),
         nodes: vec![
-            AiNode::new(0, AiOp::Dequantize { axis }, dq_inputs, vec![90]),
+            AiNode::new(
+                0,
+                AiOp::Dequantize {
+                    axis,
+                    layout: WeightLayout::RowMajor,
+                    act: ActQuant::W8A32,
+                },
+                dq_inputs,
+                vec![90],
+            ),
             AiNode::new(1, AiOp::MatMul, vec![0, 90], vec![91]),
         ],
         inputs,

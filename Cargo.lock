@@ -1061,6 +1061,7 @@ dependencies = [
  "half",
  "hologram-ai-quant",
  "hologram-archive 0.8.0",
+ "hologram-backend 0.8.0",
  "hologram-exec 0.8.0",
  "hologram-graph 0.8.0",
  "hologram-ops 0.8.0",

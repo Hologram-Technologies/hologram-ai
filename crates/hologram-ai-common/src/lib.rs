@@ -17,10 +17,10 @@ pub use error::CommonError;
 pub use exec_context::{ContextBundle, PatchPruneContext, Section, SECTION_PATCH_PRUNE};
 pub use hologram_ai_quant::{QuantDescriptor, QuantScheme, ScaleDtype};
 pub use ir::{
-    canonical_vars, shape_from_concrete, AiGraph, AiNode, AiOp, AiParam, ConstraintStore, DType,
-    Dim, DimExpr, DimVarEntry, DimVarId, DimVarSource, DimVarTable, ImportWarning, KvLayout,
+    canonical_vars, shape_from_concrete, ActQuant, AiGraph, AiNode, AiOp, AiParam, ConstraintStore,
+    DType, Dim, DimExpr, DimVarEntry, DimVarId, DimVarSource, DimVarTable, ImportWarning, KvLayout,
     MetaValue, NodeId, ScatterReduce, SemanticHint, Shape, ShapeConstraint, ShapeError, TensorId,
-    TensorInfo, ValidationError,
+    TensorInfo, ValidationError, WeightLayout,
 };
 pub use lower::{lower, LowerPhase, LoweringOptions, LoweringOutput, OptProfile, QuantStrategy};
 pub use mem::{KvCacheLayout, MemoryPlan, MemoryPlanner};

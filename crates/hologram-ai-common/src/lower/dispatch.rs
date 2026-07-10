@@ -16,7 +16,7 @@
 //!   is exact.
 //! - [`OpPlan::ControlFlow`] — `If`/`Loop`/`Scan`, resolved at compile time.
 
-use crate::ir::{AiOp, DType, ScatterReduce};
+use crate::ir::{ActQuant, AiOp, DType, ScatterReduce, WeightLayout};
 use hologram_ops::OpKind;
 
 /// Per-node attribute kind to attach after emitting the op (architecture §5.1.2).
@@ -183,9 +183,12 @@ pub enum DesugarKind {
     /// hologram's `MatMulDequant` / `DequantActivation` fusions consume the
     /// weight at its quantum width — the dense f32 is never materialized (§6).
     /// `axis` is the per-channel quantization axis (ignored when the scale is a
-    /// scalar / per-tensor).
+    /// scalar / per-tensor). `layout`/`act` carry the weight-slot declaration
+    /// through to `QuantAttrs`; see [`crate::ir::WeightLayout`].
     Dequantize {
         axis: i64,
+        layout: WeightLayout,
+        act: ActQuant,
     },
     /// Legacy matmul+activation fusion → unfused `MatMul` then the activation,
     /// so hologram fuses structurally (architecture §5.3).
@@ -537,7 +540,11 @@ pub fn dispatch(op: &AiOp) -> OpPlan {
 
         // ── Type / quant / lookup ───────────────────────────────────────────
         A::Cast { to } => P::Desugar(DesugarKind::Cast { to: *to }),
-        A::Dequantize { axis } => P::Desugar(DesugarKind::Dequantize { axis: *axis }),
+        A::Dequantize { axis, layout, act } => P::Desugar(DesugarKind::Dequantize {
+            axis: *axis,
+            layout: *layout,
+            act: *act,
+        }),
         A::Quantize { .. } => P::Desugar(DesugarKind::Quantize),
         A::Embed => P::Desugar(DesugarKind::Embed),
 

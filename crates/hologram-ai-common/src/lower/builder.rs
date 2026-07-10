@@ -9,7 +9,7 @@
 
 use std::collections::HashMap;
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use hologram_graph::constant::ConstantEntry;
 use hologram_graph::node::{
     AttentionAttrs, ConvAttrs, GatherAttrs, GemmAttrs, LrnAttrs, Node, QuantAttrs,
@@ -22,7 +22,9 @@ use smallvec::SmallVec;
 use super::dispatch::{dispatch, AttrSpec, DesugarKind, OpPlan};
 use super::dtype::{ai_dtype_to_dtype_id, default_dtype_id, DTYPE_F32, DTYPE_I32, DTYPE_I64};
 use super::LowerPhase;
-use crate::ir::{AiGraph, AiNode, AiParam, DType, Dim, TensorId, TensorInfo};
+use crate::ir::{
+    ActQuant, AiGraph, AiNode, AiParam, DType, Dim, TensorId, TensorInfo, WeightLayout,
+};
 
 // ── Public surface ──────────────────────────────────────────────────────────
 
@@ -575,7 +577,9 @@ impl<'a> Ctx<'a> {
             } => self.desugar_reverse_sequence(node, batch_axis, time_axis),
             DesugarKind::Scatter { .. } => self.desugar_scatter(node),
             DesugarKind::Quantize => self.desugar_quantize(node),
-            DesugarKind::Dequantize { axis } => self.desugar_dequantize(node, axis),
+            DesugarKind::Dequantize { axis, layout, act } => {
+                self.desugar_dequantize(node, axis, layout, act)
+            }
             DesugarKind::MatMulActivation { activation } => {
                 self.desugar_matmul_act(node, activation)
             }
@@ -1305,7 +1309,13 @@ impl<'a> Ctx<'a> {
     ///    runtime/dynamic scale): the canonical arithmetic
     ///    `(toᶠ³²(x) − toᶠ³²(zp)) · scale` over `Dequantize`(scale 1)/`Sub`/`Mul`,
     ///    correct for arbitrary scale/zp shapes and dtypes (§5.2).
-    fn desugar_dequantize(&mut self, node: &AiNode, axis: i64) -> Result<()> {
+    fn desugar_dequantize(
+        &mut self,
+        node: &AiNode,
+        axis: i64,
+        layout: WeightLayout,
+        act: ActQuant,
+    ) -> Result<()> {
         let x_tid = *node.inputs.first().context("Dequantize missing input")?;
         let quant_dtype = self.dtype_of(x_tid).0;
         let scale_tid = node.inputs.get(1).copied();
@@ -1342,12 +1352,15 @@ impl<'a> Ctx<'a> {
                             scale_bits: scale.to_bits(),
                             zero_point,
                             axis: -1,
-                            // Per-TENSOR scale. The fused output-major decode GEMV
-                            // requires per-channel symmetric scales, so this node can
-                            // never take it; declaring the default is the true
-                            // statement, not a conservative one.
-                            weight_layout: weight_layout::ROW_MAJOR,
-                            act_quant: act_quant::W8A32,
+                            // Per-TENSOR scale: the fused output-major GEMV needs
+                            // per-channel symmetric scales, so no kernel can serve an
+                            // OUTPUT_MAJOR declaration here. Pass the caller's
+                            // declaration through ANYWAY rather than quietly
+                            // downgrading it — the substrate then refuses, naming the
+                            // predicate. Downgrading would read `[n,k]` bytes as
+                            // `[k,n]` and return a plausible, wrong answer.
+                            weight_layout: layout.to_substrate(),
+                            act_quant: act.to_substrate(),
                         },
                     );
                     return self.bind_out(node, InputSource::Node(nid));
@@ -1382,20 +1395,35 @@ impl<'a> Ctx<'a> {
                             zero_point: 0,
                             axis: ax as i32,
                             // Per-CHANNEL symmetric: the one node shape the fused
-                            // output-major decode GEMV can serve. It stays
-                            // `[k,n]`/W8A32 here because `weight_layout` is a
-                            // statement of fact about the bytes the binder will
-                            // materialize, and `act_quant` changes the computed
-                            // value — neither may be asserted by a lowering that
-                            // cannot see how this weight is bound. The opt-in is
-                            // made where the binder is chosen, never here.
-                            weight_layout: weight_layout::ROW_MAJOR,
-                            act_quant: act_quant::W8A32,
+                            // output-major decode GEMV can serve. The declaration is
+                            // the node's, made by whichever pass authored this
+                            // weight's bytes — `quantize_external_matmul_weights` for
+                            // a κ-bound artifact, `quantize_weights` for a graph
+                            // constant. The lowering only carries it down; it cannot
+                            // see how the weight is bound and must not guess.
+                            weight_layout: layout.to_substrate(),
+                            act_quant: act.to_substrate(),
                         },
                     );
                     return self.bind_out(node, InputSource::Node(nid));
                 }
             }
+        }
+
+        // An OUTPUT_MAJOR weight's bytes are `[n,k]`. The primitive desugar below
+        // reads the operand at its declared `[k,n]` shape, so it would transpose
+        // the weight by accident and produce a plausible, wrong answer — the
+        // substrate refuses exactly this, and it never sees the node because the
+        // primitive form has no `MatMulDequant` to reject. Refuse here instead:
+        // the declaration is unsatisfiable, and a wrong model is worse than a
+        // slow one.
+        if layout == WeightLayout::OutputMajor {
+            bail!(
+                "a weight declared OUTPUT_MAJOR reached the primitive dequant desugar \
+                 (runtime scale, or a shape the packed kernel cannot carry): its `[n,k]` \
+                 bytes would be read as `[k,n]`. Author ROW_MAJOR bytes for this weight, \
+                 or keep it on the packed per-channel path."
+            );
         }
 
         // General canonical form for everything else (runtime scale, or shapes

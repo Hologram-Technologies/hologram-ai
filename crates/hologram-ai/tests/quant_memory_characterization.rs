@@ -13,7 +13,9 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use hologram_ai::{HoloRunner, ModelCompiler, ModelSource};
-use hologram_ai_common::{shape_from_concrete, AiGraph, AiNode, AiOp, AiParam, DType, TensorInfo};
+use hologram_ai_common::{
+    shape_from_concrete, ActQuant, AiGraph, AiNode, AiOp, AiParam, DType, TensorInfo, WeightLayout,
+};
 
 /// Peak-tracking allocator: `peak` is the high-water mark of live bytes.
 struct PeakAlloc {
@@ -80,7 +82,11 @@ fn quant_stack(d: u64, layers: u64) -> AiGraph {
         inputs.push(wq);
         nodes.push(AiNode::new(
             2 * i as u32,
-            AiOp::Dequantize { axis: -1 },
+            AiOp::Dequantize {
+                axis: -1,
+                layout: WeightLayout::RowMajor,
+                act: ActQuant::W8A32,
+            },
             vec![wq, sc, zp],
             vec![dq],
         ));

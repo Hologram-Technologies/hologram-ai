@@ -77,10 +77,32 @@ fn widen_to_f32(bytes: &[u8], dtype: DType, elems: usize) -> Result<Vec<f32>> {
     }
 }
 
-/// Derive the quantized artifact of a wide `[out, in]` weight: transpose to
-/// the matmul orientation `[in, out]`, encode per-channel symmetric int8,
-/// layout `q ‖ scales`. Deterministic — same wide bytes, same artifact
-/// bytes, same κ, on every host.
+/// Derive the quantized artifact of a wide `[out, in]` weight: encode
+/// per-channel symmetric int8, layout `q ‖ scales`. Deterministic — same wide
+/// bytes, same artifact bytes, same κ, on every host.
+///
+/// The `q` block's byte order is decided by
+/// [`hologram_ai_common::lower::omajor_w8a8_servable`] — the *same* predicate the
+/// binder consults to declare `weight_layout` on the `Dequantize` node, so the
+/// bytes and the declaration cannot drift. There is no third state: `[n,k]` bytes
+/// read as `[k,n]` is a plausible wrong answer, not a slow one.
+///
+/// * **servable** ⇒ output-major `[out, in]`. That is the wide tensor's *own*
+///   order, so this costs no transpose — it removes the one that used to be
+///   here, along with the `out·in` f32 scratch buffer it needed. Under a 4 GiB
+///   wasm ceiling, not allocating a second copy of a 300 MB projection is worth
+///   more than the transpose's cycles.
+/// * **not servable** ⇒ row-major `[in, out]`, the matmul orientation the scalar
+///   W8A32 dequant loop reads. The transpose is paid only here.
+///
+/// Either way `q.len() == out·in` and the scales follow at that offset, so the
+/// ranged κ bindings (`external_range(κ, .., 0, elems)` and
+/// `external_range(κ, .., elems, out*4)`) are layout-independent.
+///
+/// The scales are identical under both orders, and the codes are transposes of
+/// one another (`scales_omajor_and_rowmajor_agree_and_the_codes_transpose`): the
+/// codec is the same, only the storage order differs, and the accumulation
+/// `Σ aᵢ·d(cᵢ)` cannot tell them apart.
 pub fn derive_quantized_artifact(
     wide: &[u8],
     dtype: DType,
@@ -89,13 +111,25 @@ pub fn derive_quantized_artifact(
 ) -> Result<Vec<u8>> {
     let (rows, cols) = (out_features as usize, in_features as usize);
     let w = widen_to_f32(wide, dtype, rows * cols)?;
-    let mut wt = vec![0f32; rows * cols];
-    for r in 0..rows {
-        for c in 0..cols {
-            wt[c * rows + r] = w[r * cols + c];
+
+    let (q, scales) = if hologram_ai_common::lower::omajor_w8a8_servable(
+        hologram_ai_common::lower::dtype::DTYPE_I8,
+        cols,
+        rows,
+    ) {
+        // `w` is already `[out, in]` = `[n, k]`: each output channel's k-vector
+        // contiguous. Encode in place.
+        hologram_ai_quant::encode_int8_per_channel_omajor(&w, rows, cols)
+    } else {
+        let mut wt = vec![0f32; rows * cols];
+        for r in 0..rows {
+            for c in 0..cols {
+                wt[c * rows + r] = w[r * cols + c];
+            }
         }
-    }
-    let (q, scales) = hologram_ai_quant::encode_int8_per_channel(&wt, cols, rows);
+        hologram_ai_quant::encode_int8_per_channel(&wt, cols, rows)
+    };
+
     let mut artifact = Vec::with_capacity(q.len() + scales.len() * 4);
     artifact.extend_from_slice(bytemuck::cast_slice::<i8, u8>(&q));
     for s in scales {

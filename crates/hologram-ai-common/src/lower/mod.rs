@@ -6,8 +6,9 @@ pub mod quantize;
 pub use builder::{lower, LoweringOptions, LoweringOutput, QuantStrategy};
 pub use dispatch::{dispatch, AttrSpec, DesugarKind, OpPlan};
 pub use quantize::{
-    quant_key, quantizable_external_weights, quantize_external_matmul_weights, quantize_weights,
-    ranged_external_matmul_weights, HeadChunkTarget, QuantMap,
+    omajor_w8a8_servable, quant_key, quantizable_external_weights,
+    quantize_external_matmul_weights, quantize_weights, ranged_external_matmul_weights,
+    HeadChunkTarget, QuantMap, SUBSTRATE_ACCEPTS_OUTPUT_MAJOR_ON_WEIGHTLESS_CONSTANTS,
 };
 
 // The runtime shape-projection / strategy / op-resolver machinery is removed:

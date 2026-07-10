@@ -30,7 +30,7 @@
 use hologram_ai::{HoloRunner, ModelCompiler, ModelSource};
 use hologram_ai_common::ir::op::{KvLayout, ScatterReduce};
 use hologram_ai_common::lower::{dispatch, OpPlan};
-use hologram_ai_common::{AiOp, DType};
+use hologram_ai_common::{ActQuant, AiOp, DType, WeightLayout};
 use hologram_ai_conformance::ort_runner::onnx_builder;
 use hologram_ai_quant::QuantScheme;
 
@@ -297,7 +297,11 @@ fn every_ai_op_variant() -> Vec<AiOp> {
         AiOp::Quantize {
             scheme: QuantScheme::Q8_0,
         },
-        AiOp::Dequantize { axis: 1 },
+        AiOp::Dequantize {
+            axis: 1,
+            layout: WeightLayout::RowMajor,
+            act: ActQuant::W8A32,
+        },
         AiOp::QuantizedMatMul {
             lhs_scheme: QuantScheme::Q8_0,
             rhs_scheme: QuantScheme::Q8_0,

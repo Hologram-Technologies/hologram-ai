@@ -6,7 +6,10 @@ use std::sync::Arc;
 use anyhow::{bail, Result};
 use hologram_ai_quant::encode_int8_per_channel;
 
-use crate::ir::{shape_from_concrete, AiGraph, AiNode, AiOp, AiParam, DType, TensorId, TensorInfo};
+use crate::ir::{
+    shape_from_concrete, ActQuant, AiGraph, AiNode, AiOp, AiParam, DType, TensorId, TensorInfo,
+    WeightLayout,
+};
 use crate::lower::QuantStrategy;
 
 /// Read a tensor's concrete 2D dims `[k, n]`, or `None` if not rank-2 concrete.
@@ -121,9 +124,23 @@ pub fn quantize_weights(graph: &mut AiGraph, strategy: QuantStrategy) -> Result<
         // Dequantize node (zero-point omitted — lowering fills zeros), axis=1
         // (per output column for a [k, n] weight). This matches the per-channel
         // reference graph in `quantized_weight_memory.rs::per_channel_graph()`.
+        //
+        // This weight is a graph CONSTANT: its bytes are in the graph, `[k,n]`,
+        // encoded by `encode_int8_per_channel` just above. `OutputMajor` would be
+        // a false statement about them and the substrate rejects it. And it stays
+        // `W8A32`, deliberately: the compile-time fusion only transposes a
+        // constant at a decode shape (`m ≤ OMAJOR_W8A8_MAX_M`), so declaring W8A8
+        // here would give this weight W8A8 at decode and W8A32 at prefill — the
+        // same weight computing two different functions. Our chunked-prefill
+        // seeder runs at `m = 64`; that split would break every equivalence in
+        // `decode_plan.feature`. The κ-bound path below has no such gate.
         new_nodes.push(AiNode::new(
             next_nid,
-            AiOp::Dequantize { axis: 1 },
+            AiOp::Dequantize {
+                axis: 1,
+                layout: WeightLayout::RowMajor,
+                act: ActQuant::W8A32,
+            },
             vec![wq_tid, scale_tid],
             vec![deq_tid],
         ));
@@ -159,14 +176,105 @@ pub fn quantize_weights(graph: &mut AiGraph, strategy: QuantStrategy) -> Result<
     Ok(())
 }
 
+/// **The one law.** Can a load-time-bound quantized weight of this tier and
+/// shape take the fused output-major W8A8 decode GEMV?
+///
+/// This predicate decides two things that must never disagree: the byte layout
+/// `hologram_ai::quantized::derive_quantized_artifact` authors, and the
+/// `weight_layout`/`act_quant` the
+/// binder declares on the `Dequantize` node. If they disagreed, the substrate
+/// would read `[n,k]` bytes as `[k,n]` — a plausible, wrong answer. So both call
+/// *this*, and neither restates its conditions.
+///
+/// Every condition is the substrate's own derived fact, never a literal of ours:
+///
+/// * `quant_tier(dtype)` — the codec registry. An unregistered tag is `None`,
+///   never a guess. The tier states whether an output-major kernel exists for it
+///   (`omajor_fusable`) and whether this `k` is addressable per output column
+///   (`omajor_k_ok`: whole groups, and each column's unit span a whole number of
+///   bytes — which is why `i4` needs an even `k` and `i8`/`e8cb` do not).
+/// * `mm_act_quant::K_MAX` — the exact-accumulation ceiling, itself derived as
+///   `⌊ACCUM_CAPACITY / ALPHABET_BOUND²⌋` from the declared alphabet. Under it
+///   neither the final sum nor any intermediate accumulator state can overflow,
+///   so the reduction is exact and the integer invariances are bit-level. Real
+///   decode shapes sit three orders of magnitude below it; a 1M-context model's
+///   projections do not come close.
+/// * A VQ tier must bring a codebook operand. We author no codebook, so a tier
+///   that needs one cannot be declared here.
+///
+/// `n` (the output-channel count) carries no condition of its own — the fused
+/// call requires `channels == n`, which our `axis = 1` per-channel scales give by
+/// construction — but it is taken so a future tier whose packing depends on the
+/// column count cannot be added without revisiting this signature.
+#[must_use]
+pub fn omajor_w8a8_servable(quant_dtype: u8, k: usize, _n: usize) -> bool {
+    use hologram_backend::kernel_call::mm_act_quant;
+    if !SUBSTRATE_ACCEPTS_OUTPUT_MAJOR_ON_WEIGHTLESS_CONSTANTS {
+        return false;
+    }
+    let Some(tier) = hologram_backend::quant_tier::quant_tier(hologram_types::DTypeId(quant_dtype))
+    else {
+        return false; // unregistered tier: never guess
+    };
+    tier.omajor_fusable && !tier.needs_codebook && tier.omajor_k_ok(k) && k <= mm_act_quant::K_MAX
+}
+
+/// **Blocked upstream at substrate v0.8.0.** Whether the substrate's compiler
+/// accepts `weight_layout = OUTPUT_MAJOR` on the binding form our decode path
+/// actually uses: a **weightless constant** — `ConstantEntry { bytes: vec![] }`
+/// plus a `holospaces.kappa_map` extension naming the κ whose bytes arrive at
+/// materialization.
+///
+/// This is a fact about the *host substrate*, not about any model, input, or
+/// use-case — the only kind of constant this codebase permits. It is pinned, not
+/// asserted: `a_weightless_kappa_constant_cannot_yet_declare_output_major`
+/// (`hologram-ai/tests/omajor_w8a8_substrate_contract.rs`) compiles that exact
+/// graph and witnesses the refusal. When upstream lifts it, that test fails, and
+/// this flips to `true`. That is the whole point of pinning it.
+///
+/// **The gap.** `hologram-compiler::validate_weight_layout_declarations` rejects
+/// on
+///
+/// ```text
+/// if matches!(node.inputs.first(), Some(InputSource::Constant(_))) { … }
+/// ```
+///
+/// — *any* graph constant, never asking whether it has bytes. But
+/// `QuantAttrs::weight_layout`'s own docstring names our case as the one it
+/// serves: "A weightless compile — the graph carries a κ for the weight and the
+/// bytes arrive at materialization — has no constant bytes for the compiler to
+/// transpose." A zero-byte constant's bytes are precisely *not* `[k,n]` in the
+/// graph; there are none. The doc and the validator disagree, and the validator
+/// wins. `fuse_const_i8_decode` already discriminates the two cases one screen
+/// away (`Some(e) if e.bytes.len() == want_len`), so the fix is to ask the same
+/// question here — `graph.constants().get(cid)` is in scope.
+///
+/// Until then the fused output-major decode GEMV is reachable only by a weight
+/// bound as a graph **input**, which would cost the κ map, cross-model artifact
+/// dedup, and weight-tier paging — the things that let a 1.5B model fit a 4 GiB
+/// address space at all. We keep the weightless form and stay on W8A32.
+///
+/// Because this predicate gates the artifact's byte order *and* the declaration
+/// together, `false` here means `derive_quantized_artifact` keeps authoring
+/// row-major `[in, out]` bytes. Bytes and declaration cannot drift apart while
+/// the flag is off, and cannot drift when it is turned on.
+pub const SUBSTRATE_ACCEPTS_OUTPUT_MAJOR_ON_WEIGHTLESS_CONSTANTS: bool = false;
+
 /// The quantized derived-artifact map (row `quantized-transit`): a
 /// [`quant_key`] → `(artifact κ, out_features, in_features)` where the
 /// artifact is the matmul-ready per-channel symmetric int8 form of the wide
-/// `[out, in]` weight — transposed to `[in, out]` at derivation, layout
-/// `q_i8(in·out) ‖ scales_f32(4·out)` (one scale per output column). A whole
-/// projection is keyed by its wide κ; a **head chunk** (a vocab-row range of
-/// the LM-head/tied-embedding weight) is keyed by that κ AND its byte range,
-/// so the several chunks that share one κ each map to their own per-chunk
+/// `[out, in]` weight, layout `q_i8(in·out) ‖ scales_f32(4·out)` (one scale per
+/// output channel).
+///
+/// The `q` block is **output-major `[out, in]`** when
+/// [`omajor_w8a8_servable`] holds — which is the wide tensor's own order, so the
+/// derivation costs no transpose — and row-major `[in, out]` otherwise. Either
+/// way the block's length is `in·out` and the scales follow at that offset, so
+/// the ranged κ bindings below are layout-independent.
+///
+/// A whole projection is keyed by its wide κ; a **head chunk** (a vocab-row
+/// range of the LM-head/tied-embedding weight) is keyed by that κ AND its byte
+/// range, so the several chunks that share one κ each map to their own per-chunk
 /// artifact.
 pub type QuantMap = std::collections::HashMap<String, (String, u64, u64)>;
 
@@ -456,12 +564,42 @@ pub fn quantize_external_matmul_weights(graph: &mut AiGraph, quant: &QuantMap) -
             .insert(deq_tid, TensorInfo::new(DType::F32, shape));
         graph.tensor_names.insert(deq_tid, format!("{name}.deq"));
 
+        // The weight-slot declaration. This weight is LOAD-TIME BOUND — a κ the
+        // binder materializes — which is the only kind that may assert
+        // `OUTPUT_MAJOR`, and the assertion is what lets a weightless compile
+        // reach the fused output-major decode GEMV at all.
+        //
+        // `omajor_w8a8_servable` is the same predicate `derive_quantized_artifact`
+        // consults to choose the artifact's byte order, so the declaration and the
+        // bytes cannot drift. When it holds, the artifact is `[out, in]` and this
+        // node says so; when it does not, the artifact is `[in, out]` and this node
+        // says that. There is no third state, and no fallback: a wrong pairing is
+        // a wrong answer, not a slow one.
+        //
+        // W8A8 rides with the layout rather than being a separate knob, because the
+        // output-major kernel and W8A8 are one call — the substrate pairs them and
+        // rejects either alone.
+        let servable = omajor_w8a8_servable(
+            crate::lower::dtype::DTYPE_I8,
+            rw.in_features as usize,
+            rw.out_features as usize,
+        );
+        let (layout, act) = if servable {
+            (WeightLayout::OutputMajor, ActQuant::W8A8TokenSym)
+        } else {
+            (WeightLayout::RowMajor, ActQuant::W8A32)
+        };
+
         // Per-channel scales along the output columns of [in, out]: axis 1.
         // Feeding the matmul directly (no interposed transpose) is the
         // adjacency the substrate fuses in-register.
         graph.nodes.push(AiNode::new(
             next_nid,
-            AiOp::Dequantize { axis: 1 },
+            AiOp::Dequantize {
+                axis: 1,
+                layout,
+                act,
+            },
             vec![wq_tid, scale_tid],
             vec![deq_tid],
         ));

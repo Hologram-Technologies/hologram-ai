@@ -14,7 +14,9 @@
 use std::collections::HashMap;
 
 use hologram_ai::{HoloRunner, ModelCompiler, ModelSource};
-use hologram_ai_common::{shape_from_concrete, AiGraph, AiNode, AiOp, AiParam, DType, TensorInfo};
+use hologram_ai_common::{
+    shape_from_concrete, ActQuant, AiGraph, AiNode, AiOp, AiParam, DType, TensorInfo, WeightLayout,
+};
 
 const K: usize = 256; // input dim
 const N: usize = 256; // output dim
@@ -58,7 +60,16 @@ fn quantized_graph() -> AiGraph {
     AiGraph {
         name: "quant_linear".into(),
         nodes: vec![
-            AiNode::new(0, AiOp::Dequantize { axis: -1 }, vec![1, 2, 3], vec![4]),
+            AiNode::new(
+                0,
+                AiOp::Dequantize {
+                    axis: -1,
+                    layout: WeightLayout::RowMajor,
+                    act: ActQuant::W8A32,
+                },
+                vec![1, 2, 3],
+                vec![4],
+            ),
             AiNode::new(1, AiOp::MatMul, vec![0, 4], vec![5]),
         ],
         inputs: vec![0],
@@ -200,7 +211,16 @@ fn per_channel_graph() -> AiGraph {
         name: "per_channel_linear".into(),
         // axis = 1 ⇒ per-output-channel (one scale per column of W[K, N]).
         nodes: vec![
-            AiNode::new(0, AiOp::Dequantize { axis: 1 }, vec![1, 2, 3], vec![4]),
+            AiNode::new(
+                0,
+                AiOp::Dequantize {
+                    axis: 1,
+                    layout: WeightLayout::RowMajor,
+                    act: ActQuant::W8A32,
+                },
+                vec![1, 2, 3],
+                vec![4],
+            ),
             AiNode::new(1, AiOp::MatMul, vec![0, 4], vec![5]),
         ],
         inputs: vec![0],
@@ -292,7 +312,16 @@ fn i4_graph() -> (AiGraph, Vec<i8>) {
     let g = AiGraph {
         name: "i4_linear".into(),
         nodes: vec![
-            AiNode::new(0, AiOp::Dequantize { axis: -1 }, vec![1, 2, 3], vec![4]),
+            AiNode::new(
+                0,
+                AiOp::Dequantize {
+                    axis: -1,
+                    layout: WeightLayout::RowMajor,
+                    act: ActQuant::W8A32,
+                },
+                vec![1, 2, 3],
+                vec![4],
+            ),
             AiNode::new(1, AiOp::MatMul, vec![0, 4], vec![5]),
         ],
         inputs: vec![0],

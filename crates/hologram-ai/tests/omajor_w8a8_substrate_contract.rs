@@ -113,8 +113,16 @@ fn reference_w8a32(
     out
 }
 
-/// Build a weightless graph `out = A · dequant(Wq)` whose weight is a graph
-/// **input** (bound at load, not a constant) declaring `OUTPUT_MAJOR` + W8A8.
+/// Build a graph `out = A · dequant(Wq)` whose weight is a graph **input**
+/// declaring `OUTPUT_MAJOR` + W8A8.
+///
+/// **This is not the binding our decode path uses.** Our κ weights lower to a
+/// zero-byte `ConstantEntry` plus a `holospaces.kappa_map` extension, and the
+/// substrate's compiler refuses `OUTPUT_MAJOR` on *any* `InputSource::Constant`
+/// — see `a_weightless_kappa_constant_cannot_yet_declare_output_major` below.
+/// A graph input is the only binding that reaches the fused call today, so it is
+/// what these kernel-behaviour witnesses must use. Read them as: *the kernel does
+/// what the contract says, once you can reach it.*
 ///
 /// The `Dequantize` node keeps its logical `[k,n]` shape — `weight_layout` is a
 /// statement about the *bytes*, not the type. Scales and zero-points are
@@ -153,9 +161,9 @@ fn omajor_graph(m: usize, k: usize, n: usize, scales: &[f32]) -> Vec<u8> {
         output_shape: a_sh,
     });
     g.add_input(a_in);
-    // The weight as a graph INPUT — bound at load time, exactly as a κ-bound
-    // external param is. The compiler has no bytes to transpose; the
-    // declaration is what licenses the fused omajor call.
+    // The weight as a graph INPUT. The compiler has no bytes to transpose; the
+    // declaration is what licenses the fused omajor call. NOT our binding — see
+    // the doc comment above and the tripwire at the bottom of this file.
     let w_in = g.add_node(Node {
         op: GraphOp::Input,
         inputs: SmallVec::new(),
@@ -444,5 +452,133 @@ fn an_unservable_output_major_declaration_fails_loud_and_never_falls_back() {
     assert!(
         msg.contains("OUTPUT_MAJOR"),
         "the refusal must name the declaration it could not honour, got: {msg}"
+    );
+}
+
+/// **The blocker, pinned.** Our decode path binds every projection weight as a
+/// *weightless constant*: `ConstantEntry { bytes: vec![] }` in the graph, plus a
+/// `holospaces.kappa_map` extension naming the κ whose bytes arrive at
+/// materialization. That is exactly the case `QuantAttrs::weight_layout`'s
+/// docstring says it exists to serve — "a weightless compile … has no constant
+/// bytes for the compiler to transpose".
+///
+/// But `validate_weight_layout_declarations` rejects on
+/// `matches!(node.inputs.first(), Some(InputSource::Constant(_)))`, without ever
+/// asking whether the constant has bytes. So the documented use-case is
+/// unreachable through the representation the doc describes, and every model we
+/// ship stays on W8A32.
+///
+/// This test compiles that graph and pins the refusal. It is a **tripwire**: when
+/// upstream narrows the check to constants that actually carry bytes — the same
+/// question `fuse_const_i8_decode` already asks one screen away, `Some(e) if
+/// e.bytes.len() == want_len` — this test fails, and
+/// `SUBSTRATE_ACCEPTS_OUTPUT_MAJOR_ON_WEIGHTLESS_CONSTANTS` flips to `true`,
+/// turning the whole path on. Nothing here is asserted from prose.
+#[test]
+fn a_weightless_kappa_constant_cannot_yet_declare_output_major() {
+    // Read through `black_box` so this is a runtime check rather than a `const`
+    // assertion clippy folds away: if the flag flips, this must FAIL here, not be
+    // optimized into nothing.
+    let flag = std::hint::black_box(
+        hologram_ai_common::lower::SUBSTRATE_ACCEPTS_OUTPUT_MAJOR_ON_WEIGHTLESS_CONSTANTS,
+    );
+    assert!(
+        !flag,
+        "the flag claims the substrate accepts OUTPUT_MAJOR on a weightless constant — \
+         then this test must be inverted, not skipped"
+    );
+
+    let (m, k, n) = (1usize, 64usize, 8usize);
+    let mut g = Graph::new();
+    let a_sh = g
+        .shape_registry_mut()
+        .intern(ShapeDescriptor::rank2(m as u64, k as u64));
+    let w_sh = g
+        .shape_registry_mut()
+        .intern(ShapeDescriptor::rank2(k as u64, n as u64));
+    let o_sh = g
+        .shape_registry_mut()
+        .intern(ShapeDescriptor::rank2(m as u64, n as u64));
+    let v_sh = g
+        .shape_registry_mut()
+        .intern(ShapeDescriptor::rank1(n as u64));
+
+    // The weightless weight, exactly as `AiParam::External` lowers: a constant
+    // with NO bytes. Its content arrives later, addressed by κ.
+    let wc = g.constants_mut().insert(ConstantEntry {
+        bytes: Vec::new(),
+        dtype: DTypeId(DTYPE_I8),
+        shape: w_sh,
+    });
+    g.add_extension(
+        "holospaces.kappa_map",
+        b"ConstantId(0):kappa-under-test\n".to_vec(),
+    );
+
+    let scales: Vec<f32> = (0..n).map(|j| 0.001 + (j as f32) * 1e-6).collect();
+    let sc = g.constants_mut().insert(ConstantEntry {
+        bytes: scales.iter().flat_map(|v| v.to_le_bytes()).collect(),
+        dtype: DTypeId(DTYPE_F32),
+        shape: v_sh,
+    });
+    let zc = g.constants_mut().insert(ConstantEntry {
+        bytes: vec![0u8; n * 4],
+        dtype: DTypeId(DTYPE_I8),
+        shape: v_sh,
+    });
+
+    let a_in = g.add_node(Node {
+        op: GraphOp::Input,
+        inputs: SmallVec::new(),
+        output_dtype: DTypeId(DTYPE_F32),
+        output_shape: a_sh,
+    });
+    g.add_input(a_in);
+    let dq = g.add_node(Node {
+        op: GraphOp::Op(OpKind::Dequantize),
+        inputs: SmallVec::from_iter([
+            InputSource::Constant(wc),
+            InputSource::Constant(sc),
+            InputSource::Constant(zc),
+        ]),
+        output_dtype: DTypeId(DTYPE_F32),
+        output_shape: w_sh,
+    });
+    g.set_quant_attrs(
+        dq,
+        QuantAttrs {
+            quant_dtype: DTYPE_I8,
+            scale_bits: 0,
+            zero_point: 0,
+            axis: 1,
+            weight_layout: weight_layout::OUTPUT_MAJOR,
+            act_quant: act_quant::W8A8_TOKEN_SYM,
+        },
+    );
+    let mm = g.add_node(Node {
+        op: GraphOp::Op(OpKind::MatMul),
+        inputs: SmallVec::from_iter([InputSource::Node(a_in), InputSource::Node(dq)]),
+        output_dtype: DTypeId(DTYPE_F32),
+        output_shape: o_sh,
+    });
+    let out = g.add_node(Node {
+        op: GraphOp::Output,
+        inputs: SmallVec::from_iter([InputSource::Node(mm)]),
+        output_dtype: DTypeId(DTYPE_F32),
+        output_shape: o_sh,
+    });
+    g.add_output(out);
+
+    let err = compile(g, BackendKind::Cpu, WittLevel::W32).err().expect(
+        "TRIPWIRE: a weightless (zero-byte) κ constant declaring OUTPUT_MAJOR now COMPILES. \
+             Upstream has lifted the restriction. Flip \
+             SUBSTRATE_ACCEPTS_OUTPUT_MAJOR_ON_WEIGHTLESS_CONSTANTS to true, invert this test, \
+             and re-baseline the transcript oracles — W8A8 re-keys κ.",
+    );
+    let msg = format!("{err}");
+    assert!(
+        msg.contains("graph constant"),
+        "the refusal must be the constant-binding one (not k, tier, axis, or act_quant), \
+         got: {msg}"
     );
 }
