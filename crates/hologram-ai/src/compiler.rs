@@ -898,6 +898,83 @@ pub fn post_concretization_repair(mut ai_graph: AiGraph) -> anyhow::Result<AiGra
 /// The lowering pass uses this to emit 0-sentinels for those dims so the
 /// runtime can resolve them from actual buffer sizes.
 #[doc(hidden)]
+/// The structural role of a symbolic dimension, derived from the graph input it
+/// sits on rather than from its name. See [`infer_dim_var_roles`].
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum DimRole {
+    /// The leading (batch) axis of a decoder input → 1.
+    Batch,
+    /// A past-KV input's sequence axis → 0 (the empty-past law).
+    Past,
+    /// The current-sequence span: the token / position / attention-mask axis →
+    /// the compiled window length.
+    Sequence,
+}
+
+/// Map each symbolic `DimVarId` to its [`DimRole`] by the graph INPUT it appears
+/// on, using the stable ONNX decoder I/O contract (the same names
+/// `commands::generate` classifies feed-time ports by). A dim not appearing on a
+/// recognized decoder input is left unmapped, so the caller falls back to the
+/// name heuristic for it (diffusion spatial/channel dims, which have no
+/// comparable contract).
+///
+/// Precedence when a var appears in more than one role: `Batch` wins (a var used
+/// as any input's leading axis IS the batch, even if it reappears elsewhere),
+/// then `Past` over `Sequence`. This is parametric: it reads structure, never the
+/// dim's own string.
+fn infer_dim_var_roles(
+    graph: &AiGraph,
+) -> std::collections::HashMap<hologram_ai_common::DimVarId, DimRole> {
+    let mut roles: std::collections::HashMap<hologram_ai_common::DimVarId, DimRole> =
+        std::collections::HashMap::new();
+    for (i, tid) in graph.inputs.iter().enumerate() {
+        let name = graph.input_names.get(i).map(String::as_str).unwrap_or("");
+        // The ONNX decoder input contract (see `commands::generate::AuxKind`).
+        let is_past = name.starts_with("past_key_values") || name.starts_with("past.");
+        let is_seq_input =
+            name == "input_ids" || name == "position_ids" || name == "attention_mask";
+        // Only a RECOGNIZED decoder input carries a role. An unrecognized input
+        // (an arbitrary model's `X`, a vision tensor, …) has no fixed axis
+        // convention — its leading axis is not necessarily batch — so it
+        // contributes nothing here and every one of its dims falls to the name
+        // fallback. Assuming axis 0 = batch for such inputs collapsed a `[seq,
+        // hidden]` activation's leading SEQUENCE dim to 1 (`mini_transformer`).
+        if !is_past && !is_seq_input {
+            continue;
+        }
+        let Some(info) = graph.tensor_info.get(tid) else {
+            continue;
+        };
+        for (axis, dim) in info.shape.iter().enumerate() {
+            for v in dim.free_vars() {
+                // On a recognized decoder input the leading axis is the batch;
+                // the remaining symbolic axis is the past length (a past-KV
+                // input) or the current-sequence span (tokens/positions/mask).
+                // KV-head and head-dim axes are concrete in these exports, so
+                // they carry no var and never reach this branch.
+                let role = if axis == 0 {
+                    DimRole::Batch
+                } else if is_past {
+                    DimRole::Past
+                } else {
+                    DimRole::Sequence
+                };
+                roles
+                    .entry(v)
+                    .and_modify(|existing| {
+                        if role == DimRole::Batch {
+                            *existing = DimRole::Batch;
+                        } else if *existing == DimRole::Sequence && role == DimRole::Past {
+                            *existing = DimRole::Past;
+                        }
+                    })
+                    .or_insert(role);
+            }
+        }
+    }
+    roles
+}
+
 pub fn concretize_all_dims(
     mut graph: AiGraph,
     seq_len_override: Option<u64>,
@@ -944,47 +1021,71 @@ pub fn concretize_all_dims(
         "tagged seq-dependent tensor dimensions"
     );
 
-    // Set concrete values for all dim vars based on their name.
-    for (_, entry) in graph.dim_vars.iter_mut() {
+    // Set concrete values for all dim vars.
+    //
+    // The value of a symbolic dimension is decided by its ROLE — which graph
+    // INPUT and axis it sits on — not by parsing its (exporter-chosen) name. A
+    // dim's name is a whim of whatever traced the model; `attention_mask`'s span
+    // is called `total_sequence_length` by one exporter and `past_sequence_length
+    // + 1` by another, and a substring match on "past" wrongly zeroed the latter,
+    // collapsing the causal mask to a `[seq, 0]` shape. The role is structural and
+    // stable: the leading axis of every LM input is the batch; a past-KV input's
+    // sequence axis is the past length; the token / position / attention-mask span
+    // is the current sequence. This is the same input contract `commands::generate`
+    // classifies its runtime ports by (`AuxKind`), so compile-time and feed-time
+    // agree by construction rather than by two independent name heuristics.
+    //
+    // The empty-past law: hologram-ai keeps no external KV cache (reuse is
+    // content-addressed κ-label elision), so a with-past decoder export runs as a
+    // full-recompute prefill — every past length is 0, `Concat(past[…,0,…], cur)`
+    // collapses to `cur`, and the graph becomes `input_ids[1,S] → logits[1,S,V]`.
+    let roles = infer_dim_var_roles(&graph);
+    for (id, entry) in graph.dim_vars.iter_mut() {
         if entry.fixed.is_some() {
             continue;
         }
-        let name_lower = entry.name.to_lowercase();
-        if name_lower.contains("past") {
-            // `past_sequence_length` & friends → 0: hologram-ai has no external
-            // KV-cache (reuse is content-addressed κ-label elision), so a
-            // with-past decoder export is run as a full-recompute *prefill* with
-            // an empty past. `Concat(past[…,0,…], cur)` then collapses to `cur`,
-            // and the past-length position offset is 0 — the graph becomes
-            // `input_ids[1,S] → logits[1,S,V]`. (Must precede the seq-like check;
-            // "past_sequence_length" also contains "sequence"/"length".)
-            debug!(var = %entry.name, value = 0, "concretizing past-length dim → 0 (empty past)");
-            entry.fixed = Some(0);
-        } else if name_lower.contains("seq")
-            || name_lower.contains("length")
-            || name_lower.contains("position")
-        {
-            debug!(var = %entry.name, value = context_len, "concretizing seq-like dim");
-            entry.fixed = Some(context_len);
-        } else if name_lower.contains("height") || name_lower.contains("width") {
-            // Spatial dims for diffusion models: default to 128 (1024×1024
-            // image ÷ 8 VAE downscale). When spatial_scale is set, divide by it
-            // so a 4× scale gives 32, a 8× scale gives 16, etc.
-            let spatial_default = 128u64 / spatial_scale.unwrap_or(1) as u64;
-            let spatial_default = spatial_default.max(1);
-            debug!(var = %entry.name, value = spatial_default, "concretizing spatial dim");
-            entry.fixed = Some(spatial_default);
-        } else if name_lower.contains("channel") {
-            // Channel dim for diffusion latent space: typically 4.
-            debug!(var = %entry.name, value = 4, "concretizing channel dim");
-            entry.fixed = Some(4);
-        } else if name_lower == "steps" {
-            // Timestep steps: always 1 (single timestep per forward pass).
-            debug!(var = %entry.name, value = 1, "concretizing steps dim");
-            entry.fixed = Some(1);
-        } else {
-            debug!(var = %entry.name, value = 1, "concretizing batch-like dim");
-            entry.upper = Some(1u64);
+        match roles.get(&id) {
+            Some(DimRole::Past) => {
+                debug!(var = %entry.name, "role=Past → 0 (empty past)");
+                entry.fixed = Some(0);
+            }
+            Some(DimRole::Sequence) => {
+                debug!(var = %entry.name, value = context_len, "role=Sequence → context_len");
+                entry.fixed = Some(context_len);
+            }
+            Some(DimRole::Batch) => {
+                debug!(var = %entry.name, "role=Batch → 1");
+                entry.upper = Some(1u64);
+            }
+            // Not localized to a recognized decoder input — e.g. a diffusion
+            // model's spatial/channel/timestep dims. These have no structural
+            // role in the LM input contract, so fall back to the name heuristic.
+            // (Vision/diffusion I/O has no comparable stable-name contract.)
+            None => {
+                let name_lower = entry.name.to_lowercase();
+                if name_lower.contains("height") || name_lower.contains("width") {
+                    let spatial_default = (128u64 / spatial_scale.unwrap_or(1) as u64).max(1);
+                    debug!(var = %entry.name, value = spatial_default, "spatial dim (fallback)");
+                    entry.fixed = Some(spatial_default);
+                } else if name_lower.contains("channel") {
+                    entry.fixed = Some(4);
+                } else if name_lower == "steps" {
+                    entry.fixed = Some(1);
+                } else if name_lower.contains("past") {
+                    // An unlocalized past dim (a model that references a past
+                    // length without exposing the past-KV input) still obeys the
+                    // empty-past law.
+                    entry.fixed = Some(0);
+                } else if name_lower.contains("seq")
+                    || name_lower.contains("length")
+                    || name_lower.contains("position")
+                {
+                    entry.fixed = Some(context_len);
+                } else {
+                    debug!(var = %entry.name, "unlocalized → batch-like (1)");
+                    entry.upper = Some(1u64);
+                }
+            }
         }
     }
 
