@@ -16,6 +16,7 @@ use hologram_graph::node::{
 };
 use hologram_graph::registry::{DTypeId, ShapeDescriptor, ShapeId};
 use hologram_graph::{Graph, GraphOp, InputSource, NodeId, OpKind};
+use hologram_types::{act_quant, weight_layout};
 use smallvec::SmallVec;
 
 use super::dispatch::{dispatch, AttrSpec, DesugarKind, OpPlan};
@@ -1341,6 +1342,12 @@ impl<'a> Ctx<'a> {
                             scale_bits: scale.to_bits(),
                             zero_point,
                             axis: -1,
+                            // Per-TENSOR scale. The fused output-major decode GEMV
+                            // requires per-channel symmetric scales, so this node can
+                            // never take it; declaring the default is the true
+                            // statement, not a conservative one.
+                            weight_layout: weight_layout::ROW_MAJOR,
+                            act_quant: act_quant::W8A32,
                         },
                     );
                     return self.bind_out(node, InputSource::Node(nid));
@@ -1374,6 +1381,16 @@ impl<'a> Ctx<'a> {
                             scale_bits: 0,
                             zero_point: 0,
                             axis: ax as i32,
+                            // Per-CHANNEL symmetric: the one node shape the fused
+                            // output-major decode GEMV can serve. It stays
+                            // `[k,n]`/W8A32 here because `weight_layout` is a
+                            // statement of fact about the bytes the binder will
+                            // materialize, and `act_quant` changes the computed
+                            // value — neither may be asserted by a lowering that
+                            // cannot see how this weight is bound. The opt-in is
+                            // made where the binder is chosen, never here.
+                            weight_layout: weight_layout::ROW_MAJOR,
+                            act_quant: act_quant::W8A32,
                         },
                     );
                     return self.bind_out(node, InputSource::Node(nid));
@@ -1449,6 +1466,10 @@ impl<'a> Ctx<'a> {
                     scale_bits: 1.0f32.to_bits(),
                     zero_point: 0,
                     axis: -1,
+                    // Algebraic desugar — `toᶠ³²(x)`, a numeric widening, not a
+                    // weight slot. It feeds Sub/Mul, never a MatMul B operand.
+                    weight_layout: weight_layout::ROW_MAJOR,
+                    act_quant: act_quant::W8A32,
                 },
             );
             InputSource::Node(nid)
@@ -1472,6 +1493,9 @@ impl<'a> Ctx<'a> {
                     scale_bits: 1.0f32.to_bits(),
                     zero_point: 0,
                     axis: -1,
+                    // Algebraic desugar — `toᶠ³²(zp)`, the zero-point widening.
+                    weight_layout: weight_layout::ROW_MAJOR,
+                    act_quant: act_quant::W8A32,
                 },
             );
             let zpf_b = self.channel_align(InputSource::Node(zpf), &zp_dims, axis, &x_dims);

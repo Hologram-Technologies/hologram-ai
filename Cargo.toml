@@ -19,18 +19,18 @@ repository  = "https://github.com/uor-framework/hologram-ai"
 # Cargo.lock pins the exact commit; bump the tag here to advance them together.
 # Runtime-core crates (types/ops/graph) are no_std-capable (default = []); the
 # host-shell stack (compiler/exec/archive/backend) is built with `std`.
-hologram-types    = { git = "https://github.com/Hologram-Technologies/hologram.git", tag = "v0.7.2" }
-hologram-ops      = { git = "https://github.com/Hologram-Technologies/hologram.git", tag = "v0.7.2" }
-hologram-graph    = { git = "https://github.com/Hologram-Technologies/hologram.git", tag = "v0.7.2" }
-hologram-compiler = { git = "https://github.com/Hologram-Technologies/hologram.git", tag = "v0.7.2" }
+hologram-types    = { git = "https://github.com/Hologram-Technologies/hologram.git", tag = "v0.8.0" }
+hologram-ops      = { git = "https://github.com/Hologram-Technologies/hologram.git", tag = "v0.8.0" }
+hologram-graph    = { git = "https://github.com/Hologram-Technologies/hologram.git", tag = "v0.8.0" }
+hologram-compiler = { git = "https://github.com/Hologram-Technologies/hologram.git", tag = "v0.8.0" }
 # `parallel` (rayon) is NOT pinned here — it cannot run on wasm32 (no threads).
 # It is an opt-in feature, enabled by default for native consumers (the
 # `hologram-ai` lib/CLI) via their own `parallel` feature, and left off for the
 # `hologram-ai-wasm` browser build. See ADR-0017.
-hologram-exec     = { git = "https://github.com/Hologram-Technologies/hologram.git", tag = "v0.7.2" }
-hologram-archive  = { git = "https://github.com/Hologram-Technologies/hologram.git", tag = "v0.7.2", features = ["model-formats"] }
-hologram-backend  = { git = "https://github.com/Hologram-Technologies/hologram.git", tag = "v0.7.2" }
-hologram-host     = { git = "https://github.com/Hologram-Technologies/hologram.git", tag = "v0.7.2" }
+hologram-exec     = { git = "https://github.com/Hologram-Technologies/hologram.git", tag = "v0.8.0" }
+hologram-archive  = { git = "https://github.com/Hologram-Technologies/hologram.git", tag = "v0.8.0", features = ["model-formats"] }
+hologram-backend  = { git = "https://github.com/Hologram-Technologies/hologram.git", tag = "v0.8.0" }
+hologram-host     = { git = "https://github.com/Hologram-Technologies/hologram.git", tag = "v0.8.0" }
 holospaces        = { git = "https://github.com/Hologram-Technologies/holospaces.git", branch = "main" }
 
 # workspace-internal
