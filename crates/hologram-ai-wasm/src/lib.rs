@@ -9,6 +9,18 @@
 //!
 //! Verbs (over byte buffers): `compile` (ONNX → `.holo`), `describe` (ports),
 //! `run` (arbitrary forward pass, `--fill`-style), `generate` (autoregressive).
+//!
+//! Multi-threaded decode (ADR-0018): the `wasm-threads` feature turns on the
+//! substrate's embedder worker pool. See the `wasm_futex` module (compiled only
+//! on the `+atomics` build) and `apps/web`'s worker pool for the two halves of
+//! the embedder contract.
+
+// The nightly shared-memory build (`--features wasm-threads`, `+atomics`) uses
+// the native wasm atomic wait/notify intrinsics for the pool futex (see
+// `wasm_futex`). They are unstable on stable Rust (rust-lang/rust#77839) — the
+// very reason the substrate imports them from the embedder — but this build is
+// already nightly (for `-Z build-std`), so gate the feature on `atomics` only.
+#![cfg_attr(target_feature = "atomics", feature(stdarch_wasm_atomic_wait))]
 
 use hologram_ai::commands::generate::{
     apply_template, generate_stream, generate_stream_decode, GenConfig,
@@ -17,6 +29,39 @@ use hologram_ai::{FixedSession, HoloRunner, ModelCompiler, ModelSource};
 use hologram_ai_tokenizer::{NativeTokenizer, Tokenizer};
 use serde::{Deserialize, Serialize};
 use wasm_bindgen::prelude::*;
+
+/// Embedder futex for the substrate's wasm worker pool (ADR-0018).
+///
+/// The no_std backend (`hologram-backend/wasm-threads`) declares
+/// `hologram_host_wait32` / `hologram_host_notify` as `extern "C"` imports —
+/// the embedder is expected to supply `Atomics.wait` / `Atomics.notify` over
+/// the shared linear memory. On this nightly `+atomics` build we satisfy the
+/// imports *by definition* with the native wasm `memory.atomic.wait32` /
+/// `memory.atomic.notify` instructions, avoiding a JS round-trip per idle wait
+/// and keeping the wasm-bindgen import object free of `env` entries.
+///
+/// Soundness: the substrate only ever waits from a pool worker or the executing
+/// worker (never the browser main thread), where a blocking `atomic.wait` is
+/// permitted; `hologram_worker_run` and `execute` both run off-main-thread by
+/// the embedder contract. `notify` is legal from any agent.
+#[cfg(all(target_arch = "wasm32", target_feature = "atomics"))]
+mod wasm_futex {
+    /// Block while `*ptr == expect`, up to `timeout_ns` (negative = infinite).
+    /// Returns 0 (woken), 1 (`*ptr != expect`), or 2 (timed out).
+    #[no_mangle]
+    pub extern "C" fn hologram_host_wait32(ptr: *const i32, expect: i32, timeout_ns: i64) -> i32 {
+        // SAFETY: the substrate passes the address of an `AtomicU32` living in
+        // the shared linear memory; a wait on a valid, aligned i32 is defined.
+        unsafe { core::arch::wasm32::memory_atomic_wait32(ptr as *mut i32, expect, timeout_ns) }
+    }
+
+    /// Wake up to `count` agents waiting on `ptr`; returns the number woken.
+    #[no_mangle]
+    pub extern "C" fn hologram_host_notify(ptr: *const i32, count: u32) -> u32 {
+        // SAFETY: as above — `ptr` addresses a shared-memory `AtomicU32`.
+        unsafe { core::arch::wasm32::memory_atomic_notify(ptr as *mut i32, count) }
+    }
+}
 
 /// Surface Rust panics in the browser console. Runs on module init.
 #[wasm_bindgen(start)]

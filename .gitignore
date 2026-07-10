@@ -29,4 +29,5 @@ apps/*/vite.config.js
 node_modules/
 dist/
 apps/web/src/wasm/
+apps/web/src/wasm-threads/
 apps/web/public/extension.zip

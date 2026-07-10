@@ -9,7 +9,24 @@ name = "hologram-ai"
 path = "src/cli.rs"
 
 [features]
-default = ["native", "parallel"]
+default = ["native", "parallel", "std"]
+# Re-enables the host-shell substrate stack's `std` (they are pulled
+# `default-features = false` above). On by default so the native lib/CLI/benches
+# are unchanged; `hologram-ai-wasm` omits it so the browser build resolves the
+# stack no_std and `hologram-backend` reaches its `Atomics.wait` futex. ADR-0018.
+std = [
+    "hologram-compiler/std",
+    "hologram-exec/std",
+    "hologram-archive/std",
+    "hologram-backend/std",
+    "hologram-host/std",
+    "hologram-ai-common/std",
+]
+# Multi-threaded browser decode: forwards to the substrate's embedder worker
+# pool (`hologram-backend/wasm-threads`). Requires a shared-memory build
+# (`+atomics,+bulk-memory`) and the no_std backend path (i.e. NOT `std`). Off for
+# the single-threaded fallback build. ADR-0018.
+wasm-threads = ["hologram-backend/wasm-threads"]
 # Native host capabilities: the model downloader + CLI logging. Off for the wasm
 # build (these crates don't compile on wasm32). The compile/run/generate core is
 # feature-independent and builds on both.
@@ -42,7 +59,11 @@ hologram-ai-common.workspace = true
 hologram-ai-quant.workspace  = true
 hologram-ai-onnx.workspace   = true
 hologram-ai-tokenizer.workspace = true
-# hologram 0.5.0 member crates (host-shell build: std + cpu backend + compiler).
+# hologram 0.5.0 member crates. The workspace pins the host-shell stack
+# `default-features = false` (its `std` is opt-in); the native lib/CLI re-enables
+# it via the default-on `std` feature below, and the `hologram-ai-wasm` browser
+# build omits it — resolving the stack no_std so `hologram-backend` compiles its
+# `Atomics.wait` futex (multi-threaded decode) not the busy-spin std path. ADR-0018.
 hologram-types.workspace    = true
 hologram-ops.workspace      = true
 hologram-graph.workspace    = true

@@ -3,6 +3,11 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <!-- Cross-origin isolation for wasm threads on static Pages (ADR-0018).
+         First script in <head> so it can install the COOP/COEP service worker
+         and reload BEFORE the app bundle loads. No-op where headers are already
+         present (vite dev/preview) or the context is not secure. -->
+    <script src="coi-serviceworker.js"></script>
     <title>hologram-ai — browser</title>
   </head>
   <body>

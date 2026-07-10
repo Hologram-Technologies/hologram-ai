@@ -17,6 +17,13 @@ runs:
       run: |
         rustup toolchain install stable --profile minimal
         rustup target add wasm32-unknown-unknown
+        # Nightly + rust-src for the MULTI-THREADED wasm build (ADR-0018): its
+        # `-Z build-std` rebuilds std with atomics. Pinned so the gate compiles
+        # what the deploy compiles (gate == CI == deploy; the dark-gates memory).
+        rustup toolchain install "$HAI_WASM_THREADS_NIGHTLY" --profile minimal --component rust-src
+        rustup target add wasm32-unknown-unknown --toolchain "$HAI_WASM_THREADS_NIGHTLY"
+      env:
+        HAI_WASM_THREADS_NIGHTLY: nightly-2026-07-09
     - name: Install wasm-pack
       shell: bash
       run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
@@ -24,9 +31,17 @@ runs:
       with: { version: 10 }
     - uses: actions/setup-node@v4
       with: { node-version: 22, cache: pnpm, cache-dependency-path: apps/web/pnpm-lock.yaml }
-    - name: Build wasm
+    - name: Build wasm (single-threaded fallback)
       shell: bash
       run: wasm-pack build crates/hologram-ai-wasm --target web --out-dir ../../apps/web/src/wasm --release
+    - name: Build wasm (multi-threaded pool)
+      shell: bash
+      # Populates apps/web/src/wasm-threads/. Runs AFTER the wasm-pack build so
+      # the version-matched wasm-bindgen is already in the wasm-pack cache. The
+      # script self-verifies the artifact (pool exports, no env futex imports).
+      run: bash apps/web/scripts/build-wasm-threads.sh
+      env:
+        HAI_WASM_THREADS_NIGHTLY: nightly-2026-07-09
     - name: Build web bundle
       working-directory: apps/web
       shell: bash

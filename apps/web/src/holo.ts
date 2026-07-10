@@ -2,29 +2,16 @@
 // Tauri `invoke()` backend. The browser GUI calls these functions; they drive
 // the REAL hologram-ai pipeline compiled to WebAssembly (`hologram-ai-wasm`),
 // not a reimplementation. Build the wasm package first: `pnpm wasm`.
-import init, {
-  describe as wasmDescribe,
-  supported_families as wasmSupportedFamilies,
-  compile_safetensors_staged as wasmCompileSafetensorsStaged,
-  compile_safetensors_staged_quantized as wasmCompileSafetensorsStagedQuantized,
-  quantizable_weights as wasmQuantizableWeights,
-  head_quant_chunks as wasmHeadQuantChunks,
-  derive_quantized_artifact as wasmDeriveQuantizedArtifact,
-  count_tokens as wasmCountTokens,
-  StagedChatSession as WasmStagedChatSession,
-  DecodeChatSession as WasmDecodeChatSession,
-  validate_model_config as wasmValidateModelConfig,
-  validate_streamed_manifest as wasmValidateStreamedManifest,
-  run as wasmRun,
-  compile as wasmCompile,
-  generate as wasmGenerate,
-  compute_kappa as wasmComputeKappa,
-  compile_onnx_with_data as wasmCompileOnnxWithData,
-  compile_safetensors_streamed as wasmCompileSafetensorsStreamed,
-  kappa_requirements as wasmKappaRequirements,
-  materialize as wasmMaterialize,
-  KappaHasher,
-} from "./wasm/hologram_ai_wasm.js";
+// The wasm binding is chosen at runtime (ADR-0018). When the page is
+// cross-origin-isolated AND the caller opted in via `preferThreadedPool()` (the
+// generate/execute worker), we load the MULTI-THREADED build (`./wasm-threads`)
+// — the substrate embedder worker pool over a shared linear memory — else the
+// single-threaded `+simd128` fallback (`./wasm`, byte-identical to before
+// ADR-0018). Both are the SAME crate, so they export the same surface; `G` holds
+// whichever was initialised, and every verb dispatches through it. Build them
+// with `pnpm wasm` and `scripts/build-wasm-threads.sh`.
+type GlueModule = typeof import("./wasm/hologram_ai_wasm.js");
+let G: GlueModule | null = null;
 
 export interface Port {
   name: string;
@@ -46,16 +33,99 @@ export interface Output {
 }
 
 let ready: Promise<unknown> | null = null;
+let preferThreaded = false;
+let threadedActive = false;
+let poolWorkers: Worker[] = [];
+
+/**
+ * Opt this context into the multi-threaded decode pool (ADR-0018). Call it
+ * BEFORE the first `ensureReady()` — only the generate/execute worker does, so
+ * the main thread and download worker stay single-threaded (the pool would need
+ * a blocking `Atomics.wait`, disallowed on the main thread; and only the `m == 1`
+ * decode GEMV parallelises). No-op unless the page is cross-origin-isolated.
+ */
+export function preferThreadedPool(v = true): void {
+  preferThreaded = v;
+}
+
+/** Whether the threaded pool is active and how many workers registered. */
+export function poolInfo(): { threaded: boolean; workers: number } {
+  return { threaded: threadedActive, workers: poolWorkers.length };
+}
+
 /** Instantiate the wasm module once (runs the panic-hook `start`). */
 export function ensureReady(): Promise<unknown> {
-  if (!ready) ready = init();
+  if (!ready) ready = initGlue();
   return ready;
+}
+
+async function initGlue(): Promise<unknown> {
+  const isolated = typeof crossOriginIsolated !== "undefined" && crossOriginIsolated === true;
+  if (preferThreaded && isolated) {
+    try {
+      return await initThreaded();
+    } catch (err) {
+      // Fail SOFT to the single-threaded build — a coherent slow decode beats a
+      // dead tab. (The V&V asserts the pool DOES engage on the isolated deploy,
+      // so a silent permanent fallback can't hide — see ADR-0018.)
+      console.warn("[holo] threaded pool init failed; using single-threaded build", err);
+    }
+  }
+  const glue = await import("./wasm/hologram_ai_wasm.js");
+  await glue.default();
+  G = glue;
+  threadedActive = false;
+  return G;
+}
+
+async function initThreaded(): Promise<unknown> {
+  const glue = await import("./wasm-threads/hologram_ai_wasm.js");
+  const wasmUrl = new URL("./wasm-threads/hologram_ai_wasm_bg.wasm", import.meta.url);
+  // Compile ONCE, then instantiate the same module on the execute instance and
+  // every pool worker so they all share one linear memory.
+  let module: WebAssembly.Module;
+  try {
+    module = await WebAssembly.compileStreaming(fetch(wasmUrl));
+  } catch {
+    module = await WebAssembly.compile(await (await fetch(wasmUrl)).arrayBuffer());
+  }
+  // Execute/"main" instance: no `thread_stack_size` → it creates the shared
+  // memory and runs the module's one-time data init.
+  const exports = (await glue.default({ module_or_path: module })) as unknown as {
+    memory: WebAssembly.Memory;
+    hologram_pool_workers: () => number;
+  };
+  const memory = exports.memory;
+  // Leave one core for the execute worker (it is the pool's `+1` participant).
+  const n = Math.max(1, Math.min((navigator.hardwareConcurrency || 2) - 1, 32));
+  const stackSize = 2 * 1024 * 1024; // 2 MiB per worker (64 KiB-aligned)
+  poolWorkers = [];
+  for (let id = 0; id < n; id++) {
+    const w = new Worker(new URL("./pool.worker.ts", import.meta.url), { type: "module" });
+    w.postMessage({ module, memory, id, stackSize });
+    poolWorkers.push(w);
+  }
+  // Gate the first decode on FULL registration — the substrate traps on a
+  // worker that registers after the first job.
+  const t0 = Date.now();
+  while (exports.hologram_pool_workers() < n) {
+    if (Date.now() - t0 > 10_000) {
+      throw new Error(`pool registration timeout: ${exports.hologram_pool_workers()}/${n}`);
+    }
+    await new Promise((r) => setTimeout(r, 4));
+  }
+  G = glue as unknown as GlueModule;
+  threadedActive = true;
+  // Telemetry the V&V asserts on (a silent fallback to single-threaded must not
+  // be able to masquerade as success — ADR-0018, [[dark-gates]]).
+  console.log(`[holo] multi-threaded decode pool active: ${n} workers over shared memory`);
+  return G;
 }
 
 /** Inspect a compiled `.holo` — its input/output ports (positional, no names). */
 export async function describe(holo: Uint8Array): Promise<ModelInfo> {
   await ensureReady();
-  return wasmDescribe(holo) as ModelInfo;
+  return G!.describe(holo) as ModelInfo;
 }
 
 /**
@@ -69,18 +139,18 @@ export async function run(
   fill?: number,
 ): Promise<Output[]> {
   await ensureReady();
-  return wasmRun(holo, inputs, fill ?? undefined) as Output[];
+  return G!.run(holo, inputs, fill ?? undefined) as Output[];
 }
 
 /** Compile an ONNX model (bytes) → a `.holo` archive (bytes), in the browser. */
 export async function compile(onnx: Uint8Array): Promise<Uint8Array> {
   await ensureReady();
-  return wasmCompile(onnx);
+  return G!.compile(onnx);
 }
 
 export async function compileOnnxWithData(onnxBytes: Uint8Array, externalData: Uint8Array): Promise<Uint8Array> {
   await ensureReady();
-  return wasmCompileOnnxWithData(onnxBytes, externalData);
+  return G!.compile_onnx_with_data(onnxBytes, externalData);
 }
 
 export async function compileSafetensorsStreamed(
@@ -92,21 +162,21 @@ export async function compileSafetensorsStreamed(
   contextLength?: number,
 ): Promise<Uint8Array> {
   await ensureReady();
-  return wasmCompileSafetensorsStreamed(configJson, keys, kappas, shapes, dtypes, contextLength);
+  return G!.compile_safetensors_streamed(configJson, keys, kappas, shapes, dtypes, contextLength);
 }
 
 /** The architecture families the parametric registry supports — the single
  * source the search filter reads (row `supported-search`). */
 export async function supportedFamilies(): Promise<string[]> {
   await ensureReady();
-  return wasmSupportedFamilies() as string[];
+  return G!.supported_families() as string[];
 }
 
 /** Config-only preflight (S1 step a): registered family + required keys —
  * checked before even the shard headers are fetched. */
 export async function validateModelConfig(configJson: string): Promise<void> {
   await ensureReady();
-  wasmValidateModelConfig(configJson);
+  G!.validate_model_config(configJson);
 }
 
 /**
@@ -123,7 +193,7 @@ export async function validateStreamedManifest(
   layersPerStage?: number,
 ): Promise<void> {
   await ensureReady();
-  wasmValidateStreamedManifest(configJson, keys, shapes, dtypes, contextLength, layersPerStage);
+  G!.validate_streamed_manifest(configJson, keys, shapes, dtypes, contextLength, layersPerStage);
 }
 
 /** Staged compile (windowed execution over k): one k-form archive per stage
@@ -139,7 +209,7 @@ export async function compileSafetensorsStaged(
 ): Promise<Uint8Array[]> {
   await ensureReady();
   return Array.from(
-    wasmCompileSafetensorsStaged(configJson, keys, kappas, shapes, dtypes, contextLength, layersPerStage),
+    G!.compile_safetensors_staged(configJson, keys, kappas, shapes, dtypes, contextLength, layersPerStage),
   ) as Uint8Array[];
 }
 
@@ -189,7 +259,7 @@ export async function headQuantChunks(
 ): Promise<HeadChunkTarget[]> {
   await ensureReady();
   return JSON.parse(
-    wasmHeadQuantChunks(configJson, keys, kappas, shapes, dtypes, contextLength, layersPerStage),
+    G!.head_quant_chunks(configJson, keys, kappas, shapes, dtypes, contextLength, layersPerStage),
   ) as HeadChunkTarget[];
 }
 
@@ -207,7 +277,7 @@ export async function quantizableWeights(
 ): Promise<string[]> {
   await ensureReady();
   return Array.from(
-    wasmQuantizableWeights(configJson, keys, kappas, shapes, dtypes, contextLength, layersPerStage),
+    G!.quantizable_weights(configJson, keys, kappas, shapes, dtypes, contextLength, layersPerStage),
   ) as string[];
 }
 
@@ -220,7 +290,7 @@ export async function deriveQuantizedArtifact(
   inFeatures: number,
 ): Promise<Uint8Array> {
   await ensureReady();
-  return wasmDeriveQuantizedArtifact(wide, dtype, outFeatures, inFeatures);
+  return G!.derive_quantized_artifact(wide, dtype, outFeatures, inFeatures);
 }
 
 /** `compileSafetensorsStaged` on the quantized tier: stage graphs bind
@@ -237,7 +307,7 @@ export async function compileSafetensorsStagedQuantized(
 ): Promise<Uint8Array[]> {
   await ensureReady();
   return Array.from(
-    wasmCompileSafetensorsStagedQuantized(
+    G!.compile_safetensors_staged_quantized(
       configJson,
       keys,
       kappas,
@@ -272,7 +342,7 @@ export async function createStagedSession(
   onProgress?: (line: string) => void,
 ): Promise<StagedSession> {
   await ensureReady();
-  return new WasmStagedChatSession(
+  return new G!.StagedChatSession(
     configJson,
     manifest.keys,
     manifest.kappas,
@@ -319,7 +389,7 @@ export async function createDecodeSession(
   onProgress?: (line: string) => void,
 ): Promise<StagedSession> {
   await ensureReady();
-  return new WasmDecodeChatSession(
+  return new G!.DecodeChatSession(
     configJson,
     manifest.keys,
     manifest.kappas,
@@ -360,13 +430,13 @@ export interface StagedSession {
 /** Token count of `text` under the model's own tokenizer (session trimming). */
 export async function countTokens(tokenizer: Uint8Array, text: string): Promise<number> {
   await ensureReady();
-  return wasmCountTokens(tokenizer, text);
+  return G!.count_tokens(tokenizer, text);
 }
 
 /** The κ-labels a k-form archive requires (empty for a material archive). */
 export async function kappaRequirements(holo: Uint8Array): Promise<string[]> {
   await ensureReady();
-  return wasmKappaRequirements(holo) as string[];
+  return G!.kappa_requirements(holo) as string[];
 }
 
 /**
@@ -380,17 +450,14 @@ export async function materialize(
   invalidate?: (kappa: string) => void,
 ): Promise<Uint8Array> {
   await ensureReady();
-  return wasmMaterialize(holo, resolve, invalidate);
+  return G!.materialize(holo, resolve, invalidate);
 }
-
-export { KappaHasher };
-
 
 
 /** Compute the holospaces Kappa label for a byte array. */
 export async function computeKappa(bytes: Uint8Array): Promise<string> {
   await ensureReady();
-  return wasmComputeKappa(bytes);
+  return G!.compute_kappa(bytes);
 }
 
 /** Generation options (all optional). */
@@ -423,5 +490,5 @@ export async function generate(
   callback?: (text: string) => void,
 ): Promise<string> {
   await ensureReady();
-  return wasmGenerate(holo, tokenizer ?? undefined, prompt, opts, callback);
+  return G!.generate(holo, tokenizer ?? undefined, prompt, opts, callback);
 }

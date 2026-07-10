@@ -14,9 +14,20 @@ import {
   deriveQuantizedArtifact,
   kappaRequirements,
   materialize,
+  preferThreadedPool,
+  ensureReady,
+  poolInfo,
   type QuantEntry,
   type StagedSession,
 } from "./holo";
+
+// This is the execute worker: opt into the substrate's multi-threaded decode
+// pool (ADR-0018). A no-op unless the page is cross-origin-isolated AND the
+// threaded build loads; `holo` then spins up the worker pool over a shared
+// linear memory on first `ensureReady()`. The main thread never does this (a
+// blocking `Atomics.wait` is disallowed there); decode already runs here.
+/** Emit the decode-pool status exactly once (on the first turn). */
+let poolReported = false;
 
 async function materializeFromOpfs(holoBytes: Uint8Array, modelDir?: string): Promise<Uint8Array> {
   const required = await kappaRequirements(holoBytes);
@@ -561,6 +572,26 @@ self.onmessage = async (e) => {
   } = e.data;
 
   try {
+    // Establish the wasm binding once and report the decode-pool status as a
+    // progress line (recorded in `__hologram_status`) — a page-observable signal
+    // that the threaded pool actually engaged, since dedicated-worker console is
+    // not surfaced to the page. See ADR-0018 / the threaded probes.
+    if (!poolReported) {
+      poolReported = true;
+      // Opt into the multi-threaded decode pool unless the turn config disables
+      // it (`threads === false`, from `hologram_threads=0`) — the toggle the
+      // byte-identity V&V uses to A/B threaded vs single-threaded. Must precede
+      // the first `ensureReady()`. A no-op unless the page is cross-origin-isolated.
+      preferThreadedPool(e.data.threads !== false);
+      await ensureReady();
+      const p = poolInfo();
+      self.postMessage({
+        type: "progress",
+        line: p.threaded
+          ? `pool: multi-threaded decode active (${p.workers} workers)`
+          : `pool: single-threaded decode`,
+      });
+    }
     if (staged) {
       if (!tokenizerBytes) {
         throw new Error("staged chat needs the model's tokenizer.json");

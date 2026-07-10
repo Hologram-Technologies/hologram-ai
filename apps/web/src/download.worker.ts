@@ -23,10 +23,15 @@ import {
   headQuantChunks,
   validateModelConfig,
   validateStreamedManifest,
-  KappaHasher,
   ensureReady,
   type QuantEntry,
 } from "./holo";
+// The download worker is single-threaded (it never decodes; the pool only
+// parallelises the `m == 1` decode GEMV — ADR-0018), so it binds `KappaHasher`
+// straight from the single-threaded glue rather than through `holo`, which now
+// resolves its glue dynamically. Same module instance `holo.ensureReady()`
+// initialises here — one wasm, one init.
+import { KappaHasher } from "./wasm/hologram_ai_wasm.js";
 
 self.onmessage = async (e) => {
   const { type, payload } = e.data;
