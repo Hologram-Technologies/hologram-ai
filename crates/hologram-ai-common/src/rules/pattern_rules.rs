@@ -970,15 +970,31 @@ fn attention_fusion_rewrite(
         out_info.storage_dtype = qi.storage_dtype;
     }
 
-    // Since we are matching the root MatMul (Q@K^T), we replace IT with the GQA node,
-    // and we must eliminate the REST of the chain.
-    // However, the rule engine replaces the `root_idx` node automatically and keeps the graph valid.
-    // Wait, the rule engine only replaces the nodes bound in the Pattern!
-    // If our pattern only matches the `Q@K^T` MatMul, the engine will NOT remove the Add/Softmax/etc.
-    // We must manually remove them from `graph.nodes`!
-    // But modifying `graph.nodes` length during a rewrite breaks the engine's iteration!
-    // Actually, `Replacement::custom` in the engine replaces the `root_idx` node and DOES NOT remove others unless we return `AiNode` for them, or if we mark them dead.
-    // Wait, the dead node elimination pass runs AFTER this! So if we just wire the output of GQA to `chain.output_tid`, the intermediate nodes become dead and `DeadNodeElimination` will sweep them!
+    // The pattern binds only the Q@K^T MatMul, so the engine replaces THIS node
+    // with the GQA and removes nothing else. We wire the GQA to `out_tid` (the
+    // chain's final output) and then explicitly retire every other node of the
+    // SDPA chain — the scale `Mul`, the mask `Add`, the `Softmax`, any
+    // `IsNaN→Where`, AND the terminal `scores@V` MatMul (`output_matmul_idx`).
+    //
+    // Retiring the terminal MatMul is the load-bearing part. It ALSO produces
+    // `out_tid`; leaving it in place gives `out_tid` two producers, and
+    // `DeadNodeElimination`'s last-writer-wins producer map then keeps the OLD
+    // chain (and everything feeding its mask `Add`) reachable instead of the GQA
+    // — which is exactly how the external causal-mask subgraph
+    // (`ConstantOfShape→Trilu→…→ScatterND`) survived to lowering after the
+    // imperative AttentionFusion pass was removed (commit 6177a15). Clearing the
+    // chain's outputs makes GQA the sole producer of `out_tid` and orphans the
+    // mask, so DCE sweeps it — for ANY model, whatever the mask's shape or the
+    // exporter's dim names. `causal` on the GQA rebuilds the mask the kernel
+    // actually needs; the external one is redundant by construction.
+    for &idx in &chain.node_indices {
+        if idx != root_idx {
+            graph.nodes[idx].outputs.clear();
+        }
+    }
+    if chain.output_matmul_idx != root_idx {
+        graph.nodes[chain.output_matmul_idx].outputs.clear();
+    }
 
     Some(crate::ir::AiNode::new(
         graph.nodes[root_idx].id,

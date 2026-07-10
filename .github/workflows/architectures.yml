@@ -202,7 +202,11 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p models/Qwen2.5-0.5B-Instruct
-          BASE="https://huggingface.co/onnx-community/Qwen2.5-0.5B-Instruct/resolve/main"
+          # Pinned to a specific HF commit so the witness bytes are deterministic,
+          # exactly as the SmolLM2 job is. Fetching `main` let the export drift
+          # silently; a new commit pin is a deliberate scope bump, not a surprise.
+          COMMIT="cc5cc01a65cc3ff17bdb73a7de33d879f62599b0"
+          BASE="https://huggingface.co/onnx-community/Qwen2.5-0.5B-Instruct/resolve/$COMMIT"
           fetch() {
             local dest="$1" url="$2"
             curl --silent --show-error --fail --location \
