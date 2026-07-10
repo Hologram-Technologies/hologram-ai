@@ -1,0 +1,111 @@
+// Live real-model probe of the DEPLOYED instance — exercises the W8A8 int8 decode
+// path (the fixture is f32 and cannot). Adds a real model as a user would, lets
+// the deployed app download from real HuggingFace, quantize to int8 in-worker,
+// compile weightless, and decode with the fused output-major W8A8 GEMV (the
+// v0.8.1 optimization). Asserts a coherent, non-empty, error-free completion and
+// reports browser decode throughput.
+//
+// Small model on purpose: SmolLM2-135M int8 is ~270 MB — well under the codespace
+// headless OPFS ceiling — so this witnesses the optimization's correctness and
+// that it runs without errors on the live build, rather than stressing residency.
+import { chromium } from "playwright";
+
+const DEPLOY_URL =
+  process.env.HAI_DEPLOY_URL || "https://hologram-technologies.github.io/hologram-ai/";
+const MODEL = {
+  id: "smollm2-135m-instruct",
+  hfId: "HuggingFaceTB/SmolLM2-135M-Instruct",
+  displayName: "SmolLM2 135M Instruct",
+  description: "Deployed W8A8 probe (user-added).",
+  modality: "text-chat",
+  size: "135M",
+  approxArchiveMb: 0,
+  quantize: "int8",
+  promptTemplate: null,
+  stop: [],
+  chatTurnSeparator: null,
+};
+const PROMPT = "The capital of France is";
+
+function ok(m) {
+  console.log(`  ✓ ${m}`);
+}
+function fail(m) {
+  console.error(`  ✗ ${m}`);
+  process.exitCode = 1;
+}
+
+const browser = await chromium.launch();
+const pageErrors = [];
+const consoleErrors = [];
+try {
+  console.log(`Live W8A8 probe (real model) on: ${DEPLOY_URL}`);
+  const context = await browser.newContext();
+  const page = await context.newPage();
+  page.on("pageerror", (e) => pageErrors.push(String(e)));
+  page.on("console", (m) => {
+    if (m.type() === "error") consoleErrors.push(m.text());
+  });
+
+  // Real HF (no hologram_hf_base override), model added as a user entry.
+  await page.addInitScript(
+    (entryJson) => localStorage.setItem("hologram_catalogue_custom", entryJson),
+    JSON.stringify([MODEL]),
+  );
+  await page.goto(DEPLOY_URL, { waitUntil: "networkidle" });
+  ok(`loaded (${await page.title()})`);
+
+  await page.goto(`${DEPLOY_URL}#/models`);
+  await page.waitForSelector("h1:has-text('Models')");
+  const row = page.locator(".list-item", { hasText: MODEL.displayName });
+  const tDl = Date.now();
+  await row.locator("button", { hasText: "Download" }).click();
+  await row.locator("button", { hasText: "Ready" }).waitFor({ timeout: 600_000 });
+  ok(`downloaded + int8-quantized + compiled → Ready (${((Date.now() - tDl) / 1000).toFixed(0)}s)`);
+
+  await page.goto(`${DEPLOY_URL}#/chat`);
+  await page.waitForSelector("h1:has-text('Chat')");
+  const temp = page.locator("input[type=number]");
+  if (await temp.count()) await temp.first().fill("0");
+
+  const tGen = Date.now();
+  await page.locator(".composer textarea").fill(PROMPT);
+  await page.locator(".composer button", { hasText: "Send" }).click();
+  await page.locator(".composer button", { hasText: "Send" }).waitFor({ timeout: 300_000 });
+  const genMs = Date.now() - tGen;
+  const bubbles = page.locator(".bubble.assistant .md");
+  const out = (await bubbles.nth((await bubbles.count()) - 1).innerText()).trim();
+
+  console.log(`  [gen] "${PROMPT}" → "${out}"`);
+  if (out.length > 0) ok("completion is non-empty");
+  else fail("completion is empty");
+  // Coherence: SmolLM2-135M greedily answers this factual prompt with "Paris".
+  if (/paris/i.test(out)) ok("completion is coherent (contains 'Paris')");
+  else fail(`completion not coherent for the prompt: "${out}"`);
+
+  const words = out.split(/\s+/).filter(Boolean).length;
+  console.log(`  W8A8 browser decode: ~${words} words in ${(genMs / 1000).toFixed(1)}s`);
+
+  // Warm turn: window already compiled/resident, so this rate is closer to
+  // steady-state decode than the TTFT-inclusive first turn. Bounded by
+  // single-threaded wasm — GitHub Pages sets no COOP/COEP, so no threads.
+  {
+    const t = Date.now();
+    await page.locator(".composer textarea").fill("Tell me a short fact about the sun.");
+    await page.locator(".composer button", { hasText: "Send" }).click();
+    await page.locator(".composer button", { hasText: "Send" }).waitFor({ timeout: 300_000 });
+    const b = page.locator(".bubble.assistant");
+    const warmOut = (await b.nth((await b.count()) - 1).innerText()).trim();
+    const toks = Math.round(warmOut.split(/\s+/).filter(Boolean).length * 1.3);
+    console.log(`  W8A8 warm decode: ~${toks} tok in ${((Date.now()-t)/1000).toFixed(1)}s → ${(toks/((Date.now()-t)/1000)).toFixed(1)} tok/s (single-threaded wasm)`);
+  }
+
+  if (pageErrors.length === 0) ok("no uncaught page errors");
+  else fail(`page errors: ${JSON.stringify(pageErrors.slice(0, 5))}`);
+  const realErrs = consoleErrors.filter((e) => !/favicon|404.*\.png/i.test(e));
+  if (realErrs.length === 0) ok("no console errors");
+  else fail(`console errors: ${JSON.stringify(realErrs.slice(0, 5))}`);
+} finally {
+  await browser.close();
+}
+console.log(process.exitCode ? "\nLIVE W8A8 PROBE: FAILED" : "\nLIVE W8A8 PROBE: PASS");
