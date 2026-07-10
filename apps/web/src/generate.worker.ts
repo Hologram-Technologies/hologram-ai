@@ -28,6 +28,8 @@ import {
 // blocking `Atomics.wait` is disallowed there); decode already runs here.
 /** Emit the decode-pool status exactly once (on the first turn). */
 let poolReported = false;
+/** Set from a main-thread `pool-failed` message; the readiness poll checks it. */
+let poolFailed: string | null = null;
 
 async function materializeFromOpfs(holoBytes: Uint8Array, modelDir?: string): Promise<Uint8Array> {
   const required = await kappaRequirements(holoBytes);
@@ -559,6 +561,13 @@ async function warmStagedSession(
 }
 
 self.onmessage = async (e) => {
+  // Control message from the main thread: a pool worker failed to instantiate.
+  // Record it so the readiness poll in `holo.initThreaded` fails fast and falls
+  // back to single-threaded (ADR-0018 M2). Not a generation request.
+  if (e.data && e.data.type === "pool-failed") {
+    poolFailed = e.data.why || "pool worker failed";
+    return;
+  }
   const {
     holoBytes,
     modelDir,
@@ -578,13 +587,30 @@ self.onmessage = async (e) => {
     // not surfaced to the page. See ADR-0018 / the threaded probes.
     if (!poolReported) {
       poolReported = true;
-      // Opt into the multi-threaded decode pool unless the turn config disables
-      // it (`threads === false`, from `hologram_threads=0`) — the toggle the
-      // byte-identity V&V uses to A/B threaded vs single-threaded. Must precede
-      // the first `ensureReady()`. A no-op unless the page is cross-origin-isolated.
-      preferThreadedPool(e.data.threads !== false);
+      // Opt into the multi-threaded decode pool unless disabled by config
+      // (`threads === false`, from `hologram_threads=0`) OR the window plan is in
+      // use (`decodePlan === false`): the pool only parallelises the `m == 1`
+      // per-token decode GEMV, so a window (m > 1) forward gains nothing and
+      // should not pay N workers + shared memory (ADR-0018 m8). Must precede the
+      // first `ensureReady()`. A no-op unless the page is cross-origin-isolated.
+      //
+      // The pool workers are spawned + owned by the MAIN thread (via `spawn`),
+      // not here, so terminating THIS worker on cancel/error tears the pool down
+      // instead of orphaning it (ADR-0018 C1). `module` + the shared `memory` are
+      // structured-cloneable across postMessage. `teardown` cleans up on fallback
+      // (M1); `failure` surfaces a pool worker's init failure to the poll (M2).
+      preferThreadedPool(e.data.threads !== false && e.data.decodePlan !== false, {
+        spawn: (module, memory, n, stackSize) =>
+          self.postMessage({ type: "spawn-pool", module, memory, n, stackSize }),
+        teardown: () => self.postMessage({ type: "pool-teardown" }),
+        failure: () => poolFailed,
+      });
       await ensureReady();
       const p = poolInfo();
+      // Tell the main thread the pool is committed (past registration): a pool
+      // worker that dies now is a mid-session fault, so the main thread must
+      // ABORT the turn rather than fall back (ADR-0018 M3).
+      if (p.threaded) self.postMessage({ type: "pool-committed" });
       self.postMessage({
         type: "progress",
         line: p.threaded

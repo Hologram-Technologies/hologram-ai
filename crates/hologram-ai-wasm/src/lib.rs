@@ -681,8 +681,12 @@ impl hologram_ai::materialize::KappaStore for JsKappaStore {
 /// delegates to a full [`JsKappaStore`], so the provider inherits resolve,
 /// invalidate (the unpin/recover hook), the ranged seek, and the size stat.
 struct SendStore(JsKappaStore);
-// SAFETY: wasm32 is single-threaded; the callbacks are only ever invoked on
-// the one wasm thread that created them.
+// SAFETY: under ADR-0018 the wasm module runs on N+1 threads over one shared
+// memory, but the pool workers only ever execute `pool_exec_gemv` over raw
+// pointers — they never touch this JS-backed κ-store or its callbacks. The store
+// is created and invoked solely on the single EXECUTE thread, so it is never
+// shared across threads. (Narrowed from "wasm32 is single-threaded", which
+// ADR-0018 made false; the impl stays sound on the execute-thread-only argument.)
 unsafe impl Send for SendStore {}
 
 impl hologram_ai::materialize::KappaStore for SendStore {

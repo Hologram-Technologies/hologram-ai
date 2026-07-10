@@ -217,6 +217,34 @@ Speedup — honest caveat:
 - `wasm-opt` (with `--enable-threads --enable-simd`) is applied to the threaded
   build so it is not slower than the optimized single-threaded fallback.
 
+### Hardening (adversarial pass, 2026-07-10)
+
+An adversarial review (a second agent + a manual pass against the substrate pool
+source) drove these fixes; each is now covered:
+- **Pool lifecycle (the load-bearing one).** The pool workers are spawned and
+  OWNED by the MAIN thread, not the (nested) execute worker, so every path that
+  hard-terminates the execute worker — `cancelGeneration`, the worker `onerror`,
+  and a worker-reported `error` — tears the pool down with it. Without this, each
+  cancel orphaned N workers that each pinned the whole model-sized shared memory
+  (OOM after a few cancels). Witnessed by `bdd/probe-threads-teardown.mjs`: 3
+  cancel cycles, the live-worker count returns to 0 each time and never exceeds N.
+- **Fallback + failure detection.** On any fallback the execute worker signals
+  the main thread to drop the pool (no lingering half-pool); a pool worker that
+  fails to instantiate is surfaced (its `onerror`/error message) so the readiness
+  poll fails FAST instead of waiting out the timeout; a pool worker that dies
+  after commit aborts the turn (via a module-level current-turn settler) instead
+  of hanging the fork-join forever. Readiness itself stays the race-free shared
+  `hologram_pool_workers()` atomic (a worker's `registered` message is premature —
+  it precedes the substrate's `fetch_add`).
+- **Cancel now settles the turn** (resolve, keeping the partial completion), so
+  the caller's `finally` runs and the composer re-enables — fixing a pre-ADR
+  cancel-hang the teardown witness exposed.
+- **Parametric.** The worker count is `hardwareConcurrency − 1` (no arbitrary cap;
+  skip the pool below 2 participants) — the host's cores, never a model/size/input
+  parameter. The pool is not spun up for the window plan (m > 1 gains nothing).
+- **No silent build degradation.** The threaded build fails HARD if `wasm-opt` is
+  absent and asserts the artifact actually has a shared memory.
+
 ### Verification trap: the fixture is below the pool floor
 
 `fork_join_gemv` runs serial when `k·n < POOL_MIN_WEIGHT_BYTES` (256 KiB int8;

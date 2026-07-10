@@ -688,6 +688,57 @@ export interface GenerateOpts {
 
 let activeWorker: Worker | null = null;
 
+// The multi-threaded decode pool workers (ADR-0018). The MAIN thread owns them —
+// not the execute (generate) worker that requests them — so that terminating the
+// execute worker on cancel/error tears the pool down here too. Otherwise the pool
+// workers orphan and each pins the whole (model-sized) shared linear memory,
+// leaking one memory per cancel until the tab OOMs.
+let poolWorkers: Worker[] = [];
+// Whether the pool passed registration (the execute worker posted `pool-committed`).
+// Before commit, a pool-worker failure means "fall back to single-threaded"; after
+// commit it means a mid-session fault → abort the turn (ADR-0018 M2/M3).
+let poolCommitted = false;
+function terminatePool(): void {
+  for (const w of poolWorkers) w.terminate();
+  poolWorkers = [];
+  poolCommitted = false;
+  // Telemetry for the teardown witness (no orphan accumulation across cancels).
+  (globalThis as unknown as { __hologram_pool_live?: number }).__hologram_pool_live = 0;
+}
+
+// Settlers for the in-flight generate() turn, if any. Module-level (not captured
+// in a per-turn closure) because the pool workers' `onerror` handlers are set on
+// the FIRST turn but must settle whichever turn is live now — a warm turn 2+ has
+// different resolve/reject (ADR-0018 M3). `resolveActiveTurn` also lets cancel
+// settle the turn: without it, `.terminate()` fires no message, the generate()
+// promise never resolves, and the caller's `finally` (which re-enables the UI)
+// never runs — the pre-ADR cancel-hang.
+let resolveActiveTurn: ((v: number) => void) | null = null;
+let rejectActiveTurn: ((e: Error) => void) | null = null;
+function clearTurnSettlers(): void {
+  resolveActiveTurn = null;
+  rejectActiveTurn = null;
+}
+
+// A pool worker failed. Before the execute worker commits (registration passed),
+// a failure means "fall back to single-threaded": tear the pool down and tell the
+// execute worker (its readiness poll then fails fast). After commit, the execute
+// worker is blocked in a synchronous decode over the now-broken pool (a dead
+// worker never decrements the substrate's join count → the fork-join would hang
+// forever), so ABORT the live turn: terminate everything and reject it.
+function failPool(why: string): void {
+  if (poolCommitted) {
+    terminatePool();
+    if (activeWorker) { activeWorker.terminate(); activeWorker = null; }
+    const r = rejectActiveTurn;
+    clearTurnSettlers();
+    r?.(new Error(why));
+  } else {
+    terminatePool();
+    activeWorker?.postMessage({ type: 'pool-failed', why });
+  }
+}
+
 /** The local dir of the target's paired speculative DRAFT model (row
  * `speculative-draft-pairing`), if the catalogue pairs one AND it is compiled
  * locally. Returns undefined otherwise — the worker then drafts by prompt-lookup.
@@ -790,17 +841,47 @@ export async function generate(opts: GenerateOpts): Promise<number> {
     // itself rebuilds the session when the model changes (its inputs are
     // the model's), so reuse across sends is always safe.
     activeWorker ??= new GenerateWorker();
+    // The live turn's settlers, for module-level `failPool`/`cancelGeneration`.
+    resolveActiveTurn = resolve;
+    rejectActiveTurn = reject;
     // A worker script/load failure would otherwise leave generation hanging
     // silently (onmessage never fires); surface it loudly.
     activeWorker.onerror = (ev) => {
       const msg = `generate worker failed: ${(ev as ErrorEvent).message ?? ev}`;
       emitLine("chat://line", { stream: "stderr", line: msg });
+      terminatePool();
       if (activeWorker) { activeWorker.terminate(); activeWorker = null; }
+      clearTurnSettlers();
       reject(new Error(msg));
     };
-    
+
     activeWorker.onmessage = (e) => {
-      if (e.data.type === 'token') {
+      if (e.data.type === 'spawn-pool') {
+        // The execute worker created the shared memory + did the one-time data
+        // init; spawn the pool workers here (main-owned) over that same memory.
+        // Rebuild fresh — a stale pool from a prior turn must not linger.
+        terminatePool();
+        const { module, memory, n, stackSize } = e.data;
+        for (let id = 0; id < n; id++) {
+          const w = new Worker(new URL('./pool.worker.ts', import.meta.url), { type: 'module' });
+          // A pool worker throws (bad instantiation, GEMV trap, OOM) → its
+          // `onerror`/error message fires here; without this the execute side
+          // would only notice via the readiness timeout (M2) or hang (M3).
+          w.onerror = () => failPool(`decode pool worker ${id} crashed`);
+          w.onmessage = (ev) => {
+            if (ev.data && ev.data.error) failPool(`decode pool worker ${id} failed: ${ev.data.error}`);
+          };
+          w.postMessage({ module, memory, id, stackSize });
+          poolWorkers.push(w);
+        }
+        (globalThis as unknown as { __hologram_pool_live?: number }).__hologram_pool_live = n;
+      } else if (e.data.type === 'pool-committed') {
+        poolCommitted = true;
+      } else if (e.data.type === 'pool-teardown') {
+        // The execute worker fell back to single-threaded — drop the pool it no
+        // longer uses (M1), so it does not linger pinning the shared memory.
+        terminatePool();
+      } else if (e.data.type === 'token') {
         emitLine("chat://line", { stream: "stdout", line: e.data.text });
       } else if (e.data.type === 'progress') {
         // Narration of the honest work behind the first token (window
@@ -819,13 +900,16 @@ export async function generate(opts: GenerateOpts): Promise<number> {
         // The worker stays alive: it holds the warm staged session (row
         // `warm-turn`) — the next turn reuses the resident window instead
         // of rebuilding it. Cancel/error still terminate.
+        clearTurnSettlers();
         resolve(0);
       } else if (e.data.type === 'error') {
         emitLine("chat://line", { stream: "stderr", line: e.data.error });
+        terminatePool();
         if (activeWorker) {
           activeWorker.terminate();
           activeWorker = null;
         }
+        clearTurnSettlers();
         reject(new Error(e.data.error));
       }
     };
@@ -862,8 +946,19 @@ export async function generate(opts: GenerateOpts): Promise<number> {
 
 export async function cancelGeneration(): Promise<boolean> {
   if (activeWorker) {
+    // Tear down the decode pool with the execute worker — a hard terminate is the
+    // only way to interrupt the synchronous decode, and the pool workers pin the
+    // shared memory, so they must go too (ADR-0018).
+    terminatePool();
     activeWorker.terminate();
     activeWorker = null;
+    // Settle the in-flight turn (resolve = graceful stop, keeping the partial
+    // completion): a terminated worker emits no message, so without this the
+    // caller's `await generate()` would hang and its `finally` (which re-enables
+    // the composer) would never run — the composer would stay disabled.
+    const r = resolveActiveTurn;
+    clearTurnSettlers();
+    r?.(0);
     emitLine("chat://line", { stream: "stdout", line: "\n[Generation cancelled]" });
     return true;
   }

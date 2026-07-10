@@ -72,14 +72,17 @@ rm -rf "$OUT"; mkdir -p "$OUT"
 # wasm-opt from rejecting/stripping the shared-memory atomics + simd features.
 BG="$OUT/hologram_ai_wasm_bg.wasm"
 WASM_OPT="$(command -v wasm-opt 2>/dev/null || ls -t "$HOME"/.cache/.wasm-pack/wasm-opt-*/bin/wasm-opt 2>/dev/null | head -1 || true)"
-if [ -n "$WASM_OPT" ]; then
-  echo "[wasm-threads] wasm-opt -O (threads + simd preserved)"
-  "$WASM_OPT" -O --enable-threads --enable-bulk-memory --enable-mutable-globals \
-    --enable-simd "$BG" -o "$BG.opt"
-  mv "$BG.opt" "$BG"
-else
-  echo "[wasm-threads] WARNING: wasm-opt not found — artifact ships UNoptimised"
+if [ -z "$WASM_OPT" ]; then
+  # Fail HARD, not a warning: an unoptimised threaded artifact can be SLOWER than
+  # the optimised single-threaded fallback — a shipping regression (ADR-0018 M5).
+  echo "[wasm-threads] ERROR: wasm-opt not found. Install binaryen or run the" >&2
+  echo "  single-threaded 'pnpm wasm' first (it caches wasm-opt)." >&2
+  exit 1
 fi
+echo "[wasm-threads] wasm-opt -O (threads + simd preserved)"
+"$WASM_OPT" -O --enable-threads --enable-bulk-memory --enable-mutable-globals \
+  --enable-simd "$BG" -o "$BG.opt"
+mv "$BG.opt" "$BG"
 
 # Provenance: prove the artifact is actually threaded (a green build that
 # silently produced a non-shared memory would be a dark gate — ADR-0018).
@@ -93,5 +96,13 @@ if(pool.length!==3){console.error("FAIL: expected 3 pool exports, got",pool);pro
 if(envFutex.length){console.error("FAIL: unexpected env futex imports",envFutex.map(i=>i.name));process.exit(1);}
 console.log("[wasm-threads] verified: pool exports ["+pool.join(", ")+"], no env futex imports");
 ' "$OUT/hologram_ai_wasm_bg.wasm"
+
+# The glue must create a SHARED memory — a non-shared build would silently be a
+# single-threaded artifact that passes the export check above (a dark gate).
+grep -q 'shared: *true' "$OUT/hologram_ai_wasm.js" || {
+  echo "[wasm-threads] ERROR: generated glue has no shared memory (not a threaded build)" >&2
+  exit 1
+}
+echo "[wasm-threads] verified: shared linear memory"
 
 echo "[wasm-threads] done."
