@@ -79,7 +79,31 @@ opt-level = 2
 
 # Release: full optimization with thin LTO and single codegen unit.
 # codegen-units = 1 yields 10-20% for compute-bound workloads.
-# thin LTO adds cross-crate inlining (benefits hologram base kernels).
+# Whole-program (fat) LTO adds cross-crate inlining (benefits hologram base kernels).
+#
+# `lto = "thin"` here was BOTH incoherent and broken. Incoherent: with a single
+# codegen unit there is nothing for ThinLTO to thin — its whole design is to
+# parallelize across many units. Broken: `thin` + `codegen-units = 1` drops a
+# generic instantiation of std's own vendored hashbrown, and the release link of
+# `real_model_generation` fails with
+#
+#   rust-lld: error: undefined symbol:
+#     <hashbrown::raw::RawTable<(String, ())>>::reserve_rehash::<…>
+#     >>> referenced by hologram_ai … HashMap<String, (), RandomState>::insert
+#
+# `hologram-ai` has no hashbrown dependency; it calls `std::collections::HashSet
+# <String>::insert`. Reproduced from a cold build on rustc 1.95.0 AND 1.97.0, so
+# it is not toolchain drift. Bisected: `lto = "off"` links, `thin` +
+# `codegen-units = 16` links, and `fat` + `codegen-units = 1` links — the last
+# preserves the whole-program optimization the benchmark numbers were measured
+# under, so it is the one taken.
+#
+# This sank the nightly Architecture Regression Matrix from 2026-06-22 until
+# 2026-07-10 — 20+ consecutive red runs, live SmolLM2 + Qwen2.5 coverage dark —
+# while `ci` stayed green. It flipped mid-stream on an UNCHANGED commit
+# (b10a544 green 06-21, red 06-22, same rustc 1.96.0), because
+# `Swatinem/rust-cache` was restoring an already-linked test binary. The link
+# failure predated the flip; the cache merely hid it.
 [profile.release]
-lto = "thin"
+lto = "fat"
 codegen-units = 1

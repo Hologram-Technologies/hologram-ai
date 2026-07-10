@@ -251,13 +251,40 @@ fn decode_throughput_latency_and_overhead_attribution() {
         "steady state must not re-materialize (resident)"
     );
     assert!(per_token_us > 0.0);
-    // The finding that corrected the seeder gate: a batched chunked-prefill pass
-    // is dramatically faster than stepping the prompt, EVEN including the
-    // seeder's own materialization and EVEN when the model is fully resident. So
-    // the seeder must be installed for prefill regardless of residency.
+
+    // NO assertion on `prefill_seed_ms < prefill_step_ms`. There used to be one,
+    // carrying the claim "the seeder must be installed for prefill regardless of
+    // residency". Substrate v0.8.0 falsified it, on this machine and in the
+    // browser alike:
+    //
+    //             per token   prefill-by-stepping   prefill-by-seeder
+    //   v0.7.2   456,946 µs         10,931 ms             1,088 ms   seeder 10.0x
+    //   v0.8.0    19,702 µs            462 ms               941 ms   seeder  0.5x
+    //
+    // v0.8.0 dispatches the fused per-channel W8A32 decode GEMV on x86 (and on
+    // wasm32+simd128, which we build with), but only at `m ≤ FUSED_W8A32_MAX_M`.
+    // Stepping runs at `m = 1` and takes it — 23.6x faster. The seeder runs at
+    // `m = chunk = 64`, misses it, and barely moved. So batching now TRADES the
+    // fused kernel for weight-stream amortization, and wins only when the weights
+    // must actually be streamed.
+    //
+    // Which strategy wins is therefore a property of the substrate's dispatch
+    // gates and of residency — not a constant, and not something a benchmark may
+    // assert as a law. Asserting the inequality either way would fit this test to
+    // one machine, one model size, and one substrate version. It reports instead;
+    // the policy belongs where the choice is made, with its own witness.
+    //
+    // What IS a law: stepping the prompt and stepping in steady state are the same
+    // `m = 1` call, so their per-token costs must agree. That pins the measurement
+    // itself without pinning the strategy.
+    let step_per_tok_us = prefill_step_ms * 1_000.0 / PROMPT_LEN as f64;
+    let ratio = step_per_tok_us / per_token_us;
     assert!(
-        prefill_seed_ms < prefill_step_ms,
-        "seeded (batched) prefill {prefill_seed_ms:.0}ms must beat stepping {prefill_step_ms:.0}ms"
+        (0.5..=2.0).contains(&ratio),
+        "prefill-by-stepping ({step_per_tok_us:.0} µs/tok) and steady-state decode \
+         ({per_token_us:.0} µs/tok) are the same M=1 call and must cost the same \
+         within a factor of two; ratio {ratio:.2} means one of them is not taking \
+         the path we think it is"
     );
     // The in-repo per-token overhead is a rounding error against substrate
     // compute — the decode per-token levers are the substrate's, not ours.
