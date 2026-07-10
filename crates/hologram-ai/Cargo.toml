@@ -87,6 +87,9 @@ hologram-ai-safetensors = { version = "0.1.0", path = "../hologram-ai-safetensor
 [dev-dependencies]
 # Provides onnx_builder (pure Rust, no ORT) for mini fixture tests.
 hologram-ai-conformance = { path = "../hologram-ai-conformance" }
+# Graph nodes carry `SmallVec` input lists; the substrate-contract witness builds
+# raw hologram graphs, so it needs the same container the node struct declares.
+smallvec = { workspace = true }
 # hologram-backend is accessed via hologram's re-export
 bytemuck = { workspace = true }
 criterion = { workspace = true }
