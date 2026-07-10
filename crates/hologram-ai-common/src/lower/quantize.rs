@@ -219,40 +219,35 @@ pub fn omajor_w8a8_servable(quant_dtype: u8, k: usize, _n: usize) -> bool {
     tier.omajor_fusable && !tier.needs_codebook && tier.omajor_k_ok(k) && k <= mm_act_quant::K_MAX
 }
 
-/// **Blocked upstream at substrate v0.8.0.** Whether the substrate's compiler
-/// accepts `weight_layout = OUTPUT_MAJOR` on the binding form our decode path
-/// actually uses: a **weightless constant** — `ConstantEntry { bytes: vec![] }`
-/// plus a `holospaces.kappa_map` extension naming the κ whose bytes arrive at
-/// materialization.
+/// Whether the substrate's compiler accepts `weight_layout = OUTPUT_MAJOR` on the
+/// binding form our decode path actually uses: a **weightless constant** —
+/// `ConstantEntry { bytes: vec![] }` plus a `holospaces.kappa_map` extension
+/// naming the κ whose bytes arrive at materialization.
 ///
 /// This is a fact about the *host substrate*, not about any model, input, or
-/// use-case — the only kind of constant this codebase permits. It is pinned, not
-/// asserted: `a_weightless_kappa_constant_cannot_yet_declare_output_major`
+/// use-case — the only kind of constant this codebase permits. It is witnessed,
+/// not asserted: `a_weightless_kappa_constant_can_declare_output_major`
 /// (`hologram-ai/tests/omajor_w8a8_substrate_contract.rs`) compiles that exact
-/// graph and witnesses the refusal. When upstream lifts it, that test fails, and
-/// this flips to `true`. That is the whole point of pinning it.
+/// graph and proves it.
 ///
-/// **The gap.** `hologram-compiler::validate_weight_layout_declarations` rejects
-/// on
+/// **Was blocked through v0.8.0; fixed in v0.8.1 (rev `0120c94`).** The v0.8.0
+/// validator rejected on `matches!(node.inputs.first(), Some(Constant(_)))` — any
+/// graph constant, never asking whether it had bytes — which locked out precisely
+/// the case `QuantAttrs::weight_layout`'s own docstring said the field exists to
+/// serve. v0.8.1 narrowed it to `!e.bytes.is_empty()`, the same question
+/// `fuse_const_i8_decode` asks before it transposes anything: a constant *with*
+/// bytes carries them `[k,n]` and may not claim otherwise; a zero-byte constant is
+/// a κ naming content that arrives at materialization, and may declare
+/// OUTPUT_MAJOR. (We asked for this fix; the substrate commit cites the same
+/// reasoning.)
 ///
-/// ```text
-/// if matches!(node.inputs.first(), Some(InputSource::Constant(_))) { … }
-/// ```
-///
-/// — *any* graph constant, never asking whether it has bytes. But
-/// `QuantAttrs::weight_layout`'s own docstring names our case as the one it
-/// serves: "A weightless compile — the graph carries a κ for the weight and the
-/// bytes arrive at materialization — has no constant bytes for the compiler to
-/// transpose." A zero-byte constant's bytes are precisely *not* `[k,n]` in the
-/// graph; there are none. The doc and the validator disagree, and the validator
-/// wins. `fuse_const_i8_decode` already discriminates the two cases one screen
-/// away (`Some(e) if e.bytes.len() == want_len`), so the fix is to ask the same
-/// question here — `graph.constants().get(cid)` is in scope.
-///
-/// Until then the fused output-major decode GEMV is reachable only by a weight
-/// bound as a graph **input**, which would cost the κ map, cross-model artifact
-/// dedup, and weight-tier paging — the things that let a 1.5B model fit a 4 GiB
-/// address space at all. We keep the weightless form and stay on W8A32.
+/// **Still `false`, for exactly one commit.** The substrate accepts the
+/// declaration now, but our pipeline turning it on is a *numerics* change: W8A8
+/// per-token activation quantization re-keys every affected κ and re-bases the
+/// reference transcript. That belongs in its own commit, with the byte-exact
+/// oracle deliberately replaced by accuracy agreement — not folded into the
+/// substrate bump, which must stay byte-neutral. The very next commit flips this
+/// to `true` (or removes it) alongside the re-baseline.
 ///
 /// Because this predicate gates the artifact's byte order *and* the declaration
 /// together, `false` here means `derive_quantized_artifact` keeps authoring

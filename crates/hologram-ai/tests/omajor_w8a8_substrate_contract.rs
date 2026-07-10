@@ -117,12 +117,13 @@ fn reference_w8a32(
 /// declaring `OUTPUT_MAJOR` + W8A8.
 ///
 /// **This is not the binding our decode path uses.** Our κ weights lower to a
-/// zero-byte `ConstantEntry` plus a `holospaces.kappa_map` extension, and the
-/// substrate's compiler refuses `OUTPUT_MAJOR` on *any* `InputSource::Constant`
-/// — see `a_weightless_kappa_constant_cannot_yet_declare_output_major` below.
-/// A graph input is the only binding that reaches the fused call today, so it is
-/// what these kernel-behaviour witnesses must use. Read them as: *the kernel does
-/// what the contract says, once you can reach it.*
+/// zero-byte `ConstantEntry` plus a `holospaces.kappa_map` extension. Through
+/// v0.8.0 the substrate refused `OUTPUT_MAJOR` on *any* `InputSource::Constant`;
+/// v0.8.1 accepts a *zero-byte* one — see
+/// `a_weightless_kappa_constant_can_declare_output_major` below, which compiles
+/// exactly our binding. A graph input is still the simplest binding to *execute*
+/// in-process here (no `WeightProvider` plumbing), so these kernel-behaviour
+/// witnesses use it. Read them as: *the kernel does what the contract says.*
 ///
 /// The `Dequantize` node keeps its logical `[k,n]` shape — `weight_layout` is a
 /// statement about the *bytes*, not the type. Scales and zero-points are
@@ -163,7 +164,7 @@ fn omajor_graph(m: usize, k: usize, n: usize, scales: &[f32]) -> Vec<u8> {
     g.add_input(a_in);
     // The weight as a graph INPUT. The compiler has no bytes to transpose; the
     // declaration is what licenses the fused omajor call. NOT our binding — see
-    // the doc comment above and the tripwire at the bottom of this file.
+    // the doc comment above and the weightless-constant witness below.
     let w_in = g.add_node(Node {
         op: GraphOp::Input,
         inputs: SmallVec::new(),
@@ -462,32 +463,25 @@ fn an_unservable_output_major_declaration_fails_loud_and_never_falls_back() {
 /// docstring says it exists to serve — "a weightless compile … has no constant
 /// bytes for the compiler to transpose".
 ///
-/// But `validate_weight_layout_declarations` rejects on
+/// Through substrate v0.8.0 `validate_weight_layout_declarations` rejected on
 /// `matches!(node.inputs.first(), Some(InputSource::Constant(_)))`, without ever
-/// asking whether the constant has bytes. So the documented use-case is
+/// asking whether the constant had bytes — so the documented use-case was
 /// unreachable through the representation the doc describes, and every model we
-/// ship stays on W8A32.
+/// shipped stayed on W8A32.
 ///
-/// This test compiles that graph and pins the refusal. It is a **tripwire**: when
-/// upstream narrows the check to constants that actually carry bytes — the same
-/// question `fuse_const_i8_decode` already asks one screen away, `Some(e) if
-/// e.bytes.len() == want_len` — this test fails, and
-/// `SUBSTRATE_ACCEPTS_OUTPUT_MAJOR_ON_WEIGHTLESS_CONSTANTS` flips to `true`,
-/// turning the whole path on. Nothing here is asserted from prose.
+/// This was a **tripwire**: it used to pin the refusal and fail the instant
+/// upstream narrowed the check. Substrate v0.8.1 (rev `0120c94`) did exactly
+/// that — the validator now asks `!e.bytes.is_empty()`, the same question
+/// `fuse_const_i8_decode` asks before it transposes anything — so the tripwire
+/// fired and is now inverted: it asserts the capability is **present**, that a
+/// weightless (zero-byte) κ constant declaring OUTPUT_MAJOR + W8A8 *compiles*.
+///
+/// It stays a live witness: if a future substrate regresses and refuses this
+/// binding again, this fails, and the `SUBSTRATE_ACCEPTS_…` const (still `false`
+/// for one more commit, until the numerics-changing flip re-baselines the
+/// oracles) cannot be turned on. Nothing here is asserted from prose.
 #[test]
-fn a_weightless_kappa_constant_cannot_yet_declare_output_major() {
-    // Read through `black_box` so this is a runtime check rather than a `const`
-    // assertion clippy folds away: if the flag flips, this must FAIL here, not be
-    // optimized into nothing.
-    let flag = std::hint::black_box(
-        hologram_ai_common::lower::SUBSTRATE_ACCEPTS_OUTPUT_MAJOR_ON_WEIGHTLESS_CONSTANTS,
-    );
-    assert!(
-        !flag,
-        "the flag claims the substrate accepts OUTPUT_MAJOR on a weightless constant — \
-         then this test must be inverted, not skipped"
-    );
-
+fn a_weightless_kappa_constant_can_declare_output_major() {
     let (m, k, n) = (1usize, 64usize, 8usize);
     let mut g = Graph::new();
     let a_sh = g
@@ -569,16 +563,15 @@ fn a_weightless_kappa_constant_cannot_yet_declare_output_major() {
     });
     g.add_output(out);
 
-    let err = compile(g, BackendKind::Cpu, WittLevel::W32).err().expect(
-        "TRIPWIRE: a weightless (zero-byte) κ constant declaring OUTPUT_MAJOR now COMPILES. \
-             Upstream has lifted the restriction. Flip \
-             SUBSTRATE_ACCEPTS_OUTPUT_MAJOR_ON_WEIGHTLESS_CONSTANTS to true, invert this test, \
-             and re-baseline the transcript oracles — W8A8 re-keys κ.",
-    );
-    let msg = format!("{err}");
-    assert!(
-        msg.contains("graph constant"),
-        "the refusal must be the constant-binding one (not k, tier, axis, or act_quant), \
-         got: {msg}"
-    );
+    // v0.8.1: this MUST now compile. A failure means either the substrate
+    // regressed the weightless-constant acceptance, or a *different* precondition
+    // (k bound, tier, axis, act_quant) is unmet — the error text tells which.
+    compile(g, BackendKind::Cpu, WittLevel::W32).unwrap_or_else(|e| {
+        panic!(
+            "a weightless (zero-byte) κ constant declaring OUTPUT_MAJOR + W8A8 must compile on \
+             substrate v0.8.1; got: {e}. If this is the old \"graph constant\" refusal, the \
+             substrate regressed the fix from rev 0120c94 and \
+             SUBSTRATE_ACCEPTS_OUTPUT_MAJOR_ON_WEIGHTLESS_CONSTANTS must stay false."
+        )
+    });
 }

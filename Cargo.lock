@@ -1023,14 +1023,14 @@ dependencies = [
  "hologram-ai-quant",
  "hologram-ai-safetensors",
  "hologram-ai-tokenizer",
- "hologram-archive 0.8.0",
- "hologram-backend 0.8.0",
+ "hologram-archive 0.8.1",
+ "hologram-backend 0.8.1",
  "hologram-compiler",
- "hologram-exec 0.8.0",
- "hologram-graph 0.8.0",
- "hologram-host 0.8.0",
- "hologram-ops 0.8.0",
- "hologram-types 0.8.0",
+ "hologram-exec 0.8.1",
+ "hologram-graph 0.8.1",
+ "hologram-host 0.8.1",
+ "hologram-ops 0.8.1",
+ "hologram-types 0.8.1",
  "indicatif",
  "memmap2",
  "parking_lot",
@@ -1060,12 +1060,12 @@ dependencies = [
  "bytemuck",
  "half",
  "hologram-ai-quant",
- "hologram-archive 0.8.0",
- "hologram-backend 0.8.0",
- "hologram-exec 0.8.0",
- "hologram-graph 0.8.0",
- "hologram-ops 0.8.0",
- "hologram-types 0.8.0",
+ "hologram-archive 0.8.1",
+ "hologram-backend 0.8.1",
+ "hologram-exec 0.8.1",
+ "hologram-graph 0.8.1",
+ "hologram-ops 0.8.1",
+ "hologram-types 0.8.1",
  "holospaces",
  "indexmap",
  "rayon",
@@ -1094,11 +1094,11 @@ dependencies = [
  "hologram-ai-quant",
  "hologram-ai-safetensors",
  "hologram-ai-tokenizer",
- "hologram-archive 0.8.0",
- "hologram-exec 0.8.0",
- "hologram-graph 0.8.0",
- "hologram-ops 0.8.0",
- "hologram-types 0.8.0",
+ "hologram-archive 0.8.1",
+ "hologram-exec 0.8.1",
+ "hologram-graph 0.8.1",
+ "hologram-ops 0.8.1",
+ "hologram-types 0.8.1",
  "holospaces",
  "ndarray 0.16.1",
  "ort",
@@ -1162,9 +1162,9 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "hologram-ai-common",
- "hologram-graph 0.8.0",
- "hologram-ops 0.8.0",
- "hologram-types 0.8.0",
+ "hologram-graph 0.8.1",
+ "hologram-ops 0.8.1",
+ "hologram-types 0.8.1",
  "safetensors",
  "serde",
  "serde_json",
@@ -1178,8 +1178,8 @@ dependencies = [
  "anyhow",
  "hashbrown 0.15.5",
  "hologram-ai-common",
- "hologram-archive 0.8.0",
- "hologram-types 0.8.0",
+ "hologram-archive 0.8.1",
+ "hologram-types 0.8.1",
  "regex-automata",
  "rkyv",
  "serde",
@@ -1230,14 +1230,14 @@ dependencies = [
 
 [[package]]
 name = "hologram-archive"
-version = "0.8.0"
-source = "git+https://github.com/Hologram-Technologies/hologram.git?tag=v0.8.0#50b1f4131eaffdb492ca15b43b272ddfc0f5b666"
+version = "0.8.1"
+source = "git+https://github.com/Hologram-Technologies/hologram.git?rev=0120c9462ebc1dddbc00fc7ff6577a8473411d04#0120c9462ebc1dddbc00fc7ff6577a8473411d04"
 dependencies = [
  "bytemuck",
  "hashbrown 0.15.5",
- "hologram-backend 0.8.0",
- "hologram-graph 0.8.0",
- "hologram-host 0.8.0",
+ "hologram-backend 0.8.1",
+ "hologram-graph 0.8.1",
+ "hologram-host 0.8.1",
  "memmap2",
  "smallvec",
  "thiserror 2.0.18",
@@ -1267,13 +1267,13 @@ dependencies = [
 
 [[package]]
 name = "hologram-backend"
-version = "0.8.0"
-source = "git+https://github.com/Hologram-Technologies/hologram.git?tag=v0.8.0#50b1f4131eaffdb492ca15b43b272ddfc0f5b666"
+version = "0.8.1"
+source = "git+https://github.com/Hologram-Technologies/hologram.git?rev=0120c9462ebc1dddbc00fc7ff6577a8473411d04#0120c9462ebc1dddbc00fc7ff6577a8473411d04"
 dependencies = [
  "bytemuck",
- "hologram-host 0.8.0",
- "hologram-ops 0.8.0",
- "hologram-types 0.8.0",
+ "hologram-host 0.8.1",
+ "hologram-ops 0.8.1",
+ "hologram-types 0.8.1",
  "libm",
  "smallvec",
  "thiserror 2.0.18",
@@ -1294,16 +1294,16 @@ dependencies = [
 
 [[package]]
 name = "hologram-compiler"
-version = "0.8.0"
-source = "git+https://github.com/Hologram-Technologies/hologram.git?tag=v0.8.0#50b1f4131eaffdb492ca15b43b272ddfc0f5b666"
+version = "0.8.1"
+source = "git+https://github.com/Hologram-Technologies/hologram.git?rev=0120c9462ebc1dddbc00fc7ff6577a8473411d04#0120c9462ebc1dddbc00fc7ff6577a8473411d04"
 dependencies = [
  "hashbrown 0.15.5",
- "hologram-archive 0.8.0",
- "hologram-backend 0.8.0",
- "hologram-graph 0.8.0",
- "hologram-host 0.8.0",
- "hologram-ops 0.8.0",
- "hologram-types 0.8.0",
+ "hologram-archive 0.8.1",
+ "hologram-backend 0.8.1",
+ "hologram-graph 0.8.1",
+ "hologram-host 0.8.1",
+ "hologram-ops 0.8.1",
+ "hologram-types 0.8.1",
  "nom 8.0.0",
  "smallvec",
  "thiserror 2.0.18",
@@ -1332,16 +1332,16 @@ dependencies = [
 
 [[package]]
 name = "hologram-exec"
-version = "0.8.0"
-source = "git+https://github.com/Hologram-Technologies/hologram.git?tag=v0.8.0#50b1f4131eaffdb492ca15b43b272ddfc0f5b666"
+version = "0.8.1"
+source = "git+https://github.com/Hologram-Technologies/hologram.git?rev=0120c9462ebc1dddbc00fc7ff6577a8473411d04#0120c9462ebc1dddbc00fc7ff6577a8473411d04"
 dependencies = [
  "hashbrown 0.15.5",
- "hologram-archive 0.8.0",
- "hologram-backend 0.8.0",
- "hologram-graph 0.8.0",
- "hologram-host 0.8.0",
- "hologram-ops 0.8.0",
- "hologram-types 0.8.0",
+ "hologram-archive 0.8.1",
+ "hologram-backend 0.8.1",
+ "hologram-graph 0.8.1",
+ "hologram-host 0.8.1",
+ "hologram-ops 0.8.1",
+ "hologram-types 0.8.1",
  "smallvec",
  "thiserror 2.0.18",
  "uor-foundation",
@@ -1361,11 +1361,11 @@ dependencies = [
 
 [[package]]
 name = "hologram-graph"
-version = "0.8.0"
-source = "git+https://github.com/Hologram-Technologies/hologram.git?tag=v0.8.0#50b1f4131eaffdb492ca15b43b272ddfc0f5b666"
+version = "0.8.1"
+source = "git+https://github.com/Hologram-Technologies/hologram.git?rev=0120c9462ebc1dddbc00fc7ff6577a8473411d04#0120c9462ebc1dddbc00fc7ff6577a8473411d04"
 dependencies = [
- "hologram-ops 0.8.0",
- "hologram-types 0.8.0",
+ "hologram-ops 0.8.1",
+ "hologram-types 0.8.1",
  "libm",
  "smallvec",
 ]
@@ -1382,8 +1382,8 @@ dependencies = [
 
 [[package]]
 name = "hologram-host"
-version = "0.8.0"
-source = "git+https://github.com/Hologram-Technologies/hologram.git?tag=v0.8.0#50b1f4131eaffdb492ca15b43b272ddfc0f5b666"
+version = "0.8.1"
+source = "git+https://github.com/Hologram-Technologies/hologram.git?rev=0120c9462ebc1dddbc00fc7ff6577a8473411d04#0120c9462ebc1dddbc00fc7ff6577a8473411d04"
 dependencies = [
  "uor-foundation",
  "uor-foundation-sdk",
@@ -1417,11 +1417,11 @@ dependencies = [
 
 [[package]]
 name = "hologram-ops"
-version = "0.8.0"
-source = "git+https://github.com/Hologram-Technologies/hologram.git?tag=v0.8.0#50b1f4131eaffdb492ca15b43b272ddfc0f5b666"
+version = "0.8.1"
+source = "git+https://github.com/Hologram-Technologies/hologram.git?rev=0120c9462ebc1dddbc00fc7ff6577a8473411d04#0120c9462ebc1dddbc00fc7ff6577a8473411d04"
 dependencies = [
- "hologram-host 0.8.0",
- "hologram-types 0.8.0",
+ "hologram-host 0.8.1",
+ "hologram-types 0.8.1",
  "libm",
  "uor-foundation",
  "uor-foundation-sdk",
@@ -1469,10 +1469,10 @@ dependencies = [
 
 [[package]]
 name = "hologram-types"
-version = "0.8.0"
-source = "git+https://github.com/Hologram-Technologies/hologram.git?tag=v0.8.0#50b1f4131eaffdb492ca15b43b272ddfc0f5b666"
+version = "0.8.1"
+source = "git+https://github.com/Hologram-Technologies/hologram.git?rev=0120c9462ebc1dddbc00fc7ff6577a8473411d04#0120c9462ebc1dddbc00fc7ff6577a8473411d04"
 dependencies = [
- "hologram-host 0.8.0",
+ "hologram-host 0.8.1",
  "uor-foundation",
  "uor-prism",
 ]
