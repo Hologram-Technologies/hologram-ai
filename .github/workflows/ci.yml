@@ -163,6 +163,12 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-unknown-unknown
+      - name: Nightly + rust-src for the multi-threaded wasm build (ADR-0018)
+        run: |
+          rustup toolchain install "$HAI_WASM_THREADS_NIGHTLY" --profile minimal --component rust-src
+          rustup target add wasm32-unknown-unknown --toolchain "$HAI_WASM_THREADS_NIGHTLY"
+        env:
+          HAI_WASM_THREADS_NIGHTLY: nightly-2026-07-09
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: journey
@@ -179,9 +185,14 @@ jobs:
       - name: Install web deps
         working-directory: apps/web
         run: pnpm install --frozen-lockfile
-      - name: Build wasm binding
+      - name: Build wasm binding (single-threaded fallback)
         working-directory: apps/web
         run: pnpm wasm
+      - name: Build wasm binding (multi-threaded pool)
+        working-directory: apps/web
+        run: pnpm wasm:threads
+        env:
+          HAI_WASM_THREADS_NIGHTLY: nightly-2026-07-09
       - name: Install Chromium
         working-directory: apps/web
         run: pnpm exec playwright install --with-deps chromium
@@ -191,3 +202,9 @@ jobs:
       - name: Browser BDD (hermetic journey + handshake)
         working-directory: apps/web
         run: pnpm bdd
+      - name: Pool registration witness (Node worker_threads)
+        working-directory: apps/web
+        run: node bdd/probe-pool-registration.mjs
+      - name: Multi-threaded pool browser probe (isolated + byte-exact fixture)
+        working-directory: apps/web
+        run: node bdd/probe-threads-local.mjs

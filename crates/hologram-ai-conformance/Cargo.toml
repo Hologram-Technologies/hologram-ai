@@ -9,9 +9,13 @@ description = "Conformance testing for hologram float kernels against ONNX Runti
 hologram-types = { workspace = true }
 hologram-ops = { workspace = true }
 hologram-graph = { workspace = true }
-hologram-exec = { workspace = true }
-hologram-archive = { workspace = true }
-hologram-ai-common = { workspace = true }
+# Native-only conformance harness: re-enable the host-shell `std` the workspace
+# now pins off by default (ADR-0018). `hologram-ai-common/std` cascades to
+# exec/archive/backend, but list exec/archive explicitly too — this crate builds
+# without the `hologram-ai` feature (no unification through it) in its base form.
+hologram-exec = { workspace = true, features = ["std"] }
+hologram-archive = { workspace = true, features = ["std"] }
+hologram-ai-common = { workspace = true, features = ["std"] }
 hologram-ai-quant = { workspace = true }
 anyhow = { workspace = true }
 bytemuck = { workspace = true }

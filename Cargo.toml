@@ -23,25 +23,36 @@ repository  = "https://github.com/uor-framework/hologram-ai"
 # silent-wrong fix, and two end-to-end witnesses). A rev pin is immutable and
 # reproducible — the same thing a tag would resolve to; swap it for `tag =
 # "v0.8.1"` once that tag is published. Advance all crates together.
-# Runtime-core crates (types/ops/graph) are no_std-capable (default = []); the
-# host-shell stack (compiler/exec/archive/backend) is built with `std`.
+# Runtime-core crates (types/ops/graph) are no_std-capable (default = []).
+#
+# The host-shell stack (compiler/exec/archive/backend/host) is pinned
+# `default-features = false` so its `std` is OPT-IN, re-enabled by the default-on
+# `std` feature on `hologram-ai` / `hologram-ai-common` (native lib/CLI/benches
+# unchanged). The `hologram-ai-wasm` browser build omits `std`, resolving the
+# stack no_std — which is what makes `hologram-backend` compile its `Atomics.wait`
+# embedder-pool futex (multi-threaded decode) instead of the busy-spin std path.
+# A member-level `default-features = false` on a workspace-inherited dep is
+# ignored by Cargo, so the flag MUST live here. See ADR-0018.
 hologram-types    = { git = "https://github.com/Hologram-Technologies/hologram.git", rev = "0120c9462ebc1dddbc00fc7ff6577a8473411d04" }
 hologram-ops      = { git = "https://github.com/Hologram-Technologies/hologram.git", rev = "0120c9462ebc1dddbc00fc7ff6577a8473411d04" }
 hologram-graph    = { git = "https://github.com/Hologram-Technologies/hologram.git", rev = "0120c9462ebc1dddbc00fc7ff6577a8473411d04" }
-hologram-compiler = { git = "https://github.com/Hologram-Technologies/hologram.git", rev = "0120c9462ebc1dddbc00fc7ff6577a8473411d04" }
+hologram-compiler = { git = "https://github.com/Hologram-Technologies/hologram.git", rev = "0120c9462ebc1dddbc00fc7ff6577a8473411d04", default-features = false }
 # `parallel` (rayon) is NOT pinned here — it cannot run on wasm32 (no threads).
 # It is an opt-in feature, enabled by default for native consumers (the
 # `hologram-ai` lib/CLI) via their own `parallel` feature, and left off for the
 # `hologram-ai-wasm` browser build. See ADR-0017.
-hologram-exec     = { git = "https://github.com/Hologram-Technologies/hologram.git", rev = "0120c9462ebc1dddbc00fc7ff6577a8473411d04" }
-hologram-archive  = { git = "https://github.com/Hologram-Technologies/hologram.git", rev = "0120c9462ebc1dddbc00fc7ff6577a8473411d04", features = ["model-formats"] }
-hologram-backend  = { git = "https://github.com/Hologram-Technologies/hologram.git", rev = "0120c9462ebc1dddbc00fc7ff6577a8473411d04" }
-hologram-host     = { git = "https://github.com/Hologram-Technologies/hologram.git", rev = "0120c9462ebc1dddbc00fc7ff6577a8473411d04" }
+hologram-exec     = { git = "https://github.com/Hologram-Technologies/hologram.git", rev = "0120c9462ebc1dddbc00fc7ff6577a8473411d04", default-features = false }
+hologram-archive  = { git = "https://github.com/Hologram-Technologies/hologram.git", rev = "0120c9462ebc1dddbc00fc7ff6577a8473411d04", default-features = false, features = ["model-formats"] }
+hologram-backend  = { git = "https://github.com/Hologram-Technologies/hologram.git", rev = "0120c9462ebc1dddbc00fc7ff6577a8473411d04", default-features = false, features = ["cpu"] }
+hologram-host     = { git = "https://github.com/Hologram-Technologies/hologram.git", rev = "0120c9462ebc1dddbc00fc7ff6577a8473411d04", default-features = false }
 holospaces        = { git = "https://github.com/Hologram-Technologies/holospaces.git", branch = "main" }
 
 # workspace-internal
 hologram-ai-quant  = { path = "crates/hologram-ai-quant" }
-hologram-ai-common = { path = "crates/hologram-ai-common" }
+# `default-features = false` (its default is `std`): keeps the substrate `std`
+# forwarding opt-in so the wasm graph (onnx/safetensors/tokenizer/wasm all pull
+# this crate) resolves no_std; native re-enables via `hologram-ai/std`. ADR-0018.
+hologram-ai-common = { path = "crates/hologram-ai-common", default-features = false }
 hologram-ai-onnx   = { path = "crates/hologram-ai-onnx" }
 hologram-ai-tokenizer = { path = "crates/hologram-ai-tokenizer" }
 hologram-ai-safetensors = { path = "crates/hologram-ai-safetensors" }

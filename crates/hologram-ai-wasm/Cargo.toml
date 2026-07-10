@@ -16,6 +16,14 @@ hologram-ai = { path = "../hologram-ai", default-features = false }
 hologram-ai-tokenizer.workspace = true
 half.workspace = true
 
+# The whole browser graph resolves the host-shell substrate stack no_std (see
+# ADR-0018): `hologram-ai` above is pulled `default-features = false`, and the
+# workspace pins the substrate stack + `hologram-ai-common` the same way, so
+# nothing enables `hologram-backend/std` and the `Atomics.wait` futex path
+# compiles. `hologram-ai-tokenizer` keeps its default `std` *capability* feature
+# (JSON/archive loading) — that only links the host deps; they are themselves
+# no_std here by feature unification.
+
 wasm-bindgen = "0.2"
 serde = { workspace = true, features = ["derive"] }
 serde-wasm-bindgen = "0.6"
@@ -28,6 +36,13 @@ hologram-ai-safetensors = { version = "0.1.0", path = "../hologram-ai-safetensor
 serde_json.workspace = true
 hologram-ai-common.workspace = true
 anyhow.workspace = true
+
+[features]
+# Off by default → the single-threaded `+simd128` build (byte-identical to the
+# pre-ADR-0018 browser build; the automatic fallback when the page is not
+# cross-origin-isolated). On → the substrate embedder worker pool for multi-core
+# decode; must be built shared-memory (`+atomics,+bulk-memory`). ADR-0018.
+wasm-threads = ["hologram-ai/wasm-threads"]
 
 [dev-dependencies]
 wasm-bindgen-test = "0.3"

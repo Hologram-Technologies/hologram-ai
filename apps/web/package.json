@@ -6,6 +6,8 @@
   "description": "hologram-ai browser GUI (WebAssembly, GitHub Pages). See specs/docs/adrs/0017-hologram-ai-web-wasm.md",
   "scripts": {
     "wasm": "wasm-pack build ../../crates/hologram-ai-wasm --target web --out-dir ../../apps/web/src/wasm --release",
+    "wasm:threads": "bash scripts/build-wasm-threads.sh",
+    "wasm:all": "pnpm wasm && pnpm wasm:threads",
     "dev": "vite",
     "build": "tsc -b && vite build",
     "test": "vitest run --browser.headless",

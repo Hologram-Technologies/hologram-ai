@@ -5,6 +5,12 @@ edition.workspace = true
 license.workspace = true
 
 [features]
+# `std` on by default so native consumers are unchanged; the wasm build
+# (`hologram-ai-wasm`, via `hologram-ai` default-features = false) resolves this
+# crate no_std, which lets `hologram-backend` reach its `Atomics.wait` futex
+# path (ADR-0018). Forwards to the host-shell substrate crates' own `std`.
+default = ["std"]
+std = ["hologram-exec/std", "hologram-archive/std", "hologram-backend/std"]
 # Multi-core execution (rayon). Off by default so the runtime core stays
 # wasm-buildable (class NS); native consumers enable it. Cascades to the backend
 # via hologram-exec's own `parallel` feature.
@@ -16,6 +22,9 @@ hologram-ai-quant.workspace = true
 hologram-types.workspace   = true
 hologram-ops.workspace     = true
 hologram-graph.workspace   = true
+# Host-shell substrate crates: the workspace pins them `default-features = false`
+# so their `std` is opt-in (re-enabled by this crate's default-on `std` feature)
+# — see the `[features]` note and ADR-0018.
 hologram-exec.workspace    = true
 hologram-archive.workspace = true
 # The output-major/W8A8 declaration predicate reads the substrate's OWN derived

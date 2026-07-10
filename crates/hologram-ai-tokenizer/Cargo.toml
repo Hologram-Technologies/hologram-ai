@@ -15,6 +15,11 @@ regex-automata = { version = "0.4", default-features = false, features = ["alloc
 # ── Host shell (std) ─────────────────────────────────────────────────────────
 # Model loading (tokenizer.json, archive sections, training). Compiled only
 # with the `std` feature; never linked into a no_std build.
+# The workspace pins common/archive `default-features = false`, so their `std`
+# stays off in the wasm graph (avoids forcing `hologram-backend/std` and the
+# busy-spin futex over `Atomics.wait`, ADR-0018). Native re-enables their `std`
+# by feature unification (`hologram-ai/std` → their `/std`). This crate's `std`
+# capability feature only toggles whether these host deps are *linked*.
 hologram-ai-common = { workspace = true, optional = true }
 hologram-types     = { workspace = true, optional = true }
 hologram-archive   = { workspace = true, optional = true }

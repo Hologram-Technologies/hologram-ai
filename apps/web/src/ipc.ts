@@ -841,6 +841,10 @@ export async function generate(opts: GenerateOpts): Promise<number> {
       // one position per step, never a window-sized forward. The knob
       // reverts to the whole-window plan for witnesses and diagnosis.
       decodePlan: localStorage.getItem("hologram_decode_plan") !== "0",
+      // Multi-threaded decode pool (ADR-0018): on unless `hologram_threads=0`.
+      // The V&V flips it to compare threaded vs single-threaded byte-for-byte;
+      // it is also a user escape hatch. A no-op unless cross-origin-isolated.
+      threads: localStorage.getItem("hologram_threads") !== "0",
       // The weight-tier pager (row `lazy-constant-residency`): opt-in via the
       // knob (MB), so a stage whose weights exceed the heap window pages them
       // from the OPFS κ-store rather than pinning the whole stage resident.
