@@ -25,12 +25,12 @@ const WEB = path.join(ROOT, "apps/web");
 const PORT = Number(process.env.HAI_PREVIEW_PORT || 4175);
 const APP = `http://127.0.0.1:${PORT}/hologram-ai/`;
 const MODEL = {
-  id: "smollm2-135m-instruct",
-  hfId: "HuggingFaceTB/SmolLM2-135M-Instruct",
-  displayName: "SmolLM2 135M Instruct",
+  id: "byteid-model",
+  hfId: process.env.HAI_PROBE_HF || "HuggingFaceTB/SmolLM2-135M-Instruct",
+  displayName: process.env.HAI_PROBE_MODEL || "SmolLM2 135M Instruct",
   description: "Threaded-pool byte-identity witness.",
   modality: "text-chat",
-  size: "135M",
+  size: process.env.HAI_PROBE_SIZE || "135M",
   approxArchiveMb: 0,
   quantize: "int8",
   promptTemplate: null,
