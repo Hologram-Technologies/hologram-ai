@@ -346,4 +346,65 @@ mod tests {
             assert_eq!(z[i], naive, "z[{i}]");
         }
     }
+
+    /// Simulate GREEDY speculative decode over a fixed token sequence `seq` (the
+    /// output the target would greedily produce): at each realized prefix,
+    /// prompt-lookup proposes up to `k`, the model "accepts" the longest prefix
+    /// matching `seq` (exact for greedy — the sequence IS the model's output),
+    /// and the step advances `accepted + 1` (the bonus is the model's own token).
+    /// Returns (mean tokens advanced per forward pass, fraction of passes that
+    /// drafted). Mean-tokens-per-pass IS the speculative speedup in forward passes.
+    fn simulate_greedy_speculation(seq: &[i64], k: usize) -> (f64, f64) {
+        let mut i = 1usize; // the first token is the prefill's last row
+        let (mut passes, mut drafted) = (0usize, 0usize);
+        while i < seq.len() {
+            passes += 1;
+            let draft = prompt_lookup_draft(&seq[..i], k);
+            if draft.is_empty() {
+                i += 1; // plain step — never worse
+                continue;
+            }
+            drafted += 1;
+            let mut acc = 0usize;
+            while acc < draft.len() && i + acc < seq.len() && draft[acc] == seq[i + acc] {
+                acc += 1;
+            }
+            i += acc + 1; // accepted tokens + the model's own bonus token
+        }
+        let tokens = (seq.len() - 1) as f64;
+        (tokens / passes as f64, drafted as f64 / passes as f64)
+    }
+
+    #[test]
+    fn speculation_wins_on_recurrence_and_never_loses_on_novel_text() {
+        // WITNESS for defaulting speculative on: on text with recurrence it
+        // advances several tokens per pass; on novel text the drafter proposes
+        // nothing, so it falls back to plain decode (exactly 1 token/pass — never
+        // worse). This is the property that makes prompt-lookup safe by default.
+
+        // Structured/echoing output (a chatbot repeating a list/format/quote):
+        // a block that recurs verbatim — the case prompt-lookup targets. Once the
+        // recurrence dominates the sequence the per-pass advance climbs well above 1.
+        let block: Vec<i64> = (100..150).collect();
+        let mut structured = vec![1i64, 2];
+        for _ in 0..4 {
+            structured.extend_from_slice(&block); // the model re-emits the block
+        }
+        let (spd, drafted) = simulate_greedy_speculation(&structured, 8);
+        assert!(
+            spd >= 1.5,
+            "recurrence must give a real speculative speedup, got {spd:.2} tokens/pass"
+        );
+        assert!(drafted > 0.0);
+
+        // Novel output (no recurrence): every token distinct. The drafter returns
+        // empty every step → plain decode → exactly 1 token/pass (never worse).
+        let novel: Vec<i64> = (0..200).collect();
+        let (spd_novel, drafted_novel) = simulate_greedy_speculation(&novel, 8);
+        assert_eq!(
+            spd_novel, 1.0,
+            "novel text must fall back to plain decode (1 token/pass), got {spd_novel:.2}"
+        );
+        assert_eq!(drafted_novel, 0.0, "novel text must never draft");
+    }
 }
