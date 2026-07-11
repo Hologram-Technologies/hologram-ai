@@ -334,11 +334,16 @@ impl QuantTier {
     }
 
     /// Bytes the `q` block occupies for `elems = out·in` codes: one byte/code at
-    /// int8, one nibble (½ byte) at int4.
+    /// int8, one nibble (½ byte) at int4. int4 uses `div_ceil` to match the
+    /// encoders EXACTLY (`encode_int4_per_channel` allocates `⌈elems/2⌉`) — a
+    /// floor here would place the scale range one byte early on an odd `elems`
+    /// (both `out` and `in` odd) and read a packed-nibble byte as a scale byte.
+    /// Even `in` (every real projection) makes them equal; the ceil is the
+    /// hardened statement, not a happy-path assumption.
     pub fn q_bytes(self, elems: u64) -> u64 {
         match self {
             QuantTier::Int8 => elems,
-            QuantTier::Int4 => elems / 2,
+            QuantTier::Int4 => elems.div_ceil(2),
         }
     }
 
@@ -1059,6 +1064,19 @@ mod tests {
             .unwrap();
         assert_eq!(mm.inputs[1], deq.outputs[0]);
         assert!(!g.params.contains_key(&1), "old f32 weight retired");
+    }
+
+    #[test]
+    fn int4_q_bytes_rounds_up_to_match_the_encoder() {
+        // The q-block byte count MUST equal `encode_int4_per_channel`'s
+        // `⌈elems/2⌉`, or the scale range starts a byte early on an odd `elems`
+        // and the substrate reads a nibble byte as a scale. Fails-without: a floor.
+        assert_eq!(QuantTier::Int4.q_bytes(12), 6, "even elems: half");
+        assert_eq!(QuantTier::Int4.q_bytes(13), 7, "odd elems: ceil, not 6");
+        assert_eq!(QuantTier::Int8.q_bytes(13), 13, "int8 is one byte per code");
+        // Agreement with the encoder's own allocation, for an odd count.
+        let (packed, _) = hologram_ai_quant::encode_int4_per_channel(&[0.1f32; 13], 13, 1);
+        assert_eq!(packed.len() as u64, QuantTier::Int4.q_bytes(13));
     }
 
     #[test]

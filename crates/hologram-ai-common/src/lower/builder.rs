@@ -59,8 +59,10 @@ pub enum QuantStrategy {
     Q2_0,
     /// Per-channel symmetric int8 weight quantization.
     Int8,
-    /// Per-group int4 (not yet implemented; accepted by the parser, rejected
-    /// by the quantize pass until the int4 work lands).
+    /// Per-channel symmetric int4 weight quantization (packed nibbles, half the
+    /// bytes). Emitted by both `quantize_weights` (inline) and the κ-artifact
+    /// path; decoded by the substrate's `matmul_i4_pc_omajor`. Materially lossier
+    /// than int8 — a size-first tier.
     Int4,
 }
 

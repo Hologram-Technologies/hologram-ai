@@ -231,9 +231,9 @@ fn i4_artifact_reproduces_the_exact_integer_oracle() {
 }
 
 /// **The browser's actual i4 binding compiles.** Our staged decode path binds
-/// every projection weight as a WEIGHTLESS κ constant — `ConstantEntry{bytes:[]}`
-/// + a `holospaces.kappa_map` naming the κ whose bytes arrive at materialization —
-/// declaring `INT4` / `OUTPUT_MAJOR` / W8A8. The graph-input tests above prove the
+/// every projection weight as a WEIGHTLESS κ constant (`ConstantEntry{bytes:[]}`
+/// plus a `holospaces.kappa_map` naming the κ whose bytes arrive at
+/// materialization) declaring `INT4` / `OUTPUT_MAJOR` / W8A8. The graph-input tests prove the
 /// i4 kernel DECODES; this proves the substrate accepts the weightless-constant
 /// FORM the browser κ-binder actually emits for int4 (the int8 twin is
 /// `a_weightless_kappa_constant_can_declare_output_major` in the companion file).
@@ -252,7 +252,9 @@ fn a_weightless_kappa_i4_constant_can_declare_output_major() {
     let o_sh = g
         .shape_registry_mut()
         .intern(ShapeDescriptor::rank2(m as u64, n as u64));
-    let v_sh = g.shape_registry_mut().intern(ShapeDescriptor::rank1(n as u64));
+    let v_sh = g
+        .shape_registry_mut()
+        .intern(ShapeDescriptor::rank1(n as u64));
 
     // The weightless i4 weight, exactly as `AiParam::external_range` lowers for
     // int4: a constant with NO bytes, declared INT4. Its packed nibbles arrive
