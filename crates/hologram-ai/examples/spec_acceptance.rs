@@ -86,7 +86,10 @@ fn simulate(seq: &[i64], k: usize) -> (f64, f64) {
         }
         i += acc + 1;
     }
-    ((seq.len() - 1) as f64 / passes as f64, drafted as f64 / passes as f64)
+    (
+        (seq.len() - 1) as f64 / passes as f64,
+        drafted as f64 / passes as f64,
+    )
 }
 
 fn main() {
@@ -105,16 +108,27 @@ fn main() {
 
     println!("# Prompt-lookup speculative acceptance (tokenizer: {tok_path:?})");
     println!("# mean tokens/pass = speculative speedup in forward passes; drafted% = passes that proposed");
-    println!("{:<26} {:>6} {:>7} {:>12} {:>9}", "sample", "K", "tokens", "tok/pass", "drafted%");
+    println!(
+        "{:<26} {:>6} {:>7} {:>12} {:>9}",
+        "sample", "K", "tokens", "tok/pass", "drafted%"
+    );
 
     let mut totals = vec![(0usize, 0usize, 0usize); KS.len()]; // (tokens, passes, drafted-passes)
     for (label, text) in SAMPLES {
-        let ids: Vec<i64> = tokenizer.encode(text).into_iter().map(|t| t as i64).collect();
+        let ids: Vec<i64> = tokenizer
+            .encode(text)
+            .into_iter()
+            .map(|t| t as i64)
+            .collect();
         for (ki, &k) in KS.iter().enumerate() {
             let (spd, drafted) = simulate(&ids, k);
             println!(
                 "{:<26} {:>6} {:>7} {:>11.2}x {:>8.0}%",
-                label, k, ids.len(), spd, drafted * 100.0
+                label,
+                k,
+                ids.len(),
+                spd,
+                drafted * 100.0
             );
             // Re-accumulate exact counts for a token-weighted overall mean.
             let mut i = 1usize;

@@ -120,5 +120,28 @@ deploy (the 4-core codespace is too contended for absolute browser numbers) —
 these are wasmtime component measurements, representative of scaling, not of one
 particular machine's wall-clock.
 
-Related: `upstream-request-prefill-pooling.md` (the prior finding→request→fix loop
-this mirrors), ADR-0018.
+## 5. Measured + shipped this session (all local commits, not pushed)
+
+- **Pin fix (`edac541`).** Substrate repinned to the real v0.8.2 (`f031e8b`); native
+  + threaded builds green. `main` still ships v0.8.1 (no prefill pooling) — deploy
+  the corrected branch to land the 3.2–4.0× TTFT.
+- **Sampling (`e4fc7f5`), shipped.** O(vocab·log vocab) → O(vocab); byte-identical
+  top-k (witnessed), sort-free full-vocab. Removes ~5–6 ms/token.
+- **Speculative acceptance, MEASURED (`0f55803`).** `examples/spec_acceptance.rs`
+  over realistic chat with the real tokenizer: quote/RAG 1.33–1.49×, code-edit
+  1.24–1.32×, JSON 1.05×, free prose **1.00×**; overall **1.17× (K=2) .. 1.23×
+  (K=8)**. Verdict: a REAL but MODEST, workload-dependent amortizer — byte-identical,
+  never-worse-in-output, but it carries a verify-plan load cost + a K× attention
+  reject-cost at long context. NOT the ceiling-breaker; a blind universal default-on
+  is not clearly a win. Recommendation: enable it lazily/by workload, or leave the
+  knob — not K hard-on. (Witness in `speculative.rs`.)
+- **int4 status.** Genuinely supported on f031e8b (`DTypeId::I4`, `MatMulDequant`
+  accepts i4, `matmul_i4_pc_omajor`, dequant exec test, our `hologram-ai-quant`
+  Q4_0 emitter) — BUT `cli.rs` still rejects int4 claiming the fused dequant-matmul
+  "has not landed." That guard is likely stale; **confirm with a native int4 decode
+  run** before re-advertising. If it runs: halves bytes/token (~2× short-context
+  decode) AND fits larger models in the 4 GiB space — directly serves "arbitrary
+  models." Needs a quality gate (int4 vs int8 divergence) to advertise per model.
+
+Related: `upstream-request-prefill-pooling.md` and `upstream-request-decode-attention.md`
+(the finding→request→fix loop this mirrors), ADR-0018.
