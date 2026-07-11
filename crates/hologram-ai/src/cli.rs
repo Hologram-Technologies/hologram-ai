@@ -121,15 +121,14 @@ fn parse_quant(s: Option<&str>) -> anyhow::Result<QuantStrategy> {
     Ok(match s.map(|s| s.to_ascii_lowercase()).as_deref() {
         None | Some("none") | Some("f32") => QuantStrategy::None,
         Some("int8") => QuantStrategy::Int8,
-        // int4 is NOT offered: the substrate's int4 dequant-matmul kernel has not
-        // landed, so the strategy would only fail deeper in the pipeline. Reject
-        // it up front rather than advertise a scheme that cannot run — no stub.
-        Some("int4") => anyhow::bail!(
-            "int4 quantization is not yet available (the substrate int4 kernel has not landed); \
-             use int8"
-        ),
+        // int4 is a per-channel symmetric tier (packed nibbles): the inline
+        // `quantize_weights` pass emits it and the substrate's `matmul_i4_pc_omajor`
+        // decodes it (proven in `int8_accuracy.rs` / `omajor_i4_substrate_contract.rs`).
+        // It is materially lossier than int8 (≈16% vs ≈1% GEMV error) — a size-first
+        // choice — but it runs, so it is offered.
+        Some("int4") => QuantStrategy::Int4,
         Some(other) => {
-            anyhow::bail!("unknown quantization scheme {other:?} (expected none/f32/int8)")
+            anyhow::bail!("unknown quantization scheme {other:?} (expected none/f32/int8/int4)")
         }
     })
 }
