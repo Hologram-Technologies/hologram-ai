@@ -247,6 +247,14 @@ export function Chat() {
     prewarmedArchiveRef.current = archive;
     prewarmRef.current = generate({ archive, prompt: "", warm: true }).catch(() => {});
   }, [archive, sessionMeta, running]);
+  // On model switch, drop the previous model's prewarm handle: `onSend` awaits
+  // `prewarmRef` before generating, and it must never await a DIFFERENT model's
+  // warm. The newly-selected archive re-prewarms once its own meta loads above.
+  useEffect(() => {
+    return () => {
+      prewarmRef.current = null;
+    };
+  }, [archive]);
 
   const selectedKnown = useMemo(
     () => (archive ? findKnownModel(archive, knownModels) : undefined),

@@ -74,26 +74,23 @@ fn check_param_shapes(graph: &AiGraph, errors: &mut Vec<ShapeError>) {
 
         let shape_product: u64 = concrete_dims.iter().product();
 
-        // Get byte size of dtype.
-        let elem_bytes = match info.storage_dtype.byte_size() {
-            Some(b) => b as u64,
-            None => continue, // Sub-byte type (INT4) — skip for now.
-        };
-
-        let expected_bytes = shape_product * elem_bytes;
+        // Packing-aware expected size — INT4 is `⌈elems/2⌉`, not skipped, so a
+        // packed-nibble weight IS validated against its declared bytes.
+        let expected_bytes = info.storage_dtype.packed_bytes(shape_product);
 
         let actual_bytes = match param {
             crate::ir::param::AiParam::Inline { data, .. } => data.len() as u64,
             crate::ir::param::AiParam::Mmap { len, .. } => *len,
             crate::ir::param::AiParam::External { info, .. } => {
-                info.shape
+                let elems: u64 = info
+                    .shape
                     .iter()
                     .map(|d| match d {
                         crate::ir::Dim::Concrete(n) => *n,
                         _ => 1,
                     })
-                    .product::<u64>()
-                    * info.logical_dtype.byte_size().unwrap_or(0) as u64
+                    .product();
+                info.logical_dtype.packed_bytes(elems)
             }
         };
 
