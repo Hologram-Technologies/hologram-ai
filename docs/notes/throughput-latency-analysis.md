@@ -65,12 +65,49 @@ Two specific serial sinks, from the substrate decode map (f031e8b):
 - **The KV cache is recopied every token.** `DecodeRewrite` explodes decode
   attention into explicit nodes; `Concat(past∥new)` + `Transpose` read and
   rewrite the *entire* K and V cache each step — O(L) memory traffic per token,
-  hundreds of ms at 32K. A resident, append-in-place KV cache removes it
-  outright. (Same root cause feeds a second cost: because `past_k`/`past_v` are
-  regenerated graph inputs, the byte `execute` path BLAKE3-re-hashes the whole KV
-  cache every step; a resident KV or `execute_addressed` avoids it too.)
+  hundreds of ms at 32K. A resident, append-in-place KV cache removes it outright.
+- **The KV cache is BLAKE3-RE-HASHED every token — a second O(L) tax the
+  benchmark never saw.** See §2b; this is the finding of this pass.
 - **Attention math is serial.** QK^T/softmax/P·V run single-threaded below the
   pool threshold — the compute half of the long-context ceiling.
+
+## 2b. The hidden re-hash tax (measured, new)
+
+`pool-bench` measures substrate *kernels* — it never crosses the byte↔address
+boundary. The deployed decode driver does: `decode.rs` carries `past_k`/`past_v`
+as host `Vec<u8>` and runs them through the byte `InferenceSession::execute`,
+which content-addresses every input via `address_bytes` (BLAKE3). The per-port
+`input_cache` always misses on decode (substrate comment: *"autoregressive decode
+(input changes every step, always a miss)"*), so the **whole** carried K/V —
+`2 · layers · kv_heads · bucket · head_dim · 4 B` — is BLAKE3-hashed **every
+token**, on top of every step number in §1–§2.
+
+Measured (`examples/kv_rehash_cost.rs`, native SIMD @ 3.7 GB/s — the *optimistic*
+bound; deployed wasm32 without AVX is slower, so the real tax is larger):
+
+| L | 0.5B re-hash ms/tok | 1.5B | 7B | 1.5B full step (§2) |
+|---|---|---|---|---|
+| 128 | 0.7 | 2.0 | 3.5 | 38 |
+| 2048 | 12 | 28 | 55 | 56 |
+| 8192 | 47 | 110 | 225 | 129 |
+| 32768 | 189 | **442** | 884 | 778 |
+
+At 8K the re-hash ~**doubles** the 1.5B step; at 32K it adds a second ~440 ms
+(≈ the recopy). It is **pure re-addressing of a resident object** — the UOR
+anti-pattern: a value already resident is re-hashed because it crosses the byte
+boundary each step. The substrate already exposes the fix and *recommends it for
+this case* — `execute_addressed` (`session.rs:874`) binds inputs by κ-label,
+*"nothing is rehashed … no hashing, no copy"*, re-exported on `HoloRunner`. The
+decode loop simply never calls it. Removing this is **byte-identical** (no quality
+cost) — the cleanest large lever on the board. Capture is not free, though: our
+cache is a fixed-bucket ring the host mutates each step, and the substrate has
+**no append-in-place op**, so feeding the addressed path needs either the resident
+cache from `upstream-request-decode-attention.md` gap 3, or an our-side restructure
+that exports the updated `[bucket, dh]` cache as a retained output label per layer
+(ring-write moved into graph ops). Both remove the hash; only the upstream one
+also removes the recopy. The our-side restructure touches the residency ledger
+that crashed 3× — a real, high-reward, byte-identical change whose risk is
+scoped, not hand-waved.
 
 Sampling, separately: greedy `argmax` is ~0.1 ms/token, but temperature/top-k
 does a **full O(vocab·log vocab) sort = 5.4–6.1 ms/token** (150K vocab) — ~14% of
@@ -115,20 +152,44 @@ bound by pointer) — ruled out as a suspect.
   under temperature sampling. Same emitted token — pure waste removal.
 - **F. Eager pool prewarm.** Spawn the pool during model load, off the first
   turn's TTFT.
+- **G. Adopt `execute_addressed` for the resident K/V — kills the re-hash tax
+  (§2b), byte-identical.** The single largest *our-side* long-context lever now
+  measured: removes ~28 ms/tok @2K … ~442 ms/tok @32K (1.5B) with zero quality
+  cost. Requires threading the cache by κ-label instead of host bytes and exporting
+  the updated per-layer `[bucket, dh]` cache as a retained output — a restructure
+  of the fixed-bucket ring in `decode.rs`/`decode_plan.rs` that touches the
+  residency ledger (crashed 3×), so it is scoped as its own reviewed change, not a
+  drive-by. Pairs with the upstream resident-cache request (which also removes the
+  recopy). This is the direct application of the UOR "resident value is bound by
+  address, never re-hashed" law to decode.
 
 ## 4. Honest framing
 
 The GEMV pool was the right first move and it delivers at short context and on
 TTFT. But "optimal performance a user expects from a modern chatbot" at real
 context lengths is gated by the serial attention + KV path, not the weight GEMV.
-The biggest wins (A, B) are substrate changes; the biggest *our-side* win (C)
-already exists and is dormant. Real end-to-end tok/s must be confirmed on the
-deploy (the 4-core codespace is too contended for absolute browser numbers) —
-these are wasmtime component measurements, representative of scaling, not of one
-particular machine's wall-clock.
+The biggest *complete* wins (A, B) are substrate changes; the biggest *our-side*
+win is **G** — this pass found a hidden per-token BLAKE3 re-hash of the resident
+K/V (§2b), O(L) and comparable to the whole step, that `pool-bench` structurally
+could not see because it never crosses the byte boundary. Removing it is
+byte-identical and needs no substrate change (the addressed path already exists),
+but it is entangled with the residency ledger, so it is a scoped change, not a
+drive-by. Real end-to-end tok/s must be confirmed on the deploy (the 4-core
+codespace is too contended for absolute browser numbers) — these are wasmtime
+component measurements, representative of scaling, not of one particular machine's
+wall-clock; §2b's re-hash figures are native `blake3` and thus an optimistic lower
+bound on the deployed wasm tax.
 
 ## 5. Measured + shipped this session (all local commits, not pushed)
 
+- **Re-hash tax — MEASURED + FILED (this pass).** New witness
+  `examples/kv_rehash_cost.rs` quantifies the per-token BLAKE3 re-hash of the
+  resident K/V that the byte `execute` path pays and `pool-bench` never saw: 1.5B
+  28/110/442 ms/tok @2K/8K/32K (native SIMD; wasm larger). §2b + lever G above;
+  gap 3 added to `upstream-request-decode-attention.md`. Verdict: the largest
+  our-side long-context lever, byte-identical, but scoped (residency ledger) — not
+  landed blind. This is the UOR "resident value bound by address, never re-hashed"
+  law applied to decode; the substrate's `execute_addressed` already honors it.
 - **Pin fix (`edac541`).** Substrate repinned to the real v0.8.2 (`f031e8b`); native
   + threaded builds green. `main` still ships v0.8.1 (no prefill pooling) — deploy
   the corrected branch to land the 3.2–4.0× TTFT.

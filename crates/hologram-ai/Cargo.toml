@@ -114,6 +114,8 @@ smallvec = { workspace = true }
 # hologram-backend is accessed via hologram's re-export
 bytemuck = { workspace = true }
 criterion = { workspace = true }
+# The kv_rehash_cost example measures the same BLAKE3 the substrate addresses with.
+blake3 = { workspace = true }
 
 [[bench]]
 name = "inference"
