@@ -141,14 +141,17 @@ fn param_bytes(param: &AiParam) -> u64 {
         AiParam::Inline { data, .. } => data.len() as u64,
         AiParam::Mmap { len, .. } => *len,
         AiParam::External { info, .. } => {
-            info.shape
+            // Packing-aware: an INT4 external weight is `⌈elems/2⌉` bytes, NOT 0
+            // (`byte_size().unwrap_or(0)` would have mis-accounted it as free).
+            let elems: u64 = info
+                .shape
                 .iter()
                 .map(|d| match d {
                     crate::ir::Dim::Concrete(n) => *n,
                     _ => 1,
                 })
-                .product::<u64>()
-                * info.logical_dtype.byte_size().unwrap_or(0) as u64
+                .product();
+            info.logical_dtype.packed_bytes(elems)
         }
     }
 }
