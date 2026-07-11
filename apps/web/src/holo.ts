@@ -281,6 +281,10 @@ export interface QuantEntry {
   in: number;
   offset?: number;
   len?: number;
+  /** The quant tier this artifact was derived to ("int8" | "int4"); absent ⇒
+   * int8. Recorded so the binder declares the weight slot with the matching
+   * dtype and byte ranges (an int4 artifact is packed nibbles, half the bytes). */
+  tier?: string;
 }
 
 /** One head-chunk quantization target (row `quantized-transit`, chunked head):
@@ -331,16 +335,20 @@ export async function quantizableWeights(
   ) as string[];
 }
 
-/** Derive the matmul-ready int8 artifact of a wide [out, in] weight —
- * deterministic; mint the artifact's κ from the returned bytes. */
+/** Derive the matmul-ready quantized artifact of a wide [out, in] weight —
+ * deterministic; mint the artifact's κ from the returned bytes. `tier` selects
+ * the width: "int8" (default) or "int4" (packed nibbles, half the bytes). The
+ * SAME tier must be recorded in stages.json so the binder declares the matching
+ * weight dtype. */
 export async function deriveQuantizedArtifact(
   wide: Uint8Array,
   dtype: string,
   outFeatures: number,
   inFeatures: number,
+  tier: string = "int8",
 ): Promise<Uint8Array> {
   await ensureReady();
-  return G!.derive_quantized_artifact(wide, dtype, outFeatures, inFeatures);
+  return G!.derive_quantized_artifact(wide, dtype, outFeatures, inFeatures, tier);
 }
 
 /** `compileSafetensorsStaged` on the quantized tier: stage graphs bind

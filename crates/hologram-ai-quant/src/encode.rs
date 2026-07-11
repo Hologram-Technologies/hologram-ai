@@ -405,4 +405,73 @@ mod tests {
             assert_eq!(i4_decode(&packed, k + i), 0);
         }
     }
+
+    /// **The tier quality gate** (row `quantized-transit`: "the quantized form is
+    /// a DIFFERENT model whose quality is measured"). On a realistic weight /
+    /// activation distribution, the **per-channel** int4 GEMV's relative error is
+    /// BOUNDED and strictly COARSER than int8 — the inherent 4-bit-vs-8-bit
+    /// tradeoff, stated as a law (parametric in `k, n`, not fit to any model).
+    ///
+    /// The measured cost is real and large: this scheme uses ONE symmetric scale
+    /// per output channel (what the substrate's fused `matmul_i4_pc_omajor`
+    /// consumes), so a single outlier weight coarsens the whole channel's grid —
+    /// ≈16% relative GEMV error here, vs ≈1% for int8. int4 is therefore an
+    /// **opt-in, size-first tier** (the catalogue states it), NOT a drop-in int8
+    /// replacement; a lower-error int4 would need group-wise scales and a
+    /// different kernel. This gate is the honesty tripwire: int4 quantizes, is
+    /// strictly coarser than int8, and has not regressed to garbage.
+    #[test]
+    fn int4_tier_quality_is_bounded_and_coarser_than_int8() {
+        // A [k, n] weight and a k activation, both Gaussian-ish and deterministic
+        // (Box–Muller-free: a bounded sinusoidal mix — same distribution shape,
+        // reproducible on every host). k large enough for the accumulation to
+        // average, as in a real projection.
+        let (k, n) = (512usize, 16usize);
+        let g = |i: usize, salt: usize| {
+            let x = (i as f32) * 0.017 + (salt as f32) * 1.7;
+            (x.sin() + (x * 2.3).sin() * 0.5 + (x * 0.7 + 1.1).sin() * 0.8) * 0.9
+        };
+        let w: Vec<f32> = (0..k * n).map(|t| g(t, 3)).collect();
+        let a: Vec<f32> = (0..k).map(|i| g(i, 11)).collect();
+
+        // f32 reference, int8, and int4 GEMV — one dot per output channel.
+        let (q8, s8) = encode_int8_per_channel(&w, k, n);
+        let (p4, s4) = encode_int4_per_channel(&w, k, n);
+        let (mut num8, mut num4, mut den) = (0f64, 0f64, 0f64);
+        for j in 0..n {
+            let mut refj = 0f32;
+            let mut y8 = 0f32;
+            let mut y4 = 0f32;
+            for i in 0..k {
+                let a_i = a[i];
+                refj += a_i * w[i * n + j];
+                y8 += a_i * (f32::from(q8[i * n + j]) * s8[j]);
+                y4 += a_i * (i4_decode(&p4, i * n + j) as f32 * s4[j]);
+            }
+            num8 += f64::from((y8 - refj).powi(2));
+            num4 += f64::from((y4 - refj).powi(2));
+            den += f64::from(refj.powi(2));
+        }
+        let rel8 = (num8 / den).sqrt();
+        let rel4 = (num4 / den).sqrt();
+
+        // Both are real quantizers (nonzero error); int4 is strictly coarser than
+        // int8; int8 is tight (~1%); int4 is the lossy size-first tier (~16%) but
+        // has not regressed to garbage. The int4 bound is a REGRESSION TRIPWIRE
+        // (a broken encoding balloons past it), not a claim int4 rivals int8.
+        assert!(rel8 > 0.0 && rel4 > 0.0, "both tiers actually quantize");
+        assert!(
+            rel4 > rel8 * 3.0,
+            "int4 must be materially coarser than int8 (rel4 {rel4:.4} vs rel8 {rel8:.4})"
+        );
+        assert!(
+            rel8 < 0.02,
+            "int8 GEMV relative error {rel8:.4} exceeds the int8 quality bound"
+        );
+        assert!(
+            rel4 < 0.22,
+            "int4 GEMV relative error {rel4:.4} exceeds the per-channel-int4 regression \
+             tripwire — the encoding has degraded beyond the expected 4-bit cost"
+        );
+    }
 }
