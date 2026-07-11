@@ -750,29 +750,50 @@ async function statusLog(world) {
 Then("the second turn reports a warm session", async function () {
   const log = await statusLog(this);
   const sessionLines = log.filter((l) => l.startsWith("session "));
-  assert.equal(sessionLines.length, 2, `two staged turns ran:\n${log.join("\n")}`);
+  // The invariant the warm-turn feature guarantees: the session is built EXACTLY
+  // ONCE (a single "session cold"), then every turn after the build REUSES it
+  // ("session warm"). The build is done by the eager prewarm if it fired (ADR-0018),
+  // else by the first turn — so turn 1 may already be warm (prewarm moved the cold
+  // build off its TTFT, which is the point). We assert the invariant, not that
+  // turn 1 specifically is the cold one.
+  const coldCount = sessionLines.filter((l) => l.startsWith("session cold")).length;
+  assert.equal(coldCount, 1, `the session is built exactly once (cold):\n${log.join("\n")}`);
   assert.ok(
-    sessionLines[0].startsWith("session cold"),
-    `the first turn is cold:\n${log.join("\n")}`,
+    sessionLines.length >= 2,
+    `the single build plus at least one warm reuse ran:\n${log.join("\n")}`,
+  );
+  const coldIdx = sessionLines.findIndex((l) => l.startsWith("session cold"));
+  assert.ok(
+    sessionLines.slice(coldIdx + 1).every((l) => l.startsWith("session warm")),
+    `every turn after the single build reuses the warm session:\n${log.join("\n")}`,
   );
   assert.ok(
-    sessionLines[1].startsWith("session warm"),
-    `the second turn must reuse the warm session:\n${log.join("\n")}`,
+    sessionLines[sessionLines.length - 1].startsWith("session warm"),
+    `the last (second) turn reused the warm session:\n${log.join("\n")}`,
   );
 });
 
 Then("the second turn materializes no stages", async function () {
   const log = await statusLog(this);
-  const secondTurnStart = log.findIndex(
-    (l, i) => l.startsWith("session ") && log.slice(0, i).some((p) => p.startsWith("session ")),
-  );
-  assert.ok(secondTurnStart > 0, "the second turn's start is in the status log");
-  const secondTurn = log.slice(secondTurnStart);
+  // The LAST staged turn (from its opening "session " line onward) is a warm
+  // reuse — it must recompile / rematerialize NOTHING (a warm turn pays decode
+  // only). Using the LAST turn is robust to the eager prewarm having opened an
+  // earlier "session " line.
+  let lastTurnStart = -1;
+  for (let i = 0; i < log.length; i++) {
+    if (log[i].startsWith("session ")) lastTurnStart = i;
+  }
+  assert.ok(lastTurnStart >= 0, "a staged turn opened in the status log");
+  const lastTurn = log.slice(lastTurnStart);
   assert.ok(
-    !secondTurn.some((l) => l.includes("materialized") || l.includes("compiling")),
-    `a warm turn pays decode only — no recompile, no rematerialization:\n${secondTurn.join("\n")}`,
+    lastTurn[0].startsWith("session warm"),
+    `the last turn is a warm reuse:\n${lastTurn.join("\n")}`,
   );
-  console.log(`[warm-turn] turn 2 status: ${JSON.stringify(secondTurn)}`);
+  assert.ok(
+    !lastTurn.some((l) => l.includes("materialized") || l.includes("compiling")),
+    `a warm turn pays decode only — no recompile, no rematerialization:\n${lastTurn.join("\n")}`,
+  );
+  console.log(`[warm-turn] last turn status: ${JSON.stringify(lastTurn)}`);
 });
 
 // ── S4 — the three-message handshake ────────────────────────────────────────
