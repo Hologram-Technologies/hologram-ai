@@ -684,6 +684,11 @@ export interface GenerateOpts {
    * config.json). Passed so generation stops on the model's real eos rather than
    * a tokenizer default — parametric over any model. */
   eos?: number;
+  /** Prewarm only (row `eager-prewarm`): spawn the decode pool and build the warm
+   * staged session, then stop — do NOT generate. Moves the pool-spawn + session
+   * build OFF the first real turn's TTFT. `prompt` is ignored. Resolves when the
+   * worker reports `warmed`; the worker + pool stay live for the first turn. */
+  warm?: boolean;
 }
 
 let activeWorker: Worker | null = null;
@@ -834,8 +839,9 @@ export async function generate(opts: GenerateOpts): Promise<number> {
     ? await resolveDraftModelDir(archiveParts[1])
     : undefined;
 
-  emitLine("chat://line", { stream: "stdout", line: "" });
-  
+  // A real turn opens an assistant line; a prewarm is invisible to the chat.
+  if (!opts.warm) emitLine("chat://line", { stream: "stdout", line: "" });
+
   return new Promise((resolve, reject) => {
     // Reuse the live worker: it holds the warm staged session. The worker
     // itself rebuilds the session when the model changes (its inputs are
@@ -877,6 +883,12 @@ export async function generate(opts: GenerateOpts): Promise<number> {
         (globalThis as unknown as { __hologram_pool_live?: number }).__hologram_pool_live = n;
       } else if (e.data.type === 'pool-committed') {
         poolCommitted = true;
+      } else if (e.data.type === 'warmed') {
+        // Prewarm done (row `eager-prewarm`): the pool is spawned and the staged
+        // session is built. Keep the worker + pool LIVE — the first real turn
+        // reuses both, paying neither on its TTFT. Settle without a completion.
+        clearTurnSettlers();
+        resolve(0);
       } else if (e.data.type === 'pool-teardown') {
         // The execute worker fell back to single-threaded — drop the pool it no
         // longer uses (M1), so it does not linger pinning the shared memory.
@@ -945,6 +957,9 @@ export async function generate(opts: GenerateOpts): Promise<number> {
       // resolved above only when speculating and only when a compiled draft is
       // present — else undefined and the worker drafts by prompt-lookup.
       draftModelDir,
+      // Prewarm (row `eager-prewarm`): the worker spawns the pool + builds the
+      // session, then stops before generate. Off the first turn's TTFT.
+      warm: opts.warm === true,
     });
   });
 }

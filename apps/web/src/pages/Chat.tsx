@@ -233,6 +233,21 @@ export function Chat() {
     };
   }, [archive]);
 
+  // Eager prewarm (row `eager-prewarm`, ADR-0018): once a selected model's meta
+  // is ready and no turn is running, spawn the decode pool and build its staged
+  // session NOW — off the first turn's TTFT. Best-effort (never load-bearing).
+  // `onSend` awaits `prewarmRef` before its own `generate`, so the warm build and
+  // the first real turn never build the session concurrently (which would race
+  // the shared residency ledger). Fires once per archive.
+  const prewarmRef = useRef<Promise<unknown> | null>(null);
+  const prewarmedArchiveRef = useRef<string>("");
+  useEffect(() => {
+    if (!archive || !sessionMeta || running) return;
+    if (prewarmedArchiveRef.current === archive) return;
+    prewarmedArchiveRef.current = archive;
+    prewarmRef.current = generate({ archive, prompt: "", warm: true }).catch(() => {});
+  }, [archive, sessionMeta, running]);
+
   const selectedKnown = useMemo(
     () => (archive ? findKnownModel(archive, knownModels) : undefined),
     [archive, knownModels],
@@ -350,6 +365,10 @@ export function Chat() {
     // route is mounted.
     chatStream.begin(archive);
     try {
+      // Let any in-flight prewarm finish first: it and this turn share the worker
+      // + the residency ledger, so they must build the session serially, never at
+      // once. If prewarm already completed, this is an immediate no-op.
+      await prewarmRef.current;
       await generate({
         archive,
         prompt: promptForModel,
