@@ -230,6 +230,104 @@ fn i4_artifact_reproduces_the_exact_integer_oracle() {
     }
 }
 
+/// **The browser's actual i4 binding compiles.** Our staged decode path binds
+/// every projection weight as a WEIGHTLESS κ constant — `ConstantEntry{bytes:[]}`
+/// + a `holospaces.kappa_map` naming the κ whose bytes arrive at materialization —
+/// declaring `INT4` / `OUTPUT_MAJOR` / W8A8. The graph-input tests above prove the
+/// i4 kernel DECODES; this proves the substrate accepts the weightless-constant
+/// FORM the browser κ-binder actually emits for int4 (the int8 twin is
+/// `a_weightless_kappa_constant_can_declare_output_major` in the companion file).
+/// Fails-without: the substrate refuses a weightless i4 OUTPUT_MAJOR constant, and
+/// the whole browser int4 tier would be unreachable through our representation.
+#[test]
+fn a_weightless_kappa_i4_constant_can_declare_output_major() {
+    let (m, k, n) = (1usize, 64usize, 8usize);
+    let mut g = Graph::new();
+    let a_sh = g
+        .shape_registry_mut()
+        .intern(ShapeDescriptor::rank2(m as u64, k as u64));
+    let w_sh = g
+        .shape_registry_mut()
+        .intern(ShapeDescriptor::rank2(k as u64, n as u64));
+    let o_sh = g
+        .shape_registry_mut()
+        .intern(ShapeDescriptor::rank2(m as u64, n as u64));
+    let v_sh = g.shape_registry_mut().intern(ShapeDescriptor::rank1(n as u64));
+
+    // The weightless i4 weight, exactly as `AiParam::external_range` lowers for
+    // int4: a constant with NO bytes, declared INT4. Its packed nibbles arrive
+    // later, addressed by κ.
+    let wc = g.constants_mut().insert(ConstantEntry {
+        bytes: Vec::new(),
+        dtype: DTypeId(DTYPE_I4),
+        shape: w_sh,
+    });
+    g.add_extension(
+        "holospaces.kappa_map",
+        b"ConstantId(0):kappa-under-test\n".to_vec(),
+    );
+    let scales: Vec<f32> = (0..n).map(|j| 0.001 + (j as f32) * 1e-6).collect();
+    let sc = g.constants_mut().insert(ConstantEntry {
+        bytes: scales.iter().flat_map(|v| v.to_le_bytes()).collect(),
+        dtype: DTypeId(DTYPE_F32),
+        shape: v_sh,
+    });
+    let zc = g.constants_mut().insert(ConstantEntry {
+        bytes: vec![0u8; n * 4],
+        dtype: DTypeId(DTYPE_I8),
+        shape: v_sh,
+    });
+
+    let a_in = g.add_node(Node {
+        op: GraphOp::Input,
+        inputs: SmallVec::new(),
+        output_dtype: DTypeId(DTYPE_F32),
+        output_shape: a_sh,
+    });
+    g.add_input(a_in);
+    let dq = g.add_node(Node {
+        op: GraphOp::Op(OpKind::Dequantize),
+        inputs: SmallVec::from_iter([
+            InputSource::Constant(wc),
+            InputSource::Constant(sc),
+            InputSource::Constant(zc),
+        ]),
+        output_dtype: DTypeId(DTYPE_F32),
+        output_shape: w_sh,
+    });
+    g.set_quant_attrs(
+        dq,
+        QuantAttrs {
+            quant_dtype: DTYPE_I4,
+            scale_bits: 0,
+            zero_point: 0,
+            axis: 1,
+            weight_layout: weight_layout::OUTPUT_MAJOR,
+            act_quant: act_quant::W8A8_TOKEN_SYM,
+        },
+    );
+    let mm = g.add_node(Node {
+        op: GraphOp::Op(OpKind::MatMul),
+        inputs: SmallVec::from_iter([InputSource::Node(a_in), InputSource::Node(dq)]),
+        output_dtype: DTypeId(DTYPE_F32),
+        output_shape: o_sh,
+    });
+    let out = g.add_node(Node {
+        op: GraphOp::Output,
+        inputs: SmallVec::from_iter([InputSource::Node(mm)]),
+        output_dtype: DTypeId(DTYPE_F32),
+        output_shape: o_sh,
+    });
+    g.add_output(out);
+
+    compile(g, BackendKind::Cpu, WittLevel::W32).unwrap_or_else(|e| {
+        panic!(
+            "a weightless (zero-byte) κ constant declaring INT4 + OUTPUT_MAJOR + W8A8 must \
+             compile — this is the exact binding our browser int4 tier emits; got: {e}"
+        )
+    });
+}
+
 /// Schedule-independence at i4: one batched call at `m = 64` (our prefill chunk)
 /// is byte-identical row-for-row to `m` single-row (`m = 1`, decode) calls — the
 /// property our chunked-prefill seeder and step runner rely on, now for int4.
