@@ -545,15 +545,18 @@ pub fn head_quant_chunks(
 }
 
 /// Derive the quantized artifact of a wide `[out, in]` weight (row
-/// `quantized-transit`): matmul-ready per-channel symmetric int8,
-/// `q_i8(in·out) ‖ scales_f32(4·out)`. Deterministic — the caller mints the
-/// artifact's κ from the returned bytes.
+/// `quantized-transit`): matmul-ready per-channel symmetric codes,
+/// `q ‖ scales_f32(4·out)`. `tier` selects the width — "int8" (default, one
+/// byte/code) or "int4" (packed nibbles, half the bytes). Deterministic — the
+/// caller mints the artifact's κ from the returned bytes and records the same
+/// tier in stages.json.
 #[wasm_bindgen]
 pub fn derive_quantized_artifact(
     wide: &[u8],
     dtype: &str,
     out_features: u32,
     in_features: u32,
+    tier: Option<String>,
 ) -> Result<Vec<u8>, JsValue> {
     let dtype = match dtype {
         "F32" => hologram_ai_common::DType::F32,
@@ -565,9 +568,14 @@ pub fn derive_quantized_artifact(
             )))
         }
     };
-    hologram_ai::quantized::derive_quantized_artifact(
+    // Tier tag (`"int8"` / `"int4"`); absent ⇒ int8. int4 halves the artifact's
+    // weight bytes (packed nibbles) — the caller records the same tier in
+    // stages.json so the binder declares the matching weight dtype.
+    let target = hologram_ai_common::lower::QuantTier::from_tag(tier.as_deref());
+    hologram_ai::quantized::derive_quantized_artifact_tier(
         wide,
         dtype,
+        target,
         u64::from(out_features),
         u64::from(in_features),
     )

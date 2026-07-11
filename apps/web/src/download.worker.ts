@@ -524,7 +524,11 @@ export async function handleSafetensorsDownload(
       // int8 artifact into the κ-store and evaporate its wide blob. The wide
       // form rests nowhere; recorded provenance keeps it recoverable.
       const quantEntries: QuantEntry[] = [];
-      if (quantize === "int8") {
+      // The tier is stated by the catalogue (never silent): "int8" or "int4".
+      // int4 packs the weight bytes to nibbles (half), for a larger model under
+      // the 4 GiB wasm ceiling / a bandwidth-lighter decode. The SAME tier is
+      // recorded per entry so the binder declares the matching weight dtype.
+      if (quantize === "int8" || quantize === "int4") {
         const eligible = new Set(
           await quantizableWeights(
             configText,
@@ -537,7 +541,7 @@ export async function handleSafetensorsDownload(
           ),
         );
         emitProgressFn(
-          `Quantized tier (int8): deriving artifacts for ${eligible.size} projection weight(s)...`,
+          `Quantized tier (${quantize}): deriving artifacts for ${eligible.size} projection weight(s)...`,
         );
         let wideTotal = 0;
         let quantTotal = 0;
@@ -556,7 +560,7 @@ export async function handleSafetensorsDownload(
           await tensorsDir.removeEntry(`${wideKappa}.bin`).catch(() => {});
           const wideIdx = cachedKappas.indexOf(wideKappa);
           if (wideIdx >= 0) cachedKappas.splice(wideIdx, 1);
-          const artifact = await deriveQuantizedArtifact(wide, allDtypes[i], dims[0], dims[1]);
+          const artifact = await deriveQuantizedArtifact(wide, allDtypes[i], dims[0], dims[1], quantize);
           const artifactKappa = await computeKappa(artifact);
           // Artifacts are the crystallizing product of this download — never
           // on its own evictable list; remaining wide blobs evaporate first.
@@ -580,7 +584,7 @@ export async function handleSafetensorsDownload(
           artifactKappas.push(artifactKappa);
           wideTotal += wide.length;
           quantTotal += artifact.length;
-          quantEntries.push({ wide: wideKappa, artifact: artifactKappa, out: dims[0], in: dims[1] });
+          quantEntries.push({ wide: wideKappa, artifact: artifactKappa, out: dims[0], in: dims[1], tier: quantize });
         }
         emitProgressFn(
           `Quantized tier: ${quantEntries.length} artifact(s), ${(quantTotal / 1024 / 1024).toFixed(1)}MB ` +
@@ -610,7 +614,7 @@ export async function handleSafetensorsDownload(
         );
         if (headTargets.length) {
           emitProgressFn(
-            `Quantized tier (int8): deriving ${headTargets.length} LM-head chunk artifact(s)...`,
+            `Quantized tier (${quantize}): deriving ${headTargets.length} LM-head chunk artifact(s)...`,
           );
           const headArtifactKappas: string[] = [];
           const wideCache = new Map<string, Uint8Array>();
@@ -623,7 +627,7 @@ export async function handleSafetensorsDownload(
               wideCache.set(t.kappa, wide);
             }
             const slice = wide.slice(t.offset, t.offset + t.len);
-            const artifact = await deriveQuantizedArtifact(slice, allDtypes[idx], t.out, t.in);
+            const artifact = await deriveQuantizedArtifact(slice, allDtypes[idx], t.out, t.in, quantize);
             const artifactKappa = await computeKappa(artifact);
             try {
               await writeEssential(tensorsDir, cachedKappas, emitProgressFn, async () => {
@@ -649,11 +653,12 @@ export async function handleSafetensorsDownload(
               in: t.in,
               offset: t.offset,
               len: t.len,
+              tier: quantize,
             });
           }
           cachedKappas.unshift(...headArtifactKappas);
           emitProgressFn(
-            `Quantized tier: LM head crystallized into ${headArtifactKappas.length} int8 chunk(s) ` +
+            `Quantized tier: LM head crystallized into ${headArtifactKappas.length} ${quantize} chunk(s) ` +
               `(dequant-fused matmul — no whole-panel F32 image).`,
           );
         }

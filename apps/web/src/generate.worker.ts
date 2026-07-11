@@ -383,7 +383,15 @@ async function ensureQuantArtifacts(
     if (entry.offset != null && entry.len != null) {
       wide = wide.slice(entry.offset, entry.offset + entry.len);
     }
-    const artifact = await deriveQuantizedArtifact(wide, manifest.dtypes[idx], entry.out, entry.in);
+    // Re-derive at the SAME tier the artifact was recorded under, or its κ will
+    // not reproduce the recorded one.
+    const artifact = await deriveQuantizedArtifact(
+      wide,
+      manifest.dtypes[idx],
+      entry.out,
+      entry.in,
+      entry.tier ?? "int8",
+    );
     const kappa = await computeKappa(artifact);
     if (kappa !== entry.artifact) {
       throw new Error(
