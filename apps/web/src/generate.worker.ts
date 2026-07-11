@@ -599,12 +599,16 @@ self.onmessage = async (e) => {
       // instead of orphaning it (ADR-0018 C1). `module` + the shared `memory` are
       // structured-cloneable across postMessage. `teardown` cleans up on fallback
       // (M1); `failure` surfaces a pool worker's init failure to the poll (M2).
-      preferThreadedPool(e.data.threads !== false && e.data.decodePlan !== false, {
-        spawn: (module, memory, n, stackSize) =>
-          self.postMessage({ type: "spawn-pool", module, memory, n, stackSize }),
-        teardown: () => self.postMessage({ type: "pool-teardown" }),
-        failure: () => poolFailed,
-      });
+      preferThreadedPool(
+        e.data.threads !== false && e.data.decodePlan !== false,
+        {
+          spawn: (module, memory, n, stackSize) =>
+            self.postMessage({ type: "spawn-pool", module, memory, n, stackSize }),
+          teardown: () => self.postMessage({ type: "pool-teardown" }),
+          failure: () => poolFailed,
+        },
+        typeof e.data.poolWorkers === "number" ? e.data.poolWorkers : undefined,
+      );
       await ensureReady();
       const p = poolInfo();
       // Tell the main thread the pool is committed (past registration): a pool

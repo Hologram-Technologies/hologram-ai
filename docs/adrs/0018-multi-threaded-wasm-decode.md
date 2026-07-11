@@ -1,8 +1,9 @@
 # ADR-0018: Multi-Threaded WASM Decode (Embedder Worker Pool)
 
-**Status:** Accepted (correctness gates green; benchmarked 2.5–4× on realistic
-chat-scale GEMVs — see Verification results)
-**Date:** 2026-07-10
+**Status:** Accepted (correctness gates green; on substrate v0.8.2 the pool covers
+decode AND prefill — TTFT pools 3.2–3.7×, decode GEMV 2–3×; see Verification
+results, incl. the honest browser end-to-end caveat)
+**Date:** 2026-07-10 (v0.8.2 rebase 2026-07-11)
 **Supersedes:** ADR-0017 §"Single-threaded" / §6 ("No headers required") — the
 parallel-off, no-COOP/COEP stance. Everything else in ADR-0017 stands.
 **Relates to:** CONFORMANCE class **NS** (multi-target runtime core), **PV**
@@ -202,42 +203,54 @@ Correctness — all green:
   single-threaded one (`"The capital of France is Paris."`). The pool's fan-out
   preserves output end-to-end.
 
-Speedup — the decode GEMV scales near-linearly for realistic chat models:
-- Benchmark: `apps/web/scripts/bench-pool-scaling.sh` (the substrate's
-  `wasm_threads_timing` under wasmtime, wasm32-wasip1-threads — std threads drive
-  the SAME atomics fork-join queue the browser web workers do; representative for
-  the compute-bound decode GEMV, and free of OPFS/download limits). It times the
-  int8 M=1 decode GEMV SERIAL vs POOLED (3 workers + main = **4 participants**,
-  matching the codespace's 4 physical cores) at chat-scale MLP shapes:
+Per-model metrics, with units (`pnpm bench:pool` → `scripts/bench-pool-scaling.sh`
+builds `scripts/pool-bench.rs` against the substrate's pub int8 GEMV + pool, runs
+it under wasmtime/wasm32-wasip1-threads — std threads drive the SAME atomics
+fork-join the browser web workers do). It composes each metric from the model's
+REAL step from every int8 projection GEMV: **decode** = per-token step (M=1 GEMVs
+across layers + LM head), **TTFT** = prefill (M=128 GEMM) + 1 decode step. SERIAL
+vs POOLED (3 workers + main = **4 participants**, the codespace's 4 physical
+cores). As of substrate **v0.8.2** the pool covers BOTH decode (M=1) and prefill
+(M>1). Numbers are ±noise on the shared VM:
 
-  | GEMV k×n | model scale | serial | pooled (4 part.) | speedup |
-  |---|---|---|---|---|
-  | 896×4864   | Qwen2.5-0.5B | 252 µs  | 99 µs   | **2.55×** |
-  | 1536×8960  | Qwen2.5-1.5B | 755 µs  | 199 µs  | **3.79×** |
-  | 3584×18944 | Qwen2.5-7B   | 4700 µs | 1371 µs | **3.43×** |
-  | 3584×18944 (int4) | 7B int4 | 6147 µs | 1524 µs | **4.04×** |
+  | model | ~GB | decode tok/s (s→p) | sp | **TTFT ms (s→p)** | **sp** |
+  |---|---|---|---|---|---|
+  | Qwen2.5-0.5B | 0.5 | 31 → 61 | 2.0× | 2430 → 1087 | **2.2×** |
+  | Llama-3.2-1B | 1.2 | 13 → 35 | 2.7× | 6201 → 1682 | **3.7×** |
+  | Qwen2.5-1.5B | 1.5 | 11 → 30 | 2.8× | 8941 → 2533 | **3.5×** |
+  | Qwen2.5-3B   | 3.1 | 5.1 → 15 | 3.0× | 18954 → 5360 | **3.5×** |
+  | Phi-3-mini-3.8B | 3.7 | 5.1 → 14 | 2.8× | 22637 → 7033 | **3.2×** |
+  | Qwen2.5-7B   | 7.1 | 2.2 → 4.7 | 2.1× | 56603 → 15334 | **3.7×** |
+  | Llama-3.1-8B | 7.5 | 2.2 → 5.1 | 2.4× | 48148 → 13172 | **3.7×** |
 
-  Near-linear on 4 participants (up to 4.04×), and it scales with the host's
-  cores (a user's 8–16-core machine goes higher). The GB/s columns confirm it is
-  memory-bandwidth-scaling, not a fixed-overhead artifact.
-- The earlier **~1.0×** on SmolLM2-135M was NOT implementation overhead — it is
-  the smallest model's floor: its GEMV tiles (hidden 576) split N ways fall to
-  the fork-join break-even, and the substrate's 256 KiB pool floor exists exactly
-  to skip GEMVs that small. 135M is well below what a user expects to chat with;
-  the models that matter (Phi/Llama/Qwen/GLM, 0.5B–7B+) are all in the scaling
-  regime above.
-- The implementation adds **no per-token overhead** — the fork-join hot loop is
-  entirely in the substrate; the embedder only spawns the pool once (a one-time
-  first-turn cost that overlaps the model's own materialization). `wasm-opt`
-  (with `--enable-threads --enable-simd`) keeps the threaded build no slower than
-  the optimized single-threaded fallback.
-- **No arbitrary cap.** The only size ceiling is the wasm32 4 GiB address space
-  (a HOST law; `STRUCTURAL_CEILING`), and larger models use the substrate's
-  weight-tier pager — the threading path adds no model/size/input cap
-  (`context_length` is a passed-through model parameter, never clamped; the pool
-  memory is `hardwareConcurrency−1 × 2 MiB` stacks, <1% of the budget for
-  realistic core counts). Qwen2.5-1.5B downloads, quantizes, compiles, and
-  decodes in the browser (164 s to Ready), threaded, on the codespace.
+Reading the metrics:
+- **TTFT (prefill) pools 3.2–3.7× — the biggest real win.** Prefill is a
+  compute-bound M=P GEMM; v0.8.2 pools it (work-keyed admission), so first-token
+  latency drops with cores: 1.5B 8.9 s → 2.5 s, 7B 56.6 s → 15.3 s (at a 128-token
+  prompt; ∝ prompt length). Prefill is GEMM-dominated, so unlike decode this
+  speedup is NOT diluted by non-GEMV work — it lands end-to-end.
+- **Decode pools the GEMV 2–3× (bandwidth-bound), but the END-TO-END browser
+  decode gain is smaller.** The fork-join partitions output columns so each weight
+  byte is read once — bandwidth-optimal, no embedder change beats it. BUT the real
+  browser decode STEP is only ~25–50% GEMV; the rest is non-GEMV substrate work
+  (attention, κ content-addressing, sampling) the pool cannot touch. By Amdahl a
+  2–3× GEMV speedup is ~1.2–1.5× end-to-end, and the contended 4-core codespace
+  (pool + vite + Chromium + Playwright) eroded a real browser 0.5B measurement to
+  **~1.0×** (`bdd/bench-decode.mjs`: 0.98× at 7 workers, 1.02× at 3). The true
+  real-machine decode gain (free cores, larger/more-GEMV-heavy models) is between
+  1× and the GEMV's 2–3× and must be measured on a real host / the deployed
+  instance — the codespace cannot isolate it.
+- **Worker count `hardwareConcurrency−1` is validated** (the wasmtime sweep
+  saturates at ~physical cores then plateaus; no degradation from HT). A runtime
+  override `hologram_pool_workers` exists for tuning/diagnosis. No arbitrary cap.
+- SmolLM2-135M's ~1.0× is the smallest model's floor (below the fork-join
+  break-even), not implementation overhead; 135M is below chat scale.
+- **No arbitrary cap.** The only ceiling is the wasm32 4 GiB address space (a HOST
+  law; `STRUCTURAL_CEILING`); larger models use the substrate weight-tier pager.
+  The threading path adds no model/size/input cap (`context_length` passed through,
+  never clamped; pool stacks `hardwareConcurrency−1 × 2 MiB`, <1% of budget).
+  Qwen2.5-1.5B downloads, quantizes, compiles, and decodes threaded in the browser
+  (164 s to Ready).
 
 ### Hardening (adversarial pass, 2026-07-10)
 

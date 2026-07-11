@@ -68,9 +68,11 @@ let poolDelegates: PoolDelegates | null = null;
  * `delegates` route pool-worker ownership to the main thread; without them the
  * threaded path cannot start and falls back to single-threaded.
  */
-export function preferThreadedPool(v = true, delegates?: PoolDelegates): void {
+let poolWorkerOverride: number | null = null;
+export function preferThreadedPool(v = true, delegates?: PoolDelegates, maxWorkers?: number): void {
   preferThreaded = v;
   poolDelegates = delegates ?? null;
+  poolWorkerOverride = typeof maxWorkers === "number" && maxWorkers > 0 ? Math.floor(maxWorkers) : null;
 }
 
 /** Whether the threaded pool is active and how many workers registered. `workers`
@@ -117,7 +119,9 @@ async function initThreaded(): Promise<unknown> {
   // uses 127 workers; the substrate's 256 KiB floor + serial fallback keep it
   // sound when a model's GEMV is too small to split that far). If the resulting
   // stacks overflow the 4 GiB space, instantiation throws → single-threaded.
-  const n = (navigator.hardwareConcurrency || 2) - 1;
+  // `hologram_pool_workers` (localStorage → here) overrides for tuning/diagnosis;
+  // default is logical cores − 1.
+  const n = poolWorkerOverride ?? (navigator.hardwareConcurrency || 2) - 1;
   // Below 2 participants (n < 1) there is no parallelism — a lone pool worker on
   // a 1-core host is pure overhead + shared-memory cost, so stay single-threaded.
   if (n < 1) throw new Error("too few cores for a decode pool");

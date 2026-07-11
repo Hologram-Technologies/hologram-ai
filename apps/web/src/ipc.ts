@@ -929,6 +929,11 @@ export async function generate(opts: GenerateOpts): Promise<number> {
       // The V&V flips it to compare threaded vs single-threaded byte-for-byte;
       // it is also a user escape hatch. A no-op unless cross-origin-isolated.
       threads: localStorage.getItem("hologram_threads") !== "0",
+      // Pool worker count override (tuning/diagnosis); default = logical cores − 1.
+      poolWorkers: (() => {
+        const w = Number(localStorage.getItem("hologram_pool_workers") ?? "");
+        return Number.isFinite(w) && w > 0 ? Math.floor(w) : undefined;
+      })(),
       // The weight-tier pager (row `lazy-constant-residency`): opt-in via the
       // knob (MB), so a stage whose weights exceed the heap window pages them
       // from the OPFS κ-store rather than pinning the whole stage resident.

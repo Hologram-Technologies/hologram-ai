@@ -16,13 +16,12 @@ repository  = "https://github.com/uor-framework/hologram-ai"
 # Consumers depend on the individual member crates, pinned together to one
 # Hologram-Technologies/hologram revision.
 #
-# Pinned to a `rev`, not a `tag`: this is substrate **v0.8.1** (its workspace
-# `version = "0.8.1"`), which is not git-tagged yet. rev 0120c94 is main HEAD =
-# v0.8.0 + 4 commits, all the weightless-OUTPUT_MAJOR work we requested (the
-# validator fix, a first-class `insert_external` weightless binding, the
-# silent-wrong fix, and two end-to-end witnesses). A rev pin is immutable and
-# reproducible — the same thing a tag would resolve to; swap it for `tag =
-# "v0.8.1"` once that tag is published. Advance all crates together.
+# Pinned to substrate **v0.8.2** (tag; commit f031e8b). v0.8.2 = v0.8.1 + the
+# multi-threaded-decode follow-ons we requested (ADR-0018): it **pools the m>1
+# GEMM** in the wasm worker pool (prefill/TTFT now parallelises, not just decode),
+# and fixes pool admission to be WORK-keyed (`m*k*n`) with a per-participant
+# column-width floor — decode admission (m=1) is bit-for-bit unchanged. Advance
+# all crates together.
 # Runtime-core crates (types/ops/graph) are no_std-capable (default = []).
 #
 # The host-shell stack (compiler/exec/archive/backend/host) is pinned
@@ -33,18 +32,18 @@ repository  = "https://github.com/uor-framework/hologram-ai"
 # embedder-pool futex (multi-threaded decode) instead of the busy-spin std path.
 # A member-level `default-features = false` on a workspace-inherited dep is
 # ignored by Cargo, so the flag MUST live here. See ADR-0018.
-hologram-types    = { git = "https://github.com/Hologram-Technologies/hologram.git", rev = "0120c9462ebc1dddbc00fc7ff6577a8473411d04" }
-hologram-ops      = { git = "https://github.com/Hologram-Technologies/hologram.git", rev = "0120c9462ebc1dddbc00fc7ff6577a8473411d04" }
-hologram-graph    = { git = "https://github.com/Hologram-Technologies/hologram.git", rev = "0120c9462ebc1dddbc00fc7ff6577a8473411d04" }
-hologram-compiler = { git = "https://github.com/Hologram-Technologies/hologram.git", rev = "0120c9462ebc1dddbc00fc7ff6577a8473411d04", default-features = false }
+hologram-types    = { git = "https://github.com/Hologram-Technologies/hologram.git", tag = "v0.8.2" }
+hologram-ops      = { git = "https://github.com/Hologram-Technologies/hologram.git", tag = "v0.8.2" }
+hologram-graph    = { git = "https://github.com/Hologram-Technologies/hologram.git", tag = "v0.8.2" }
+hologram-compiler = { git = "https://github.com/Hologram-Technologies/hologram.git", tag = "v0.8.2", default-features = false }
 # `parallel` (rayon) is NOT pinned here — it cannot run on wasm32 (no threads).
 # It is an opt-in feature, enabled by default for native consumers (the
 # `hologram-ai` lib/CLI) via their own `parallel` feature, and left off for the
 # `hologram-ai-wasm` browser build. See ADR-0017.
-hologram-exec     = { git = "https://github.com/Hologram-Technologies/hologram.git", rev = "0120c9462ebc1dddbc00fc7ff6577a8473411d04", default-features = false }
-hologram-archive  = { git = "https://github.com/Hologram-Technologies/hologram.git", rev = "0120c9462ebc1dddbc00fc7ff6577a8473411d04", default-features = false, features = ["model-formats"] }
-hologram-backend  = { git = "https://github.com/Hologram-Technologies/hologram.git", rev = "0120c9462ebc1dddbc00fc7ff6577a8473411d04", default-features = false, features = ["cpu"] }
-hologram-host     = { git = "https://github.com/Hologram-Technologies/hologram.git", rev = "0120c9462ebc1dddbc00fc7ff6577a8473411d04", default-features = false }
+hologram-exec     = { git = "https://github.com/Hologram-Technologies/hologram.git", tag = "v0.8.2", default-features = false }
+hologram-archive  = { git = "https://github.com/Hologram-Technologies/hologram.git", tag = "v0.8.2", default-features = false, features = ["model-formats"] }
+hologram-backend  = { git = "https://github.com/Hologram-Technologies/hologram.git", tag = "v0.8.2", default-features = false, features = ["cpu"] }
+hologram-host     = { git = "https://github.com/Hologram-Technologies/hologram.git", tag = "v0.8.2", default-features = false }
 holospaces        = { git = "https://github.com/Hologram-Technologies/holospaces.git", branch = "main" }
 
 # workspace-internal
