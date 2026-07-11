@@ -644,6 +644,15 @@ self.onmessage = async (e) => {
         typeof weightBudget === "number" && weightBudget > 0 ? weightBudget : undefined,
         typeof draftModelDir === "string" && draftModelDir ? draftModelDir : undefined,
       );
+      // Prewarm (row `eager-prewarm`): a `warm` message spawns the pool and builds
+      // the staged session OFF the first turn's TTFT, then stops here. The warm
+      // session + pool are cached (`warm`, `poolReported`), so the user's first
+      // real turn pays neither. The pool is main-owned, so a later cancel/error
+      // still tears it down (ADR-0018 C1) — prewarm adds no lifecycle exception.
+      if (e.data.warm) {
+        self.postMessage({ type: "warmed" });
+        return;
+      }
       const result = session.generate(prompt, genOpts as never, (text: string) => {
         self.postMessage({ type: "token", text });
       });
@@ -662,6 +671,13 @@ self.onmessage = async (e) => {
           // abandoned speculation — the next crossing derives on demand
         }
       }, 0);
+      return;
+    }
+    // Prewarm on the non-staged path: the pool is spawned above; there is no
+    // persistent session to build (materialization is per-turn), so warming just
+    // establishes the pool and returns.
+    if (e.data.warm) {
+      self.postMessage({ type: "warmed" });
       return;
     }
     const material = await materializeFromOpfs(holoBytes, modelDir);
