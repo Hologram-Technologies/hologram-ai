@@ -112,3 +112,28 @@ fn int8_matches_f32_within_cosine_999() {
         "int8 output not finite"
     );
 }
+
+#[test]
+fn int4_inline_decodes_and_tracks_f32() {
+    // The INLINE int4 pass (`quantize_weights` → `Dequantize{I4}` → MatMul) must
+    // DECODE end-to-end through the real compiler + backend — not merely rewrite
+    // the graph. int4 is coarser than int8 (one symmetric scale per output
+    // channel, 4-bit codes), so the bound is looser, but the logits must still
+    // track f32 in DIRECTION (cosine) and stay finite. Fails-without: the
+    // substrate cannot decode an inline i4 weight, or the nibble packing is wrong
+    // (the logits would be garbage or the execute would error).
+    let x: Vec<f32> = (0..K).map(|i| ((i % 13) as f32 - 6.0) * 0.1).collect();
+    let (_f, f_out) = run(QuantStrategy::None, &x);
+    let (_q4, q4_out) = run(QuantStrategy::Int4, &x);
+
+    assert_eq!(q4_out.len(), N);
+    assert!(
+        q4_out.iter().all(|v| v.is_finite()),
+        "int4 output not finite — inline i4 decode failed"
+    );
+    let cos = cosine(&f_out, &q4_out);
+    assert!(
+        cos >= 0.97,
+        "int4 logit cosine {cos} < 0.97 — the inline i4 decode is wrong or absent"
+    );
+}

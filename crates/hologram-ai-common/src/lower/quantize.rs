@@ -3,8 +3,8 @@
 
 use std::sync::Arc;
 
-use anyhow::{bail, Result};
-use hologram_ai_quant::encode_int8_per_channel;
+use anyhow::Result;
+use hologram_ai_quant::{encode_int4_per_channel, encode_int8_per_channel};
 
 use crate::ir::{
     shape_from_concrete, ActQuant, AiGraph, AiNode, AiOp, AiParam, DType, TensorId, TensorInfo,
@@ -23,20 +23,22 @@ fn concrete_2d(info: &TensorInfo) -> Option<(usize, usize)> {
 }
 
 /// Rewrite each MatMul whose B (weight) operand is an inline f32 rank-2 constant
-/// into `Dequantize(i8_weight, per_column_scale) → MatMul`. No-op unless
-/// `strategy == Int8`. `Int4` is rejected until the int4 spec lands.
+/// into `Dequantize(q_weight, per_column_scale) → MatMul`. No-op unless
+/// `strategy` is `Int8` or `Int4`; the tier sets the weight width (int8 = one
+/// byte/code, int4 = packed nibbles) and the declared weight dtype.
 ///
 /// The emitted `Dequantize` node uses `axis: 1` (per output column for a
 /// `[k, n]` weight) and carries only two operands — weight and scale; no
 /// explicit zero-point operand is included (the lowering pass treats a missing
 /// zero-point as all-zeros, matching the reference test in
-/// `hologram-ai/tests/quantized_weight_memory.rs`).
+/// `hologram-ai/tests/quantized_weight_memory.rs`). RowMajor / W8A32 for both
+/// tiers — an inline constant may not assert OUTPUT_MAJOR (see below).
 pub fn quantize_weights(graph: &mut AiGraph, strategy: QuantStrategy) -> Result<()> {
-    match strategy {
-        QuantStrategy::Int8 => {}
-        QuantStrategy::Int4 => bail!("int4 quantization is not yet implemented"),
+    let tier = match strategy {
+        QuantStrategy::Int8 => QuantTier::Int8,
+        QuantStrategy::Int4 => QuantTier::Int4,
         _ => return Ok(()),
-    }
+    };
 
     // tensor_info and params share the TensorId namespace; max() over both
     // deduplicates. Three ids are allocated per rewritten MatMul: i8 weight,
@@ -79,22 +81,37 @@ pub fn quantize_weights(graph: &mut AiGraph, strategy: QuantStrategy) -> Result<
             continue;
         }
 
+        // int4 packs two codes per byte, so it needs an even code count. A
+        // rank-2 projection with an odd `k*n` (never a real transformer weight —
+        // hidden/interm/vocab are all even) would leave a half byte; skip it
+        // rather than emit a mis-sized constant. int8 has no such constraint.
+        if tier == QuantTier::Int4 && !(k * n).is_multiple_of(2) {
+            continue;
+        }
+
         let wf: Vec<f32> = data
             .chunks_exact(4)
             .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
             .collect();
-        let (q, scales) = encode_int8_per_channel(&wf, k, n);
+        // The tier-packed weight bytes (int8: one byte/code; int4: nibbles) and
+        // per-channel scales. A graph constant is always `[k, n]` row-major.
+        let (q_bytes, scales): (Vec<u8>, Vec<f32>) = match tier {
+            QuantTier::Int8 => {
+                let (q, s) = encode_int8_per_channel(&wf, k, n);
+                (bytemuck::cast_slice::<i8, u8>(&q).to_vec(), s)
+            }
+            QuantTier::Int4 => encode_int4_per_channel(&wf, k, n),
+        };
 
         let wq_tid = next_tid;
         let scale_tid = next_tid + 1;
         let deq_tid = next_tid + 2;
         next_tid += 3;
 
-        // i8 weight constant [k, n].
-        // Reinterpret the signed quantized values as raw bytes for storage in
-        // AiParam::Inline; the lowering reads them back as i8 via INT8 dtype.
-        let q_bytes: Vec<u8> = bytemuck::cast_slice::<i8, u8>(&q).to_vec();
-        let wq_info = TensorInfo::new(DType::INT8, info.shape.clone());
+        // Quantized weight constant [k, n] at the tier's dtype (INT8 = one byte
+        // per code; INT4 = packed nibbles, k*n/2 bytes). The lowering reads the
+        // bytes back per the declared dtype.
+        let wq_info = TensorInfo::new(tier.weight_dtype(), info.shape.clone());
         graph.params.insert(
             wq_tid,
             AiParam::Inline {
@@ -1014,12 +1031,34 @@ mod tests {
     }
 
     #[test]
-    fn int4_inline_pass_errors() {
-        // The INLINE graph-constant pass (`quantize_weights`) still rejects int4;
-        // the browser reaches int4 through the κ-artifact binding below, not this
-        // path. Kept as the honest statement of the inline path's coverage.
+    fn int4_inline_rewrites_matmul_weight_to_nibbles() {
+        // The INLINE graph-constant pass now supports int4 too: a [4,2] f32 weight
+        // (k·n = 8 codes) becomes a packed-nibble INT4 constant of 4 bytes (half
+        // of int8's 8) + per-column f32 scales, feeding Dequantize → MatMul.
+        // Fails-without: the old bail, or an int8-sized (8-byte) constant.
         let mut g = f32_weight_matmul_graph();
-        assert!(quantize_weights(&mut g, QuantStrategy::Int4).is_err());
+        quantize_weights(&mut g, QuantStrategy::Int4).unwrap();
+
+        let deq = g
+            .nodes
+            .iter()
+            .find(|n| matches!(n.op, AiOp::Dequantize { .. }))
+            .expect("dequant node inserted");
+        let wq_tid = deq.inputs[0];
+        match g.params.get(&wq_tid) {
+            Some(AiParam::Inline { info, data }) => {
+                assert_eq!(info.logical_dtype, DType::INT4, "weight declared int4");
+                assert_eq!(data.len(), 4 * 2 / 2, "int4 packs to k·n/2 nibble bytes");
+            }
+            _ => panic!("i4 weight constant missing"),
+        }
+        let mm = g
+            .nodes
+            .iter()
+            .find(|n| matches!(n.op, AiOp::MatMul))
+            .unwrap();
+        assert_eq!(mm.inputs[1], deq.outputs[0]);
+        assert!(!g.params.contains_key(&1), "old f32 weight retired");
     }
 
     #[test]
