@@ -100,14 +100,17 @@ bound by pointer) — ruled out as a suspect.
   attacks the long-context ceiling directly. Ceiling = mean-acceptance×; ≈neutral
   on novel text. Needs an acceptance measurement on realistic chat to set the
   default; low-risk because worst case is ≈one plain step.
-- **D. int4 weights — IMPLEMENTED this session (opt-in tier).** Halves the weight
-  bytes/token → ~2× the *short-context* (GEMV-bound) decode AND fits a larger model
-  under the 4 GiB wasm ceiling. Now wired end-to-end (encoder → derive → κ-binding →
-  substrate `matmul_i4_pc_omajor`, substrate-contract proven). BUT the fused kernel
-  is PER-CHANNEL (one symmetric scale per output channel), which measures ≈16%
-  relative GEMV error vs int8's ≈1% — a real size/quality tradeoff. So int4 ships
-  as an OPT-IN, size-first tier (catalogue `quantize: "int4"`), not a default; a
-  lower-error int4 would need group-wise scales + a different kernel.
+- **D. int4 weights + PARAMETRIC tier selection — IMPLEMENTED this session.**
+  Halves the weight bytes/token → ~2× the *short-context* (GEMV-bound) decode AND
+  fits a larger model resident under the 4 GiB ceiling. Wired end-to-end (encoder →
+  derive → κ-binding → substrate `matmul_i4_pc_omajor`, substrate-contract proven).
+  The fused kernel is PER-CHANNEL (one scale per output channel), so at the MODEL
+  level int4 is severely, model-dependently lossy (0.66/0.96/0.66/0.72 cosine vs
+  bf16 across families; int8 ≥0.99). Therefore the tier is chosen AUTOMATICALLY,
+  PARAMETRICALLY (`QuantTier::optimal_for(params, 4 GiB)`): int8 for quality when it
+  fits resident, int4 only to keep a too-large model resident/interactive, int8
+  (paged) beyond — never a user knob. int8 is the default for every chat-scale
+  model; a lower-error int4 would need group-wise scales + a different kernel.
 - **E. Sampling: partial top-k instead of the full sort.** Removes 5–6 ms/token
   under temperature sampling. Same emitted token — pure waste removal.
 - **F. Eager pool prewarm.** Spawn the pool during model load, off the first
@@ -150,9 +153,12 @@ particular machine's wall-clock.
   in the `QuantMap` value so the binder declares INT4 + halved ranges, tier threaded
   through the browser download/derive/bind path. **V&V:** `omajor_i4_substrate_contract.rs`
   proves our bytes → the fused i4 kernel reproduce the EXACT i4 integer oracle, and
-  prefill=decode bit-for-bit. **Quality gate:** per-channel int4 ≈16% relative GEMV
-  error vs int8 ≈1% — a real, measured, OPT-IN size/quality tradeoff (catalogue
-  `quantize: "int4"`), never a silent default.
+  prefill=decode bit-for-bit; `int4_decode_tracks_bf16_...` measures the MODEL-level
+  cost (0.66–0.96 cosine, per-channel int4 compounding across layers). **Selection
+  is PARAMETRIC/AUTOMATIC** (`QuantTier::optimal_for` + `optimal_quant_tier` wasm):
+  int8 for quality by default, int4 only to keep a too-large model resident — never
+  a manual quant knob. The catalogue default is `"auto"`; `hologram_quantize` is a
+  diagnostic override.
 
 Related: `upstream-request-prefill-pooling.md` and `upstream-request-decode-attention.md`
 (the finding→request→fix loop this mirrors), ADR-0018.
