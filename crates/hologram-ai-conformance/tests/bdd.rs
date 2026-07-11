@@ -3617,7 +3617,7 @@ async fn when_chunked_head_quantized(w: &mut BddWorld) {
     let mut map = hologram_ai::quantized::QuantMap::new();
     let mut artifact_kappas = Vec::new();
     for t in &targets {
-        let (artifact, _, _) = hologram_ai::quantized::crystallize_quantized_range(
+        let (artifact, _, _, _) = hologram_ai::quantized::crystallize_quantized_range(
             &mut dir,
             &t.kappa,
             t.offset,
@@ -3630,7 +3630,12 @@ async fn when_chunked_head_quantized(w: &mut BddWorld) {
         artifact_kappas.push(artifact.clone());
         map.insert(
             hologram_ai_common::lower::quant_key(&t.kappa, Some((t.offset, t.len))),
-            (artifact, t.out_features, t.in_features),
+            (
+                artifact,
+                t.out_features,
+                t.in_features,
+                hologram_ai_common::lower::QuantTier::Int8,
+            ),
         );
     }
 
@@ -5448,7 +5453,7 @@ async fn when_quant_derive_twice(w: &mut BddWorld) {
     let kit = w.quant.as_ref().expect("the quant kit");
     let mut dir = DirKappaStore::new(&kit.store.path);
     let (mut wide_total, mut quant_total) = (0u64, 0u64);
-    for (wide_kappa, (artifact_kappa, out, inf)) in &kit.map {
+    for (wide_kappa, (artifact_kappa, out, inf, _)) in &kit.map {
         let wide = dir.resolve(wide_kappa).expect("the wide form resolves");
         let a = hologram_ai::quantized::derive_quantized_artifact(&wide, DType::F32, *out, *inf)
             .expect("the derivation runs");
@@ -5630,7 +5635,7 @@ fn quant_decode_archive(kit: &QuantKit, bucket: u64, quantize: bool) -> (Vec<u8>
     let mut bytes = 0u64;
     for (i, key) in kit.keys.iter().enumerate() {
         let sz = match kit.map.get(&kit.kappas[i]) {
-            Some((artifact, _, _)) if quantize => {
+            Some((artifact, _, _, _)) if quantize => {
                 dir.resolve(artifact).expect("the artifact resolves").len()
             }
             _ => quant_tensor_bytes(key, &kit.shapes[i]).len(),
@@ -5824,7 +5829,7 @@ async fn then_quant_gas_phase(w: &mut BddWorld) {
         );
     }
     let quant_kappas: std::collections::HashSet<&String> =
-        kit.map.values().map(|(k, _, _)| k).collect();
+        kit.map.values().map(|(k, _, _, _)| k).collect();
     let (mut whole, mut ranged) = (0u64, 0u64);
     for (kappa, bytes, was_ranged) in journal {
         if quant_kappas.contains(kappa) {
