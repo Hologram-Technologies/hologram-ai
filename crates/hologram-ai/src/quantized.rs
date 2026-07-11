@@ -109,66 +109,125 @@ pub fn derive_quantized_artifact(
     out_features: u64,
     in_features: u64,
 ) -> Result<Vec<u8>> {
+    derive_quantized_artifact_tier(wide, dtype, QuantTier::Int8, out_features, in_features)
+}
+
+pub use hologram_ai_common::lower::QuantTier;
+
+/// Tier-parametric artifact derivation. `target` selects int8 or int4; the layout
+/// decision (`omajor_w8a8_servable` for the tier's dtype) is shared, so the bytes
+/// and the binder's `weight_layout` declaration cannot drift for either tier.
+/// Layout `q ‖ scales_f32_le(4·out)`, with `q` the tier-packed codes.
+pub fn derive_quantized_artifact_tier(
+    wide: &[u8],
+    dtype: DType,
+    target: QuantTier,
+    out_features: u64,
+    in_features: u64,
+) -> Result<Vec<u8>> {
     let (rows, cols) = (out_features as usize, in_features as usize);
     let w = widen_to_f32(wide, dtype, rows * cols)?;
+    // Same predicate the binder consults for `weight_layout`, per the tier's
+    // dtype — so the artifact bytes and the declaration cannot drift. Servable ⇒
+    // encode in the wide tensor's own output-major `[out, in]` order (no
+    // transpose); otherwise transpose to row-major `[in, out]` first.
+    let servable = hologram_ai_common::lower::omajor_w8a8_servable(target.dtype_tag(), cols, rows);
 
-    let (q, scales) = if hologram_ai_common::lower::omajor_w8a8_servable(
-        hologram_ai_common::lower::dtype::DTYPE_I8,
-        cols,
-        rows,
-    ) {
-        // `w` is already `[out, in]` = `[n, k]`: each output channel's k-vector
-        // contiguous. Encode in place.
-        hologram_ai_quant::encode_int8_per_channel_omajor(&w, rows, cols)
-    } else {
-        let mut wt = vec![0f32; rows * cols];
-        for r in 0..rows {
-            for c in 0..cols {
-                wt[c * rows + r] = w[r * cols + c];
-            }
+    // The tier-packed weight block (int8: one byte/code; int4: packed nibbles),
+    // then the per-channel f32 scales appended at `q.len()`.
+    let (mut artifact, scales) = match target {
+        QuantTier::Int8 if servable => {
+            let (q, scales) = hologram_ai_quant::encode_int8_per_channel_omajor(&w, rows, cols);
+            (bytemuck::cast_slice::<i8, u8>(&q).to_vec(), scales)
         }
-        hologram_ai_quant::encode_int8_per_channel(&wt, cols, rows)
+        QuantTier::Int8 => {
+            let wt = transpose_omajor_to_rowmajor(&w, rows, cols);
+            let (q, scales) = hologram_ai_quant::encode_int8_per_channel(&wt, cols, rows);
+            (bytemuck::cast_slice::<i8, u8>(&q).to_vec(), scales)
+        }
+        QuantTier::Int4 if servable => {
+            hologram_ai_quant::encode_int4_per_channel_omajor(&w, rows, cols)
+        }
+        QuantTier::Int4 => {
+            let wt = transpose_omajor_to_rowmajor(&w, rows, cols);
+            hologram_ai_quant::encode_int4_per_channel(&wt, cols, rows)
+        }
     };
-
-    let mut artifact = Vec::with_capacity(q.len() + scales.len() * 4);
-    artifact.extend_from_slice(bytemuck::cast_slice::<i8, u8>(&q));
-    for s in scales {
-        artifact.extend_from_slice(&s.to_le_bytes());
-    }
+    append_scales(&mut artifact, &scales);
     Ok(artifact)
 }
 
-/// Derive and persist the quantized artifact for `wide_kappa`, returning its
-/// [`QuantMap`] entry `(artifact κ, out_features, in_features)`. The wide
-/// content is resolved through the store; the artifact enters the store as
-/// ordinary content (its κ is minted by the insert's hash). Evicting the
-/// wide blob afterwards is the caller's saturation decision —
-/// crystallization makes it gas-phase, the lifecycle evaporates it.
+/// Transpose an output-major `[out, in]` weight to row-major `[in, out]` — the
+/// orientation the non-servable scalar dequant loop reads.
+fn transpose_omajor_to_rowmajor(w: &[f32], rows: usize, cols: usize) -> Vec<f32> {
+    let mut wt = vec![0f32; rows * cols];
+    for r in 0..rows {
+        for c in 0..cols {
+            wt[c * rows + r] = w[r * cols + c];
+        }
+    }
+    wt
+}
+
+/// Append the per-channel f32 scales (little-endian) after the `q` block.
+fn append_scales(artifact: &mut Vec<u8>, scales: &[f32]) {
+    artifact.reserve(scales.len() * 4);
+    for &s in scales {
+        artifact.extend_from_slice(&s.to_le_bytes());
+    }
+}
+
+/// Derive and persist the quantized artifact for `wide_kappa` at `target` tier,
+/// returning its [`QuantMap`] entry `(artifact κ, out_features, in_features,
+/// tier)`. The wide content is resolved through the store; the artifact enters
+/// the store as ordinary content (its κ is minted by the insert's hash). Evicting
+/// the wide blob afterwards is the caller's saturation decision — crystallization
+/// makes it gas-phase, the lifecycle evaporates it.
 pub fn crystallize_quantized(
     store: &mut DirKappaStore,
     wide_kappa: &str,
     dtype: DType,
     out_features: u64,
     in_features: u64,
-) -> Result<(String, u64, u64)> {
+) -> Result<(String, u64, u64, QuantTier)> {
+    crystallize_quantized_tier(
+        store,
+        wide_kappa,
+        dtype,
+        QuantTier::Int8,
+        out_features,
+        in_features,
+    )
+}
+
+/// [`crystallize_quantized`] at an explicit `target` tier (int8 / int4).
+pub fn crystallize_quantized_tier(
+    store: &mut DirKappaStore,
+    wide_kappa: &str,
+    dtype: DType,
+    target: QuantTier,
+    out_features: u64,
+    in_features: u64,
+) -> Result<(String, u64, u64, QuantTier)> {
     let wide = store
         .resolve(wide_kappa)
         .with_context(|| format!("resolving wide κ `{wide_kappa}` for quantized derivation"))?;
-    let artifact = derive_quantized_artifact(&wide, dtype, out_features, in_features)?;
+    let artifact = derive_quantized_artifact_tier(&wide, dtype, target, out_features, in_features)?;
     let kappa = store.insert(&artifact)?;
-    Ok((kappa, out_features, in_features))
+    Ok((kappa, out_features, in_features, target))
 }
 
-/// Crystallize the int8 artifact of a **head chunk**: a byte range
+/// Crystallize the artifact of a **head chunk** at `target` tier: a byte range
 /// `[offset, offset+len)` of the wide LM-head tensor `wide_kappa` (a tied
 /// head's is the embedding table), covering `out_features` vocab rows of
 /// `in_features` hidden. Resolves only the chunk's slice through the store
 /// (sub-tensor κ-resolution — the tied embedding never re-transits whole),
-/// derives its matmul-ready per-channel int8 form, and persists it. Returns
-/// the artifact's [`QuantMap`] entry `(artifact κ, out_features, in_features)`;
-/// the caller keys it by [`hologram_ai_common::lower::quant_key`]`(wide_kappa,
+/// derives its matmul-ready per-channel form, and persists it. Returns
+/// the artifact's [`QuantMap`] entry `(artifact κ, out_features, in_features,
+/// tier)`; the caller keys it by [`hologram_ai_common::lower::quant_key`]`(wide_kappa,
 /// Some((offset, len)))`. The wide κ is NOT evaporated — the embedding Gather
 /// still binds it.
+#[allow(clippy::too_many_arguments)]
 pub fn crystallize_quantized_range(
     store: &mut DirKappaStore,
     wide_kappa: &str,
@@ -177,7 +236,31 @@ pub fn crystallize_quantized_range(
     dtype: DType,
     out_features: u64,
     in_features: u64,
-) -> Result<(String, u64, u64)> {
+) -> Result<(String, u64, u64, QuantTier)> {
+    crystallize_quantized_range_tier(
+        store,
+        wide_kappa,
+        offset,
+        len,
+        dtype,
+        QuantTier::Int8,
+        out_features,
+        in_features,
+    )
+}
+
+/// [`crystallize_quantized_range`] at an explicit `target` tier (int8 / int4).
+#[allow(clippy::too_many_arguments)]
+pub fn crystallize_quantized_range_tier(
+    store: &mut DirKappaStore,
+    wide_kappa: &str,
+    offset: u64,
+    len: u64,
+    dtype: DType,
+    target: QuantTier,
+    out_features: u64,
+    in_features: u64,
+) -> Result<(String, u64, u64, QuantTier)> {
     let slice = store
         .resolve_range(wide_kappa, offset, len)
         .with_context(|| {
@@ -185,9 +268,10 @@ pub fn crystallize_quantized_range(
                 "resolving head-chunk range [{offset}, {offset}+{len}) of wide κ `{wide_kappa}`"
             )
         })?;
-    let artifact = derive_quantized_artifact(&slice, dtype, out_features, in_features)?;
+    let artifact =
+        derive_quantized_artifact_tier(&slice, dtype, target, out_features, in_features)?;
     let kappa = store.insert(&artifact)?;
-    Ok((kappa, out_features, in_features))
+    Ok((kappa, out_features, in_features, target))
 }
 
 #[cfg(test)]
@@ -242,6 +326,76 @@ mod tests {
             a16, a32,
             "F16 widening must reproduce the exact-f32 artifact for f16-representable values"
         );
+    }
+
+    #[test]
+    fn int4_artifact_is_half_the_weight_bytes_and_deterministic() {
+        // int4 packs the weight block to nibbles: q is out·in/2 bytes (vs out·in
+        // for int8), + the same out·4 scale bytes. This is the bandwidth/size
+        // lever — the artifact is strictly smaller than the int8 one.
+        let (out, inf) = (4u64, 8u64);
+        let wide: Vec<u8> = (0..out * inf)
+            .flat_map(|k| (((k % 5) as f32) * 0.4 - 1.0).to_le_bytes())
+            .collect();
+        let a4 =
+            derive_quantized_artifact_tier(&wide, DType::F32, QuantTier::Int4, out, inf).unwrap();
+        let a8 =
+            derive_quantized_artifact_tier(&wide, DType::F32, QuantTier::Int8, out, inf).unwrap();
+        assert_eq!(
+            a4.len() as u64,
+            out * inf / 2 + out * 4,
+            "int4 q block is nibbles"
+        );
+        assert_eq!(
+            a8.len() as u64,
+            out * inf + out * 4,
+            "int8 q block is bytes"
+        );
+        assert!(a4.len() < a8.len(), "int4 artifact is strictly smaller");
+        let b4 =
+            derive_quantized_artifact_tier(&wide, DType::F32, QuantTier::Int4, out, inf).unwrap();
+        assert_eq!(a4, b4, "int4 derivation must be bit-deterministic");
+    }
+
+    #[test]
+    fn int4_artifact_dequantizes_close_to_the_wide_weights() {
+        // The int4 artifact, decoded through the substrate's I4_VALUES grid +
+        // per-channel scales, reproduces the wide weights within a quant step —
+        // the property the quality gate rests on. Dims chosen so the encode is
+        // output-major servable (the browser decode path).
+        let (out, inf) = (6u64, 16u64);
+        let w: Vec<f32> = (0..out * inf)
+            .map(|k| ((k as f32) * 0.13).sin() * 2.0)
+            .collect();
+        let wide: Vec<u8> = w.iter().flat_map(|v| v.to_le_bytes()).collect();
+        let art =
+            derive_quantized_artifact_tier(&wide, DType::F32, QuantTier::Int4, out, inf).unwrap();
+        let (o, i) = (out as usize, inf as usize);
+        assert!(
+            hologram_ai_common::lower::omajor_w8a8_servable(QuantTier::Int4.dtype_tag(), i, o),
+            "test dims must be output-major servable"
+        );
+        // q = out·in/2 nibble bytes (omajor [out, in]); scales = out f32 after it.
+        let q = &art[..o * i / 2];
+        let scales: Vec<f32> = art[o * i / 2..]
+            .chunks_exact(4)
+            .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+            .collect();
+        assert_eq!(scales.len(), o);
+        for j in 0..o {
+            for x in 0..i {
+                let l = j * i + x; // omajor: channel j's k-run contiguous
+                let byte = q[l >> 1];
+                let nib = if l & 1 == 0 { byte & 0x0F } else { byte >> 4 };
+                let code = if nib < 8 { nib as i8 } else { nib as i8 - 16 };
+                let deq = code as f32 * scales[j];
+                let orig = w[j * i + x];
+                assert!(
+                    (deq - orig).abs() <= scales[j] / 2.0 + 1e-6,
+                    "({j},{x}): deq {deq} vs {orig}"
+                );
+            }
+        }
     }
 
     #[test]

@@ -1790,7 +1790,11 @@ impl GrowableStagedSession {
             ingest.extend_from_slice(b":quant-int8:");
             let mut entries: Vec<_> = quant.iter().collect();
             entries.sort_by(|a, b| a.0.cmp(b.0));
-            for (wide, (artifact, out, inf)) in entries {
+            // The tier is NOT re-hashed here: the artifact κ already differs by
+            // tier (int4 bytes ≠ int8 bytes → different hash), so an int4 and an
+            // int8 window mint distinct keys through `{artifact}` alone. Keeping
+            // this string byte-identical preserves the shipped int8 derived store.
+            for (wide, (artifact, out, inf, _tier)) in entries {
                 ingest.extend_from_slice(format!("{wide}>{artifact}@{out}x{inf};").as_bytes());
             }
         }
