@@ -100,10 +100,14 @@ bound by pointer) — ruled out as a suspect.
   attacks the long-context ceiling directly. Ceiling = mean-acceptance×; ≈neutral
   on novel text. Needs an acceptance measurement on realistic chat to set the
   default; low-risk because worst case is ≈one plain step.
-- **D. int4 weights.** The kernel exists (`matmul_i4_pc_omajor`) but int4 is
-  de-advertised. int4 halves bytes/token → ~2× the *short-context* (GEMV-bound)
-  decode: 1.5B ~26 → ~45 tok/s @128. Quality-gated re-enable (advertise the tier
-  where perplexity holds).
+- **D. int4 weights — IMPLEMENTED this session (opt-in tier).** Halves the weight
+  bytes/token → ~2× the *short-context* (GEMV-bound) decode AND fits a larger model
+  under the 4 GiB wasm ceiling. Now wired end-to-end (encoder → derive → κ-binding →
+  substrate `matmul_i4_pc_omajor`, substrate-contract proven). BUT the fused kernel
+  is PER-CHANNEL (one symmetric scale per output channel), which measures ≈16%
+  relative GEMV error vs int8's ≈1% — a real size/quality tradeoff. So int4 ships
+  as an OPT-IN, size-first tier (catalogue `quantize: "int4"`), not a default; a
+  lower-error int4 would need group-wise scales + a different kernel.
 - **E. Sampling: partial top-k instead of the full sort.** Removes 5–6 ms/token
   under temperature sampling. Same emitted token — pure waste removal.
 - **F. Eager pool prewarm.** Spawn the pool during model load, off the first
@@ -135,13 +139,20 @@ particular machine's wall-clock.
   reject-cost at long context. NOT the ceiling-breaker; a blind universal default-on
   is not clearly a win. Recommendation: enable it lazily/by workload, or leave the
   knob — not K hard-on. (Witness in `speculative.rs`.)
-- **int4 status.** Genuinely supported on f031e8b (`DTypeId::I4`, `MatMulDequant`
-  accepts i4, `matmul_i4_pc_omajor`, dequant exec test, our `hologram-ai-quant`
-  Q4_0 emitter) — BUT `cli.rs` still rejects int4 claiming the fused dequant-matmul
-  "has not landed." That guard is likely stale; **confirm with a native int4 decode
-  run** before re-advertising. If it runs: halves bytes/token (~2× short-context
-  decode) AND fits larger models in the 4 GiB space — directly serves "arbitrary
-  models." Needs a quality gate (int4 vs int8 divergence) to advertise per model.
+- **int4 — IMPLEMENTED + PROVEN (`0398d1f` native, `8073840` browser).** Correction
+  to an earlier note: int4 was NOT a stale guard on a working feature — it was a
+  genuinely unimplemented emit path (`quantize_weights` bailed; `derive_quantized_artifact`
+  had no i4 variant; the κ-binder hardcoded INT8). The substrate shipped the i4
+  CONSUMPTION side (`matmul_i4_pc_omajor`, i4 `QuantTier`, `Dequantize{I4}`); the
+  PRODUCTION side did not exist. Now built, mirroring the proven int8 κ-artifact path:
+  `encode_int4_per_channel{,_omajor}` (per-channel symmetric, `-7..7` two's-complement
+  nibbles low-first — bit-exact to the substrate's `I4_VALUES`), `QuantTier` carried
+  in the `QuantMap` value so the binder declares INT4 + halved ranges, tier threaded
+  through the browser download/derive/bind path. **V&V:** `omajor_i4_substrate_contract.rs`
+  proves our bytes → the fused i4 kernel reproduce the EXACT i4 integer oracle, and
+  prefill=decode bit-for-bit. **Quality gate:** per-channel int4 ≈16% relative GEMV
+  error vs int8 ≈1% — a real, measured, OPT-IN size/quality tradeoff (catalogue
+  `quantize: "int4"`), never a silent default.
 
 Related: `upstream-request-prefill-pooling.md` and `upstream-request-decode-attention.md`
 (the finding→request→fix loop this mirrors), ADR-0018.
