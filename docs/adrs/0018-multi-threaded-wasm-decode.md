@@ -291,6 +291,41 @@ floor (e.g. SmolLM2-135M, hidden 576) **and** assert the pool actually fired
 (`hologram_pool_workers() === N`, GEMV above floor) — otherwise it witnesses
 nothing.
 
+## Follow-on optimizations (2026-07-11)
+
+The per-model benchmark (`scripts/pool-bench.rs`) and the decode-step
+decomposition it grew (`docs/notes/throughput-latency-analysis.md`) showed the
+pool is not the whole story: at chat context lengths the serial attention + KV
+path and the fixed weight-bandwidth dominate. Two follow-ons land here, each
+substrate-proven and behind its own witness:
+
+- **Eager pool prewarm.** The pool spawn + the staged-session build ran inside the
+  FIRST turn's TTFT. A `warm` message (`generate({warm:true})`) runs the identical
+  setup — `preferThreadedPool → ensureReady → warmStagedSession` — then STOPS before
+  generate; the warm session + pool are cached, so the first real turn pays neither.
+  `Chat.tsx` prewarms once per archive when the model's meta is ready and idle, and
+  `onSend` AWAITS the prewarm promise before its own `generate` — the warm build and
+  the first turn never build the session concurrently (which would race the shared
+  residency ledger, the invariant the crash-fixes established). The pool stays
+  main-owned, so cancel/error still tears it down: prewarm adds no lifecycle
+  exception. Best-effort — a prewarm failure is swallowed and the first turn builds
+  as before.
+
+- **int4 weight tier (opt-in).** Halves the weight bytes/token — ~2× the
+  short-context (GEMV-bound) decode and a larger model under the 4 GiB ceiling.
+  Wired end-to-end: `encode_int4_per_channel{,_omajor}` (per-channel symmetric,
+  two's-complement nibbles low-first, bit-exact to the substrate's `I4_VALUES`);
+  the tier rides in the `QuantMap` value so the κ-binder declares `DType::INT4` +
+  halved ranges; the browser download/derive/bind carries it in `stages.json`
+  (catalogue `quantize: "int4"`). Both emit paths — κ-artifact (browser/staged) and
+  inline `quantize_weights` (native) — decode, each substrate-proven
+  (`omajor_i4_substrate_contract.rs` reproduces the exact i4 integer oracle;
+  `int8_accuracy.rs` decodes inline i4 to cosine ≥ 0.97). **Honest cost:** the fused
+  kernel is PER-CHANNEL (one scale per output channel), ≈16% relative GEMV error vs
+  int8's ≈1% — so int4 is an OPT-IN size-first tier, never a default; a lower-error
+  int4 needs group-wise scales + a different kernel. Quality is measured and stated
+  (`int4_tier_quality_is_bounded_and_coarser_than_int8`), never silent.
+
 ## Alternatives considered
 
 - **`wasm-bindgen-rayon`.** Rejected: the substrate provides its *own* pool wired
