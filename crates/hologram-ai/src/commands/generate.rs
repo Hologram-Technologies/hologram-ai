@@ -294,19 +294,41 @@ fn sample_at(
 }
 
 /// Temperature + optional top-k sampling over a logit row.
+///
+/// The candidate set is built in the order the inverse-CDF walks it — WITHOUT a
+/// full O(vocab·log vocab) sort, which at chat vocab sizes (150K) cost ~5–6 ms per
+/// token (`pool-bench.rs`), a vocab-scaling per-token ceiling with no purpose:
+/// - **top-k:** the k highest logits are selected in O(vocab) (`select_nth_unstable`),
+///   then only those k are sorted descending. The kept set and its order are
+///   identical to sorting the whole vocab and truncating, so the sampled token is
+///   byte-for-byte unchanged (barring an exact float tie straddling the k-boundary,
+///   where a full sort is already arbitrary). O(vocab + k·log k).
+/// - **no top-k:** the inverse-CDF over the FULL distribution needs no ordering at
+///   all — token i is drawn with probability p_i in any index order — so the sort
+///   is skipped entirely and the natural order is walked. Same distribution, O(vocab).
 fn sample(logits: &[f32], temperature: f32, top_k: Option<usize>, rng: &mut u64) -> u32 {
     if temperature <= 0.0 {
         return argmax(logits);
     }
-    // Indices sorted by descending logit, truncated to top-k.
-    let mut idx: Vec<usize> = (0..logits.len()).collect();
-    idx.sort_unstable_by(|&a, &b| {
-        logits[b]
-            .partial_cmp(&logits[a])
+    let desc = |a: &usize, b: &usize| {
+        logits[*b]
+            .partial_cmp(&logits[*a])
             .unwrap_or(std::cmp::Ordering::Equal)
-    });
-    let k = top_k.map(|k| k.clamp(1, idx.len())).unwrap_or(idx.len());
-    let keep = &idx[..k];
+    };
+    let keep: Vec<usize> = match top_k {
+        Some(k) => {
+            let k = k.clamp(1, logits.len());
+            let mut idx: Vec<usize> = (0..logits.len()).collect();
+            if k < idx.len() {
+                idx.select_nth_unstable_by(k - 1, desc); // top-k to the front, O(vocab)
+                idx.truncate(k);
+            }
+            idx.sort_unstable_by(desc); // order only the k kept
+            idx
+        }
+        None => (0..logits.len()).collect(), // full vocab, natural order — no sort
+    };
+    let keep = &keep[..];
 
     // Softmax over the kept logits (shifted by max for numerical stability).
     let max = keep
@@ -757,5 +779,53 @@ mod tests {
         let mut rng = 42;
         // Even with temperature, top_k=1 forces the highest-logit token.
         assert_eq!(sample(&[1.0, 9.0, 2.0, 3.0], 1.0, Some(1), &mut rng), 1);
+    }
+
+    #[test]
+    fn top_k_selection_matches_full_sort_byte_for_byte() {
+        // The O(vocab) select_nth top-k path must draw the IDENTICAL token to a
+        // full O(vocab·log vocab) sort-then-truncate, across k and seed. If the
+        // partition kept a different set or order, the inverse-CDF would land on a
+        // different token — this fails-without the byte-identity it claims.
+        fn full_sort_reference(logits: &[f32], temperature: f32, k: usize, rng: &mut u64) -> u32 {
+            let mut idx: Vec<usize> = (0..logits.len()).collect();
+            idx.sort_unstable_by(|&a, &b| {
+                logits[b]
+                    .partial_cmp(&logits[a])
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
+            let keep = &idx[..k.clamp(1, idx.len())];
+            let max = keep
+                .iter()
+                .map(|&i| logits[i] / temperature)
+                .fold(f32::NEG_INFINITY, f32::max);
+            let exps: Vec<f64> = keep
+                .iter()
+                .map(|&i| ((logits[i] / temperature - max) as f64).exp())
+                .collect();
+            let sum: f64 = exps.iter().sum();
+            let r = next_unit(rng) * sum;
+            let mut acc = 0.0;
+            for (n, &i) in keep.iter().enumerate() {
+                acc += exps[n];
+                if r <= acc {
+                    return i as u32;
+                }
+            }
+            keep[keep.len() - 1] as u32
+        }
+        // Distinct sinusoidal logits (no exact ties at any k-boundary).
+        let logits: Vec<f32> = (0..3000).map(|i| (i as f32 * 0.013).sin() * 4.0).collect();
+        for k in [1usize, 5, 40, 128, 1000, 2999] {
+            for seed in [1u64, 7, 42, 12345, 99999] {
+                let mut a = seed;
+                let mut b = seed;
+                assert_eq!(
+                    sample(&logits, 0.8, Some(k), &mut a),
+                    full_sort_reference(&logits, 0.8, k, &mut b),
+                    "top_k={k} seed={seed}"
+                );
+            }
+        }
     }
 }
