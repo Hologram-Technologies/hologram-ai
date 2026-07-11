@@ -351,6 +351,22 @@ export async function deriveQuantizedArtifact(
   return G!.derive_quantized_artifact(wide, dtype, outFeatures, inFeatures, tier);
 }
 
+/** The wasm32 address space — the HOST ceiling every resident model shares
+ * (weights + KV cache + activations + scratch). A STRUCTURAL law, not a cap. */
+export const WASM_ADDRESS_SPACE = 4 * 1024 * 1024 * 1024;
+
+/** The PARAMETRIC optimal quant tier for a model of `params` weights — the single
+ * Rust law (`QuantTier::optimal_for`), so a selected model is AUTOMATICALLY,
+ * optimally compiled: int8 for quality when it fits resident, int4 only to keep a
+ * larger model resident/interactive, int8 (paged) beyond that. No user knob. */
+export async function optimalQuantTier(
+  params: number,
+  addressSpace: number = WASM_ADDRESS_SPACE,
+): Promise<string> {
+  await ensureReady();
+  return G!.optimal_quant_tier(params, addressSpace);
+}
+
 /** `compileSafetensorsStaged` on the quantized tier: stage graphs bind
  * projection weights to their quantized derived artifacts. */
 export async function compileSafetensorsStagedQuantized(

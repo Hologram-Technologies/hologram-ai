@@ -415,11 +415,14 @@ mod tests {
     /// The measured cost is real and large: this scheme uses ONE symmetric scale
     /// per output channel (what the substrate's fused `matmul_i4_pc_omajor`
     /// consumes), so a single outlier weight coarsens the whole channel's grid —
-    /// ≈16% relative GEMV error here, vs ≈1% for int8. int4 is therefore an
-    /// **opt-in, size-first tier** (the catalogue states it), NOT a drop-in int8
-    /// replacement; a lower-error int4 would need group-wise scales and a
-    /// different kernel. This gate is the honesty tripwire: int4 quantizes, is
-    /// strictly coarser than int8, and has not regressed to garbage.
+    /// ≈16% relative GEMV error here, vs ≈1% for int8 (and worse at the MODEL
+    /// level, where it compounds; see `int4_decode_tracks_bf16_...`). int4 is
+    /// therefore NOT a drop-in int8 replacement, which is precisely why the tier
+    /// is chosen PARAMETRICALLY (`QuantTier::optimal_for`): int8 for quality by
+    /// default, int4 only to keep a too-large model resident — never a user's
+    /// manual choice. A lower-error int4 would need group-wise scales + a different
+    /// kernel. This gate is the honesty tripwire: int4 quantizes, is strictly
+    /// coarser than int8, and has not regressed to garbage.
     #[test]
     fn int4_tier_quality_is_bounded_and_coarser_than_int8() {
         // A [k, n] weight and a k activation, both Gaussian-ish and deterministic

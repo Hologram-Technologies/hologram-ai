@@ -311,20 +311,29 @@ substrate-proven and behind its own witness:
   exception. Best-effort — a prewarm failure is swallowed and the first turn builds
   as before.
 
-- **int4 weight tier (opt-in).** Halves the weight bytes/token — ~2× the
-  short-context (GEMV-bound) decode and a larger model under the 4 GiB ceiling.
-  Wired end-to-end: `encode_int4_per_channel{,_omajor}` (per-channel symmetric,
-  two's-complement nibbles low-first, bit-exact to the substrate's `I4_VALUES`);
-  the tier rides in the `QuantMap` value so the κ-binder declares `DType::INT4` +
-  halved ranges; the browser download/derive/bind carries it in `stages.json`
-  (catalogue `quantize: "int4"`). Both emit paths — κ-artifact (browser/staged) and
-  inline `quantize_weights` (native) — decode, each substrate-proven
+- **int4 weight tier + PARAMETRIC tier selection.** A selected model is
+  AUTOMATICALLY compiled at its optimal tier — never a user knob.
+  `QuantTier::optimal_for(params, address_space)` is the single law: int8 for
+  quality whenever the model's int8 resident weights fit the ¾-of-4-GiB weight
+  budget; int4 ONLY when int8 would not fit resident but int4 would (keeping a
+  larger model resident + interactive); int8 (served by the weight-tier pager) for
+  anything larger. The browser download computes the model footprint and resolves
+  the tier automatically (`optimal_quant_tier` wasm binding), narrating the choice;
+  the catalogue default is `"auto"`, and `hologram_quantize` is a diagnostic
+  override only. int4 itself is wired end-to-end: `encode_int4_per_channel{,_omajor}`
+  (per-channel symmetric, two's-complement nibbles low-first, bit-exact to the
+  substrate's `I4_VALUES`); the tier rides in the `QuantMap` value so the κ-binder
+  declares `DType::INT4` + halved ranges; both emit paths — κ-artifact (browser/
+  staged) and inline `quantize_weights` (native) — decode, each substrate-proven
   (`omajor_i4_substrate_contract.rs` reproduces the exact i4 integer oracle;
   `int8_accuracy.rs` decodes inline i4 to cosine ≥ 0.97). **Honest cost:** the fused
-  kernel is PER-CHANNEL (one scale per output channel), ≈16% relative GEMV error vs
-  int8's ≈1% — so int4 is an OPT-IN size-first tier, never a default; a lower-error
-  int4 needs group-wise scales + a different kernel. Quality is measured and stated
-  (`int4_tier_quality_is_bounded_and_coarser_than_int8`), never silent.
+  kernel is PER-CHANNEL (one scale per output channel), and at the MODEL level int4
+  is severely, MODEL-DEPENDENTLY lossy — measured 0.66/0.96/0.66/0.72 logit cosine
+  vs bf16 across Llama/Qwen2/Mistral/Phi3 (int8 is ≥0.99), the ~16% per-GEMV error
+  compounding across layers + the head (`int4_decode_tracks_bf16_..._for_every_family`).
+  So the parametric policy PREFERS int8, reaching for int4 only as the price of
+  keeping a too-large model resident at all; quality is measured and stated, never
+  silent, and never a user's manual burden.
 
 ## Alternatives considered
 

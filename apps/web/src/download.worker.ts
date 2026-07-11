@@ -19,6 +19,7 @@ import {
   compileSafetensorsStreamed,
   computeKappa,
   deriveQuantizedArtifact,
+  optimalQuantTier,
   quantizableWeights,
   headQuantChunks,
   validateModelConfig,
@@ -519,15 +520,29 @@ export async function handleSafetensorsDownload(
     // streamed κs and emits the k-form archive(s). Models beyond the
     // execution window compile as stage archives (windowed execution over k).
     if (stageCount && stageCount > 1 && layersPerStage && localName) {
-      // Quantized tier (row `quantized-transit`, stated by the catalogue —
-      // never silent): derive each fully-retirable projection's matmul-ready
-      // int8 artifact into the κ-store and evaporate its wide blob. The wide
-      // form rests nowhere; recorded provenance keeps it recoverable.
+      // PARAMETRIC tier selection (never a user knob): a model is AUTOMATICALLY
+      // compiled at its optimal tier. "auto" (the default) resolves to the tier
+      // that best serves THIS model's footprint under the 4 GiB address space —
+      // int8 for quality when it fits resident, int4 ONLY to keep a larger model
+      // resident/interactive when int8 cannot. An explicit "int8"/"int4" is a
+      // diagnostic override. The decision is narrated, never silent.
+      if (quantize === undefined || quantize === "auto") {
+        const params = allShapes.reduce((sum, s) => {
+          const dims = JSON.parse(s) as number[];
+          return sum + dims.reduce((p, d) => p * d, 1);
+        }, 0);
+        quantize = await optimalQuantTier(params);
+        const b = (params / 1e9).toFixed(2);
+        emitProgressFn(
+          quantize === "int4"
+            ? `Parametric tier: ${b}B params exceed int8-resident under 4 GiB — compiling int4 ` +
+              `to keep it resident/interactive (reduced quality; a size-fit choice).`
+            : `Parametric tier: ${b}B params fit resident at int8 — compiling int8 (full quality).`,
+        );
+      }
       const quantEntries: QuantEntry[] = [];
-      // The tier is stated by the catalogue (never silent): "int8" or "int4".
-      // int4 packs the weight bytes to nibbles (half), for a larger model under
-      // the 4 GiB wasm ceiling / a bandwidth-lighter decode. The SAME tier is
-      // recorded per entry so the binder declares the matching weight dtype.
+      // The resolved tier is recorded per entry so the binder declares the
+      // matching weight dtype (int8 = one byte/code, int4 = packed nibbles).
       if (quantize === "int8" || quantize === "int4") {
         const eligible = new Set(
           await quantizableWeights(

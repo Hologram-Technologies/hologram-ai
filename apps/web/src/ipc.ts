@@ -166,7 +166,10 @@ export async function addCustomModel(hfId: string): Promise<void> {
     modality: "text-chat",
     size: "?",
     approxArchiveMb: 0,
-    quantize: "int8",
+    // "auto": the tier is chosen PARAMETRICALLY at compile from the model's
+    // footprint vs the 4 GiB ceiling (int8 for quality, int4 only to fit a larger
+    // model resident) — never a manual choice.
+    quantize: "auto",
     promptTemplate: null,
     stop: [],
     chatTurnSeparator: null,
@@ -409,9 +412,12 @@ async function downloadOne(model: { hfId: string; quantize: string }): Promise<v
             reject(new Error(e.data.error));
           }
         };
-        // The quantized tier is a per-model catalogue statement (data, never
-        // code); the localStorage knob forces it for hermetic witnesses.
-        const quantize = localStorage.getItem("hologram_quantize") ?? model.quantize;
+        // The quant tier is chosen PARAMETRICALLY at compile from the model's
+        // footprint vs the 4 GiB ceiling (default "auto" → the download worker
+        // resolves it via `QuantTier::optimal_for`). The catalogue may state an
+        // explicit tier, and the localStorage knob forces one — both are
+        // diagnostic OVERRIDES for witnesses, not the user-facing path.
+        const quantize = localStorage.getItem("hologram_quantize") ?? model.quantize ?? "auto";
         worker.postMessage({
           type: "download_safetensors",
           payload: {

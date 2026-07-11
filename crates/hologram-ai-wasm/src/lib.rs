@@ -582,6 +582,26 @@ pub fn derive_quantized_artifact(
     .map_err(|e| err(format!("derive_quantized_artifact: {e:#}")))
 }
 
+/// The PARAMETRIC optimal quant tier (`"int8"` / `"int4"`) for a model of
+/// `params` weights on a host address space of `address_space` bytes — the ONE
+/// law the browser consults so a selected model is AUTOMATICALLY, optimally
+/// compiled (no user knob). int8 for quality whenever it fits resident; int4
+/// only to keep a larger model resident/interactive when int8 cannot; int8
+/// (paged) for anything larger. `f64` at the boundary — param/byte counts are
+/// well under 2^53. See `QuantTier::optimal_for`.
+#[wasm_bindgen]
+pub fn optimal_quant_tier(params: f64, address_space: f64) -> String {
+    let tier = hologram_ai_common::lower::QuantTier::optimal_for(
+        params.max(0.0) as u64,
+        address_space.max(0.0) as u64,
+    );
+    match tier {
+        hologram_ai_common::lower::QuantTier::Int8 => "int8",
+        hologram_ai_common::lower::QuantTier::Int4 => "int4",
+    }
+    .to_string()
+}
+
 // ── κ-materialization (journey stage S3) ────────────────────────────────────
 
 /// The κ-labels a k-form archive requires (its `holospaces.kappa_map`

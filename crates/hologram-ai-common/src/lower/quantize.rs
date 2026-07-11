@@ -354,6 +354,40 @@ impl QuantTier {
             _ => QuantTier::Int8,
         }
     }
+
+    /// The PARAMETRIC optimal tier for a model of `params` weights on a host whose
+    /// usable address space is `address_space` bytes. This is a function of the
+    /// model and the HOST ceiling ALONE — never a user knob, never fit to one
+    /// architecture — so a selected model is automatically, optimally compiled.
+    ///
+    /// Quality is preferred: int8 (≈full precision, per the family V&V) whenever
+    /// the model's int8 resident weights fit the weight budget. int4 (HALF the
+    /// bytes, but materially lossier — measured 0.66–0.96 logit cosine vs bf16,
+    /// model-dependent) is chosen ONLY when int8 would NOT fit resident but int4
+    /// WOULD — the sole price of keeping a larger model resident and interactive
+    /// (a chatbot needs resident decode, not per-token OPFS streaming). A model
+    /// too large even for int4-resident stays int8 and is served by the
+    /// substrate's weight-tier pager (quality preserved, streamed) — int4's
+    /// degradation is not worth trading for when the model cannot be resident
+    /// either way.
+    ///
+    /// `weight_budget = ¾ · address_space`: the resident weights share the space
+    /// with the KV cache (grows with chat context), activations, dequant scratch,
+    /// and the retained F32 head scratch — a HOST-law reserve of the remaining ¼,
+    /// not a per-model figure. The substrate's footprint-gated residency + pager
+    /// absorb any overflow, so this is the DEFAULT tier, refined at runtime.
+    pub fn optimal_for(params: u64, address_space: u64) -> QuantTier {
+        let weight_budget = address_space / 4 * 3;
+        let int8_bytes = params; // 1 byte / param
+        let int4_bytes = params.div_ceil(2);
+        if int8_bytes <= weight_budget {
+            QuantTier::Int8 // fits resident at full quality — always preferred
+        } else if int4_bytes <= weight_budget {
+            QuantTier::Int4 // int8 won't fit resident; int4 will — keep it interactive
+        } else {
+            QuantTier::Int8 // too large even for int4-resident → page int8 at quality
+        }
+    }
 }
 
 /// `key → (artifact κ, out_features, in_features, tier)`. The tier rides in the
@@ -1077,6 +1111,23 @@ mod tests {
         // Agreement with the encoder's own allocation, for an odd count.
         let (packed, _) = hologram_ai_quant::encode_int4_per_channel(&[0.1f32; 13], 13, 1);
         assert_eq!(packed.len() as u64, QuantTier::Int4.q_bytes(13));
+    }
+
+    #[test]
+    fn optimal_tier_is_parametric_in_footprint_and_ceiling() {
+        const GIB: u64 = 1 << 30;
+        let space = 4 * GIB; // the wasm32 address space; budget = ¾ = 3 GiB
+                             // A chat-scale model fits resident at int8 → quality.
+        assert_eq!(QuantTier::optimal_for(GIB, space), QuantTier::Int8);
+        assert_eq!(QuantTier::optimal_for(3 * GIB, space), QuantTier::Int8);
+        // Too big for int8-resident, fits at int4 → int4 keeps it interactive.
+        assert_eq!(QuantTier::optimal_for(4 * GIB, space), QuantTier::Int4);
+        assert_eq!(QuantTier::optimal_for(6 * GIB, space), QuantTier::Int4);
+        // Too big even for int4-resident → int8, served by the pager (quality).
+        assert_eq!(QuantTier::optimal_for(8 * GIB, space), QuantTier::Int8);
+        // Parametric in the ceiling, not a fixed cap: the SAME model tiers
+        // differently on a bigger host.
+        assert_eq!(QuantTier::optimal_for(4 * GIB, 8 * GIB), QuantTier::Int8);
     }
 
     #[test]
