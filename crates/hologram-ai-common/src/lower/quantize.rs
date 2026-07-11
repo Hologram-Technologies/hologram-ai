@@ -282,7 +282,62 @@ pub const SUBSTRATE_ACCEPTS_OUTPUT_MAJOR_ON_WEIGHTLESS_CONSTANTS: bool = true;
 /// range of the LM-head/tied-embedding weight) is keyed by that κ AND its byte
 /// range, so the several chunks that share one κ each map to their own per-chunk
 /// artifact.
-pub type QuantMap = std::collections::HashMap<String, (String, u64, u64)>;
+/// The quant tier a derived artifact was encoded to. int8 is the shipped
+/// default; int4 HALVES the weight bytes (`q` is packed nibbles, `out·in/2`
+/// bytes) — the bandwidth-bound decode lever and the ceiling on model size under
+/// the 4 GiB wasm address space. Both are per-output-channel symmetric with an
+/// identical codec shape; only the code width (and thus the `q` byte count and
+/// the declared weight dtype) differs. Carried IN the [`QuantMap`] value so the
+/// binder declares the weight slot with the SAME tier the artifact was derived
+/// to — the two cannot drift. A tier is a SEMANTIC choice whose quality is
+/// measured and stated, never a silent default.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum QuantTier {
+    #[default]
+    Int8,
+    Int4,
+}
+
+impl QuantTier {
+    /// The substrate dtype tag the weight slot is declared with (and the tag the
+    /// layout predicate [`omajor_w8a8_servable`] is evaluated for).
+    pub fn dtype_tag(self) -> u8 {
+        match self {
+            QuantTier::Int8 => crate::lower::dtype::DTYPE_I8,
+            QuantTier::Int4 => crate::lower::dtype::DTYPE_I4,
+        }
+    }
+
+    /// The AI-graph weight dtype (`INT8` / `INT4`) for the bound weight tensor.
+    pub fn weight_dtype(self) -> DType {
+        match self {
+            QuantTier::Int8 => DType::INT8,
+            QuantTier::Int4 => DType::INT4,
+        }
+    }
+
+    /// Bytes the `q` block occupies for `elems = out·in` codes: one byte/code at
+    /// int8, one nibble (½ byte) at int4.
+    pub fn q_bytes(self, elems: u64) -> u64 {
+        match self {
+            QuantTier::Int8 => elems,
+            QuantTier::Int4 => elems / 2,
+        }
+    }
+
+    /// Parse a tier tag (`"int8"` / `"int4"`); unknown/absent ⇒ the int8 default.
+    pub fn from_tag(tag: Option<&str>) -> Self {
+        match tag {
+            Some("int4") => QuantTier::Int4,
+            _ => QuantTier::Int8,
+        }
+    }
+}
+
+/// `key → (artifact κ, out_features, in_features, tier)`. The tier rides in the
+/// value so the binder declares the weight slot with exactly the tier the
+/// artifact was derived to.
+pub type QuantMap = std::collections::HashMap<String, (String, u64, u64, QuantTier)>;
 
 /// The [`QuantMap`] key of a κ-bound projection weight: the bare κ for a
 /// whole-tensor binding, or `κ@offset+len` for a ranged (head-chunk) binding.
@@ -387,7 +442,10 @@ pub fn quantizable_external_weights(graph: &AiGraph) -> Result<Vec<String>> {
         if info.shape.len() != 2 {
             continue;
         }
-        dummy.insert(kappa.clone(), (format!("probe:{kappa}"), out, inf));
+        dummy.insert(
+            kappa.clone(),
+            (format!("probe:{kappa}"), out, inf, QuantTier::Int8),
+        );
     }
     if dummy.is_empty() {
         return Ok(Vec::new());
@@ -508,6 +566,7 @@ pub fn quantize_external_matmul_weights(graph: &mut AiGraph, quant: &QuantMap) -
         kappa: String,
         out_features: u64,
         in_features: u64,
+        tier: QuantTier,
     }
     // The fused dequant-matmul kernel is 2D: rank>2 activations flatten to
     // [∏leading, in] around the matmul (a structural reshape pair — the
@@ -517,7 +576,7 @@ pub fn quantize_external_matmul_weights(graph: &mut AiGraph, quant: &QuantMap) -
         // Whole tensor → keyed by κ; head chunk → keyed by κ AND its range, so
         // the several chunks sharing one κ each resolve their own artifact.
         let key = quant_key(&m.kappa, m.range);
-        let Some((quant_kappa, out_features, in_features)) = quant.get(&key) else {
+        let Some((quant_kappa, out_features, in_features, tier)) = quant.get(&key) else {
             continue;
         };
         rewrites.push(Rewrite {
@@ -526,6 +585,7 @@ pub fn quantize_external_matmul_weights(graph: &mut AiGraph, quant: &QuantMap) -
             kappa: quant_kappa.clone(),
             out_features: *out_features,
             in_features: *in_features,
+            tier: *tier,
         });
     }
 
@@ -539,16 +599,24 @@ pub fn quantize_external_matmul_weights(graph: &mut AiGraph, quant: &QuantMap) -
         let (wq_tid, scale_tid, deq_tid) = (next_tid, next_tid + 1, next_tid + 2);
         next_tid += 3;
         let elems = rw.out_features * rw.in_features;
+        // The `q` block's byte count is tier-dependent: one byte per code at int8,
+        // packed nibbles (half) at int4. The scales follow at that offset, so the
+        // two ranged κ bindings track the artifact `derive_quantized_artifact_tier`
+        // wrote for this same tier — they cannot drift.
+        let q_bytes = rw.tier.q_bytes(elems);
+        let bits = if rw.tier == QuantTier::Int4 { 4 } else { 8 };
 
-        // The artifact is stored in the matmul orientation: [in, out].
+        // The artifact is stored in the matmul orientation: [in, out]. The weight
+        // tensor is declared at the tier's dtype (INT8 / INT4) — the substrate
+        // reads INT4 as packed nibbles (k/2 bytes) and dispatches its i4 kernel.
         let shape = shape_from_concrete(&[rw.in_features, rw.out_features]);
-        let wq_info = TensorInfo::new(DType::INT8, shape.clone());
+        let wq_info = TensorInfo::new(rw.tier.weight_dtype(), shape.clone());
         graph.params.insert(
             wq_tid,
-            AiParam::external_range(rw.kappa.clone(), wq_info.clone(), 0, elems),
+            AiParam::external_range(rw.kappa.clone(), wq_info.clone(), 0, q_bytes),
         );
         graph.tensor_info.insert(wq_tid, wq_info);
-        graph.tensor_names.insert(wq_tid, format!("{name}.q8"));
+        graph.tensor_names.insert(wq_tid, format!("{name}.q{bits}"));
 
         let scale_info = TensorInfo::new(DType::F32, shape_from_concrete(&[rw.out_features]));
         graph.params.insert(
@@ -556,14 +624,14 @@ pub fn quantize_external_matmul_weights(graph: &mut AiGraph, quant: &QuantMap) -
             AiParam::external_range(
                 rw.kappa.clone(),
                 scale_info.clone(),
-                elems,
+                q_bytes,
                 rw.out_features * 4,
             ),
         );
         graph.tensor_info.insert(scale_tid, scale_info);
         graph
             .tensor_names
-            .insert(scale_tid, format!("{name}.q8_scale"));
+            .insert(scale_tid, format!("{name}.q{bits}_scale"));
 
         graph
             .tensor_info
@@ -586,7 +654,7 @@ pub fn quantize_external_matmul_weights(graph: &mut AiGraph, quant: &QuantMap) -
         // output-major kernel and W8A8 are one call — the substrate pairs them and
         // rejects either alone.
         let servable = omajor_w8a8_servable(
-            crate::lower::dtype::DTYPE_I8,
+            rw.tier.dtype_tag(),
             rw.in_features as usize,
             rw.out_features as usize,
         );
@@ -901,7 +969,7 @@ mod tests {
         let mut g = ranged_head_chunk_graph("embed", 0, 3, 4);
         let key = quant_key("embed", Some((0, 24)));
         let mut quant = QuantMap::new();
-        quant.insert(key, ("chunk-artifact-κ".to_string(), 3, 4));
+        quant.insert(key, ("chunk-artifact-κ".to_string(), 3, 4, QuantTier::Int8));
 
         let rewritten = quantize_external_matmul_weights(&mut g, &quant).unwrap();
         assert_eq!(rewritten, 1, "the ranged head chunk must be rewritten");
@@ -946,9 +1014,50 @@ mod tests {
     }
 
     #[test]
-    fn int4_errors() {
+    fn int4_inline_pass_errors() {
+        // The INLINE graph-constant pass (`quantize_weights`) still rejects int4;
+        // the browser reaches int4 through the κ-artifact binding below, not this
+        // path. Kept as the honest statement of the inline path's coverage.
         let mut g = f32_weight_matmul_graph();
         assert!(quantize_weights(&mut g, QuantStrategy::Int4).is_err());
+    }
+
+    #[test]
+    fn int4_binding_declares_nibble_weight_and_halved_range() {
+        // The tier rides in the QuantMap value; an int4 entry must make the binder
+        // declare the weight slot INT4 with a HALVED byte range (packed nibbles),
+        // scales following at that halved offset. Fails-without: an int8-hardcoded
+        // binder declares INT8 + the full range, and the substrate reads twice the
+        // bytes and mis-decodes.
+        let mut g = ranged_head_chunk_graph("embed", 0, 3, 4);
+        let key = quant_key("embed", Some((0, 24)));
+        let mut quant = QuantMap::new();
+        quant.insert(key, ("chunk-artifact-κ".to_string(), 3, 4, QuantTier::Int4));
+
+        let rewritten = quantize_external_matmul_weights(&mut g, &quant).unwrap();
+        assert_eq!(rewritten, 1, "the ranged head chunk must be rewritten");
+
+        let deq = g
+            .nodes
+            .iter()
+            .find(|n| matches!(n.op, AiOp::Dequantize { .. }))
+            .expect("dequant inserted");
+        let (wq_tid, scale_tid) = (deq.inputs[0], deq.inputs[1]);
+        // out·in = 12 codes → 6 packed nibble bytes (half of int8's 12).
+        match g.params.get(&wq_tid).unwrap() {
+            AiParam::External { info, range, .. } => {
+                assert_eq!(info.logical_dtype, DType::INT4, "weight slot declared int4");
+                assert_eq!(*range, Some((0, 6)), "int4 q block is out·in/2 bytes");
+            }
+            _ => panic!("weight must be an external range"),
+        }
+        // Scales follow the halved q block: offset 6, len out·4 = 12.
+        match g.params.get(&scale_tid).unwrap() {
+            AiParam::External { range, .. } => {
+                assert_eq!(*range, Some((6, 12)), "scales follow the halved q block")
+            }
+            _ => panic!("scales must be an external range"),
+        }
     }
 
     #[test]

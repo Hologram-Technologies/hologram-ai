@@ -399,6 +399,11 @@ fn parse_quant_json(
         offset: Option<u64>,
         #[serde(default)]
         len: Option<u64>,
+        /// Tier tag (`"int8"` / `"int4"`); absent ⇒ the int8 default. The web tier
+        /// records the tier its artifact was derived to, so the binder declares
+        /// the weight slot with the matching dtype and byte ranges.
+        #[serde(default)]
+        tier: Option<String>,
     }
     let entries: Vec<Entry> =
         serde_json::from_str(&json).map_err(|e| err(format!("quant map JSON: {e}")))?;
@@ -407,7 +412,8 @@ fn parse_quant_json(
             .into_iter()
             .map(|e| {
                 let key = hologram_ai_common::lower::quant_key(&e.wide, e.offset.zip(e.len));
-                (key, (e.artifact, e.out, e.inf))
+                let tier = hologram_ai_common::lower::QuantTier::from_tag(e.tier.as_deref());
+                (key, (e.artifact, e.out, e.inf, tier))
             })
             .collect(),
     ))
