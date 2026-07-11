@@ -18,7 +18,7 @@ mask** (or a runtime realized-length) so a fixed padded bucket works, and (c)
 
 The kernel exists (`attention_float`, `attention_w8`, `AttentionCall`) but at
 decode we cannot use it, so `decode_plan.rs` (ours) decomposes each GQA node into
-primitive ops. Two gaps block the fused path:
+primitive ops. Three gaps block the fully-resident decode path:
 
 1. **Masking.** `AttentionCall` offers only `causal: bool`. Decode uses a fixed
    padded past-bucket whose *realized length is a runtime value*; visibility is an
@@ -32,6 +32,28 @@ primitive ops. Two gaps block the fused path:
    (and transposes) the *entire* bucket to append one row. **Let the kernel take
    `past_k`/`past_v` + `k_new`/`v_new` (or read a resident cache with a write
    position), so the cache is read once, never recopied.**
+3. **The K/V is re-hashed on the byte boundary every step — a SECOND O(bucket)
+   cost, comparable to the recopy, that our benchmark never measured.** Our decode
+   driver carries `past_k`/`past_v` as host `Vec<u8>` and runs them through the
+   byte `InferenceSession::execute`, which content-addresses every input via
+   `address_bytes` (BLAKE3). The per-port `input_cache` always misses on decode
+   (the substrate's own comment: *"autoregressive decode (input changes every step,
+   always a miss)"*), so the **entire** carried K/V is BLAKE3-hashed every token.
+   Measured (`examples/kv_rehash_cost.rs`, native SIMD — the optimistic bound;
+   deployed wasm32 hashes slower): **1.5B ⇒ 28 ms/tok @2K, 110 @8K, 442 @32K**;
+   **7B ⇒ 55 / 225 / 884**. This is ON TOP of the kernel step `pool-bench` reports
+   (which never crosses the byte boundary), so at 8K it ~doubles the step and at
+   32K it adds a second ~440 ms. The substrate **already exposes the fix** and
+   recommends it here — `execute_addressed` (`session.rs:874`) binds inputs by
+   κ-label via `bind_resident`, *"nothing is rehashed … no hashing, no copy"*, and
+   `HoloRunner::execute_addressed`/`intern_input` already re-export it. But there
+   is **no append-in-place op on a resident KV**, and our cache is a fixed-bucket
+   ring the host mutates each step, so we cannot feed the addressed path without
+   either (a) this request's resident cache with a write position — which lets the
+   updated cache be **retained by label** and bound next step with no hash — or (b)
+   a graph+driver restructure that exports the updated `[bucket, dh]` cache as a
+   retained output label per layer (the ring-write moved into graph ops). **(a) is
+   this request; (b) is the our-side capture, tracked in the analysis note.**
 
 ## Why (measured)
 
@@ -64,8 +86,14 @@ per-step recopy and pooling the attention math needs the kernel.
 
 Removes the long-context throughput ceiling: the per-token cost drops to the
 **inherent** O(context) KV *read* (bandwidth-bound, unavoidable for causal
-attention) **divided across cores**, with no recopy and no serial softmax. That is
-the difference between "caps out past a few K tokens" and "scales to arbitrary
-context at the host's memory bandwidth" — the parametric, no-arbitrary-ceiling
-target. Decode and chunked prefill share the one kernel; speculative verify (m=K)
-rides it too.
+attention) **divided across cores**, with no recopy, no serial softmax, and — via
+a resident cache bound by label — **no per-step re-hash** (gap 3: another
+~440 ms/tok at 32K on 1.5B removed byte-identically). That is the difference
+between "caps out past a few K tokens" and "scales to arbitrary context at the
+host's memory bandwidth" — the parametric, no-arbitrary-ceiling target. Decode and
+chunked prefill share the one kernel; speculative verify (m=K) rides it too.
+
+The re-hash is the UOR "a resident value is bound by its address, never
+re-addressed" law applied to decode: the byte boundary re-hashes an object that is
+already resident. `execute_addressed` is the substrate honoring that law; gap 3 is
+the one place decode cannot yet reach it.
