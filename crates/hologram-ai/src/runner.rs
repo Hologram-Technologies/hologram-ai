@@ -216,6 +216,45 @@ impl HoloRunner {
         self.session.resolve(label)
     }
 
+    // ── κ-leases: residency by ownership, not recency (v0.9.0) ────────────────
+    //
+    // The transient pool keeps a value resident for a two-walk window (recency);
+    // a lease keeps it resident until released (ownership). The ownership law:
+    // a lease is a borrow, so a `KvCacheWrite` on a leased cache DECLINES the
+    // in-place move and takes the honest copy — the leased pre-image survives
+    // bit-intact. That is the substrate primitive for holding state beyond one
+    // step's outputs: speculative rollback (lease the pre-state; accept ⇒
+    // release and the next step moves; reject ⇒ re-step from the intact
+    // pre-image) and a paired draft model's KV parked across the main's walks.
+
+    /// Take host ownership of a resident value by κ-label so it survives every
+    /// walk until [`Self::release_label`]d (refcounted). Returns `false` if the
+    /// label is not resident (or is a lazily-paged weight the pager owns).
+    pub fn retain_label(&mut self, label: &ContentLabel) -> bool {
+        self.session.retain_label(label)
+    }
+
+    /// Release one lease taken by [`Self::retain_label`]. When the last lease
+    /// drops, the value is uniquely owned again and the `KvCacheWrite` move
+    /// resumes. Returns `false` if no lease is held.
+    pub fn release_label(&mut self, label: &ContentLabel) -> bool {
+        self.session.release_label(label)
+    }
+
+    /// Distinct host-leased values currently held ([`Self::retain_label`]).
+    pub fn leased_count(&self) -> usize {
+        self.session.leased_count()
+    }
+
+    /// Total allocated pool bytes — every live buffer including recycled
+    /// free-list capacity. The **confinement** metric: a steady-state decode
+    /// loop must hold this constant (O(1) memory per step), which is exactly the
+    /// residency the 32-bit host ledger must not over-commit. Read this rather
+    /// than estimating the resident footprint host-side.
+    pub fn pool_allocated_bytes(&self) -> usize {
+        self.session.pool_allocated_bytes()
+    }
+
     /// Resident bytes in the content-addressed pool, **deduplicated by κ-label**
     /// — the runtime memory footprint of all interned values (weights supplied
     /// as inputs, intermediate results). Values that share a content address
