@@ -40,6 +40,27 @@ pub struct HoloRunner {
     session: InferenceSession<CpuBackend<BufferArena>>,
 }
 
+/// Process-global walk serialization — the substrate's implicit contract made
+/// explicit and load-bearing at our boundary.
+///
+/// hologram's pooled kernels carry publisher/worker scratch that assumes **one
+/// walk at a time per process**: two `InferenceSession`s executing concurrently
+/// (e.g. parallel test threads, a parallel server) re-enter the v0.9.0 pooled
+/// decode-attention scratch — a `RefCell already borrowed` panic at best,
+/// silent cross-session corruption of the numbers at worst (observed: decode
+/// tokens change run-to-run under concurrent sessions; see
+/// `docs/notes/upstream-issue-v090-pooled-decode-scratch.md`). Production
+/// drives every session sequentially already (one browser worker, one CLI
+/// generation loop), so this lock is uncontended there — nanoseconds against
+/// multi-millisecond walks — and it turns any future concurrent caller into a
+/// correct, serialized one instead of a corrupted one.
+fn walk_lock() -> std::sync::MutexGuard<'static, ()> {
+    static WALK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    // Poison-tolerant: a panic mid-walk in another thread must not turn every
+    // later walk into a panic (consistent with the paged-store lock below).
+    WALK.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 impl HoloRunner {
     /// Load a runner from in-memory `.holo` archive bytes.
     ///
@@ -174,6 +195,7 @@ impl HoloRunner {
     /// without that round-trip, use the κ-label surface below.
     pub fn execute(&mut self, inputs: &[&[u8]]) -> anyhow::Result<Vec<OutputBuffer>> {
         let bufs: Vec<InputBuffer> = inputs.iter().map(|&bytes| InputBuffer { bytes }).collect();
+        let _walk = walk_lock();
         self.session
             .execute(&bufs)
             .map_err(|e| anyhow::anyhow!("inference execute failed: {e:?}"))
@@ -205,6 +227,7 @@ impl HoloRunner {
         &mut self,
         input_labels: &[ContentLabel],
     ) -> anyhow::Result<Vec<ContentLabel>> {
+        let _walk = walk_lock();
         self.session
             .execute_addressed(input_labels)
             .map_err(|e| anyhow::anyhow!("addressed execute failed: {e:?}"))

@@ -75,6 +75,24 @@ fn decode_family_q(scale: &FamilyScale, quantize: bool) -> (Vec<f32>, Vec<i64>) 
 /// eligible projection + head chunk is crystallized at `tier` and the whole
 /// transformer decodes through it — the browser's exact staged path, per family.
 fn decode_family_tier(scale: &FamilyScale, tier: Option<QuantTier>) -> (Vec<f32>, Vec<i64>) {
+    let (mut rows, tokens) = decode_family_rows(scale, tier, None);
+    (rows.pop().expect("at least the prefill row"), tokens)
+}
+
+/// The core run, returning EVERY logit row (prefill + one per generated step;
+/// `GEN_STEPS + 1` rows) and the token ids consumed. `force` teacher-forces the
+/// generation on a given token stream instead of the greedy argmax — the
+/// apples-to-apples instrument for comparing two weight tiers: forcing the
+/// reference tier's tokens through the quantized tier compares logits at every
+/// position under a SHARED context. (Autonomous generation amplifies a single
+/// knife-edge argmax flip — a legitimate quantization outcome on a near-tied
+/// logit pair — into full context divergence, after which logit comparisons
+/// measure the divergence, not the quantization.)
+fn decode_family_rows(
+    scale: &FamilyScale,
+    tier: Option<QuantTier>,
+    force: Option<&[i64]>,
+) -> (Vec<Vec<f32>>, Vec<i64>) {
     let quantize = tier.is_some();
     let quant_tier = tier.unwrap_or(QuantTier::Int8);
     let arch = scale.arch();
@@ -205,15 +223,21 @@ fn decode_family_tier(scale: &FamilyScale, tier: Option<QuantTier>) -> (Vec<f32>
     let mut row = decode
         .feed(&PROMPT)
         .unwrap_or_else(|e| panic!("{arch}: prefill (feed): {e:#}"));
+    let mut rows = Vec::with_capacity(GEN_STEPS + 1);
     let mut tokens = Vec::with_capacity(GEN_STEPS);
     for s in 0..GEN_STEPS {
-        let next = argmax(&row) as i64;
+        rows.push(row.clone());
+        let next = match force {
+            Some(f) => f[s],
+            None => argmax(&row) as i64,
+        };
         tokens.push(next);
         row = decode
             .step(next)
             .unwrap_or_else(|e| panic!("{arch}: decode step {s}: {e:#}"));
     }
-    (row, tokens)
+    rows.push(row);
+    (rows, tokens)
 }
 
 /// Every faithful decoder family DECODES end to end: the full int8-quantized
@@ -303,32 +327,52 @@ fn int8_w8a8_decode_tracks_full_precision_for_every_family() {
         let scale = FamilyScale::new(*layout, Dims::MODEST);
         let arch = scale.arch();
 
-        let (q_logits, q_tokens) = decode_family_q(&scale, true); // int8 W8A8
-        let (f_logits, f_tokens) = decode_family_q(&scale, false); // bf16 reference
+        // bf16 generates autonomously; int8 is TEACHER-FORCED on the bf16
+        // tokens, so every position's logits are compared under a SHARED
+        // context. This measures what the gate claims — per-position numeric
+        // tracking of the quantized forward — at every generation depth.
+        // (The previous methodology compared only the final row of two
+        // autonomous runs: one knife-edge argmax flip on a near-tied logit
+        // pair — a legitimate int8 outcome, observed on Phi3 when the fused
+        // v0.9.0 attention's equally-valid f32 schedule moved a tie by an
+        // ulp — diverged the contexts and collapsed the cosine to 0.82,
+        // gating on sequence luck rather than quantization quality.)
+        let (f_rows, f_tokens) = decode_family_rows(&scale, None, None);
+        let (q_rows, _) = decode_family_rows(&scale, Some(QuantTier::Int8), Some(&f_tokens));
+        assert_eq!(q_rows.len(), f_rows.len());
 
-        let cos = cosine(&q_logits, &f_logits);
+        let cosines: Vec<f64> = q_rows
+            .iter()
+            .zip(&f_rows)
+            .map(|(q, f)| cosine(q, f))
+            .collect();
+        // Would int8 have picked the same greedy token at each shared-context
+        // position? Reported for visibility; near-tie flips are legal.
+        let agree = q_rows
+            .iter()
+            .zip(&f_rows)
+            .filter(|(q, f)| argmax(q) == argmax(f))
+            .count();
         eprintln!(
-            "[w8a8-accuracy] {arch}: W8A8={q_tokens:?} bf16={f_tokens:?} \
-             seq_match={} cos={cos:.6}",
-            q_tokens == f_tokens
+            "[w8a8-accuracy] {arch}: bf16={f_tokens:?} argmax_agree={agree}/{} \
+             per-position cos={cosines:?}",
+            q_rows.len()
         );
 
         assert_eq!(
-            argmax(&q_logits),
-            argmax(&f_logits),
-            "{arch}: int8-W8A8 flipped the first-token argmax vs full-precision bf16 \
-             (cos {cos:.6}) — the deployed quantized path no longer tracks the model"
+            argmax(&q_rows[0]),
+            argmax(&f_rows[0]),
+            "{arch}: int8-W8A8 flipped the FIRST predicted token vs full-precision \
+             bf16 — the deployed quantized path no longer tracks the model"
         );
-        assert!(
-            cos >= 0.99,
-            "{arch}: int8-W8A8 logit cosine {cos:.6} vs bf16 fell below 0.99 — \
-             quantization is degrading the forward, not just rounding it"
-        );
-        assert_eq!(
-            q_tokens.first(),
-            f_tokens.first(),
-            "{arch}: int8-W8A8 first generated token differs from full precision"
-        );
+        for (i, cos) in cosines.iter().enumerate() {
+            assert!(
+                *cos >= 0.99,
+                "{arch}: int8-W8A8 logit cosine {cos:.6} at position {i} (shared \
+                 context) fell below 0.99 — quantization is degrading the forward, \
+                 not just rounding it"
+            );
+        }
     }
 }
 
@@ -348,31 +392,44 @@ fn int4_decode_tracks_bf16_within_a_stated_loose_bound_for_every_family() {
         let scale = FamilyScale::new(*layout, Dims::MODEST);
         let arch = scale.arch();
 
-        let (q_logits, q_tokens) = decode_family_tier(&scale, Some(QuantTier::Int4));
-        let (f_logits, _f_tokens) = decode_family_tier(&scale, None); // bf16 reference
-
-        let cos = cosine(&q_logits, &f_logits);
-        eprintln!("[int4-accuracy] {arch}: int4={q_tokens:?} cos_vs_bf16={cos:.6}");
+        // Same shared-context methodology as the int8 gate: int4 is
+        // teacher-forced on the bf16 tokens, and every position's logits are
+        // compared under the same context.
+        let (f_rows, f_tokens) = decode_family_rows(&scale, None, None);
+        let (q_rows, _) = decode_family_rows(&scale, Some(QuantTier::Int4), Some(&f_tokens));
+        let cosines: Vec<f64> = q_rows
+            .iter()
+            .zip(&f_rows)
+            .map(|(q, f)| cosine(q, f))
+            .collect();
+        eprintln!("[int4-accuracy] {arch}: bf16={f_tokens:?} per-position cos_vs_bf16={cosines:?}");
 
         assert!(
-            q_logits.iter().all(|v| v.is_finite()),
+            q_rows.iter().flatten().all(|v| v.is_finite()),
             "{arch}: int4 decode produced non-finite logits — the tier broke the forward"
         );
         assert!(
-            q_logits.iter().any(|&v| v != 0.0),
+            q_rows.iter().flatten().any(|&v| v != 0.0),
             "{arch}: int4 decode produced all-zero logits — degenerate"
         );
-        // MEASURED: per-channel int4 model-level cosine is ≈0.6–0.7 vs bf16 here
-        // (int8 is ≥0.99 on the SAME synthetic weights) — the ~16% per-GEMV error
-        // compounds across layers + the LM head. int4 is genuinely, SEVERELY lossy;
-        // this floor is a regression TRIPWIRE (a decode bug collapses cosine toward
-        // 0), NOT a quality endorsement. It states the honest ceiling: int4 is a
-        // size/experimental tier, and does not track bf16 the way int8 does.
-        assert!(
-            cos >= 0.45,
-            "{arch}: int4 logit cosine {cos:.6} vs bf16 fell below the regression floor \
-             (0.45) — the staged int4 pipeline is decoding wrong (a bug), not merely \
-             coarsely. int4 is lossy (≈0.6–0.7 expected) but a collapse toward 0 is a defect"
-        );
+        // MEASURED (shared-context, per position): per-channel int4 cosine is
+        // ≈0.96–0.99 vs bf16 here, an order of magnitude looser than int8's
+        // ≈0.9995 on the SAME synthetic weights — the ~16% per-GEMV error
+        // compounds across layers + the LM head. (The earlier ≈0.6–0.7 figure
+        // was measured post-divergence — autonomous sequences amplified by
+        // near-tie flips — and overstated the numeric error.) int4 remains the
+        // materially lossier tier: near-tied tokens flip far more readily, so
+        // sequences diverge fast even though per-position tracking stays high.
+        // This floor is a regression TRIPWIRE (a decode bug collapses cosine
+        // toward 0), NOT a quality endorsement.
+        for (i, cos) in cosines.iter().enumerate() {
+            assert!(
+                *cos >= 0.45,
+                "{arch}: int4 logit cosine {cos:.6} at position {i} fell below the \
+                 regression floor (0.45) — the staged int4 pipeline is decoding wrong \
+                 (a bug), not merely coarsely. int4 is lossy (≈0.6–0.7 expected) but a \
+                 collapse toward 0 is a defect"
+            );
+        }
     }
 }

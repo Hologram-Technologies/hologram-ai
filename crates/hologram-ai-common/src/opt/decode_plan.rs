@@ -418,9 +418,12 @@ impl<'g> Emitter<'g> {
     /// The v0.9.0 fused **split-KV** decode attention (`DecodeAttention`, κ119)
     /// plus two `KvCacheWrite` ring updates (κ120). Fully parametric: every dim
     /// derives from the node, and the model's scale is honored for ANY head_dim.
-    /// The kernel applies `1/√dh` internally (`scale_bits` 0 — the default and
-    /// the common case, so q is untouched); a model-declared non-default scale
-    /// `s` is folded into q as `f = s·√dh`, giving effective scale exactly `s`.
+    /// The scale (declared, or the `1/√dh` default) is pre-folded into q with
+    /// the SAME `Mul`-by-constant the legacy decomposition emits, and the fused
+    /// node's `AttentionAttrs.scale_bits = 1.0` makes the kernel's own scaling
+    /// an exact no-op (`dot / (1/1.0) = dot`) — one scale placement for both
+    /// forms, ulp for ulp, so a fused/legacy switch cannot move a knife-edge
+    /// token by scale rounding (`x·(1/√d)` ≠ `x/√d` in the last ulp).
     /// The carried-K/V ports now carry the WHOLE updated cache (the driver binds
     /// it by κ-label next step, no host splice).
     #[allow(clippy::too_many_arguments)]
@@ -443,19 +446,16 @@ impl<'g> Emitter<'g> {
         heads_first: bool,
         layer: usize,
     ) {
-        let q_pre = match scale {
-            None => q_r,
-            Some(s) => {
-                let f = s * (dh as f32).sqrt();
-                let fc = self.const_f32(&format!("dscale_{layer}"), &[f], &[1, 1]);
-                let qs = self.tensor(&format!("dq_scaled_{layer}"), DType::F32, &[h * chunk, dh]);
-                self.node(AiOp::Mul, vec![q_r, fc], vec![qs]);
-                qs
-            }
-        };
+        // Attention scale folded into q once — the IDENTICAL constant and Mul
+        // the legacy decomposition emits (same name, same value), so the two
+        // forms share one scale placement exactly.
+        let scale_val = scale.unwrap_or(1.0 / (dh as f32).sqrt());
+        let scale_c = self.const_f32(&format!("dscale_{layer}"), &[scale_val], &[1, 1]);
+        let q_s = self.tensor(&format!("dq_scaled_{layer}"), DType::F32, &[h * chunk, dh]);
+        self.node(AiOp::Mul, vec![q_r, scale_c], vec![q_s]);
         // Head-major flat → rank-4 [1, heads, chunk, dh] the kernel expects.
         let q4 = self.tensor(&format!("dq4_{layer}"), DType::F32, &[1, h, chunk, dh]);
-        self.node(AiOp::Reshape { allow_zero: false }, vec![q_pre], vec![q4]);
+        self.node(AiOp::Reshape { allow_zero: false }, vec![q_s], vec![q4]);
         let kn4 = self.tensor(&format!("dkn4_{layer}"), DType::F32, &[1, kv, chunk, dh]);
         self.node(AiOp::Reshape { allow_zero: false }, vec![k_r], vec![kn4]);
         let vn4 = self.tensor(&format!("dvn4_{layer}"), DType::F32, &[1, kv, chunk, dh]);

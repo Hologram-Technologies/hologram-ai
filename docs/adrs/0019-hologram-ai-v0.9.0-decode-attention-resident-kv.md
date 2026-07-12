@@ -270,6 +270,38 @@ No claim ships without a witness that fails if the claim is false ([[dark-gates]
   breaking change does not break our current build, so adoption is additive on a
   green workspace.
 
+## Adoption findings (2026-07-12, the flip)
+
+Three findings from turning the fused path on in production, all resolved:
+
+1. **Scale parity.** The κ119 kernel applies its scale as `dot / (1/sm)`
+   (`scale_bits` = the multiplier `sm`; `0` ⇒ `√d` divisor), while the legacy
+   decomposition pre-folds `1/√d` into q — `x·(1/√d)` ≠ `x/√d` in the last
+   ulp. The fused emission now always folds the model's scale (declared or the
+   `1/√dh` default) into q with the identical `Mul` legacy emits and declares
+   `AttentionAttrs { causal: false, scale_bits: 1.0 }` (a new
+   `AttrSpec::Attention`), making the kernel's own scaling an exact no-op —
+   one scale placement for both forms, any model, any head_dim.
+2. **Family-gate methodology.** The int8/int4 family gates compared the final
+   logits of two *autonomous* generations; a single knife-edge argmax flip on
+   a near-tied pair (a legal quantization outcome — observed on Phi3 when the
+   fused kernel's equally-valid f32 schedule moved a tie by an ulp) diverges
+   the contexts and collapses the cosine, gating on sequence luck. The gates
+   now **teacher-force** the quantized leg on the bf16 reference tokens and
+   assert per-position logit cosine under a **shared context** at every
+   generation step — strictly stronger as a tracking measure and robust to
+   ties. Measured post-fix: int8 ≥ 0.9994/position for every family (Phi3
+   0.9996–0.9997); int4 0.958–0.988/position (the earlier ≈0.66 "model-level"
+   figure was divergence-amplified, not numeric error).
+3. **Substrate concurrency quarantine.** v0.9.0's pooled decode-attention
+   publisher scratch is unsound across *concurrent* `InferenceSession` walks
+   in one process — `RefCell already borrowed` at best, silent numeric
+   corruption at worst (`upstream-issue-v090-pooled-decode-scratch.md`).
+   Production already drives walks sequentially; `HoloRunner::execute{,_addressed}`
+   now take a process-global `walk_lock()` making that contract explicit —
+   concurrent callers (parallel tests, future servers) serialize instead of
+   corrupting. Uncontended cost ≈ ns against multi-ms walks.
+
 ## Risks / honest framing
 
 - The driver + residency changes touch the code that crashed three times. Mitigated
