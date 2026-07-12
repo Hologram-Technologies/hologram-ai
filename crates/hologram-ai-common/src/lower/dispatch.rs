@@ -332,6 +332,14 @@ pub fn dispatch(op: &AiOp) -> OpPlan {
             rope_base: *rope_base,
         }),
         A::FlashAttentionHint => P::Operandized(OpKind::Attention),
+        // v0.9.0 split-KV decode attention (ADR-0019): the six operands
+        // `[q, k_past, v_past, k_new, v_new, mask]` pass straight through to the
+        // six-input `OpKind::Attention` (κ119). No attrs — the mask is the sole
+        // masking authority and a `causal` attr on this form is refused upstream.
+        A::DecodeAttention => P::Operandized(OpKind::Attention),
+        // Fixed-bucket ring write → `OpKind::KvCacheWrite` (κ120); the executor
+        // realizes it as an in-place κ-move under sole ownership.
+        A::KvCacheWrite => P::Operandized(OpKind::KvCacheWrite),
 
         // ── Positional encoding ─────────────────────────────────────────────
         A::RotaryEmbedding { .. } => P::Operandized(OpKind::RotaryEmbedding),

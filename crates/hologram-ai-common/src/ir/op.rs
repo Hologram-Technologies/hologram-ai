@@ -491,6 +491,25 @@ pub enum AiOp {
         layout: KvLayout,
     },
 
+    // ── v0.9.0 resident-KV decode (ADR-0019) ───────────────────────────────
+    /// Fused decode / prefill attention over a **split** KV cache. Inputs are
+    /// exactly six — `[q, k_past, v_past, k_new, v_new, mask]` — and the output
+    /// is `q`'s shape. The realized context length rides the additive `mask`
+    /// (`-inf` erases a key exactly); the bucket geometry is structure the
+    /// compiler recovers from the operand shapes. Lowers to the six-input
+    /// `OpKind::Attention` (κ discriminant 119). The substrate refuses a
+    /// `causal` attr on this form — the mask is the one masking authority — so
+    /// this op carries none, and the scale is the default `1/√head_dim`.
+    DecodeAttention,
+    /// Fixed-bucket **ring write** of `new` rows into a resident KV `cache` at a
+    /// runtime `pos`. Inputs: `[cache, new, pos]`; output is `cache`'s shape.
+    /// Lowers to `OpKind::KvCacheWrite` (κ discriminant 120), which the executor
+    /// realizes as an in-place κ-**move** under sole ownership (no re-hash, no
+    /// copy) and an honest copy while the cache is leased. The ring geometry
+    /// (bucket / new / planes / row_bytes) is recovered by the compiler from the
+    /// operand shapes, so this op carries no parameters.
+    KvCacheWrite,
+
     // ── Fused ops (produced by optimization passes) ────────────────────────
     /// gate × up → silu(gate) × up
     FusedSwiGLU,
@@ -644,6 +663,11 @@ impl AiOp {
             | AiOp::FusedLayerNormResidual { .. }
             | AiOp::KvSlotWrite { .. }
             | AiOp::KvSlotRead { .. }
+            // Split-KV decode attention: output = q shape (first input).
+            // KvCacheWrite: output = cache shape (first input). Both preserve
+            // the first-input shape, so the generic ShapePreserving rule holds.
+            | AiOp::DecodeAttention
+            | AiOp::KvCacheWrite
             | AiOp::Quantize { .. }
             | AiOp::InstanceNorm { .. }
             | AiOp::LRN { .. }
