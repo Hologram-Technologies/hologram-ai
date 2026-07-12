@@ -253,6 +253,68 @@ impl<'g> Emitter<'g> {
         self.node(AiOp::Reshape { allow_zero: false }, vec![hf3], vec![flat]);
         (hf3, flat)
     }
+
+    /// One kv-group's masked scaled-dot-product attention over the fixed bucket
+    /// plus this chunk's own keys: `softmax(q_jᵀ·[past_k ∥ k_new] + mask) ·
+    /// [past_v ∥ v_new] → [g·chunk, dh]`, strictly 2-D.
+    ///
+    /// This whole per-group `Concat`/`Transpose`/`MatMul`/`Softmax`/`MatMul`
+    /// chain is the **seam** the v0.9.0 fused `DecodeAttention` (κ119) collapses
+    /// into a single pooled, split-KV kernel (ADR-0019). Keeping it in one named
+    /// method makes that swap a localized change and keeps the layer emitter
+    /// readable. `span = bucket + chunk` is the `[past ∥ new]` key count.
+    #[allow(clippy::too_many_arguments)]
+    fn emit_kv_group_attention(
+        &mut self,
+        q_s: TensorId,
+        past_k: TensorId,
+        past_v: TensorId,
+        k_r: TensorId,
+        v_flat: TensorId,
+        mask: TensorId,
+        j: u64,
+        g: u64,
+        chunk: u64,
+        bucket: u64,
+        dh: u64,
+        span: u64,
+        layer: usize,
+    ) -> TensorId {
+        let n = format!("l{layer}_kv{j}");
+        // Head-major rows: group j's heads occupy rows j·g·C..(j+1)·g·C.
+        let q_j = self.slice0(q_s, &format!("dqj_{n}"), j * g * chunk, g * chunk, &[dh]);
+
+        let pk3 = self.slice0(past_k, &format!("dpk3_{n}"), j, 1, &[bucket, dh]);
+        let pk = self.tensor(&format!("dpk_{n}"), DType::F32, &[bucket, dh]);
+        self.node(AiOp::Reshape { allow_zero: false }, vec![pk3], vec![pk]);
+        let kn = self.slice0(k_r, &format!("dkn_{n}"), j * chunk, chunk, &[dh]);
+        let keys = self.tensor(&format!("dkeys_{n}"), DType::F32, &[span, dh]);
+        self.node(AiOp::Concat { axis: 0 }, vec![pk, kn], vec![keys]);
+        let keys_t = self.tensor(&format!("dkeyst_{n}"), DType::F32, &[dh, span]);
+        self.node(
+            AiOp::Transpose { perm: vec![1, 0] },
+            vec![keys],
+            vec![keys_t],
+        );
+
+        let scores = self.tensor(&format!("dscores_{n}"), DType::F32, &[g * chunk, span]);
+        self.node(AiOp::MatMul, vec![q_j, keys_t], vec![scores]);
+        let masked = self.tensor(&format!("dmasked_{n}"), DType::F32, &[g * chunk, span]);
+        self.node(AiOp::Add, vec![scores, mask], vec![masked]);
+        let probs = self.tensor(&format!("dprobs_{n}"), DType::F32, &[g * chunk, span]);
+        self.node(AiOp::Softmax { axis: 1 }, vec![masked], vec![probs]);
+
+        let pv3 = self.slice0(past_v, &format!("dpv3_{n}"), j, 1, &[bucket, dh]);
+        let pv = self.tensor(&format!("dpv_{n}"), DType::F32, &[bucket, dh]);
+        self.node(AiOp::Reshape { allow_zero: false }, vec![pv3], vec![pv]);
+        let vn = self.slice0(v_flat, &format!("dvn_{n}"), j * chunk, chunk, &[dh]);
+        let vals = self.tensor(&format!("dvals_{n}"), DType::F32, &[span, dh]);
+        self.node(AiOp::Concat { axis: 0 }, vec![pv, vn], vec![vals]);
+
+        let out_j = self.tensor(&format!("dout_{n}"), DType::F32, &[g * chunk, dh]);
+        self.node(AiOp::MatMul, vec![probs, vals], vec![out_j]);
+        out_j
+    }
 }
 
 /// The concrete `[u64]` shape of a tensor, or an error naming the port.
@@ -413,44 +475,13 @@ pub fn rewrite_decode_attention(
         em.node(AiOp::Mul, vec![q_r, scale_c], vec![q_s]);
 
         // Per kv-head group: strictly 2-D masked attention over the bucket
-        // plus the chunk's own keys.
+        // plus the chunk's own keys (the seam the fused DecodeAttention replaces).
         let span = bucket + chunk;
         let mut group_outs = Vec::with_capacity(kv as usize);
         for j in 0..kv {
-            let n = format!("l{layer}_kv{j}");
-            // Head-major rows: group j's heads occupy rows j·g·C..(j+1)·g·C.
-            let q_j = em.slice0(q_s, &format!("dqj_{n}"), j * g * chunk, g * chunk, &[dh]);
-
-            let pk3 = em.slice0(past_k, &format!("dpk3_{n}"), j, 1, &[bucket, dh]);
-            let pk = em.tensor(&format!("dpk_{n}"), DType::F32, &[bucket, dh]);
-            em.node(AiOp::Reshape { allow_zero: false }, vec![pk3], vec![pk]);
-            let kn = em.slice0(k_r, &format!("dkn_{n}"), j * chunk, chunk, &[dh]);
-            let keys = em.tensor(&format!("dkeys_{n}"), DType::F32, &[span, dh]);
-            em.node(AiOp::Concat { axis: 0 }, vec![pk, kn], vec![keys]);
-            let keys_t = em.tensor(&format!("dkeyst_{n}"), DType::F32, &[dh, span]);
-            em.node(
-                AiOp::Transpose { perm: vec![1, 0] },
-                vec![keys],
-                vec![keys_t],
-            );
-
-            let scores = em.tensor(&format!("dscores_{n}"), DType::F32, &[g * chunk, span]);
-            em.node(AiOp::MatMul, vec![q_j, keys_t], vec![scores]);
-            let masked = em.tensor(&format!("dmasked_{n}"), DType::F32, &[g * chunk, span]);
-            em.node(AiOp::Add, vec![scores, mask], vec![masked]);
-            let probs = em.tensor(&format!("dprobs_{n}"), DType::F32, &[g * chunk, span]);
-            em.node(AiOp::Softmax { axis: 1 }, vec![masked], vec![probs]);
-
-            let pv3 = em.slice0(past_v, &format!("dpv3_{n}"), j, 1, &[bucket, dh]);
-            let pv = em.tensor(&format!("dpv_{n}"), DType::F32, &[bucket, dh]);
-            em.node(AiOp::Reshape { allow_zero: false }, vec![pv3], vec![pv]);
-            let vn = em.slice0(v_flat, &format!("dvn_{n}"), j * chunk, chunk, &[dh]);
-            let vals = em.tensor(&format!("dvals_{n}"), DType::F32, &[span, dh]);
-            em.node(AiOp::Concat { axis: 0 }, vec![pv, vn], vec![vals]);
-
-            let out_j = em.tensor(&format!("dout_{n}"), DType::F32, &[g * chunk, dh]);
-            em.node(AiOp::MatMul, vec![probs, vals], vec![out_j]);
-            group_outs.push(out_j);
+            group_outs.push(em.emit_kv_group_attention(
+                q_s, past_k, past_v, k_r, v_flat, mask, j, g, chunk, bucket, dh, span, layer,
+            ));
         }
 
         // Chain-concat the kv groups (head-major) → [h·C, dh], then restore
