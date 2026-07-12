@@ -152,16 +152,18 @@ bound by pointer) — ruled out as a suspect.
   under temperature sampling. Same emitted token — pure waste removal.
 - **F. Eager pool prewarm.** Spawn the pool during model load, off the first
   turn's TTFT.
-- **G. Adopt `execute_addressed` for the resident K/V — kills the re-hash tax
-  (§2b), byte-identical.** The single largest *our-side* long-context lever now
-  measured: removes ~28 ms/tok @2K … ~442 ms/tok @32K (1.5B) with zero quality
-  cost. Requires threading the cache by κ-label instead of host bytes and exporting
-  the updated per-layer `[bucket, dh]` cache as a retained output — a restructure
-  of the fixed-bucket ring in `decode.rs`/`decode_plan.rs` that touches the
-  residency ledger (crashed 3×), so it is scoped as its own reviewed change, not a
-  drive-by. Pairs with the upstream resident-cache request (which also removes the
-  recopy). This is the direct application of the UOR "resident value is bound by
-  address, never re-hashed" law to decode.
+- **G. Adopt the v0.9.0 resident K/V + fused decode attention — kills BOTH the
+  recopy (A) AND the re-hash (§2b), byte-identical.** As of 2026-07-12 this is no
+  longer a hand-rolled our-side ring-export: upstream **PR #41 (v0.9.0, in-flight)**
+  lands the primitives — `OpKind::Attention` 6-input (κ119) + `OpKind::KvCacheWrite`
+  κ-move (κ120) — motivated by this exact three-gap finding. We *adopt* them:
+  `rewrite_decode_attention` emits the fused node + 2×KvCacheWrite; `decode.rs`
+  carries per-layer cache **labels** and drives `execute_addressed`; the resident
+  cache is O(bucket) **fixed** (the κ-move mutates in place, so no growth doubling —
+  a net simplification of the residency ledger that crashed 3×). Plan +
+  witnesses: **`docs/adrs/0019-hologram-ai-v0.9.0-decode-attention-resident-kv.md`**.
+  This is the direct application of the UOR "resident value is bound by address,
+  never re-hashed" law to decode.
 
 ## 4. Honest framing
 
@@ -186,10 +188,11 @@ bound on the deployed wasm tax.
   `examples/kv_rehash_cost.rs` quantifies the per-token BLAKE3 re-hash of the
   resident K/V that the byte `execute` path pays and `pool-bench` never saw: 1.5B
   28/110/442 ms/tok @2K/8K/32K (native SIMD; wasm larger). §2b + lever G above;
-  gap 3 added to `upstream-request-decode-attention.md`. Verdict: the largest
-  our-side long-context lever, byte-identical, but scoped (residency ledger) — not
-  landed blind. This is the UOR "resident value bound by address, never re-hashed"
-  law applied to decode; the substrate's `execute_addressed` already honors it.
+  gap 3 filed to `upstream-request-decode-attention.md`, and **ACCEPTED into
+  v0.9.0 (upstream PR #41, in-flight)** — the substrate landed `KvCacheWrite`
+  (κ-move, no re-hash) + the 6-input fused attention, citing this finding. Our
+  adoption plan + witnesses = ADR-0019. This is the UOR "resident value bound by
+  address, never re-hashed" law applied to decode.
 - **Pin fix (`edac541`).** Substrate repinned to the real v0.8.2 (`f031e8b`); native
   + threaded builds green. `main` still ships v0.8.1 (no prefill pooling) — deploy
   the corrected branch to land the 3.2–4.0× TTFT.

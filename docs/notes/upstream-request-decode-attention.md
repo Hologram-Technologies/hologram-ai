@@ -1,7 +1,24 @@
 # Upstream request: a pooled, KV-cache-aware, masked fused decode-attention kernel
 
-**Status: OPEN (filed 2026-07-11).** Follows the same finding→request→fix loop as
-`upstream-request-prefill-pooling.md`, which shipped as substrate **v0.8.2**.
+**Status: ACCEPTED — landing as v0.9.0 (upstream PR #41, in-flight, 2026-07-12).**
+Filed 2026-07-11; gap 3 (the re-hash) added 2026-07-12. Follows the same
+finding→request→fix loop as `upstream-request-prefill-pooling.md` (shipped as
+v0.8.2). PR #41 (`feat(backend)!: fused, pooled, KV-cache-aware masked decode
+attention`) delivers **all three gaps** and cites this finding by name:
+
+- gaps 1+2 → `OpKind::Attention` 6-input `(q, k_past, v_past, k_new, v_new, mask)`
+  → `DecodeAttentionCall` (κ **119**): split-KV (recopy deleted by construction),
+  required additive mask `[q_rows, past+new]`, pooled; `causal` attr refused.
+- gap 3 → `OpKind::KvCacheWrite` (κ **120**): fixed-bucket ring write at a runtime
+  `pos` operand, realized by the executor as a κ **move** (old label retired,
+  buffer mutated O(new_rows), retained by label) — bound next step **no hash, no
+  copy**. Eligibility proven by load-time analysis + steal-time ownership check.
+
+**hologram-ai adoption is `docs/adrs/0019-hologram-ai-v0.9.0-decode-attention-resident-kv.md`**
+(adopt the primitives; do not hand-roll). The request below is preserved as the
+finding record.
+
+---
 
 **To:** the hologram substrate (Hologram-Technologies/hologram, `hologram-backend`).
 **From:** hologram-ai (ADR-0018 follow-on; the throughput/latency analysis in
