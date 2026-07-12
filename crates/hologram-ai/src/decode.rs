@@ -399,11 +399,17 @@ impl DecodeState {
     /// geometry is `geom`; `real ≤ geom.chunk`, padded up to the chunk). Reads
     /// the gather head's single logit row and splices the new K/V into the
     /// carried past, advancing the realized length.
+    /// `carry` (resident-KV plans only): the runner already holds the carried
+    /// caches from ITS previous resident walk — bind them by label instead of
+    /// re-ingesting the host bytes. The caller owns carrier tracking: pass
+    /// `false` on a runner's first walk and whenever the host bytes are the
+    /// truth (post-seeder, post-commit, post-regrow).
     fn pass(
         &mut self,
         runner: &mut impl LmSession,
         geom: DecodeGeometry,
         tokens: &[i64],
+        carry: bool,
     ) -> Result<Vec<f32>> {
         let real = tokens.len();
         let (chunk, pos) = (geom.chunk, self.cur_len);
@@ -411,7 +417,17 @@ impl DecodeState {
             let bufs = self.pass_buffers(geom, tokens)?;
             let port_info = runner.input_port_info();
             let inputs = Self::bind_inputs(&port_info, &bufs, &self.past_k, &self.past_v)?;
-            runner.execute(&inputs)?
+            if geom.resident_kv {
+                // The resident walk: KV rides κ-labels inside the runner (no
+                // re-hash, ring write moves in place); `None` outputs mean the
+                // updated cache stayed resident — the host copy goes stale
+                // until the owner syncs at a truth boundary. A session type
+                // without the override returns every output materialized and
+                // the byte handling below keeps the host copy current.
+                runner.execute_kv_resident(&inputs, carry)?
+            } else {
+                runner.execute(&inputs)?.into_iter().map(Some).collect()
+            }
         };
         let out_ports = runner.output_port_info();
         ensure!(
@@ -424,6 +440,10 @@ impl DecodeState {
         let mut logits: Option<Vec<f32>> = None;
         let row = geom.head_dim * 4;
         for (port, out) in out_ports.iter().zip(outputs.iter()) {
+            let Some(out) = out else {
+                // Updated cache retained inside the runner (resident carry).
+                continue;
+            };
             match port.name.as_str() {
                 "logits" => {
                     logits = Some(le_f32_vec(&out.bytes));
@@ -475,6 +495,32 @@ impl DecodeState {
         self.tokens.extend_from_slice(tokens);
         self.steps += 1;
         logits.context("decode pass produced no logits output")
+    }
+
+    /// Materialize a runner's resident-KV carry back into the host buffers —
+    /// the truth boundary before anything reads `past_k`/`past_v` bytes (a
+    /// verify pass on another runner, a bucket regrow, a rewind). A no-op for
+    /// a runner that never carried.
+    fn sync_kv_carry(&mut self, runner: &mut impl LmSession, geom: DecodeGeometry) -> Result<()> {
+        for (name, bytes) in runner.take_kv_carry()? {
+            let (kind, layer) = name
+                .rsplit_once('_')
+                .and_then(|(k, l)| l.parse::<usize>().ok().map(|l| (k, l)))
+                .with_context(|| format!("unexpected carried cache port `{name}`"))?;
+            let target = match kind {
+                "past_k" => &mut self.past_k[layer],
+                "past_v" => &mut self.past_v[layer],
+                _ => bail!("unexpected carried cache port `{name}`"),
+            };
+            ensure!(
+                bytes.len() == geom.kv_heads * geom.bucket * geom.head_dim * 4,
+                "carried cache `{name}` is {} bytes, expected {}",
+                bytes.len(),
+                geom.kv_heads * geom.bucket * geom.head_dim * 4
+            );
+            *target = bytes;
+        }
+        Ok(())
     }
 
     /// A **verify pass** (row `speculative-decode`): run `tokens` through a
@@ -661,6 +707,27 @@ pub struct DecodeSession<S: LmSession> {
     context_length: u64,
     rebuild: Option<DecodeRebuild<S>>,
     state: DecodeState,
+    /// Where the carried-K/V truth lives (ADR-0019 increment 3b).
+    truth: KvTruth,
+}
+
+/// Where the carried-K/V truth lives. On a resident-KV plan the hot runner
+/// keeps the updated caches as κ-labels between walks (no per-step re-hash,
+/// no copy — the ring write moves in place); the host byte buffers then go
+/// stale until a **truth boundary** syncs them back: a verify pass on another
+/// runner, a seeder↔step hand-off, or a bucket regrow. `Poisoned` marks a
+/// failed resident walk (the carried labels may be consumed) — the session
+/// must be reset before further use, never silently continued on stale bytes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum KvTruth {
+    /// The host `past_k`/`past_v` buffers are current (legacy plans always).
+    Host,
+    /// The step runner carries the truth as resident κ-labels.
+    Step,
+    /// The prefill seeder carries the truth as resident κ-labels.
+    Seeder,
+    /// A resident walk failed mid-flight; the carried truth may be lost.
+    Poisoned,
 }
 
 /// Bytes for one layer's carried K (or V) buffer: `kv_heads · bucket ·
@@ -709,7 +776,29 @@ impl<S: LmSession> DecodeSession<S> {
                 tokens: Vec::new(),
                 steps: 0,
             },
+            truth: KvTruth::Host,
         })
+    }
+
+    /// Materialize any runner-resident K/V carry back into the host buffers —
+    /// the truth boundary before anything reads `past_k`/`past_v` bytes.
+    /// Fails loud on a poisoned carry rather than continuing on stale bytes.
+    fn sync_truth(&mut self) -> Result<()> {
+        match self.truth {
+            KvTruth::Host => {}
+            KvTruth::Step => self.state.sync_kv_carry(&mut self.runner, self.geom)?,
+            KvTruth::Seeder => {
+                if let Some((seeder, sgeom)) = self.seeder.as_mut() {
+                    self.state.sync_kv_carry(seeder, *sgeom)?;
+                }
+            }
+            KvTruth::Poisoned => bail!(
+                "the carried K/V was lost by a failed resident decode walk — \
+                 reset the session before continuing"
+            ),
+        }
+        self.truth = KvTruth::Host;
+        Ok(())
     }
 
     /// Attach a rebuild source so bucket exhaustion regrows geometrically
@@ -756,7 +845,10 @@ impl<S: LmSession> DecodeSession<S> {
     /// produced is committed, with `step`/`feed`. The verify runner shares this session's
     /// decode geometry (same bucket/layers/heads); its chunk is the draft
     /// length `K`, so `tokens.len() ≤ K`.
-    pub fn verify(&self, verify_runner: &mut S, tokens: &[i64]) -> Result<Vec<Vec<f32>>> {
+    pub fn verify(&mut self, verify_runner: &mut S, tokens: &[i64]) -> Result<Vec<Vec<f32>>> {
+        // The verify runner binds the host K/V bytes — materialize any
+        // resident carry first (truth boundary).
+        self.sync_truth()?;
         let geom = self.verify_geometry(verify_runner, tokens.len())?;
         self.state.verify_pass(verify_runner, geom, tokens)
     }
@@ -779,6 +871,10 @@ impl<S: LmSession> DecodeSession<S> {
         draft: &[i64],
         next_token: &mut dyn FnMut(&[f32], u64) -> i64,
     ) -> Result<(Vec<i64>, i64)> {
+        // The verify runner binds — and its accepted-prefix commit writes —
+        // the host K/V bytes: materialize any resident carry first. The host
+        // stays the truth afterwards (the next step re-ingests once).
+        self.sync_truth()?;
         let geom = self.verify_geometry(verify_runner, draft.len())?;
         self.state
             .draft_verify(verify_runner, geom, prev_row, draft, next_token)
@@ -875,6 +971,10 @@ impl<S: LmSession> DecodeSession<S> {
                 self.geom.bucket
             );
         }
+        // The widen below reads the host K/V bytes, and both carriers are
+        // dropped/replaced by the rebuild — materialize any resident carry
+        // first (truth boundary).
+        self.sync_truth()?;
         // The next bucket comes from the SAME geometric policy the rebuild
         // closure uses (`engine::geometric_window`), so the rebuilt runner's
         // bucket matches `new_bucket` by construction — never a re-implemented
@@ -958,11 +1058,34 @@ impl<S: LmSession> DecodeSession<S> {
         Ok(())
     }
 
-    /// One decode step: feed `token` at the next absolute position, splice
-    /// the step's K/V rows into the past buffers, and return the logit row.
+    /// One decode step: feed `token` at the next absolute position and return
+    /// the logit row. On a resident-KV plan the updated caches stay inside the
+    /// step runner as κ-labels between steps (no re-hash, no copy — the ring
+    /// write moves in place); legacy plans splice into the host buffers.
     pub fn step(&mut self, token: i64) -> Result<Vec<f32>> {
         self.ensure_capacity(1)?;
-        self.state.pass(&mut self.runner, self.geom, &[token])
+        // Hand-off: if the seeder carries the truth (a resident prefill just
+        // ran), materialize once so this runner ingests current bytes.
+        if self.truth == KvTruth::Seeder {
+            self.sync_truth()?;
+        }
+        ensure!(
+            self.truth != KvTruth::Poisoned,
+            "the carried K/V was lost by a failed resident decode walk — reset the session"
+        );
+        let carry = self.geom.resident_kv && self.truth == KvTruth::Step;
+        if self.geom.resident_kv {
+            self.truth = KvTruth::Poisoned; // until the walk returns
+        }
+        let row = self
+            .state
+            .pass(&mut self.runner, self.geom, &[token], carry)?;
+        self.truth = if self.geom.resident_kv {
+            KvTruth::Step
+        } else {
+            KvTruth::Host
+        };
+        Ok(row)
     }
 
     /// Feed `tokens` at the next absolute positions and return the logit row
@@ -983,16 +1106,54 @@ impl<S: LmSession> DecodeSession<S> {
             };
             self.ensure_capacity(take)?;
             let (now, later) = rest.split_at(take.min(rest.len()));
-            row = Some(match self.seeder.as_mut() {
-                Some((seeder, sgeom)) if now.len() >= 2 => self.state.pass(seeder, *sgeom, now)?,
-                _ => {
-                    // One position at a time on the step plan.
-                    let mut last = None;
-                    for &t in now {
-                        last = Some(self.state.pass(&mut self.runner, self.geom, &[t])?);
-                    }
-                    last.expect("now is non-empty")
+            let use_seeder = self.seeder.is_some() && now.len() >= 2;
+            row = Some(if use_seeder {
+                // Hand-off: if the STEP runner carries the truth, materialize
+                // once so the seeder ingests current bytes.
+                if self.truth == KvTruth::Step {
+                    self.sync_truth()?;
                 }
+                ensure!(
+                    self.truth != KvTruth::Poisoned,
+                    "the carried K/V was lost by a failed resident decode walk — reset the session"
+                );
+                let (seeder, sgeom) = self.seeder.as_mut().expect("checked above");
+                let carry = sgeom.resident_kv && self.truth == KvTruth::Seeder;
+                let resident = sgeom.resident_kv;
+                let sgeom = *sgeom;
+                if resident {
+                    self.truth = KvTruth::Poisoned;
+                }
+                let r = self.state.pass(seeder, sgeom, now, carry)?;
+                self.truth = if resident {
+                    KvTruth::Seeder
+                } else {
+                    KvTruth::Host
+                };
+                r
+            } else {
+                // One position at a time on the step plan.
+                let mut last = None;
+                for &t in now {
+                    if self.truth == KvTruth::Seeder {
+                        self.sync_truth()?;
+                    }
+                    ensure!(
+                        self.truth != KvTruth::Poisoned,
+                        "the carried K/V was lost by a failed resident decode walk — reset the session"
+                    );
+                    let carry = self.geom.resident_kv && self.truth == KvTruth::Step;
+                    if self.geom.resident_kv {
+                        self.truth = KvTruth::Poisoned;
+                    }
+                    last = Some(self.state.pass(&mut self.runner, self.geom, &[t], carry)?);
+                    self.truth = if self.geom.resident_kv {
+                        KvTruth::Step
+                    } else {
+                        KvTruth::Host
+                    };
+                }
+                last.expect("now is non-empty")
             });
             rest = later;
         }

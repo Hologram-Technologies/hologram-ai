@@ -104,6 +104,33 @@ pub trait LmSession {
     /// of graph input `i`; returns the output buffers in graph-output order.
     fn execute(&mut self, inputs: &[&[u8]]) -> Result<Vec<OutputBuffer>>;
 
+    /// One fused-decode walk with the carried K/V resident in the session
+    /// (ADR-0019): KV input ports bind the labels retained from the previous
+    /// resident walk (no re-hash, no copy; the κ120 write moves in place) and
+    /// KV outputs stay unmaterialized (`None`). `carry = false` ingests the
+    /// passed KV bytes once and starts a fresh carry — pass it on the first
+    /// walk and whenever the host bytes are the truth (seeder prefill,
+    /// speculative commit, regrow, or after a failed walk).
+    ///
+    /// The default is the plain byte path — correct everywhere, resident
+    /// nowhere — so a session type gains the optimization by overriding, never
+    /// by obligation.
+    fn execute_kv_resident(
+        &mut self,
+        inputs: &[&[u8]],
+        carry: bool,
+    ) -> Result<Vec<Option<OutputBuffer>>> {
+        let _ = carry;
+        Ok(self.execute(inputs)?.into_iter().map(Some).collect())
+    }
+
+    /// Materialize the session-resident K/V carry back to host bytes, keyed by
+    /// the consuming input port (`past_k_l`/`past_v_l`), clearing the carry.
+    /// Empty for a session that never carried (the default).
+    fn take_kv_carry(&mut self) -> Result<Vec<(String, Vec<u8>)>> {
+        Ok(Vec::new())
+    }
+
     /// Kernels dispatched by the most recent forward pass (class CE — the
     /// decode attribution instrument). `0` when the session doesn't count.
     fn pass_dispatched(&self) -> u64 {
@@ -149,6 +176,18 @@ impl LmSession for HoloRunner {
 
     fn execute(&mut self, inputs: &[&[u8]]) -> Result<Vec<OutputBuffer>> {
         HoloRunner::execute(self, inputs)
+    }
+
+    fn execute_kv_resident(
+        &mut self,
+        inputs: &[&[u8]],
+        carry: bool,
+    ) -> Result<Vec<Option<OutputBuffer>>> {
+        HoloRunner::execute_kv_resident(self, inputs, carry)
+    }
+
+    fn take_kv_carry(&mut self) -> Result<Vec<(String, Vec<u8>)>> {
+        HoloRunner::take_kv_carry(self)
     }
 
     fn pass_dispatched(&self) -> u64 {
