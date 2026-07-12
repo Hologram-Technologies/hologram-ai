@@ -1910,7 +1910,7 @@ fn build_chunk_graph_with(recipe: &DecoderRecipe, bucket: u64, chunk: u64) -> Re
     builder.add_output(logits, "logits");
 
     let mut graph = builder.build();
-    let rewrite = rewrite_decode_attention(&mut graph, bucket, chunk, 0)?;
+    let rewrite = rewrite_decode_attention(&mut graph, bucket, chunk, 0, false)?;
     ensure!(
         rewrite.layers as u64 == recipe.cfg.num_hidden_layers,
         "decode rewrite touched {} attention nodes, expected {} layers",
@@ -2136,7 +2136,7 @@ fn assemble_stage_graphs(
             // Decompose this stage's fused attention over the carried past —
             // absolute layer indices, so the pipeline's K/V port names are
             // the model's layer numbers regardless of the partition.
-            let rewrite = rewrite_decode_attention(&mut graph, bucket, chunk, start as usize)?;
+            let rewrite = rewrite_decode_attention(&mut graph, bucket, chunk, start as usize, false)?;
             ensure!(
                 rewrite.layers as u64 == end - start,
                 "decode rewrite touched {} attention nodes in stage {s}, expected {}",
