@@ -2136,7 +2136,8 @@ fn assemble_stage_graphs(
             // Decompose this stage's fused attention over the carried past —
             // absolute layer indices, so the pipeline's K/V port names are
             // the model's layer numbers regardless of the partition.
-            let rewrite = rewrite_decode_attention(&mut graph, bucket, chunk, start as usize, false)?;
+            let rewrite =
+                rewrite_decode_attention(&mut graph, bucket, chunk, start as usize, false)?;
             ensure!(
                 rewrite.layers as u64 == end - start,
                 "decode rewrite touched {} attention nodes in stage {s}, expected {}",
