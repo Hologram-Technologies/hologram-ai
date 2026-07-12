@@ -4664,7 +4664,7 @@ async fn when_verify_chunked(w: &mut BddWorld) {
         &shapes,
         &store.path,
     );
-    let mono_session = DecodeSession::new(
+    let mut mono_session = DecodeSession::new(
         HoloRunner::from_bytes(mono_decode).expect("mono decode loads"),
         theta,
         STG_WINDOW,
@@ -4685,7 +4685,7 @@ async fn when_verify_chunked(w: &mut BddWorld) {
     )
     .expect("staged verify compiles");
     let head_chunks = verify_stages.len() as u64 - (STG_LAYERS + 1);
-    let staged_session = DecodeSession::new(
+    let mut staged_session = DecodeSession::new(
         StagedRunner::from_archives(staged_decode, Box::new(DirKappaStore::new(&store.path)))
             .expect("staged decode runner"),
         theta,

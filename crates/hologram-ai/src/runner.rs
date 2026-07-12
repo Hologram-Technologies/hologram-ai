@@ -38,6 +38,13 @@ pub struct PortInfo {
 pub struct HoloRunner {
     /// The execution session (owns its decoded plan + buffer pool).
     session: InferenceSession<CpuBackend<BufferArena>>,
+    /// Resident-KV carry (ADR-0019 increment 3b): the κ-labels of the previous
+    /// resident decode walk's updated caches, keyed by the INPUT port that
+    /// consumes them next walk (`past_k_l`/`past_v_l`). Leased between walks
+    /// (residency by ownership — an interleaved walk on this session cannot age
+    /// them out); the lease is released at bind time so the κ120 ring write
+    /// regains sole ownership and MOVES in place. Empty = no carry.
+    kv_carry: std::collections::HashMap<String, ContentLabel>,
 }
 
 /// Process-global walk serialization — the substrate's implicit contract made
@@ -74,7 +81,10 @@ impl HoloRunner {
         let session = InferenceSession::load(&bytes, backend)
             .map_err(|e| anyhow::anyhow!("loading .holo archive: {e:?}"))?;
         drop(bytes);
-        Ok(Self { session })
+        Ok(Self {
+            session,
+            kv_carry: Default::default(),
+        })
     }
 
     /// Load a runner from a `.holo` file. (`_config` is accepted for CLI
@@ -102,7 +112,10 @@ impl HoloRunner {
         let session = InferenceSession::load_paged(&bytes, backend, provider, budget)
             .map_err(|e| anyhow::anyhow!("loading paged .holo archive: {e:?}"))?;
         drop(bytes);
-        Ok(Self { session })
+        Ok(Self {
+            session,
+            kv_carry: Default::default(),
+        })
     }
 
     /// Build a paged runner directly from a k-form archive and its κ-store: turn
@@ -237,6 +250,136 @@ impl HoloRunner {
     /// for reading a result produced by [`Self::execute_addressed`].
     pub fn resolve(&self, label: &ContentLabel) -> Option<&[u8]> {
         self.session.resolve(label)
+    }
+
+    /// One fused-decode walk with the carried K/V **resident in the runner**
+    /// (ADR-0019 increment 3b). KV input ports (`past_k_*`/`past_v_*`) bind the
+    /// κ-labels retained from this runner's previous resident walk — **no byte
+    /// re-hash, no copy**, and the κ120 ring write realizes as an in-place
+    /// move — while KV output ports (`k_new_*`/`v_new_*`) stay unmaterialized
+    /// (retained + leased for the next walk) and return `None`. Non-KV outputs
+    /// (logits, activations) are materialized as usual.
+    ///
+    /// `carry` declares the runner-carried KV **current**. Pass `false` on the
+    /// first walk and whenever the host's KV bytes are the truth (after a
+    /// seeder prefill, a speculative commit from another runner, or a bucket
+    /// regrow): the passed KV bytes are then ingested once (one hash) and a
+    /// fresh carry starts. Every input buffer must be supplied either way —
+    /// carried KV positions are simply not read when `carry` is true. If a
+    /// walk fails, the carry must be treated as broken: re-enter with
+    /// `carry = false`.
+    pub fn execute_kv_resident(
+        &mut self,
+        inputs: &[&[u8]],
+        carry: bool,
+    ) -> anyhow::Result<Vec<Option<OutputBuffer>>> {
+        let in_ports = self.input_port_info();
+        ensure!(
+            inputs.len() == in_ports.len(),
+            "resident walk got {} inputs for {} ports",
+            inputs.len(),
+            in_ports.len()
+        );
+        // Bind: carried KV by retained label (released at bind so the ring
+        // write regains sole ownership and moves), everything else interned.
+        let mut labels = Vec::with_capacity(inputs.len());
+        let mut consumed: Vec<String> = Vec::new();
+        for (i, port) in in_ports.iter().enumerate() {
+            let is_kv = port.name.starts_with("past_k_") || port.name.starts_with("past_v_");
+            if is_kv && carry {
+                let label = *self.kv_carry.get(&port.name).with_context(|| {
+                    format!(
+                        "carry declared current but no retained cache label for `{}` — \
+                         re-enter with carry = false",
+                        port.name
+                    )
+                })?;
+                self.session.release_label(&label);
+                consumed.push(port.name.clone());
+                labels.push(label);
+            } else {
+                labels.push(self.session.intern_input(inputs[i]));
+            }
+        }
+        // Any carry entries NOT consumed this walk (a fresh ingest after a
+        // seeder/commit/regrow) still hold a lease — release them, the host
+        // bytes are the truth now.
+        if !carry {
+            for (_, stale) in self.kv_carry.drain() {
+                self.session.release_label(&stale);
+            }
+        }
+
+        let out_labels = {
+            let _walk = walk_lock();
+            self.session
+                .execute_addressed(&labels)
+                .map_err(|e| anyhow::anyhow!("resident decode walk failed: {e:?}"))?
+        };
+
+        // Outputs: retain + lease the updated caches under their NEXT-walk
+        // input port names; materialize everything else.
+        let out_ports = self.output_port_info();
+        ensure!(
+            out_labels.len() == out_ports.len(),
+            "resident walk returned {} outputs for {} ports",
+            out_labels.len(),
+            out_ports.len()
+        );
+        let mut new_carry = std::collections::HashMap::with_capacity(4);
+        let mut result = Vec::with_capacity(out_labels.len());
+        for (label, port) in out_labels.iter().zip(&out_ports) {
+            let next_in = port
+                .name
+                .strip_prefix("k_new_")
+                .map(|l| format!("past_k_{l}"))
+                .or_else(|| {
+                    port.name
+                        .strip_prefix("v_new_")
+                        .map(|l| format!("past_v_{l}"))
+                });
+            match next_in {
+                Some(name) => {
+                    ensure!(
+                        self.session.retain_label(label),
+                        "updated cache `{}` is not resident — cannot carry",
+                        port.name
+                    );
+                    new_carry.insert(name, *label);
+                    result.push(None);
+                }
+                None => {
+                    let bytes = self
+                        .session
+                        .resolve(label)
+                        .with_context(|| format!("output `{}` did not resolve", port.name))?
+                        .to_vec();
+                    result.push(Some(OutputBuffer { bytes }));
+                }
+            }
+        }
+        self.kv_carry = new_carry;
+        Ok(result)
+    }
+
+    /// Materialize the runner-resident K/V carry back to host bytes, keyed by
+    /// the input port that would consume each cache (`past_k_l`/`past_v_l`).
+    /// The boundary crossing for everything that needs the bytes host-side —
+    /// a speculative verify on another runner, a bucket regrow — after which
+    /// the caller owns the truth and must re-enter with `carry = false`.
+    /// Leases are released; the carry is cleared.
+    pub fn take_kv_carry(&mut self) -> anyhow::Result<Vec<(String, Vec<u8>)>> {
+        let mut out = Vec::with_capacity(self.kv_carry.len());
+        for (name, label) in std::mem::take(&mut self.kv_carry) {
+            let bytes = self
+                .session
+                .resolve(&label)
+                .with_context(|| format!("carried cache `{name}` did not resolve"))?
+                .to_vec();
+            self.session.release_label(&label);
+            out.push((name, bytes));
+        }
+        Ok(out)
     }
 
     // ── κ-leases: residency by ownership, not recency (v0.9.0) ────────────────

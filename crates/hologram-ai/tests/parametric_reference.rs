@@ -546,7 +546,7 @@ fn verify_pass_logits_match_reference_per_position() {
     let k = toks.len() as u64;
     let bucket = 8u64; // ≥ K: the fresh session's past is empty.
 
-    let session = decode_session(bucket);
+    let mut session = decode_session(bucket);
     let mut verify = HoloRunner::from_bytes(compile(build_verify_graph(bucket, k)))
         .expect("verify archive loads");
     let rows = session
