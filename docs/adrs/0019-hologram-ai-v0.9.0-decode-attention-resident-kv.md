@@ -95,6 +95,42 @@ new, pos, output, bucket_rows, new_rows, planes, row_bytes }` (κ discriminant
   gained `q_rows, past_len, new_len, kv_bucket_rows, kv_new_rows, kv_planes,
   kv_row_bytes`.
 
+### κ-leases — residency by ownership (PR #41 head `f2f864b`)
+
+The "κ-leases, pinned total, flow law, exact confinement" commit adds the residency
+primitive our driver + residency ledger need — the substrate applying the UOR
+driftless-torus discipline (`docs/numerics/invariance.md`) to the pool:
+
+- `InferenceSession::retain_label(&ContentLabel) -> bool` / `release_label(...) ->
+  bool` — **residency by ownership, not recency**: a leased value survives every
+  walk until released (refcounted). The **ownership law**: a lease is a *borrow*,
+  so `KvCacheWrite` on a leased cache **declines the in-place move and takes the
+  honest copy** — the leased pre-image survives bit-intact. Releasing the last
+  lease restores the move.
+- `InferenceSession::pool_allocated_bytes() -> usize` — **the exact confinement
+  metric.** A steady-state decode loop holds this *constant* (O(1) memory/step);
+  we read it directly for the residency ledger instead of host-side estimation
+  (the source of three prior over-commits). `leased_count()` for lease bookkeeping.
+- This is precisely the two things our decode needs beyond one step's outputs:
+  **speculative rollback** (lease pre-state → draft step by honest copy → accept
+  ⇒ `release_label` and the next step moves; reject ⇒ re-step from the intact
+  pre-image) and **draft-pairing** (a second session's KV parked across the main's
+  walks — our `share_residency_with`, now a lease). Contract witnessed upstream by
+  `tests/lease.rs`, `tests/confinement.rs`, `tests/flow_law.rs`.
+
+### The invariance ladder — what "byte-identical" we may claim
+
+Per `docs/numerics/invariance.md`, our witnesses obey the rung law:
+- **Integer paths** are codec-invariant, schedule-independent, **and cross-lane
+  machine-invariant** (exact i32 accumulation).
+- **f32 within one lane** is structure-pinned bit-identity: pooled == serial,
+  **split-KV == precatenated**, padded == tight, **moved == copied**, chunked ==
+  sequential — all exact **on one target**. Our fused-vs-legacy decode witness is
+  an f32 path, so it runs **natively on a single lane**; it is NOT a cross-lane
+  claim.
+- **f32 across lanes is a non-claim** (wasm SIMD128 has no FMA). No witness asserts
+  cross-lane f32 bit-identity.
+
 ### The step graph (per layer), from `addressed_decode_timing.rs`
 
 ```
@@ -166,9 +202,17 @@ memory). The change is a *net simplification*:
 
 - The resident cache lives in the substrate `BufferArena`, **O(bucket) fixed** per
   layer × 2 planes — the κ-move mutates in place, so it does **not** grow with
-  context and the `Concat` no longer doubles it transiently. Account exactly this
-  (one cache per plane per layer) in the shared residency ledger; the host `Vec`
-  bytes it replaces are removed from the ledger.
+  context and the `Concat` no longer doubles it transiently. **Read
+  `pool_allocated_bytes()` for the ledger** — the exact substrate-reported resident
+  footprint — instead of host-side estimation (the estimation error is what
+  over-committed three times). The host `Vec` bytes it replaces are removed from
+  the ledger.
+- **Speculative verify / draft-pairing use κ-leases, not the host splice.** Verify
+  (`m=K`) leases the pre-image cache labels, drafts by honest copy (pre-image
+  intact), and on accept `release_label`s so the accepted step moves; on reject it
+  re-steps from the intact pre-image — the substrate ownership law replaces our
+  host-side accept/reject bookkeeping. Draft-pairing leases the parked second-model
+  KV (superseding the ad-hoc `share_residency_with`).
 - **Bucket-growth** (`decode.rs grow()`) simplifies: `KvCacheWrite` is fixed-bucket
   with ring wrap, so growth still rebuilds at a wider bucket, but it now evicts +
   re-interns the resident cache labels (retire old, intern widened) rather than
@@ -189,17 +233,23 @@ No claim ships without a witness that fails if the claim is false ([[dark-gates]
 1. **Byte-identical migration.** New fused-form decode logits == the legacy
    `Concat/Transpose/softmax` decode logits, bit-for-bit, per family (Llama /
    Qwen2 / Mistral / Phi3). This is the load-bearing "we changed the schedule, not
-   the numbers" witness — extend `decode_family_coverage.rs`.
+   the numbers" witness — extend `decode_family_coverage.rs`. **Rung 2: run on one
+   native lane** (f32), never a cross-lane claim.
 2. **Addressed == byte.** `execute_addressed` caches == `execute` caches bit-for-bit
-   (mirror the substrate's `tests/kv_cache_write.rs` at our layer).
-3. **Residency no-over-commit.** A witness (in the spirit of
-   `decode_growth_residency.rs`) that the resident cache is accounted and the
-   ledger never over-commits the 4 GiB space across seeder + step + verify + a
-   bucket-growth transition — **fails-without** the eviction discipline.
-4. **Re-hash removed, measured.** A driver-level bench (extend
+   (mirror the substrate's `tests/kv_cache_write.rs` at our layer): the
+   `KvCacheWrite` move produces the same bytes as the honest copy.
+3. **Confinement (residency no-over-commit).** `pool_allocated_bytes()` is
+   **constant** across a steady-state decode loop (O(1)/step) and the ledger never
+   over-commits the 4 GiB space across seeder + step + verify + a bucket-growth
+   transition — **fails-without** the eviction/lease discipline (spirit of
+   `decode_growth_residency.rs` + the substrate's `confinement.rs`).
+4. **Lease rollback.** Speculative reject re-steps from a bit-intact leased
+   pre-image; accept releases and the next step moves (`last_dispatched()` flips
+   copy→move) — the accept/reject primitive, witnessed at our layer.
+5. **Re-hash removed, measured.** A driver-level bench (extend
    `kv_rehash_cost.rs` / port `addressed_decode_timing.rs`) showing the per-token
    O(bucket) hash is gone on the addressed path.
-5. **Single masking authority.** We never emit a `causal` attr on the 6-input node
+6. **Single masking authority.** We never emit a `causal` attr on the 6-input node
    (assert at emit); the compiler would reject it anyway.
 
 ## Pin-flip readiness
