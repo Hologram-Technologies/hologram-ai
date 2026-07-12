@@ -52,6 +52,10 @@ pub const DECODE_ROPE_COS_K_PORT: &str = "rope_cos_k";
 pub const DECODE_ROPE_SIN_K_PORT: &str = "rope_sin_k";
 /// Additive decode mask (`[g·C, bucket+C]` f32).
 pub const DECODE_MASK_PORT: &str = "decode_mask";
+/// Runtime ring-write position (`cur_len`) for the v0.9.0 resident-KV form: a
+/// single INT32 operand shared by every layer's `KvCacheWrite`. Content, not
+/// structure — one compiled step-graph serves every step (ADR-0019).
+pub const DECODE_POS_PORT: &str = "decode_pos";
 
 /// Named input port carrying layer `l`'s past keys (`[kv, bucket, head_dim]`).
 pub fn past_key_port(layer: usize) -> String {
@@ -315,6 +319,166 @@ impl<'g> Emitter<'g> {
         self.node(AiOp::MatMul, vec![probs, vals], vec![out_j]);
         out_j
     }
+
+    /// Restore a head-major attention result (`src`, either flat `[h·C, dh]` or
+    /// `[1, h, C, dh]` — same element count) to the fused node's own output
+    /// tensor `out_tid`: a bare reshape when the model is heads-first, else a
+    /// `[chunk, h, dh]` transpose back to the interleaved layout.
+    #[allow(clippy::too_many_arguments)]
+    fn restore_head_output(
+        &mut self,
+        src: TensorId,
+        out_tid: TensorId,
+        h: u64,
+        chunk: u64,
+        dh: u64,
+        heads_first: bool,
+        layer: usize,
+    ) {
+        if heads_first {
+            self.node(
+                AiOp::Reshape { allow_zero: false },
+                vec![src],
+                vec![out_tid],
+            );
+        } else {
+            let hf3 = self.tensor(&format!("dout_hf_{layer}"), DType::F32, &[h, chunk, dh]);
+            self.node(AiOp::Reshape { allow_zero: false }, vec![src], vec![hf3]);
+            let pm3 = self.tensor(&format!("dout_pm_{layer}"), DType::F32, &[chunk, h, dh]);
+            self.node(
+                AiOp::Transpose {
+                    perm: vec![1, 0, 2],
+                },
+                vec![hf3],
+                vec![pm3],
+            );
+            self.node(
+                AiOp::Reshape { allow_zero: false },
+                vec![pm3],
+                vec![out_tid],
+            );
+        }
+    }
+
+    /// Legacy per-group SDPA decomposition + head-major carried-K/V outputs
+    /// (the NEW rows only; the driver splices them into the host cache). This is
+    /// the substrate-version-agnostic path, unchanged in behavior.
+    #[allow(clippy::too_many_arguments)]
+    fn emit_legacy_attention(
+        &mut self,
+        q_r: TensorId,
+        k_r: TensorId,
+        v_flat: TensorId,
+        v_hf3: TensorId,
+        past_k: TensorId,
+        past_v: TensorId,
+        mask: TensorId,
+        out_tid: TensorId,
+        scale: Option<f32>,
+        h: u64,
+        kv: u64,
+        g: u64,
+        chunk: u64,
+        bucket: u64,
+        dh: u64,
+        heads_first: bool,
+        layer: usize,
+    ) {
+        // Attention scale folded into q once.
+        let scale_val = scale.unwrap_or(1.0 / (dh as f32).sqrt());
+        let scale_c = self.const_f32(&format!("dscale_{layer}"), &[scale_val], &[1, 1]);
+        let q_s = self.tensor(&format!("dq_scaled_{layer}"), DType::F32, &[h * chunk, dh]);
+        self.node(AiOp::Mul, vec![q_r, scale_c], vec![q_s]);
+
+        let span = bucket + chunk;
+        let mut group_outs = Vec::with_capacity(kv as usize);
+        for j in 0..kv {
+            group_outs.push(self.emit_kv_group_attention(
+                q_s, past_k, past_v, k_r, v_flat, mask, j, g, chunk, bucket, dh, span, layer,
+            ));
+        }
+        // Chain-concat the kv groups (head-major) → [h·C, dh].
+        let mut acc = group_outs[0];
+        for (j, &t) in group_outs.iter().enumerate().skip(1) {
+            let rows = (j as u64 + 1) * g * chunk;
+            let cat = self.tensor(&format!("dcat_l{layer}_{j}"), DType::F32, &[rows, dh]);
+            self.node(AiOp::Concat { axis: 0 }, vec![acc, t], vec![cat]);
+            acc = cat;
+        }
+        self.restore_head_output(acc, out_tid, h, chunk, dh, heads_first, layer);
+
+        // Carried K/V rows leave head-major ([kv, C, dh]) so the engine's
+        // per-head splice is contiguous.
+        let k_out = self.tensor(&format!("dknew_{layer}"), DType::F32, &[kv, chunk, dh]);
+        self.node(AiOp::Reshape { allow_zero: false }, vec![k_r], vec![k_out]);
+        self.output(k_out, &new_key_port(layer));
+        self.output(v_hf3, &new_value_port(layer));
+    }
+
+    /// The v0.9.0 fused **split-KV** decode attention (`DecodeAttention`, κ119)
+    /// plus two `KvCacheWrite` ring updates (κ120). Fully parametric: every dim
+    /// derives from the node, and the model's scale is honored for ANY head_dim.
+    /// The kernel applies `1/√dh` internally (`scale_bits` 0 — the default and
+    /// the common case, so q is untouched); a model-declared non-default scale
+    /// `s` is folded into q as `f = s·√dh`, giving effective scale exactly `s`.
+    /// The carried-K/V ports now carry the WHOLE updated cache (the driver binds
+    /// it by κ-label next step, no host splice).
+    #[allow(clippy::too_many_arguments)]
+    fn emit_fused_attention(
+        &mut self,
+        q_r: TensorId,
+        k_r: TensorId,
+        v_flat: TensorId,
+        past_k: TensorId,
+        past_v: TensorId,
+        mask: TensorId,
+        pos: TensorId,
+        out_tid: TensorId,
+        scale: Option<f32>,
+        h: u64,
+        kv: u64,
+        chunk: u64,
+        bucket: u64,
+        dh: u64,
+        heads_first: bool,
+        layer: usize,
+    ) {
+        let q_pre = match scale {
+            None => q_r,
+            Some(s) => {
+                let f = s * (dh as f32).sqrt();
+                let fc = self.const_f32(&format!("dscale_{layer}"), &[f], &[1, 1]);
+                let qs = self.tensor(&format!("dq_scaled_{layer}"), DType::F32, &[h * chunk, dh]);
+                self.node(AiOp::Mul, vec![q_r, fc], vec![qs]);
+                qs
+            }
+        };
+        // Head-major flat → rank-4 [1, heads, chunk, dh] the kernel expects.
+        let q4 = self.tensor(&format!("dq4_{layer}"), DType::F32, &[1, h, chunk, dh]);
+        self.node(AiOp::Reshape { allow_zero: false }, vec![q_pre], vec![q4]);
+        let kn4 = self.tensor(&format!("dkn4_{layer}"), DType::F32, &[1, kv, chunk, dh]);
+        self.node(AiOp::Reshape { allow_zero: false }, vec![k_r], vec![kn4]);
+        let vn4 = self.tensor(&format!("dvn4_{layer}"), DType::F32, &[1, kv, chunk, dh]);
+        self.node(AiOp::Reshape { allow_zero: false }, vec![v_flat], vec![vn4]);
+
+        // One pooled split-KV masked attention over [past ∥ chunk].
+        let attn4 = self.tensor(&format!("dattn_{layer}"), DType::F32, &[1, h, chunk, dh]);
+        self.node(
+            AiOp::DecodeAttention,
+            vec![q4, past_k, past_v, kn4, vn4, mask],
+            vec![attn4],
+        );
+        self.restore_head_output(attn4, out_tid, h, chunk, dh, heads_first, layer);
+
+        // Ring-write the new rows; the UPDATED full caches leave through the
+        // carried-K/V ports (bound by label next step — no host splice).
+        let k_upd = self.tensor(&format!("dkupd_{layer}"), DType::F32, &[1, kv, bucket, dh]);
+        self.node(AiOp::KvCacheWrite, vec![past_k, kn4, pos], vec![k_upd]);
+        self.output(k_upd, &new_key_port(layer));
+        let v_upd = self.tensor(&format!("dvupd_{layer}"), DType::F32, &[1, kv, bucket, dh]);
+        self.node(AiOp::KvCacheWrite, vec![past_v, vn4, pos], vec![v_upd]);
+        self.output(v_upd, &new_value_port(layer));
+    }
 }
 
 /// The concrete `[u64]` shape of a tensor, or an error naming the port.
@@ -346,6 +510,7 @@ pub fn rewrite_decode_attention(
     bucket: u64,
     chunk: u64,
     layer_base: usize,
+    resident_kv: bool,
 ) -> Result<DecodeRewrite> {
     ensure!(bucket > 0, "decode bucket must be non-empty");
     ensure!(chunk > 0, "decode chunk must be non-empty");
@@ -362,8 +527,17 @@ pub fn rewrite_decode_attention(
     }
 
     let mut em = Emitter::new(graph);
-    // (cos_q, sin_q, cos_k, sin_k, mask, head_dim)
-    let mut shared: Option<(TensorId, TensorId, TensorId, TensorId, TensorId, u64)> = None;
+    // (cos_q, sin_q, cos_k, sin_k, mask, pos, head_dim) — `pos` is 0/unused in
+    // the legacy path, the runtime ring-write position in the resident-KV path.
+    let mut shared: Option<(
+        TensorId,
+        TensorId,
+        TensorId,
+        TensorId,
+        TensorId,
+        TensorId,
+        u64,
+    )> = None;
     let mut report: Option<DecodeRewrite> = None;
     // node vec position → replacement nodes (spliced in place, preserving order).
     let mut replacements: Vec<(usize, Vec<AiNode>)> = Vec::new();
@@ -413,24 +587,47 @@ pub fn rewrite_decode_attention(
              {q_dims:?}, expected {expected:?}"
         );
 
-        // Shared runtime ports, created at the first attention node.
-        let (cos_q, sin_q, cos_k, sin_k, mask, shared_dh) = *shared.get_or_insert_with(|| {
-            let cos_q = em.input(DECODE_ROPE_COS_Q_PORT, DType::F32, &[h * chunk, dh]);
-            let sin_q = em.input(DECODE_ROPE_SIN_Q_PORT, DType::F32, &[h * chunk, dh]);
-            let cos_k = em.input(DECODE_ROPE_COS_K_PORT, DType::F32, &[kv * chunk, dh]);
-            let sin_k = em.input(DECODE_ROPE_SIN_K_PORT, DType::F32, &[kv * chunk, dh]);
-            let mask = em.input(DECODE_MASK_PORT, DType::F32, &[g * chunk, bucket + chunk]);
-            (cos_q, sin_q, cos_k, sin_k, mask, dh)
-        });
+        // Shared runtime ports, created at the first attention node. The mask is
+        // the sole visibility authority; its rows are the query positions. The
+        // legacy per-group decomposition replicates them per group (`g·chunk`
+        // rows), while the fused kernel groups internally and applies one
+        // per-position mask (`chunk` rows) — and adds a runtime `pos` operand for
+        // the ring write. `pos` is unused (id 0) in the legacy path.
+        let (cos_q, sin_q, cos_k, sin_k, mask, pos_port, shared_dh) =
+            *shared.get_or_insert_with(|| {
+                let cos_q = em.input(DECODE_ROPE_COS_Q_PORT, DType::F32, &[h * chunk, dh]);
+                let sin_q = em.input(DECODE_ROPE_SIN_Q_PORT, DType::F32, &[h * chunk, dh]);
+                let cos_k = em.input(DECODE_ROPE_COS_K_PORT, DType::F32, &[kv * chunk, dh]);
+                let sin_k = em.input(DECODE_ROPE_SIN_K_PORT, DType::F32, &[kv * chunk, dh]);
+                if resident_kv {
+                    let mask = em.input(DECODE_MASK_PORT, DType::F32, &[chunk, bucket + chunk]);
+                    let pos = em.input(DECODE_POS_PORT, DType::INT32, &[1]);
+                    (cos_q, sin_q, cos_k, sin_k, mask, pos, dh)
+                } else {
+                    let mask = em.input(DECODE_MASK_PORT, DType::F32, &[g * chunk, bucket + chunk]);
+                    (cos_q, sin_q, cos_k, sin_k, mask, 0, dh)
+                }
+            });
         ensure!(
             shared_dh == dh,
             "attention head_dim varies across layers ({shared_dh} vs {dh} at layer {layer}) — \
              the shared rope tables cannot serve both"
         );
 
-        // Per-layer carried K/V ports.
-        let past_k = em.input(&past_key_port(layer), DType::F32, &[kv, bucket, dh]);
-        let past_v = em.input(&past_value_port(layer), DType::F32, &[kv, bucket, dh]);
+        // Per-layer carried K/V ports. The fused kernel takes rank-4
+        // `[1, kv, bucket, dh]`; the legacy decomposition slices a rank-3
+        // `[kv, bucket, dh]` per group.
+        let (past_k, past_v) = if resident_kv {
+            (
+                em.input(&past_key_port(layer), DType::F32, &[1, kv, bucket, dh]),
+                em.input(&past_value_port(layer), DType::F32, &[1, kv, bucket, dh]),
+            )
+        } else {
+            (
+                em.input(&past_key_port(layer), DType::F32, &[kv, bucket, dh]),
+                em.input(&past_value_port(layer), DType::F32, &[kv, bucket, dh]),
+            )
+        };
 
         em.nodes.clear();
 
@@ -468,62 +665,51 @@ pub fn rewrite_decode_attention(
             (q_flat, k_flat)
         };
 
-        // Attention scale folded into q once.
-        let scale_val = scale.unwrap_or(1.0 / (dh as f32).sqrt());
-        let scale_c = em.const_f32(&format!("dscale_{layer}"), &[scale_val], &[1, 1]);
-        let q_s = em.tensor(&format!("dq_scaled_{layer}"), DType::F32, &[h * chunk, dh]);
-        em.node(AiOp::Mul, vec![q_r, scale_c], vec![q_s]);
-
-        // Per kv-head group: strictly 2-D masked attention over the bucket
-        // plus the chunk's own keys (the seam the fused DecodeAttention replaces).
-        let span = bucket + chunk;
-        let mut group_outs = Vec::with_capacity(kv as usize);
-        for j in 0..kv {
-            group_outs.push(em.emit_kv_group_attention(
-                q_s, past_k, past_v, k_r, v_flat, mask, j, g, chunk, bucket, dh, span, layer,
-            ));
-        }
-
-        // Chain-concat the kv groups (head-major) → [h·C, dh], then restore
-        // the fused node's own 4-D output tensor.
-        let mut acc = group_outs[0];
-        for (j, &t) in group_outs.iter().enumerate().skip(1) {
-            let rows = (j as u64 + 1) * g * chunk;
-            let cat = em.tensor(&format!("dcat_l{layer}_{j}"), DType::F32, &[rows, dh]);
-            em.node(AiOp::Concat { axis: 0 }, vec![acc, t], vec![cat]);
-            acc = cat;
-        }
-        if heads_first {
-            // out_tid is [1, h, C, dh] — the head-major flat IS that layout.
-            em.node(
-                AiOp::Reshape { allow_zero: false },
-                vec![acc],
-                vec![out_tid],
+        // Emit the attention core + carried-K/V outputs. Two forms, one seam:
+        // the legacy per-group SDPA decomposition, or the v0.9.0 fused
+        // split-KV DecodeAttention + KvCacheWrite (ADR-0019). Both consume the
+        // same roped q/k and head-major v; they differ only in how the masked
+        // attention and the cache update are expressed.
+        if resident_kv {
+            em.emit_fused_attention(
+                q_r,
+                k_r,
+                v_flat,
+                past_k,
+                past_v,
+                mask,
+                pos_port,
+                out_tid,
+                scale,
+                h,
+                kv,
+                chunk,
+                bucket,
+                dh,
+                heads_first,
+                layer,
             );
         } else {
-            let hf3 = em.tensor(&format!("dout_hf_{layer}"), DType::F32, &[h, chunk, dh]);
-            em.node(AiOp::Reshape { allow_zero: false }, vec![acc], vec![hf3]);
-            let pm3 = em.tensor(&format!("dout_pm_{layer}"), DType::F32, &[chunk, h, dh]);
-            em.node(
-                AiOp::Transpose {
-                    perm: vec![1, 0, 2],
-                },
-                vec![hf3],
-                vec![pm3],
-            );
-            em.node(
-                AiOp::Reshape { allow_zero: false },
-                vec![pm3],
-                vec![out_tid],
+            em.emit_legacy_attention(
+                q_r,
+                k_r,
+                v_flat,
+                v_hf3,
+                past_k,
+                past_v,
+                mask,
+                out_tid,
+                scale,
+                h,
+                kv,
+                g,
+                chunk,
+                bucket,
+                dh,
+                heads_first,
+                layer,
             );
         }
-
-        // The pass's derived K/V rows leave through named ports, head-major
-        // ([kv, C, dh]) so the engine's per-head splice is contiguous.
-        let k_out = em.tensor(&format!("dknew_{layer}"), DType::F32, &[kv, chunk, dh]);
-        em.node(AiOp::Reshape { allow_zero: false }, vec![k_r], vec![k_out]);
-        em.output(k_out, &new_key_port(layer));
-        em.output(v_hf3, &new_value_port(layer));
 
         replacements.push((pos, std::mem::take(&mut em.nodes)));
         report = Some(DecodeRewrite {
