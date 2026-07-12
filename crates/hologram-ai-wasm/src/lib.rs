@@ -2114,6 +2114,7 @@ mod residency_budget_tests {
             bucket,
             chunk: 1,
             vocab: 151936,
+            resident_kv: false,
         }
     }
 
