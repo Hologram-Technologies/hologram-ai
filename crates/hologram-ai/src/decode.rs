@@ -49,6 +49,12 @@ pub struct DecodeGeometry {
     pub chunk: usize,
     /// Vocabulary size (`logits` element count — one gathered row per pass).
     pub vocab: usize,
+    /// v0.9.0 fused resident-KV form (ADR-0019): the plan carries a `decode_pos`
+    /// operand and a fused `DecodeAttention` + `KvCacheWrite`, so the carried-K/V
+    /// outputs are the WHOLE updated caches (bound forward, not spliced) and the
+    /// mask is `[chunk, bucket+chunk]` (one row per position, not per head-group).
+    /// `false` is the legacy per-group decomposition.
+    pub resident_kv: bool,
 }
 
 impl DecodeGeometry {
@@ -101,28 +107,59 @@ impl DecodeGeometry {
             layers > 0,
             "archive has no past_k_* input ports — not a decode plan"
         );
+        // The v0.9.0 fused form (ADR-0019) is recognized by its `decode_pos`
+        // operand; it shapes the carried-K/V ports rank-4 `[1, kv, bucket, dh]`
+        // and its mask one row per position. The legacy decomposition has no
+        // `decode_pos`, rank-3 past ports, and a `[g·chunk, ...]` mask.
+        let resident_kv = inputs.iter().any(|p| p.name == "decode_pos");
+
         let pk = inputs
             .iter()
             .find(|p| p.name == "past_k_0")
             .context("decode plan lacks past_k_0")?;
-        ensure!(
-            pk.shape.len() == 3,
-            "past_k_0 must be [kv, bucket, head_dim], got {:?}",
-            pk.shape
-        );
-        let (kv_heads, bucket, head_dim) = (pk.shape[0], pk.shape[1], pk.shape[2]);
+        let (kv_heads, bucket, head_dim) = if resident_kv {
+            ensure!(
+                pk.shape.len() == 4 && pk.shape[0] == 1,
+                "resident-KV past_k_0 must be [1, kv, bucket, head_dim], got {:?}",
+                pk.shape
+            );
+            (pk.shape[1], pk.shape[2], pk.shape[3])
+        } else {
+            ensure!(
+                pk.shape.len() == 3,
+                "past_k_0 must be [kv, bucket, head_dim], got {:?}",
+                pk.shape
+            );
+            (pk.shape[0], pk.shape[1], pk.shape[2])
+        };
 
         let outputs = session.output_port_info();
-        let kn = outputs
-            .iter()
-            .find(|p| p.name == "k_new_0")
-            .context("decode plan lacks a k_new_0 output")?;
-        ensure!(
-            kn.shape.len() == 3 && kn.shape[0] == kv_heads && kn.shape[2] == head_dim,
-            "k_new_0 must be [kv, chunk, head_dim], got {:?}",
-            kn.shape
-        );
-        let chunk = kn.shape[1];
+        // Chunk (positions per pass) is read from the mask's row count in the
+        // fused form (`[chunk, bucket+chunk]`), whose carried-K/V outputs are the
+        // whole cache; legacy reads it from the new-rows output `k_new_0`.
+        let chunk = if resident_kv {
+            let mask = inputs
+                .iter()
+                .find(|p| p.name == "decode_mask")
+                .context("resident-KV plan lacks decode_mask")?;
+            ensure!(
+                mask.shape.len() == 2 && mask.shape[1] == bucket + mask.shape[0],
+                "resident-KV decode_mask must be [chunk, bucket+chunk], got {:?} (bucket {bucket})",
+                mask.shape
+            );
+            mask.shape[0]
+        } else {
+            let kn = outputs
+                .iter()
+                .find(|p| p.name == "k_new_0")
+                .context("decode plan lacks a k_new_0 output")?;
+            ensure!(
+                kn.shape.len() == 3 && kn.shape[0] == kv_heads && kn.shape[2] == head_dim,
+                "k_new_0 must be [kv, chunk, head_dim], got {:?}",
+                kn.shape
+            );
+            kn.shape[1]
+        };
 
         let cq = inputs
             .iter()
@@ -162,6 +199,7 @@ impl DecodeGeometry {
             bucket,
             chunk,
             vocab: logits.element_count,
+            resident_kv,
         })
     }
 }
@@ -203,6 +241,9 @@ struct PassBuffers {
     sin_k: Vec<u8>,
     mask_b: Vec<u8>,
     lp: [u8; 8],
+    /// Ring-write position (`cur_len`) for the fused resident-KV form's
+    /// `decode_pos` operand; unbound (and 0) on the legacy path.
+    pos: [u8; 4],
 }
 
 impl DecodeState {
@@ -261,21 +302,39 @@ impl DecodeState {
         let cos_k = Self::expand_rows(&cos, geom.kv_heads);
         let sin_k = Self::expand_rows(&sin, geom.kv_heads);
 
-        // The mask [g·chunk, bucket+chunk]: row jj·chunk + i is position i's
-        // row — bucket cols < pos visible, chunk cols ≤ i visible.
+        // The additive mask carries both visibility laws: a bucket col is
+        // visible when realized (`col < pos`); a chunk col (the new keys) when
+        // causal-within-chunk (`col - bucket ≤ i`). The fused kernel groups
+        // internally, so its mask is one row per position `[chunk, span]`; the
+        // legacy decomposition needs it replicated per query-head-group
+        // (`[g·chunk, span]`, row `jj·chunk + i`). `-inf` (as `-1e9`) erases.
         let span = geom.bucket + chunk;
-        let mut mask = vec![0.0f32; g * chunk * span];
-        for jj in 0..g {
+        let visible = |col: usize, i: usize| {
+            if col < geom.bucket {
+                col < pos
+            } else {
+                col - geom.bucket <= i
+            }
+        };
+        // The fused DecodeAttention kernel erases a key with a true `-∞` (its
+        // softmax maps `exp(-∞) → 0.0` exactly, per the substrate contract); the
+        // legacy decomposition's `Add(scores, mask)` uses a large finite `-1e9`
+        // (a raw `-∞` there would make a fully-masked pad row `NaN`). Matching
+        // each form's erase value exactly is load-bearing: a finite mask into the
+        // fused kernel leaves a nonzero weight that flips boundary tokens.
+        let erase = if geom.resident_kv {
+            f32::NEG_INFINITY
+        } else {
+            -1e9
+        };
+        let group_rows = if geom.resident_kv { 1 } else { g };
+        let mut mask = vec![0.0f32; group_rows * chunk * span];
+        for jj in 0..group_rows {
             for i in 0..chunk {
                 let base = (jj * chunk + i) * span;
                 for (col, slot) in mask[base..base + span].iter_mut().enumerate() {
-                    let visible = if col < geom.bucket {
-                        col < pos
-                    } else {
-                        col - geom.bucket <= i
-                    };
-                    if !visible {
-                        *slot = -1e9;
+                    if !visible(col, i) {
+                        *slot = erase;
                     }
                 }
             }
@@ -285,6 +344,8 @@ impl DecodeState {
         // The gather head takes the LAST REAL position's row; the verify head
         // has no `last_pos` port, so this is simply unbound there.
         let lp = ((real - 1) as i64).to_le_bytes();
+        // The fused KvCacheWrite ring position is the current realized length.
+        let pos_b = (pos as u32).to_le_bytes();
         Ok(PassBuffers {
             ids,
             cos_q,
@@ -293,6 +354,7 @@ impl DecodeState {
             sin_k,
             mask_b,
             lp,
+            pos: pos_b,
         })
     }
 
@@ -315,6 +377,7 @@ impl DecodeState {
                 "rope_sin_k" => &b.sin_k,
                 "decode_mask" => &b.mask_b,
                 "last_pos" => &b.lp,
+                "decode_pos" => &b.pos,
                 name => {
                     let (kind, layer) = name
                         .rsplit_once('_')
@@ -375,20 +438,35 @@ impl DecodeState {
                         "v_new" => &mut self.past_v[layer],
                         _ => bail!("unexpected decode output port `{name}`"),
                     };
-                    ensure!(
-                        out.bytes.len() == geom.kv_heads * chunk * row,
-                        "{name} returned {} bytes, expected {}",
-                        out.bytes.len(),
-                        geom.kv_heads * chunk * row
-                    );
-                    // Splice the REAL rows [kv, real, dh] into bucket rows
-                    // pos..pos+real — head-major, so one contiguous copy per
-                    // kv head; pad rows never leave the output buffer.
-                    for j in 0..geom.kv_heads {
-                        let src = j * chunk * row;
-                        let dst = (j * geom.bucket + pos) * row;
-                        target[dst..dst + real * row]
-                            .copy_from_slice(&out.bytes[src..src + real * row]);
+                    if geom.resident_kv {
+                        // Fused (ADR-0019): the KvCacheWrite already ring-wrote
+                        // the real rows at `pos`, so its output IS the whole
+                        // updated cache `[1, kv, bucket, dh]` — carry it forward
+                        // verbatim (on the byte path this is an honest copy; the
+                        // addressed path turns it into a κ-move).
+                        ensure!(
+                            out.bytes.len() == geom.kv_heads * geom.bucket * row,
+                            "{name} returned {} bytes, expected the full cache {}",
+                            out.bytes.len(),
+                            geom.kv_heads * geom.bucket * row
+                        );
+                        target.clone_from(&out.bytes);
+                    } else {
+                        ensure!(
+                            out.bytes.len() == geom.kv_heads * chunk * row,
+                            "{name} returned {} bytes, expected {}",
+                            out.bytes.len(),
+                            geom.kv_heads * chunk * row
+                        );
+                        // Splice the REAL rows [kv, real, dh] into bucket rows
+                        // pos..pos+real — head-major, so one contiguous copy per
+                        // kv head; pad rows never leave the output buffer.
+                        for j in 0..geom.kv_heads {
+                            let src = j * chunk * row;
+                            let dst = (j * geom.bucket + pos) * row;
+                            target[dst..dst + real * row]
+                                .copy_from_slice(&out.bytes[src..src + real * row]);
+                        }
                     }
                 }
             }
@@ -510,10 +588,15 @@ impl DecodeState {
             accepted += 1;
         }
 
-        // Splice the accepted prefix's K/V (rows 0..accepted) into the carried
-        // bucket at pos..pos+accepted — head-major, one contiguous copy per kv
-        // head; the rejected draft rows never leave the output buffer.
-        if accepted > 0 {
+        // Commit the accepted prefix's K/V. The legacy form splices rows
+        // 0..accepted into pos..pos+accepted (head-major, one contiguous copy per
+        // kv head; rejected draft rows never leave the output buffer). The fused
+        // KvCacheWrite already ring-wrote all `k` draft rows into the resident
+        // cache; because `cur_len` advances by only `accepted`, the rejected rows
+        // (pos+accepted..pos+k) sit past the realized length and are mask-erased
+        // until overwritten — so carrying the whole updated cache forward IS the
+        // accepted-prefix state.
+        if geom.resident_kv || accepted > 0 {
             for (port, out) in out_ports.iter().zip(outputs.iter()) {
                 if port.name == "logits" {
                     continue;
@@ -528,11 +611,22 @@ impl DecodeState {
                     "v_new" => &mut self.past_v[layer],
                     _ => bail!("unexpected decode output port `{}`", port.name),
                 };
-                for h in 0..geom.kv_heads {
-                    let src = h * geom.chunk * row;
-                    let dst = (h * geom.bucket + pos) * row;
-                    target[dst..dst + accepted * row]
-                        .copy_from_slice(&out.bytes[src..src + accepted * row]);
+                if geom.resident_kv {
+                    ensure!(
+                        out.bytes.len() == geom.kv_heads * geom.bucket * row,
+                        "{} returned {} bytes, expected the full cache {}",
+                        port.name,
+                        out.bytes.len(),
+                        geom.kv_heads * geom.bucket * row
+                    );
+                    target.clone_from(&out.bytes);
+                } else {
+                    for h in 0..geom.kv_heads {
+                        let src = h * geom.chunk * row;
+                        let dst = (h * geom.bucket + pos) * row;
+                        target[dst..dst + accepted * row]
+                            .copy_from_slice(&out.bytes[src..src + accepted * row]);
+                    }
                 }
             }
         }
@@ -935,6 +1029,7 @@ mod tests {
             bucket,
             chunk: 1,
             vocab: 32,
+            resident_kv: false,
         }
     }
 
@@ -967,6 +1062,7 @@ mod tests {
             bucket: 128,
             chunk: 1,
             vocab: 151936,
+            resident_kv: false,
         };
         // 2 (K and V) · 28 layers · 2 kv · 128 head_dim · 4 B
         let per_row = 2u64 * 28 * 2 * 128 * 4;
@@ -984,6 +1080,7 @@ mod tests {
             bucket: 64,
             chunk: 1,
             vocab: 32,
+            resident_kv: false,
         };
         let wide = DecodeGeometry {
             bucket: 32768,
@@ -1010,6 +1107,7 @@ mod tests {
             bucket: usize::MAX,
             chunk: 1,
             vocab: 1,
+            resident_kv: false,
         };
         assert!(g.carried_kv_bytes_per_row().is_err());
         assert!(g.carried_kv_bytes().is_err());
