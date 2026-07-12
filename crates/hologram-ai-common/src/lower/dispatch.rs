@@ -43,6 +43,13 @@ pub enum AttrSpec {
         beta: f32,
         bias: f32,
     },
+    /// `AttentionAttrs` on an already-operandized `Attention` node. Used by the
+    /// six-input decode form (κ119), whose mask operand is the sole masking
+    /// authority: `causal` MUST stay false (the substrate refuses it on that
+    /// form) and `scale_bits` declares the softmax multiplier the kernel
+    /// applies — `1.0` when the graph pre-folds the scale into q (ADR-0019),
+    /// so the kernel's own scaling is an exact no-op.
+    Attention { causal: bool, scale_bits: u32 },
 }
 
 /// A complete canonical desugaring, expressed purely in `OpKind`s. The builder
@@ -334,9 +341,19 @@ pub fn dispatch(op: &AiOp) -> OpPlan {
         A::FlashAttentionHint => P::Operandized(OpKind::Attention),
         // v0.9.0 split-KV decode attention (ADR-0019): the six operands
         // `[q, k_past, v_past, k_new, v_new, mask]` pass straight through to the
-        // six-input `OpKind::Attention` (κ119). No attrs — the mask is the sole
-        // masking authority and a `causal` attr on this form is refused upstream.
-        A::DecodeAttention => P::Operandized(OpKind::Attention),
+        // six-input `OpKind::Attention` (κ119). The mask is the sole masking
+        // authority (`causal` false — the substrate refuses it on this form);
+        // `scale_bits = 1.0` because the decode rewrite pre-folds the model's
+        // scale into q exactly as the legacy decomposition does, so the fused
+        // kernel's own scaling is an exact no-op (`dot / (1/1.0) = dot`) and the
+        // two forms share one scale placement, ulp for ulp.
+        A::DecodeAttention => P::Attrs(
+            OpKind::Attention,
+            AttrSpec::Attention {
+                causal: false,
+                scale_bits: 1.0f32.to_bits(),
+            },
+        ),
         // Fixed-bucket ring write → `OpKind::KvCacheWrite` (κ120); the executor
         // realizes it as an in-place κ-move under sole ownership.
         A::KvCacheWrite => P::Operandized(OpKind::KvCacheWrite),

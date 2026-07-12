@@ -515,6 +515,15 @@ impl<'a> Ctx<'a> {
                     },
                 );
             }
+            AttrSpec::Attention { causal, scale_bits } => {
+                self.graph.set_attention_attrs(
+                    nid,
+                    AttentionAttrs {
+                        causal: *causal,
+                        scale_bits: *scale_bits,
+                    },
+                );
+            }
         }
         Ok(())
     }
