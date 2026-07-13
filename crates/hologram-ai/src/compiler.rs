@@ -699,10 +699,13 @@ fn infer_llm_metadata_from_graph(graph: &mut AiGraph) {
     let (num_heads, n_kv_heads, head_dim) = gqa_params[0];
     let n_embd = num_heads * head_dim;
 
+    // The honest label: what was actually established is the fused-GQA
+    // decoder STRUCTURE, not any named architecture — "llama" here would be
+    // a fabricated claim on an ONNX graph whose family is unknown.
     graph
         .metadata
         .entry("arch".into())
-        .or_insert(MetaValue::Str("llama".into()));
+        .or_insert(MetaValue::Str("gqa_decoder".into()));
     graph
         .metadata
         .entry("n_layers".into())
