@@ -29,7 +29,7 @@
 use std::io::Write;
 
 use anyhow::{bail, Context, Result};
-use hologram_ai_tokenizer::Tokenizer;
+use hologram_ai_tokenizer::{StreamingDecoder, Tokenizer};
 
 use crate::decode::DecodeSession;
 use crate::engine::{LmSession, SessionProvider};
@@ -353,6 +353,73 @@ fn sample(logits: &[f32], temperature: f32, top_k: Option<usize>, rng: &mut u64)
     keep[keep.len() - 1] as u32
 }
 
+/// Rolling stop-string scanner with exact `decode(generated).contains(stop)`
+/// semantics over streamed deltas — without rescanning the accumulated text.
+/// A new occurrence must end in text that is new (the delta) or still mutable
+/// (the decoder's pending tail), and can start at most `longest stop − 1`
+/// bytes earlier — so a bounded suffix of the stable text plus the pending
+/// tail is exactly the region a whole-text scan could newly match in.
+struct StopScan<'a> {
+    stops: &'a [String],
+    /// Longest stop string in bytes minus one — how far back into stable text
+    /// an occurrence ending in new text can reach.
+    keep: usize,
+    /// The retained suffix of the stable (already emitted) text.
+    tail: String,
+}
+
+impl<'a> StopScan<'a> {
+    fn new(stops: &'a [String]) -> Self {
+        let keep = stops
+            .iter()
+            .map(|s| s.len())
+            .max()
+            .unwrap_or(0)
+            .saturating_sub(1);
+        Self {
+            stops,
+            keep,
+            tail: String::new(),
+        }
+    }
+
+    /// Absorb the newly emitted `delta`; report whether any stop string
+    /// occurs in the running text (`… tail + delta + pending`).
+    fn hit(&mut self, delta: &str, pending: &str) -> bool {
+        if self.stops.is_empty() {
+            return false;
+        }
+        self.tail.push_str(delta);
+        let candidate = format!("{}{}", self.tail, pending);
+        let hit = self
+            .stops
+            .iter()
+            .any(|s| !s.is_empty() && candidate.contains(s.as_str()));
+        // Trim the front, keeping AT LEAST `keep` bytes (backing up to the
+        // nearest char boundary keeps a byte or two more, never fewer).
+        if self.tail.len() > self.keep {
+            let mut cut = self.tail.len() - self.keep;
+            while !self.tail.is_char_boundary(cut) {
+                cut -= 1;
+            }
+            self.tail.drain(..cut);
+        }
+        hit
+    }
+}
+
+/// Flush the decoder's held-back tail (an unfinished multi-token character at
+/// the very end) into `acc` and the sink — the returned text is exactly the
+/// accumulation of the streamed deltas.
+fn finish_stream(mut streamer: StreamingDecoder<'_>, acc: &mut String, out: &mut dyn Write) {
+    let rest = streamer.finish();
+    if !rest.is_empty() {
+        out.write_all(rest.as_bytes()).ok();
+        out.flush().ok();
+        acc.push_str(&rest);
+    }
+}
+
 /// Run autoregressive generation, streaming each decoded delta to `out`.
 /// Returns the full generated text (excluding the prompt).
 ///
@@ -395,7 +462,13 @@ pub fn generate_stream(
 
     let mut sequence: Vec<u32> = prompt_tokens;
     let mut generated: Vec<u32> = Vec::new();
-    let mut emitted = 0usize; // chars of `generated` text already streamed
+    // Incremental detokenization: the decoder re-decodes only its short
+    // pending window per token — O(N) total text work where re-decoding
+    // `generated` every step was O(N²) — and the returned text is the
+    // accumulation of its deltas, byte-identical to the one-shot decode.
+    let mut streamer = StreamingDecoder::new(tokenizer);
+    let mut stops = StopScan::new(&cfg.stop);
+    let mut acc = String::new();
 
     for _ in 0..budget {
         // The window is the running sequence — the budget keeps it within the
@@ -455,28 +528,28 @@ pub fn generate_stream(
         generated.push(next);
         sequence.push(next);
 
-        // Stream the newly-decoded suffix (handles multi-token characters by
-        // re-decoding the full generated text and emitting only the delta).
-        let text = tokenizer.decode(&generated);
-        if let Some(delta) = text.get(emitted..) {
-            if !delta.is_empty() {
-                out.write_all(delta.as_bytes()).ok();
-                out.flush().ok();
-                emitted = text.len();
-            }
+        // Stream the newly stable text; a character still split across
+        // tokens stays held until complete (never partial garbage).
+        let delta = streamer.feed(next);
+        if !delta.is_empty() {
+            out.write_all(delta.as_bytes()).ok();
+            out.flush().ok();
+            acc.push_str(&delta);
         }
 
         // Stop strings: halt once the decoded text contains one.
-        if cfg
-            .stop
-            .iter()
-            .any(|s| !s.is_empty() && text.contains(s.as_str()))
-        {
+        if stops.hit(&delta, streamer.pending()) {
             break;
         }
     }
 
-    Ok(tokenizer.decode(&generated))
+    finish_stream(streamer, &mut acc, out);
+    debug_assert_eq!(
+        acc,
+        tokenizer.decode(&generated),
+        "streamed deltas must accumulate to the one-shot decode"
+    );
+    Ok(acc)
 }
 
 /// [`generate_stream`] over the decode-step plan (row `decode-plan`): the
@@ -534,7 +607,11 @@ pub fn generate_stream_decode<S: LmSession>(
     let remaining = max_window - prompt_tokens.len();
     let budget = cfg.max_tokens.map_or(remaining, |n| n.min(remaining));
     let mut generated: Vec<u32> = Vec::new();
-    let mut emitted = 0usize;
+    // Incremental detokenization — same O(N)-total delta streaming as
+    // [`generate_stream`] (the O(N²) full re-decode per token is gone).
+    let mut streamer = StreamingDecoder::new(tokenizer);
+    let mut stops = StopScan::new(&cfg.stop);
+    let mut acc = String::new();
 
     for step in 0..budget {
         // Position-indexed sampling: the token at this absolute position is a
@@ -552,19 +629,13 @@ pub fn generate_stream_decode<S: LmSession>(
         }
         generated.push(next);
 
-        let text = tokenizer.decode(&generated);
-        if let Some(delta) = text.get(emitted..) {
-            if !delta.is_empty() {
-                out.write_all(delta.as_bytes()).ok();
-                out.flush().ok();
-                emitted = text.len();
-            }
+        let delta = streamer.feed(next);
+        if !delta.is_empty() {
+            out.write_all(delta.as_bytes()).ok();
+            out.flush().ok();
+            acc.push_str(&delta);
         }
-        if cfg
-            .stop
-            .iter()
-            .any(|s| !s.is_empty() && text.contains(s.as_str()))
-        {
+        if stops.hit(&delta, streamer.pending()) {
             break;
         }
 
@@ -575,7 +646,13 @@ pub fn generate_stream_decode<S: LmSession>(
         }
     }
 
-    Ok(tokenizer.decode(&generated))
+    finish_stream(streamer, &mut acc, out);
+    debug_assert_eq!(
+        acc,
+        tokenizer.decode(&generated),
+        "streamed deltas must accumulate to the one-shot decode"
+    );
+    Ok(acc)
 }
 
 /// Generation over the decode plan with **speculative decode** (row
@@ -649,29 +726,27 @@ pub fn generate_stream_speculative<S: LmSession>(
     let draft_cap = max_draft.max(1);
 
     let mut generated: Vec<u32> = Vec::new();
-    let mut emitted = 0usize;
+    // Incremental detokenization — same O(N)-total delta streaming as
+    // [`generate_stream`] (the O(N²) full re-decode per token is gone).
+    let mut streamer = StreamingDecoder::new(tokenizer);
+    let mut stops = StopScan::new(&cfg.stop);
+    let mut acc = String::new();
 
     // Emit one token: stream its text delta, honor stop strings and eos, and
     // report whether to end. Shared by the drafted and plain paths so both stop
     // on exactly the same conditions.
-    let mut emit = |next: i64, generated: &mut Vec<u32>, emitted: &mut usize| -> bool {
+    let mut emit = |next: i64, generated: &mut Vec<u32>, acc: &mut String| -> bool {
         if next == eos as i64 {
             return true;
         }
         generated.push(next as u32);
-        let text = tokenizer.decode(generated);
-        if let Some(delta) = text.get(*emitted..) {
-            if !delta.is_empty() {
-                out.write_all(delta.as_bytes()).ok();
-                out.flush().ok();
-                *emitted = text.len();
-            }
+        let delta = streamer.feed(next as u32);
+        if !delta.is_empty() {
+            out.write_all(delta.as_bytes()).ok();
+            out.flush().ok();
+            acc.push_str(&delta);
         }
-        if cfg
-            .stop
-            .iter()
-            .any(|s| !s.is_empty() && text.contains(s.as_str()))
-        {
+        if stops.hit(&delta, streamer.pending()) {
             return true;
         }
         generated.len() >= budget
@@ -709,7 +784,7 @@ pub fn generate_stream_speculative<S: LmSession>(
                 // No recurrence (or speculation retired): a plain step under the
                 // SAME token rule the verify path uses, at this absolute position.
                 let next = next_token(&row, session.realized_len() as u64);
-                if emit(next, &mut generated, &mut emitted) {
+                if emit(next, &mut generated, &mut acc) {
                     break;
                 }
                 row = session.step(next).context("decode step failed")?;
@@ -719,7 +794,7 @@ pub fn generate_stream_speculative<S: LmSession>(
                     let n_accepted = accepted.len();
                     let mut stop = false;
                     for t in accepted.into_iter().chain(std::iter::once(bonus)) {
-                        if emit(t, &mut generated, &mut emitted) {
+                        if emit(t, &mut generated, &mut acc) {
                             stop = true;
                             break;
                         }
@@ -748,7 +823,13 @@ pub fn generate_stream_speculative<S: LmSession>(
             },
         }
     }
-    Ok(tokenizer.decode(&generated))
+    finish_stream(streamer, &mut acc, out);
+    debug_assert_eq!(
+        acc,
+        tokenizer.decode(&generated),
+        "streamed deltas must accumulate to the one-shot decode"
+    );
+    Ok(acc)
 }
 
 #[cfg(test)]
