@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   KnownModelStatus,
   WorkspacePaths,
@@ -11,9 +11,31 @@ import {
   extensionPresent,
   hfBase,
 } from "../ipc";
-import { supportedFamilies } from "../holo";
+import { validateModelConfig } from "../holo";
+import {
+  PROBE_CONCURRENCY,
+  ProbeCache,
+  type ProbeState,
+  lacksSafetensorsExport,
+  mapBounded,
+  probeWithCache,
+} from "../searchPreflight";
 
 type Busy = { id: string; phase: "downloading" | "compiling" } | null;
+
+/** One search row: the listing's metadata plus its derivability probe state
+ * (row `supported-search`). Rows render immediately as `probing` and upgrade
+ * in place — a probe never blocks the list. */
+type SearchResult = {
+  id: string;
+  downloads: number;
+  tags?: string[];
+  probe: ProbeState;
+};
+
+// Probe verdicts are per repo+revision, session-scoped (Map + sessionStorage
+// mirror) — a re-search re-fetches nothing. Module-level: survives remounts.
+const probeCache = new ProbeCache();
 
 export function Models() {
   const [paths, setPaths] = useState<WorkspacePaths | null>(null);
@@ -72,40 +94,73 @@ export function Models() {
 
 
   const [searchQuery, setSearchQuery] = useState("");
-  const [searchResults, setSearchResults] = useState<any[]>([]);
+  const [searchResults, setSearchResults] = useState<SearchResult[]>([]);
   const [isSearching, setIsSearching] = useState(false);
+  // A newer search supersedes the previous one's in-flight probes: their late
+  // outcomes must not be written onto the new result rows.
+  const searchSeq = useRef(0);
 
   async function onSearch() {
     if (!searchQuery.trim()) return;
+    const seq = ++searchSeq.current;
     setIsSearching(true);
     setTail([]);
     try {
       const q = encodeURIComponent(searchQuery.trim());
-      const res = await fetch(`${hfBase()}/api/models?search=${q}&sort=downloads&direction=-1&limit=20`);
+      // ONE listing request: `full=true` includes each repo's file list
+      // (siblings), so the safetensors first pass costs no extra fetches.
+      const res = await fetch(
+        `${hfBase()}/api/models?search=${q}&sort=downloads&direction=-1&limit=20&full=true`,
+      );
       if (!res.ok) throw new Error(`Search failed`);
 
       const data = await res.json();
       const unique = Array.from(new Map(data.map((item: any) => [item.id, item])).values()) as any[];
       unique.sort((a, b) => b.downloads - a.downloads);
 
-      // Supported-only discovery (row `supported-search`): resolve each
-      // candidate's architecture family and list only what the parametric
-      // registry supports. The supported set comes from the registry itself.
-      const supported = new Set(await supportedFamilies());
-      const resolved = await Promise.all(
-        unique.slice(0, 15).map(async (item: any) => {
-          try {
-            const info = await fetch(`${hfBase()}/api/models/${item.id}`);
-            if (!info.ok) return null;
-            const detail = await info.json();
-            const family = detail?.config?.architectures?.[0];
-            return family && supported.has(family) ? { ...item, family } : null;
-          } catch {
-            return null;
-          }
-        }),
+      // Derivability discovery (row `supported-search`): the ONLY authority is
+      // the SAME config-only preflight the download runs (validateModelConfig →
+      // parametric::validate_config) — no architecture-name allowlist anywhere.
+      // First pass (structural, free): a repo whose listing PROVES it has no
+      // safetensors export can never start the journey; a listing without file
+      // info stays in and the probe decides.
+      const candidates = unique
+        .filter((item: any) => !lacksSafetensorsExport(item.siblings))
+        .slice(0, 15);
+
+      // A model already downloaded locally passed this very preflight at
+      // download time — selectable without re-probing.
+      const local = new Set(
+        models.filter((m) => m.downloaded || m.compiledArchive).map((m) => m.hfId),
       );
-      setSearchResults(resolved.filter(Boolean).slice(0, 15));
+
+      // Render NOW; each row upgrades in place as its probe resolves.
+      setSearchResults(
+        candidates.map(
+          (item: any): SearchResult => ({
+            id: item.id,
+            downloads: item.downloads,
+            tags: item.tags,
+            probe: local.has(item.id) ? { status: "derivable" } : { status: "probing" },
+          }),
+        ),
+      );
+
+      // Bounded, cached probes (per repo+revision; a hit costs no fetch). Each
+      // config.json comes from the same resolve base the downloader uses. A
+      // refusal is SHOWN with the preflight's reason — never silently hidden.
+      const toProbe = candidates.filter((item: any) => !local.has(item.id));
+      void mapBounded(toProbe, PROBE_CONCURRENCY, async (item: any) => {
+        const outcome = await probeWithCache(
+          item.id,
+          item.sha,
+          `${hfBase()}/${item.id}/resolve/main/config.json`,
+          probeCache,
+          validateModelConfig,
+        );
+        if (searchSeq.current !== seq) return; // superseded by a newer search
+        setSearchResults((rs) => rs.map((r) => (r.id === item.id ? { ...r, probe: outcome } : r)));
+      });
     } catch (e) {
       setTail((t) => [...t, `search error: ${String(e)}`]);
     } finally {
@@ -229,17 +284,40 @@ export function Models() {
         {searchResults.length > 0 && (
           <div className="list" style={{ marginBottom: 32, border: "1px dashed var(--border)", background: "rgba(0,0,0,0.1)" }}>
             <div style={{ padding: "8px 12px", borderBottom: "1px solid var(--border)", fontSize: 12, fontWeight: "bold", color: "var(--fg-dim)" }}>
-              Search Results (Top 10)
+              Search Results
             </div>
             {searchResults.map((r) => (
-              <div className="list-item" key={r.id} style={{ alignItems: "center" }}>
+              <div
+                className="list-item"
+                key={r.id}
+                style={{ alignItems: "center", opacity: r.probe.status === "refused" ? 0.55 : 1 }}
+              >
                 <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
                   <strong>{r.id}</strong>
-                  <div className="meta">Downloads: {r.downloads} · Family: {r.family} · Tags: {(r.tags || []).slice(0, 4).join(", ")}</div>
+                  <div className="meta">Downloads: {r.downloads} · Tags: {(r.tags || []).slice(0, 4).join(", ")}</div>
+                  {r.probe.status === "probing" && (
+                    <div className="meta">Preflight: checking derivability…</div>
+                  )}
+                  {r.probe.status === "refused" && (
+                    // The preflight's refusal VERBATIM — an honest refusal is
+                    // information, never hidden (row `supported-search`).
+                    <div className="meta" style={{ color: "var(--fg-dim)" }}>
+                      Not runnable: {r.probe.reason}
+                    </div>
+                  )}
                 </div>
-                <button onClick={() => onAddAndDownload(r.id)} disabled={busy !== null}>
-                  Add & Download
-                </button>
+                {r.probe.status === "derivable" ? (
+                  <button onClick={() => onAddAndDownload(r.id)} disabled={busy !== null}>
+                    Add & Download
+                  </button>
+                ) : (
+                  <button
+                    disabled
+                    title={r.probe.status === "refused" ? r.probe.reason : "preflight in progress"}
+                  >
+                    {r.probe.status === "probing" ? "Checking…" : "Not runnable"}
+                  </button>
+                )}
               </div>
             ))}
           </div>
