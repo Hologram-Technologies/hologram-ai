@@ -7,7 +7,7 @@ import { spawn } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
-import { startFixtureServer, FIXTURE_REPO } from "./fixture-server.mjs";
+import { startFixtureServer, FIXTURE_REPO, DEEP_FIXTURE_REPO } from "./fixture-server.mjs";
 
 const WEB_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const ROOT = path.resolve(WEB_DIR, "../..");
@@ -91,11 +91,51 @@ class HologramWorld {
   /** Open the app in a fresh context, pointed at `hfBase` (the fixture server
    * unless a live run overrides), with the fixture catalogue entry installed
    * from the committed reference (data, not code). */
+  /** Install the DEEP hermetic fixture as a catalogue entry (int8 tier,
+   * many stages) and point the app at the fixture server — the real-model
+   * journey SHAPE with zero network. Must run before navigation. */
+  async installDeepFixture() {
+    const reference = referenceTranscript();
+    await this.page.addInitScript(
+      ([base, entryJson]) => {
+        localStorage.setItem("hologram_hf_base", base);
+        const cur = JSON.parse(localStorage.getItem("hologram_catalogue_custom") ?? "[]");
+        cur.push(JSON.parse(entryJson));
+        localStorage.setItem("hologram_catalogue_custom", JSON.stringify(cur));
+      },
+      [
+        fixture.base,
+        JSON.stringify({
+          id: "deep-tiny",
+          hfId: DEEP_FIXTURE_REPO,
+          displayName: "deep-tiny (30-layer hermetic fixture)",
+          description: "The real-model-shape journey fixture (many stages, int8).",
+          modality: "text-chat",
+          size: "tiny-deep",
+          approxArchiveMb: 28,
+          quantize: "int8",
+          promptTemplate: reference.template,
+          stop: ["\nUser:"],
+          chatTurnSeparator: reference.separator,
+          maxTokens: reference.max_tokens,
+        }),
+      ],
+    );
+    await this.page.reload({ waitUntil: "networkidle" });
+  }
+
   async openApp({ live = false } = {}) {
     this.context = await browser.newContext();
     this.page = await this.context.newPage();
+    this.consoleErrors = [];
     this.page.on("pageerror", (err) => {
       this.lastPageError = String(err);
+      this.consoleErrors.push(`pageerror: ${err}`);
+    });
+    this.page.on("console", (m) => {
+      if (m.type() === "error" || m.type() === "warning") {
+        this.consoleErrors.push(`console.${m.type()}: ${m.text()}`);
+      }
     });
     if (!live) {
       const reference = referenceTranscript();

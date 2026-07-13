@@ -525,6 +525,16 @@ executor = "browser"
 feature = "features/suites/s4_application/browser_journey.feature"
 
 [[row]]
+id = "deep-model-journey"
+statement = "The browser runs a checkpoint at PRODUCTION attention geometry — head_dim 128 (the real Qwen/Llama value), grouped-query attention, many stages, the int8 tier — end to end: download, compile, and a chat turn that COMPLETES and commits its assistant reply honestly (a turn that emits no text shows an explicit no-output notice, never a silent blank or a vanished turn). The committed handshake fixture runs at head_dim 16 and below the pool's parallel-dispatch threshold, so this is the first journey to exercise the real head_dim and an actual multi-worker GEMV dispatch; a worker that dies surfaces a diagnostic cause, never an opaque event."
+stage = "S4"
+status = "build"
+oracles = ["journey-reference"]
+tier = "suite"
+executor = "browser"
+feature = "features/suites/s4_application/deep_model_journey.feature"
+
+[[row]]
 id = "scaled-rope-journey"
 statement = "A checkpoint carrying an IMPLEMENTED rope_scaling law (llama3/yarn/linear/dynamic/longrope, and partial_rotary_factor) runs the whole browser journey — download, compile, chat streaming — with the engine synthesizing the scaled frequency tables at the realized positions; the law itself is pinned bit-level by the native rope_scaling_reference witnesses, and an UNIMPLEMENTED law is refused at preflight naming the type."
 stage = "S4"

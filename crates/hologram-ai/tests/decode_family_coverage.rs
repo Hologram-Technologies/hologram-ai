@@ -260,6 +260,40 @@ fn decode_family_rows_at(
 /// staged decode pipeline compiles, prefills, and generates finite, non-empty,
 /// reproducible output for Llama, Qwen2, Mistral, and Phi3 alike.
 #[test]
+fn decode_generates_at_production_head_dim_int8_staged() {
+    // The committed fixture runs at head_dim 16 and `MODEST` at head_dim 64;
+    // the browser's real-model hang appears only at the PRODUCTION head_dim
+    // (128 = 1024/8, the Qwen/Llama value). This is the native (seconds)
+    // reproduction of the deployed path: the int8-quantized STAGED decode
+    // pipeline, prefilled and generated, at head_dim 128 for every family.
+    for layout in FAITHFUL_FAMILIES {
+        let scale = FamilyScale::new(*layout, Dims::DEEP);
+        let arch = scale.arch();
+        assert_eq!(scale.dims.head_dim, 128, "{arch}: production head_dim");
+
+        let (logits, tokens) = decode_family(&scale);
+        assert_eq!(
+            logits.len(),
+            scale.dims.vocab_size as usize,
+            "{arch}: logits width must equal the vocabulary at head_dim 128"
+        );
+        assert!(
+            logits.iter().all(|x| x.is_finite()),
+            "{arch}: head_dim-128 decode produced non-finite logits"
+        );
+        assert!(
+            tokens.iter().all(|&t| (t as u64) < scale.dims.vocab_size),
+            "{arch}: a head_dim-128 generated token is out of vocabulary range"
+        );
+        let (_, again) = decode_family(&scale);
+        assert_eq!(
+            tokens, again,
+            "{arch}: head_dim-128 decode is not reproducible"
+        );
+    }
+}
+
+#[test]
 fn decode_generates_for_every_supported_family() {
     assert!(
         FAITHFUL_FAMILIES.len() >= 4,

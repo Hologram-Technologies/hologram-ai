@@ -95,6 +95,69 @@ async function installFixtureAlias(world, id, hfId, displayName) {
   });
 }
 
+const DEEP_FIXTURE_DISPLAY = "deep-tiny (30-layer hermetic fixture)";
+
+Given("the deep hermetic fixture model is available", async function () {
+  await this.installDeepFixture();
+});
+
+When("the deep fixture model is downloaded", async function () {
+  await this.downloadModel(DEEP_FIXTURE_DISPLAY, { timeoutMs: 600_000 });
+});
+
+When("the user sends a chat message on the deep fixture model", async function () {
+  await this.gotoChat();
+  await this.page.locator("input[type=number]").first().fill("0");
+  await selectArchiveByDir(this, "deep-tiny");
+  // Inline send + wait so a FAILED turn surfaces the real diagnostics (the
+  // app's status tail + captured console errors) instead of a bare selector
+  // timeout — the deployed "[object Event]" was undiagnosable for exactly
+  // this reason. The completion may be EMPTY (the fixture's deterministic
+  // noise weights emit end-of-sequence immediately) — that is the point: a
+  // real-shape turn that produces no text must COMPLETE and be handled
+  // honestly, never hang or vanish.
+  await this.page.locator(".composer textarea").fill(HANDSHAKE[0]);
+  await this.page.locator(".composer button", { hasText: "Send" }).click();
+  await this.page
+    .locator(".composer button", { hasText: "Send" })
+    .waitFor({ timeout: 300_000 });
+  const completions = await this.page.evaluate(() => globalThis.__hologram_completions ?? []);
+  const crash = (this.consoleErrors ?? []).find((e) => /worker (failed|crashed)|\[object Event\]/i.test(e));
+  if (crash) throw new Error(`deep-fixture turn hit a worker crash: ${crash}`);
+  if (completions.length === 0) {
+    const status = await this.page.evaluate(() => (globalThis.__hologram_status ?? []).slice(-8));
+    const bubbles = await this.page.locator(".bubble.assistant").allInnerTexts();
+    throw new Error(
+      `deep-fixture turn did not complete (no worker crash surfaced).\n` +
+        `  bubbles: ${JSON.stringify(bubbles)}\n` +
+        `  status tail: ${JSON.stringify(status)}\n` +
+        `  console errors: ${JSON.stringify((this.consoleErrors ?? []).slice(-12))}`,
+    );
+  }
+});
+
+Then("the real-shape turn completes and its assistant reply is committed honestly", async function () {
+  // The real-model SHAPE (head_dim 128, many stages, int8) runs end to end in
+  // the browser: the turn completes (asserted above — no crash, a completion
+  // recorded) and the assistant turn is COMMITTED, never silently dropped. An
+  // empty completion shows the honest no-output notice; a non-empty one shows
+  // its text. Either way exactly one assistant bubble joins the transcript.
+  const completions = await this.page.evaluate(() => globalThis.__hologram_completions ?? []);
+  assert.ok(completions.length >= 1, "the turn must record a completion");
+  const bubbles = await this.page.locator(".bubble.assistant").allInnerTexts();
+  assert.equal(bubbles.length, 1, `exactly one assistant bubble must be committed, got ${bubbles.length}`);
+  const text = cleanCompletion(completions.at(-1).text);
+  if (text.length === 0) {
+    assert.match(
+      bubbles[0],
+      /no output/i,
+      `an empty completion must render the honest no-output notice, got: ${JSON.stringify(bubbles[0])}`,
+    );
+  } else {
+    assert.ok(bubbles[0].includes(text.slice(0, 8)), "a non-empty completion must render its text");
+  }
+});
+
 When("the second fixture model is downloaded", async function () {
   await installFixtureAlias(this, "handshake-tiny-b", SECOND_FIXTURE_REPO, SECOND_FIXTURE_DISPLAY);
   await this.downloadModel(SECOND_FIXTURE_DISPLAY);
