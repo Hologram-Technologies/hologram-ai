@@ -549,28 +549,23 @@ pub fn build_ai_graph(
                 .map(|a| a.i)
                 .unwrap_or(0);
 
-            if interleaved != 0 {
-                warnings.push(ImportWarning {
-                    message: format!(
-                        "RotaryEmbedding '{}': interleaved=1 not supported; skipping",
-                        n.name
-                    ),
-                    node_name: Some(n.name.clone()),
-                });
-                continue;
-            }
-            if input_tids.len() < 4 || output_tids.is_empty() {
-                warnings.push(ImportWarning {
-                    message: format!(
-                        "RotaryEmbedding '{}' has too few inputs/outputs ({}/{}); skipping",
-                        n.name,
-                        input_tids.len(),
-                        output_tids.len()
-                    ),
-                    node_name: Some(n.name.clone()),
-                });
-                continue;
-            }
+            // Skipping would leave this node's output unproduced — every
+            // downstream consumer then fails far from the cause (or a shape
+            // accident runs un-roped positions). An unrealizable rotary is a
+            // REFUSAL of the import, loud, naming the node and the reason.
+            anyhow::ensure!(
+                interleaved == 0,
+                "RotaryEmbedding '{}': interleaved=1 (adjacent-pair rotation) is not \
+                 implemented — importing it as rotate-half would be silently wrong",
+                n.name
+            );
+            anyhow::ensure!(
+                input_tids.len() >= 4 && !output_tids.is_empty(),
+                "RotaryEmbedding '{}' has too few inputs/outputs ({}/{}) to realize",
+                n.name,
+                input_tids.len(),
+                output_tids.len()
+            );
 
             let input_tid = input_tids[0];
             let pos_ids_tid = input_tids[1];
@@ -606,16 +601,14 @@ pub fn build_ai_graph(
 
             let (head_dim, num_heads) = match (head_dim_u64, num_heads_u64) {
                 (Some(hd), Some(nh)) if hd > 0 && nh > 0 && hd.is_multiple_of(2) => (hd, nh),
-                _ => {
-                    warnings.push(ImportWarning {
-                        message: format!(
-                            "RotaryEmbedding '{}': cannot derive head_dim/num_heads (head_dim={:?}, num_heads={:?}); skipping",
-                            n.name, head_dim_u64, num_heads_u64
-                        ),
-                        node_name: Some(n.name.clone()),
-                    });
-                    continue;
-                }
+                _ => anyhow::bail!(
+                    "RotaryEmbedding '{}': cannot derive head_dim/num_heads \
+                     (head_dim={:?}, num_heads={:?}) — refusing to import an \
+                     underdetermined rotary",
+                    n.name,
+                    head_dim_u64,
+                    num_heads_u64
+                ),
             };
             let half = head_dim / 2;
 
@@ -828,38 +821,29 @@ pub fn build_ai_graph(
                 .map(|a| a.i)
                 .unwrap_or(0);
 
-            if do_rotary != 0 {
-                warnings.push(ImportWarning {
-                    message: format!(
-                        "GroupQueryAttention '{}': do_rotary=1 not supported; skipping",
-                        n.name
-                    ),
-                    node_name: Some(n.name.clone()),
-                });
-                continue;
-            }
-            if input_tids.len() < 3 || output_tids.len() < 3 {
-                warnings.push(ImportWarning {
-                    message: format!(
-                        "GroupQueryAttention '{}' has too few inputs/outputs ({}/{}); skipping",
-                        n.name,
-                        input_tids.len(),
-                        output_tids.len()
-                    ),
-                    node_name: Some(n.name.clone()),
-                });
-                continue;
-            }
-            if num_heads <= 0 || kv_num_heads <= 0 {
-                warnings.push(ImportWarning {
-                    message: format!(
-                        "GroupQueryAttention '{}': num_heads={}, kv_num_heads={} (both must be > 0); skipping",
-                        n.name, num_heads, kv_num_heads
-                    ),
-                    node_name: Some(n.name.clone()),
-                });
-                continue;
-            }
+            // Same refusal law as RotaryEmbedding above: this node produces
+            // output + present K/V — skipping strands three downstream
+            // tensors. Unrealizable forms refuse the import by name.
+            anyhow::ensure!(
+                do_rotary == 0,
+                "GroupQueryAttention '{}': do_rotary=1 (fused in-kernel rotary) is not \
+                 implemented — importing it without the rotation would be silently wrong",
+                n.name
+            );
+            anyhow::ensure!(
+                input_tids.len() >= 3 && output_tids.len() >= 3,
+                "GroupQueryAttention '{}' has too few inputs/outputs ({}/{}) to realize",
+                n.name,
+                input_tids.len(),
+                output_tids.len()
+            );
+            anyhow::ensure!(
+                num_heads > 0 && kv_num_heads > 0,
+                "GroupQueryAttention '{}': num_heads={}, kv_num_heads={} (both must be > 0)",
+                n.name,
+                num_heads,
+                kv_num_heads
+            );
 
             let q_tid = input_tids[0];
             let k_tid = input_tids[1];
