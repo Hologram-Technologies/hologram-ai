@@ -2,6 +2,7 @@ import { computeKappa, countTokens, validateModelConfig } from "./holo";
 import { type GenOpts } from "./holo";
 import GenerateWorker from "./generate.worker?worker";
 import { cacheBudgetFromHeadroom, environmentBudgetBytes, estimateResources, formatBytes, measuredStorageHeadroomBytes } from "./resources";
+import { describeWorkerErrorEvent } from "./workerError";
 
 export interface WorkspacePaths {
   root: string;
@@ -868,7 +869,9 @@ export async function generate(opts: GenerateOpts): Promise<number> {
     // A worker script/load failure would otherwise leave generation hanging
     // silently (onmessage never fires); surface it loudly.
     activeWorker.onerror = (ev) => {
-      const msg = `generate worker failed: ${(ev as ErrorEvent).message ?? ev}`;
+      // A worker that dies without reaching its own error handlers fires a
+      // bare Event here — say what that MEANS instead of "[object Event]".
+      const msg = `generate worker failed: ${describeWorkerErrorEvent(ev as ErrorEvent)}`;
       emitLine("chat://line", { stream: "stderr", line: msg });
       terminatePool();
       if (activeWorker) { activeWorker.terminate(); activeWorker = null; }
