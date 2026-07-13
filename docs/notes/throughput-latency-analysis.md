@@ -153,7 +153,10 @@ bound by pointer) — ruled out as a suspect.
 - **F. Eager pool prewarm.** Spawn the pool during model load, off the first
   turn's TTFT.
 - **G. Adopt the v0.9.0 resident K/V + fused decode attention — kills BOTH the
-  recopy (A) AND the re-hash (§2b), byte-identical.** As of 2026-07-12 this is no
+  recopy (A) AND the re-hash (§2b), byte-identical.** **SHIPPED 2026-07-13:
+  ADR-0019 is Accepted and IS production decode (mono + staged), and speculative
+  decode is folded onto the same resident carry (`speculative_resident.rs`).**
+  As of 2026-07-12 this is no
   longer a hand-rolled our-side ring-export: upstream **PR #41 (v0.9.0, in-flight)**
   lands the primitives — `OpKind::Attention` 6-input (κ119) + `OpKind::KvCacheWrite`
   κ-move (κ120) — motivated by this exact three-gap finding. We *adopt* them:
@@ -206,6 +209,13 @@ bound on the deployed wasm tax.
   reject-cost at long context. NOT the ceiling-breaker; a blind universal default-on
   is not clearly a win. Recommendation: enable it lazily/by workload, or leave the
   knob — not K hard-on. (Witness in `speculative.rs`.)
+  **UPDATE 2026-07-13: the per-batch overhead side of this verdict is obsolete —
+  speculation is FOLDED onto the resident carry (the pending token commits as the
+  first row of each verify batch; the verify runner alone executes during
+  speculation), so the per-batch sync → re-hash → commit-copy → re-ingest
+  traversals are gone (`tests/speculative_resident.rs`). The acceptance-rate
+  economics (workload-dependent 1.0–1.5×) are unchanged; re-measure
+  `spec_acceptance` at real scale before any default-on decision.**
 - **int4 — IMPLEMENTED + PROVEN (`0398d1f` native, `8073840` browser).** Correction
   to an earlier note: int4 was NOT a stale guard on a working feature — it was a
   genuinely unimplemented emit path (`quantize_weights` bailed; `derive_quantized_artifact`

@@ -229,6 +229,26 @@ struct DecodeState {
     /// prefill instruments: a shared-prefix turn adds only its suffix; a
     /// chunked prefill adds ceil(suffix/chunk) instead of suffix).
     steps: u64,
+    /// The per-pass input buffers, allocated once and refreshed in place —
+    /// a generation step re-fills, never re-allocates (see
+    /// [`DecodeState::refresh_buffers`]).
+    bufs: PassBuffers,
+    /// Cached rotary frequency law: `inv_freqs`/`attention_factor` are
+    /// position-free for the length-independent laws, so a step reuses them;
+    /// a length-dependent law (dynamic/longrope) recomputes when the realized
+    /// length moves. `rope_valid_for` is the seq_len the cache was built at.
+    rope_freqs: Vec<f64>,
+    rope_scale: f32,
+    rope_valid_for: Option<usize>,
+    /// Staging rows `[chunk · head_dim]` for the rope table assembly.
+    rope_cos: Vec<f32>,
+    rope_sin: Vec<f32>,
+    /// The mask buffer's identity `(span, group_rows, chunk, resident)` and
+    /// the realized position it encodes: a pass with the same identity flips
+    /// only the Δpos columns (O(Δpos · rows), amortized O(1)/token) instead
+    /// of rebuilding — and re-hashing — O(bucket) bytes every step.
+    mask_key: Option<(usize, usize, usize, bool)>,
+    mask_pos: usize,
 }
 
 /// The owned per-pass input buffers — everything but the carried K/V, which the
@@ -236,6 +256,7 @@ struct DecodeState {
 /// generation step) and `verify_pass` (the all-positions verify pass): both
 /// feed byte-identical decode inputs, differing only in which head the runner
 /// carries and how their logits are read.
+#[derive(Default)]
 struct PassBuffers {
     ids: Vec<u8>,
     cos_q: Vec<u8>,
@@ -250,27 +271,12 @@ struct PassBuffers {
 }
 
 impl DecodeState {
-    /// Non-interleaved RoPE rows for absolute positions `base..base+chunk`
-    /// (`[chunk · head_dim]`, halves duplicated to pair with the rotate-half
-    /// partner `j ± rotary_dim/2`) — the spec's complete frequency law.
-    fn rope_rows(&self, base: usize, chunk: usize, d: usize) -> (Vec<f32>, Vec<f32>) {
-        self.rope.rows(base, chunk, d)
-    }
-
-    /// Tile per-position rope rows `[chunk, d]` to the head-major layout
-    /// `[rows · chunk, d]` the plan's exact-shape `Mul` consumes.
-    fn expand_rows(table: &[f32], rows: usize) -> Vec<u8> {
-        let mut out = Vec::with_capacity(rows * table.len() * 4);
-        for _ in 0..rows {
-            out.extend(table.iter().flat_map(|v| v.to_le_bytes()));
-        }
-        out
-    }
-
-    /// Build the per-pass input buffers for `tokens` at the current position
-    /// (`real ≤ geom.chunk`, padded up to the chunk; pad rows are masked below
-    /// the realized length until overwritten).
-    fn pass_buffers(&self, geom: DecodeGeometry, tokens: &[i64]) -> Result<PassBuffers> {
+    /// Refresh the per-pass input buffers IN PLACE for `tokens` at the
+    /// current position (`real ≤ geom.chunk`, padded up to the chunk; pad
+    /// rows are masked below the realized length until overwritten). The
+    /// rope rows carry the spec's complete frequency law at the realized
+    /// length; the mask update is incremental when only the position moved.
+    fn refresh_buffers(&mut self, geom: DecodeGeometry, tokens: &[i64]) -> Result<()> {
         let real = tokens.len();
         ensure!(
             0 < real && real <= geom.chunk,
@@ -279,72 +285,120 @@ impl DecodeState {
         );
         let (chunk, pos) = (geom.chunk, self.cur_len);
         let g = geom.heads / geom.kv_heads;
+        let d = geom.head_dim;
 
-        let mut ids_v = vec![0i64; chunk];
-        ids_v[..real].copy_from_slice(tokens);
-        let ids: Vec<u8> = ids_v.iter().flat_map(|v| v.to_le_bytes()).collect();
+        self.bufs.ids.clear();
+        for i in 0..chunk {
+            let t = tokens.get(i).copied().unwrap_or(0);
+            self.bufs.ids.extend_from_slice(&t.to_le_bytes());
+        }
 
-        // Rope tables at absolute positions pos..pos+chunk, head-major.
-        let (cos, sin) = self.rope_rows(pos, chunk, geom.head_dim);
-        let cos_q = Self::expand_rows(&cos, geom.heads);
-        let sin_q = Self::expand_rows(&sin, geom.heads);
-        let cos_k = Self::expand_rows(&cos, geom.kv_heads);
-        let sin_k = Self::expand_rows(&sin, geom.kv_heads);
+        // Rope tables at absolute positions pos..pos+chunk, head-major. The
+        // frequency law is cached: position-free for the length-independent
+        // laws, recomputed at each new realized length for dynamic/longrope.
+        let seq_len = pos + chunk;
+        let stale = match self.rope_valid_for {
+            None => true,
+            Some(at) => self.rope.scaling.length_dependent() && at != seq_len,
+        };
+        if stale {
+            self.rope_freqs = self.rope.inv_freqs(d, seq_len);
+            self.rope_scale = self.rope.attention_factor(seq_len);
+            self.rope_valid_for = Some(seq_len);
+        }
+        self.rope_cos.resize(chunk * d, 0.0);
+        self.rope_sin.resize(chunk * d, 0.0);
+        self.rope.rows_into(
+            pos,
+            chunk,
+            d,
+            &self.rope_freqs,
+            self.rope_scale,
+            &mut self.rope_cos,
+            &mut self.rope_sin,
+        );
+        Self::expand_rows_into(&self.rope_cos, geom.heads, &mut self.bufs.cos_q);
+        Self::expand_rows_into(&self.rope_sin, geom.heads, &mut self.bufs.sin_q);
+        Self::expand_rows_into(&self.rope_cos, geom.kv_heads, &mut self.bufs.cos_k);
+        Self::expand_rows_into(&self.rope_sin, geom.kv_heads, &mut self.bufs.sin_k);
 
         // The additive mask carries both visibility laws: a bucket col is
         // visible when realized (`col < pos`); a chunk col (the new keys) when
         // causal-within-chunk (`col - bucket ≤ i`). The fused kernel groups
         // internally, so its mask is one row per position `[chunk, span]`; the
         // legacy decomposition needs it replicated per query-head-group
-        // (`[g·chunk, span]`, row `jj·chunk + i`). `-inf` (as `-1e9`) erases.
+        // (`[g·chunk, span]`, row `jj·chunk + i`). The fused DecodeAttention
+        // kernel erases a key with a true `-∞` (its softmax maps `exp(-∞) →
+        // 0.0` exactly, per the substrate contract); the legacy
+        // decomposition's `Add(scores, mask)` uses a large finite `-1e9` (a
+        // raw `-∞` there would make a fully-masked pad row `NaN`). Matching
+        // each form's erase value exactly is load-bearing: a finite mask into
+        // the fused kernel leaves a nonzero weight that flips boundary tokens.
         let span = geom.bucket + chunk;
-        let visible = |col: usize, i: usize| {
-            if col < geom.bucket {
-                col < pos
-            } else {
-                col - geom.bucket <= i
-            }
-        };
-        // The fused DecodeAttention kernel erases a key with a true `-∞` (its
-        // softmax maps `exp(-∞) → 0.0` exactly, per the substrate contract); the
-        // legacy decomposition's `Add(scores, mask)` uses a large finite `-1e9`
-        // (a raw `-∞` there would make a fully-masked pad row `NaN`). Matching
-        // each form's erase value exactly is load-bearing: a finite mask into the
-        // fused kernel leaves a nonzero weight that flips boundary tokens.
         let erase = if geom.resident_kv {
             f32::NEG_INFINITY
         } else {
             -1e9
         };
         let group_rows = if geom.resident_kv { 1 } else { g };
-        let mut mask = vec![0.0f32; group_rows * chunk * span];
-        for jj in 0..group_rows {
-            for i in 0..chunk {
-                let base = (jj * chunk + i) * span;
-                for (col, slot) in mask[base..base + span].iter_mut().enumerate() {
-                    if !visible(col, i) {
-                        *slot = erase;
+        let key = (span, group_rows, chunk, geom.resident_kv);
+        let write = |buf: &mut [u8], row: usize, col: usize, v: f32| {
+            let at = (row * span + col) * 4;
+            buf[at..at + 4].copy_from_slice(&v.to_le_bytes());
+        };
+        if self.mask_key == Some(key) {
+            // Same mask identity: only the realized position moved. Newly
+            // realized bucket columns become visible; a rewind re-erases.
+            let (from, to) = (self.mask_pos.min(pos), self.mask_pos.max(pos));
+            let value = if pos > self.mask_pos { 0.0 } else { erase };
+            if from != to {
+                for row in 0..group_rows * chunk {
+                    for col in from..to {
+                        write(&mut self.bufs.mask_b, row, col, value);
                     }
                 }
             }
+        } else {
+            let visible = |col: usize, i: usize| {
+                if col < geom.bucket {
+                    col < pos
+                } else {
+                    col - geom.bucket <= i
+                }
+            };
+            self.bufs.mask_b.clear();
+            self.bufs.mask_b.resize(group_rows * chunk * span * 4, 0);
+            for jj in 0..group_rows {
+                for i in 0..chunk {
+                    for col in 0..span {
+                        if !visible(col, i) {
+                            write(&mut self.bufs.mask_b, jj * chunk + i, col, erase);
+                        }
+                    }
+                }
+            }
+            self.mask_key = Some(key);
         }
-        let mask_b: Vec<u8> = mask.iter().flat_map(|v| v.to_le_bytes()).collect();
+        self.mask_pos = pos;
 
         // The gather head takes the LAST REAL position's row; the verify head
         // has no `last_pos` port, so this is simply unbound there.
-        let lp = ((real - 1) as i64).to_le_bytes();
+        self.bufs.lp = ((real - 1) as i64).to_le_bytes();
         // The fused KvCacheWrite ring position is the current realized length.
-        let pos_b = (pos as u32).to_le_bytes();
-        Ok(PassBuffers {
-            ids,
-            cos_q,
-            sin_q,
-            cos_k,
-            sin_k,
-            mask_b,
-            lp,
-            pos: pos_b,
-        })
+        self.bufs.pos = (pos as u32).to_le_bytes();
+        Ok(())
+    }
+
+    /// Tile per-position rope rows `[chunk, d]` into the head-major layout
+    /// `[rows · chunk, d]` the plan's exact-shape `Mul` consumes — in place.
+    fn expand_rows_into(table: &[f32], rows: usize, out: &mut Vec<u8>) {
+        out.clear();
+        out.reserve(rows * table.len() * 4);
+        for _ in 0..rows {
+            for v in table {
+                out.extend_from_slice(&v.to_le_bytes());
+            }
+        }
     }
 
     /// Bind the decode input ports by NAME — buffers by value, carried K/V by
@@ -403,9 +457,9 @@ impl DecodeState {
         let real = tokens.len();
         let (chunk, pos) = (geom.chunk, self.cur_len);
         let outputs = {
-            let bufs = self.pass_buffers(geom, tokens)?;
+            self.refresh_buffers(geom, tokens)?;
             let port_info = runner.input_port_info();
-            let inputs = Self::bind_inputs(&port_info, &bufs, &self.past_k, &self.past_v)?;
+            let inputs = Self::bind_inputs(&port_info, &self.bufs, &self.past_k, &self.past_v)?;
             if geom.resident_kv {
                 // The resident walk: KV rides κ-labels inside the runner (no
                 // re-hash, ring write moves in place); `None` outputs mean the
@@ -490,7 +544,12 @@ impl DecodeState {
     /// the truth boundary before anything reads `past_k`/`past_v` bytes (a
     /// verify pass on another runner, a bucket regrow, a rewind). A no-op for
     /// a runner that never carried.
-    fn sync_kv_carry(&mut self, runner: &mut impl LmSession, geom: DecodeGeometry) -> Result<()> {
+    fn sync_kv_carry(
+        &mut self,
+        runner: &mut impl LmSession,
+        geom: DecodeGeometry,
+    ) -> Result<usize> {
+        let mut synced = 0usize;
         for (name, bytes) in runner.take_kv_carry()? {
             let (kind, layer) = name
                 .rsplit_once('_')
@@ -508,8 +567,9 @@ impl DecodeState {
                 geom.kv_heads * geom.bucket * geom.head_dim * 4
             );
             *target = bytes;
+            synced += 1;
         }
-        Ok(())
+        Ok(synced)
     }
 
     /// A **verify pass** (row `speculative-decode`): run `tokens` through a
@@ -521,16 +581,16 @@ impl DecodeState {
     /// verify is a trial pass, and only the prefix the model itself would have
     /// produced is later committed (through [`pass`]/`feed`).
     fn verify_pass(
-        &self,
+        &mut self,
         runner: &mut impl LmSession,
         geom: DecodeGeometry,
         tokens: &[i64],
     ) -> Result<Vec<Vec<f32>>> {
         let real = tokens.len();
         let outputs = {
-            let bufs = self.pass_buffers(geom, tokens)?;
+            self.refresh_buffers(geom, tokens)?;
             let port_info = runner.input_port_info();
-            let inputs = Self::bind_inputs(&port_info, &bufs, &self.past_k, &self.past_v)?;
+            let inputs = Self::bind_inputs(&port_info, &self.bufs, &self.past_k, &self.past_v)?;
             runner.execute(&inputs)?
         };
         let out_ports = runner.output_port_info();
@@ -556,48 +616,58 @@ impl DecodeState {
             .collect())
     }
 
-    /// One **speculative-decode** batch (row `speculative-decode`): run the
-    /// `draft` through the verify runner in ONE `M = draft.len()` forward, then
-    /// accept the longest prefix the model would itself produce under
-    /// `next_token`.
+    /// One FOLDED **speculative-decode** batch (row `speculative-decode`):
+    /// commit `pending` — the model's OWN token for the current position,
+    /// decided by the caller's rule from the previous row — and verify `draft`
+    /// behind it, all in ONE `M = 1 + draft.len()` pass. Folding the commit
+    /// into the batch is what lets the verify runner alone carry the resident
+    /// truth across batches (`carry`): no per-batch step on another runner, so
+    /// no per-batch sync → re-hash → commit-copy → re-ingest traversals.
     ///
-    /// `next_token(logits, position)` is the caller's own token rule — `argmax`
-    /// for greedy, or a per-position-seeded sample for temperature — the SAME
-    /// rule plain decode applies. `prev_row` is the logits after the
-    /// currently-realized sequence, so the model's token at the first position
-    /// is `next_token(prev_row, cur_len)`. A draft token is accepted iff it
-    /// equals the model's own token at that position; at the first mismatch (or
-    /// after the whole draft) the model's own token is the `bonus` — the caller
-    /// commits it with a plain [`pass`] to advance the K/V and get the next
-    /// `prev_row`. Because `next_token` is a pure function of `(logits, position)`
-    /// and every accepted position shares the plain path's prefix, the committed
-    /// sequence is byte-identical to stepping one token at a time under the same
-    /// rule — greedy OR sampled. The accepted prefix's K/V is spliced from this
-    /// same pass (see [`verify_pass`]), so they are never recomputed. Returns
-    /// `(accepted, bonus)`; the realized length advances by the accepted count.
-    fn draft_verify(
+    /// `next_token(logits, position)` is the caller's own token rule — the
+    /// SAME rule plain decode applies, a pure function of (logits, position) —
+    /// so the committed sequence is byte-identical to stepping one token at a
+    /// time, greedy OR sampled. Row 0 (after `pending`) seeds acceptance: a
+    /// draft token is accepted iff it equals the model's own token at that
+    /// position; the divergence token is the returned `bonus` (the next
+    /// batch's `pending`). The fused KvCacheWrite ring-wrote ALL batch rows;
+    /// `cur_len` advances by `1 + accepted`, so rejected rows sit past the
+    /// realized length, mask-erased until overwritten — carrying the whole
+    /// updated cache forward IS the accepted-prefix state. Returns
+    /// `(accepted, bonus, resident)` — `resident` = the updated caches stayed
+    /// inside the runner as κ-labels (nothing materialized).
+    fn speculate_pass(
         &mut self,
         runner: &mut impl LmSession,
         geom: DecodeGeometry,
-        prev_row: &[f32],
+        pending: i64,
         draft: &[i64],
         next_token: &mut dyn FnMut(&[f32], u64) -> i64,
-    ) -> Result<(Vec<i64>, i64)> {
+        carry: bool,
+    ) -> Result<(Vec<i64>, i64, bool)> {
         let k = draft.len();
         let pos = self.cur_len;
         let row = geom.head_dim * 4;
+        let mut batch = Vec::with_capacity(1 + k);
+        batch.push(pending);
+        batch.extend_from_slice(draft);
         let outputs = {
-            let bufs = self.pass_buffers(geom, draft)?;
+            self.refresh_buffers(geom, &batch)?;
             let port_info = runner.input_port_info();
-            let inputs = Self::bind_inputs(&port_info, &bufs, &self.past_k, &self.past_v)?;
-            runner.execute(&inputs)?
+            let inputs = Self::bind_inputs(&port_info, &self.bufs, &self.past_k, &self.past_v)?;
+            if geom.resident_kv {
+                runner.execute_kv_resident(&inputs, carry)?
+            } else {
+                runner.execute(&inputs)?.into_iter().map(Some).collect()
+            }
         };
         let out_ports = runner.output_port_info();
         let logits = out_ports
             .iter()
             .zip(outputs.iter())
             .find(|(p, _)| p.name == "logits")
-            .map(|(_, o)| o.bytes.as_slice())
+            .and_then(|(_, o)| o.as_ref())
+            .map(|o| o.bytes.as_slice())
             .context("verify pass produced no logits output")?;
         ensure!(
             logits.len() % (geom.chunk * 4) == 0,
@@ -607,68 +677,71 @@ impl DecodeState {
         );
         let vocab = logits.len() / (geom.chunk * 4);
 
-        // Acceptance under the caller's rule: the model's token at position `pos`
-        // is next_token(prev_row, pos); accept draft[i] while it equals the
-        // model's token, then advance to the model's token at the next position
-        // (from this pass's logit row for that draft position). `bonus` ends as
-        // the model's token at the divergence point (or after the whole draft).
-        let mut bonus = next_token(prev_row, pos as u64);
+        // Acceptance under the caller's rule. Row `i` is the logits AFTER
+        // batch position `i` (absolute position pos + i), so row 0 — after the
+        // committed `pending` — decides the model's token at pos + 1.
+        let mut bonus = {
+            let row0 = le_f32_vec(&logits[..vocab * 4]);
+            next_token(&row0, (pos + 1) as u64)
+        };
         let mut accepted = 0usize;
         while accepted < k {
             if draft[accepted] != bonus {
                 break;
             }
-            let next = le_f32_vec(&logits[accepted * vocab * 4..(accepted + 1) * vocab * 4]);
-            bonus = next_token(&next, (pos + accepted + 1) as u64);
+            let next = le_f32_vec(&logits[(accepted + 1) * vocab * 4..(accepted + 2) * vocab * 4]);
+            bonus = next_token(&next, (pos + accepted + 2) as u64);
             accepted += 1;
         }
 
-        // Commit the accepted prefix's K/V. The legacy form splices rows
-        // 0..accepted into pos..pos+accepted (head-major, one contiguous copy per
-        // kv head; rejected draft rows never leave the output buffer). The fused
-        // KvCacheWrite already ring-wrote all `k` draft rows into the resident
-        // cache; because `cur_len` advances by only `accepted`, the rejected rows
-        // (pos+accepted..pos+k) sit past the realized length and are mask-erased
-        // until overwritten — so carrying the whole updated cache forward IS the
-        // accepted-prefix state.
-        if geom.resident_kv || accepted > 0 {
-            for (port, out) in out_ports.iter().zip(outputs.iter()) {
-                if port.name == "logits" {
-                    continue;
-                }
-                let (kind, layer) = port
-                    .name
-                    .rsplit_once('_')
-                    .and_then(|(kd, l)| l.parse::<usize>().ok().map(|l| (kd, l)))
-                    .with_context(|| format!("unexpected decode output port `{}`", port.name))?;
-                let target = match kind {
-                    "k_new" => &mut self.past_k[layer],
-                    "v_new" => &mut self.past_v[layer],
-                    _ => bail!("unexpected decode output port `{}`", port.name),
-                };
-                if geom.resident_kv {
-                    ensure!(
-                        out.bytes.len() == geom.kv_heads * geom.bucket * row,
-                        "{} returned {} bytes, expected the full cache {}",
-                        port.name,
-                        out.bytes.len(),
-                        geom.kv_heads * geom.bucket * row
-                    );
-                    target.clone_from(&out.bytes);
-                } else {
-                    for h in 0..geom.kv_heads {
-                        let src = h * geom.chunk * row;
-                        let dst = (h * geom.bucket + pos) * row;
-                        target[dst..dst + accepted * row]
-                            .copy_from_slice(&out.bytes[src..src + accepted * row]);
-                    }
+        // Commit the batch's K/V. Resident (`None` outputs): the caches stayed
+        // inside the runner — nothing to copy, the mask erases the rejected
+        // tail. Materialized resident form: the output IS the whole updated
+        // cache. Legacy form: splice rows 0..1+accepted into pos..
+        let mut resident = geom.resident_kv;
+        for (port, out) in out_ports.iter().zip(outputs.iter()) {
+            if port.name == "logits" {
+                continue;
+            }
+            let Some(out) = out else {
+                continue;
+            };
+            let (kind, layer) = port
+                .name
+                .rsplit_once('_')
+                .and_then(|(kd, l)| l.parse::<usize>().ok().map(|l| (kd, l)))
+                .with_context(|| format!("unexpected decode output port `{}`", port.name))?;
+            let target = match kind {
+                "k_new" => &mut self.past_k[layer],
+                "v_new" => &mut self.past_v[layer],
+                _ => bail!("unexpected decode output port `{}`", port.name),
+            };
+            if geom.resident_kv {
+                resident = false;
+                ensure!(
+                    out.bytes.len() == geom.kv_heads * geom.bucket * row,
+                    "{} returned {} bytes, expected the full cache {}",
+                    port.name,
+                    out.bytes.len(),
+                    geom.kv_heads * geom.bucket * row
+                );
+                target.clone_from(&out.bytes);
+            } else {
+                resident = false;
+                let commit = 1 + accepted;
+                for h in 0..geom.kv_heads {
+                    let src = h * geom.chunk * row;
+                    let dst = (h * geom.bucket + pos) * row;
+                    target[dst..dst + commit * row]
+                        .copy_from_slice(&out.bytes[src..src + commit * row]);
                 }
             }
         }
-        self.cur_len += accepted;
+        self.cur_len += 1 + accepted;
+        self.tokens.push(pending);
         self.tokens.extend_from_slice(&draft[..accepted]);
         self.steps += 1;
-        Ok((draft[..accepted].to_vec(), bonus))
+        Ok((draft[..accepted].to_vec(), bonus, resident))
     }
 }
 
@@ -698,6 +771,9 @@ pub struct DecodeSession<S: LmSession> {
     state: DecodeState,
     /// Where the carried-K/V truth lives (ADR-0019 increment 3b).
     truth: KvTruth,
+    /// Geometry of the caller-held verify runner while it carries the truth
+    /// (`KvTruth::Verify`) — what `end_speculation` sizes the sync against.
+    verify_geom: Option<DecodeGeometry>,
 }
 
 /// Where the carried-K/V truth lives. On a resident-KV plan the hot runner
@@ -715,6 +791,11 @@ enum KvTruth {
     Step,
     /// The prefill seeder carries the truth as resident κ-labels.
     Seeder,
+    /// The CALLER-HELD verify runner carries the truth as resident κ-labels
+    /// (a folded speculative run, [`DecodeSession::speculate`]). The session
+    /// cannot reach that runner on its own, so every other path refuses loud
+    /// until [`DecodeSession::end_speculation`] hands the truth back.
+    Verify,
     /// A resident walk failed mid-flight; the carried truth may be lost.
     Poisoned,
 }
@@ -766,8 +847,17 @@ impl<S: LmSession> DecodeSession<S> {
                 cur_len: 0,
                 tokens: Vec::new(),
                 steps: 0,
+                bufs: PassBuffers::default(),
+                rope_freqs: Vec::new(),
+                rope_scale: 1.0,
+                rope_valid_for: None,
+                rope_cos: Vec::new(),
+                rope_sin: Vec::new(),
+                mask_key: None,
+                mask_pos: 0,
             },
             truth: KvTruth::Host,
+            verify_geom: None,
         })
     }
 
@@ -777,12 +867,18 @@ impl<S: LmSession> DecodeSession<S> {
     fn sync_truth(&mut self) -> Result<()> {
         match self.truth {
             KvTruth::Host => {}
-            KvTruth::Step => self.state.sync_kv_carry(&mut self.runner, self.geom)?,
+            KvTruth::Step => {
+                self.state.sync_kv_carry(&mut self.runner, self.geom)?;
+            }
             KvTruth::Seeder => {
                 if let Some((seeder, sgeom)) = self.seeder.as_mut() {
                     self.state.sync_kv_carry(seeder, *sgeom)?;
                 }
             }
+            KvTruth::Verify => bail!(
+                "the carried K/V truth lives in the speculation verify runner — \
+                 call end_speculation(verify_runner) before any other pass"
+            ),
             KvTruth::Poisoned => bail!(
                 "the carried K/V was lost by a failed resident decode walk — \
                  reset the session before continuing"
@@ -844,36 +940,96 @@ impl<S: LmSession> DecodeSession<S> {
         self.state.verify_pass(verify_runner, geom, tokens)
     }
 
-    /// One **speculative-decode** batch (row `speculative-decode`): verify
-    /// `draft` in one `M = draft.len()` pass and accept the longest prefix the
-    /// model itself would produce under `next_token`, advancing the session by
-    /// the accepted count and splicing their K/V from the same pass. `prev_row`
-    /// is the logits after the currently-realized sequence; `next_token(logits,
-    /// position)` is the caller's own token rule (argmax, or a per-position
-    /// sample), applied identically here and on the plain step. Returns
-    /// `(accepted, bonus)`; the caller commits `bonus` with `step` to advance
-    /// past it and obtain the next `prev_row`. Output-identical to stepping the
-    /// accepted tokens one at a time under the same rule — a batched shortcut,
-    /// never a change in meaning (greedy OR sampled).
-    pub fn draft_verify(
+    /// One FOLDED **speculative-decode** batch (row `speculative-decode`):
+    /// commit `pending` (the model's own token for the current position,
+    /// decided by `next_token` from the previous row) and verify `draft`
+    /// behind it in ONE `M = 1 + draft.len()` pass on the verify runner —
+    /// which then CARRIES the resident K/V truth across batches. During a
+    /// speculative run the session's other passes refuse loud; the caller
+    /// hands the truth back with [`end_speculation`] before stepping again.
+    /// Returns `(accepted, bonus)`: the accepted draft prefix (the model's
+    /// own tokens, byte for byte) and the model's token at the divergence —
+    /// the next batch's `pending`. Output-identical to stepping one token at
+    /// a time under the same rule, at ANY temperature.
+    ///
+    /// A batch never grows the bucket (growth would stale the verify runner
+    /// while it holds the truth): the caller retires speculation before the
+    /// bucket fills, and an overflowing batch is refused loud here.
+    ///
+    /// [`end_speculation`]: DecodeSession::end_speculation
+    pub fn speculate(
         &mut self,
         verify_runner: &mut S,
-        prev_row: &[f32],
+        pending: i64,
         draft: &[i64],
         next_token: &mut dyn FnMut(&[f32], u64) -> i64,
     ) -> Result<(Vec<i64>, i64)> {
-        // The verify runner binds — and its accepted-prefix commit writes —
-        // the host K/V bytes: materialize any resident carry first. The host
-        // stays the truth afterwards (the next step re-ingests once).
-        self.sync_truth()?;
-        let geom = self.verify_geometry(verify_runner, draft.len())?;
-        self.state
-            .draft_verify(verify_runner, geom, prev_row, draft, next_token)
+        ensure!(
+            self.state.cur_len + 1 + draft.len() <= self.geom.bucket,
+            "a speculative batch of {} rows at position {} would leave the bucket ({}) — \
+             retire speculation and let plain decode grow it",
+            1 + draft.len(),
+            self.state.cur_len,
+            self.geom.bucket
+        );
+        // Hand-off INTO speculation: whoever carries the truth materializes
+        // once; the verify runner ingests current bytes on its first batch and
+        // carries from there.
+        if matches!(self.truth, KvTruth::Step | KvTruth::Seeder) {
+            self.sync_truth()?;
+        }
+        ensure!(
+            self.truth != KvTruth::Poisoned,
+            "the carried K/V was lost by a failed resident decode walk — reset the session"
+        );
+        let vgeom = self.verify_geometry(verify_runner, 1 + draft.len())?;
+        let carry = vgeom.resident_kv && self.truth == KvTruth::Verify;
+        if vgeom.resident_kv {
+            self.truth = KvTruth::Poisoned; // until the walk returns
+        }
+        let (accepted, bonus, resident) =
+            self.state
+                .speculate_pass(verify_runner, vgeom, pending, draft, next_token, carry)?;
+        self.truth = if resident {
+            self.verify_geom = Some(vgeom);
+            KvTruth::Verify
+        } else {
+            self.verify_geom = None;
+            KvTruth::Host
+        };
+        Ok((accepted, bonus))
+    }
+
+    /// Hand the carried K/V truth back from the speculation verify runner to
+    /// the host buffers — the truth boundary that ends a speculative run
+    /// (bucket retire, empty-draft fallback to plain steps, or turn end).
+    /// A no-op when the verify runner never carried. The runner passed here
+    /// must be THE one `speculate` ran on: a runner with no carry to give
+    /// back fails loud rather than leaving stale host bytes as "truth".
+    pub fn end_speculation(&mut self, verify_runner: &mut S) -> Result<()> {
+        if self.truth != KvTruth::Verify {
+            return Ok(());
+        }
+        let vgeom = self
+            .verify_geom
+            .take()
+            .context("verify truth recorded without its geometry")?;
+        self.truth = KvTruth::Poisoned; // until the sync lands
+        let synced = self.state.sync_kv_carry(verify_runner, vgeom)?;
+        ensure!(
+            synced == 2 * vgeom.layers,
+            "end_speculation synced {synced} carried caches, expected {} — \
+             this is not the runner that carried the speculative truth",
+            2 * vgeom.layers
+        );
+        self.truth = KvTruth::Host;
+        Ok(())
     }
 
     /// Discover and validate a verify runner's geometry: it must share this
-    /// session's bucket/layers/heads (its chunk `K` is the draft width), and the
-    /// draft length must fit in one pass.
+    /// session's bucket/layers/heads (its chunk bounds the batch width — for a
+    /// folded speculative batch, the pending token plus the draft), and the
+    /// batch must fit in one pass.
     fn verify_geometry(&self, verify_runner: &mut S, draft_len: usize) -> Result<DecodeGeometry> {
         let geom = DecodeGeometry::discover(verify_runner)?;
         ensure!(
@@ -937,6 +1093,19 @@ impl<S: LmSession> DecodeSession<S> {
         let len = len.min(self.state.cur_len);
         self.state.cur_len = len;
         self.state.tokens.truncate(len);
+        // A rewind while the verify runner holds the truth abandons rows the
+        // host never received: at 0 every row is masked-unreachable (any
+        // content is the correct empty state); anywhere else the host bytes
+        // are stale, so the truth is POISONED — later passes fail loud
+        // instead of continuing on wrong numbers.
+        if self.truth == KvTruth::Verify {
+            self.verify_geom = None;
+            self.truth = if len == 0 {
+                KvTruth::Host
+            } else {
+                KvTruth::Poisoned
+            };
+        }
         if len == 0 && self.truth == KvTruth::Poisoned {
             self.truth = KvTruth::Host;
         }
@@ -1064,6 +1233,11 @@ impl<S: LmSession> DecodeSession<S> {
     /// step runner as κ-labels between steps (no re-hash, no copy — the ring
     /// write moves in place); legacy plans splice into the host buffers.
     pub fn step(&mut self, token: i64) -> Result<Vec<f32>> {
+        ensure!(
+            self.truth != KvTruth::Verify,
+            "the carried K/V truth lives in the speculation verify runner — \
+             call end_speculation(verify_runner) before stepping"
+        );
         self.ensure_capacity(1)?;
         // Hand-off: if the seeder carries the truth (a resident prefill just
         // ran), materialize once so this runner ingests current bytes.
@@ -1095,6 +1269,11 @@ impl<S: LmSession> DecodeSession<S> {
     /// else one step per token.
     pub fn feed(&mut self, tokens: &[i64]) -> Result<Vec<f32>> {
         ensure!(!tokens.is_empty(), "feed needs at least one token");
+        ensure!(
+            self.truth != KvTruth::Verify,
+            "the carried K/V truth lives in the speculation verify runner — \
+             call end_speculation(verify_runner) before feeding"
+        );
         let mut row: Option<Vec<f32>> = None;
         let mut rest = tokens;
         while !rest.is_empty() {

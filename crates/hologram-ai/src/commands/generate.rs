@@ -753,76 +753,102 @@ pub fn generate_stream_speculative<S: LmSession>(
     };
 
     // Speculation is a projection of speed, never of meaning: it retires to
-    // plain decode — never worse — the moment it would leave the current bucket
-    // (proactively, below) or a verify pass fails. Once retired it stays retired
-    // for the turn (the verify runner is not rebuilt at a wider bucket).
+    // plain decode — never worse — the moment a batch would leave the current
+    // bucket. The loop is FOLDED (ADR-0019): the model's own next token
+    // (`pending`, decided by the shared rule and emitted immediately) is
+    // committed as the FIRST row of the next verify batch, so the verify
+    // runner alone executes during speculation and CARRIES the resident K/V
+    // truth across batches — no per-batch step on the session runner, hence
+    // no per-batch sync → re-hash → commit-copy → re-ingest traversals. The
+    // truth is handed back (`end_speculation`, one sync) only at regime
+    // boundaries: bucket retire, an empty draft falling back to plain steps,
+    // and turn end.
     let mut speculate = true;
+    let mut pending: Option<i64> = None;
     while generated.len() < budget {
         let cap = draft_cap.min(budget - generated.len());
-        // Speculation must stay STRICTLY within the current bucket. `draft_verify`
-        // splices the accepted prefix into FIXED bucket rows `pos..pos+accepted`
-        // (it never grows), so a batch that reached the bucket would overflow the
-        // K/V buffer; and the bonus step must not regrow the bucket while the
-        // verify runner — a full resident plan — is co-resident with the step
-        // runner's rebuild of the wider bucket (the wasm 4 GiB over-commit). Both
-        // are avoided by retiring the moment the next batch (≤ cap accepted + 1
-        // bonus) would reach the bucket: a growth would stale the verify runner
-        // anyway, so retire PROACTIVELY and free it here, letting the plain steps
-        // below regrow the bucket safely. The output is unchanged — the target's
-        // own tokens, byte for byte — only the acceptance boundary moves.
+        // A folded batch ring-writes 1 (pending) + cap rows at the realized
+        // position and never grows the bucket (growth would stale the verify
+        // runner while it holds the truth). Retire PROACTIVELY: hand the truth
+        // back, free the verify runner's residency, and let the plain steps
+        // below regrow the bucket safely. The output is unchanged — the
+        // target's own tokens, byte for byte — only the acceptance boundary
+        // moves.
         if speculate && session.realized_len() + cap + 1 > session.geometry().bucket {
+            session
+                .end_speculation(verify_runner)
+                .context("speculation retire failed")?;
             verify_runner.evict_resident();
             speculate = false;
         }
+        // Decide (and emit) the model's own token for the current position —
+        // the batch's first, committed row. Same rule, same position, as a
+        // plain step would apply.
+        if speculate && pending.is_none() {
+            let next = next_token(&row, session.realized_len() as u64);
+            if emit(next, &mut generated, &mut acc) {
+                break;
+            }
+            pending = Some(next);
+        }
         let draft = if speculate {
-            drafter.propose(session.realized_tokens(), cap)?
+            // The drafter continues AFTER the pending token.
+            let mut seq = session.realized_tokens().to_vec();
+            seq.extend(pending);
+            drafter.propose(&seq, cap)?
         } else {
             Vec::new()
         };
-        match draft.is_empty() {
-            true => {
-                // No recurrence (or speculation retired): a plain step under the
-                // SAME token rule the verify path uses, at this absolute position.
+        match (draft.is_empty(), pending) {
+            (false, Some(p)) => {
+                // A failed resident walk poisons the carried truth — there is
+                // no honest "retire and continue" from it, so a verify failure
+                // is the turn's failure, loud (the bucket case is handled
+                // proactively above; this is a genuine execution error).
+                let (accepted, bonus) = session
+                    .speculate(verify_runner, p, &draft, &mut next_token)
+                    .context("speculative verify failed")?;
+                let n_accepted = accepted.len();
+                let mut stop = false;
+                for t in accepted.into_iter().chain(std::iter::once(bonus)) {
+                    if emit(t, &mut generated, &mut acc) {
+                        stop = true;
+                        break;
+                    }
+                }
+                if stop {
+                    break;
+                }
+                pending = Some(bonus);
+                drafter
+                    .commit(n_accepted, bonus)
+                    .context("drafter commit failed")?;
+            }
+            _ => {
+                // No recurrence (or speculation retired): plain steps. First
+                // hand the truth back and commit any outstanding pending token
+                // through the plain path, then step under the same rule.
+                if let Some(p) = pending.take() {
+                    session
+                        .end_speculation(verify_runner)
+                        .context("speculation hand-off failed")?;
+                    row = session.step(p).context("decode step failed")?;
+                }
                 let next = next_token(&row, session.realized_len() as u64);
                 if emit(next, &mut generated, &mut acc) {
                     break;
                 }
                 row = session.step(next).context("decode step failed")?;
             }
-            false => match session.draft_verify(verify_runner, &row, &draft, &mut next_token) {
-                Ok((accepted, bonus)) => {
-                    let n_accepted = accepted.len();
-                    let mut stop = false;
-                    for t in accepted.into_iter().chain(std::iter::once(bonus)) {
-                        if emit(t, &mut generated, &mut acc) {
-                            stop = true;
-                            break;
-                        }
-                    }
-                    if stop {
-                        break;
-                    }
-                    // Commit the bonus's K/V and get the next acceptance row, then
-                    // sync the drafter to the same committed sequence.
-                    row = session.step(bonus).context("decode step failed")?;
-                    drafter
-                        .commit(n_accepted, bonus)
-                        .context("drafter commit failed")?;
-                }
-                Err(e) => {
-                    // A genuine verify FAILURE — the bucket-growth staleness is
-                    // handled proactively above, so this is an execution error or
-                    // a real misconfiguration. Retire to plain decode (never
-                    // worse) and surface it rather than swallow a silent slowdown.
-                    tracing::warn!("speculative verify failed, decoding plainly: {e:#}");
-                    speculate = false;
-                    // Free the retired verify runner's resident stages — never
-                    // used again this turn (no-op on an unbounded budget).
-                    verify_runner.evict_resident();
-                }
-            },
         }
     }
+    // Turn end: the session survives across turns — hand any carried truth
+    // back so the next turn's prefill reads current bytes. An uncommitted
+    // pending token was already emitted; the next turn's transcript feed
+    // realizes it.
+    session
+        .end_speculation(verify_runner)
+        .context("speculation hand-off failed")?;
     finish_stream(streamer, &mut acc, out);
     debug_assert_eq!(
         acc,
