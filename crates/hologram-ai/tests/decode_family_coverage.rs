@@ -27,7 +27,7 @@ use hologram_ai::quantized::{
     crystallize_quantized_range_tier, crystallize_quantized_tier, QuantTier,
 };
 use hologram_ai::staged::{head_quant_chunks, quantizable_weights, GrowableStagedSession};
-use hologram_ai::DecodeSession;
+use hologram_ai::{DecodeSession, LmSession};
 use hologram_ai_common::lower::{quant_key, QuantMap};
 use hologram_ai_common::DType;
 
@@ -92,6 +92,18 @@ fn decode_family_rows(
     scale: &FamilyScale,
     tier: Option<QuantTier>,
     force: Option<&[i64]>,
+) -> (Vec<Vec<f32>>, Vec<i64>) {
+    decode_family_rows_at(scale, tier, force, 1 << 30) // 1 GiB holds this modest model
+}
+
+/// [`decode_family_rows`] with an explicit stage-residency budget — the
+/// instrument for the eviction-pressure witness (a tiny budget forces every
+/// stage to drop and re-materialize each window).
+fn decode_family_rows_at(
+    scale: &FamilyScale,
+    tier: Option<QuantTier>,
+    force: Option<&[i64]>,
+    budget: u64,
 ) -> (Vec<Vec<f32>>, Vec<i64>) {
     let quantize = tier.is_some();
     let quant_tier = tier.unwrap_or(QuantTier::Int8);
@@ -194,7 +206,7 @@ fn decode_family_rows(
         Box::new(DirKappaStore::new(&store_dir)),
     )
     .unwrap_or_else(|e| panic!("{arch}: growable session: {e:#}"));
-    session.set_residency_budget(1 << 30); // 1 GiB — holds this modest model
+    session.set_residency_budget(budget);
     session.set_bound_by_footprint(true);
     if quantize {
         session.set_quant_map(quant);
@@ -432,4 +444,171 @@ fn int4_decode_tracks_bf16_within_a_stated_loose_bound_for_every_family() {
             );
         }
     }
+}
+
+/// **The resident-carry eviction witness (ADR-0019 increment 3b, staged).**
+/// The same decode, twice per family: a generous budget (stages stay resident,
+/// the K/V carry lives as κ-labels inside each stage session) versus a 1-byte
+/// budget (NO stage is ever admitted — every stage session drops after every
+/// window, so every carried cache must be BANKED into the runner's shadow at
+/// eviction and re-ingested on the next walk, every step). The two runs must
+/// agree bit-for-bit: same kernels, same values — only the carry vehicle
+/// differs (labels vs banked bytes).
+///
+/// Fails-without: remove the eviction banking and the dropped stage takes the
+/// carried truth with it — the next window binds stale host bytes and the
+/// sequences diverge (or the walk errors on a missing carry).
+#[test]
+fn resident_kv_decode_is_identical_under_stage_eviction_pressure() {
+    for layout in FAITHFUL_FAMILIES {
+        let scale = FamilyScale::new(*layout, Dims::MODEST);
+        let arch = scale.arch();
+
+        let (resident_rows, resident_tokens) =
+            decode_family_rows_at(&scale, Some(QuantTier::Int8), None, 1 << 30);
+        let (windowed_rows, windowed_tokens) =
+            decode_family_rows_at(&scale, Some(QuantTier::Int8), None, 1);
+
+        assert_eq!(
+            resident_tokens, windowed_tokens,
+            "{arch}: eviction pressure changed the decoded tokens — the carried K/V \
+             truth was lost (or corrupted) across a stage drop"
+        );
+        for (i, (r, w)) in resident_rows.iter().zip(&windowed_rows).enumerate() {
+            assert_eq!(
+                r.len(),
+                w.len(),
+                "{arch}: logit row {i} width differs under eviction pressure"
+            );
+            for (j, (a, b)) in r.iter().zip(w.iter()).enumerate() {
+                assert!(
+                    a.to_bits() == b.to_bits(),
+                    "{arch}: logit row {i} cell {j} differs under eviction pressure \
+                     ({a} vs {b}) — the banked carry did not round-trip bit-exactly"
+                );
+            }
+        }
+        eprintln!("[eviction-carry] {arch}: resident == strict-windowed, bit-for-bit");
+    }
+}
+
+/// **The staged carry is LIVE, not a dark gate.** Drives one family's
+/// `StagedRunner` directly through the `LmSession` surface: a resident walk
+/// must (a) return `None` for every carried-cache output (nothing
+/// materialized — the whole point), (b) return the SAME bytes as the byte walk
+/// for every materialized output, and (c) hold a non-empty carry whose banked
+/// bytes equal the byte walk's cache outputs bit-for-bit. Fails-without: if
+/// the staged override were missing (trait default), every output would come
+/// back `Some` and the carry would be empty — (a) and (c) both fail.
+#[test]
+fn staged_runner_carries_kv_resident_and_banks_bitwise() {
+    let scale = FamilyScale::new(FAITHFUL_FAMILIES[0], Dims::MODEST);
+    let arch = scale.arch();
+    let config_json = scale.config_json();
+    let (keys, shapes): (Vec<String>, Vec<Vec<u64>>) = scale.manifest().into_iter().unzip();
+    let dtypes = vec![DType::BF16; keys.len()];
+    let one = NonZeroU64::new(1).expect("1 is non-zero");
+    let store_dir = std::env::temp_dir().join(format!("hai-carry-{arch}-{}", std::process::id()));
+    std::fs::create_dir_all(&store_dir).expect("κ-store dir");
+    let dir = DirKappaStore::new(&store_dir);
+    let kappas: Vec<String> = keys
+        .iter()
+        .zip(&shapes)
+        .map(|(name, dims)| dir.insert(&dummy_bf16_bytes(name, dims)).expect("weight"))
+        .collect();
+    let mut session = GrowableStagedSession::new(
+        config_json,
+        keys,
+        kappas,
+        shapes,
+        dtypes,
+        None,
+        one,
+        Box::new(DirKappaStore::new(&store_dir)),
+    )
+    .expect("growable session");
+    session.set_residency_budget(1 << 30);
+    let mut runner = session
+        .decode_runner_for(PROMPT.len())
+        .expect("step runner");
+
+    // Deterministic inputs by port dtype — the carry mechanics are the subject,
+    // so the values only need to be finite and identical across both walks.
+    let ports = runner.input_port_info();
+    let bufs: Vec<Vec<u8>> = ports
+        .iter()
+        .map(|p| match p.dtype {
+            5 => (0..p.element_count)
+                .flat_map(|_| 1i64.to_le_bytes())
+                .collect(),
+            4 => (0..p.element_count)
+                .flat_map(|_| 0i32.to_le_bytes())
+                .collect(),
+            _ => (0..p.element_count)
+                .flat_map(|i| (((i % 7) as f32) * 0.01).to_le_bytes())
+                .collect(),
+        })
+        .collect();
+    let refs: Vec<&[u8]> = bufs.iter().map(|b| b.as_slice()).collect();
+
+    let byte_walk = LmSession::execute(&mut runner, &refs).expect("byte walk");
+    let out_ports = LmSession::output_port_info(&runner);
+    let resident_walk = runner
+        .execute_kv_resident(&refs, false)
+        .expect("resident walk");
+
+    let mut carried_ports = 0usize;
+    for ((port, byte_out), res_out) in out_ports.iter().zip(&byte_walk).zip(&resident_walk) {
+        let is_kv = port.name.starts_with("k_new_") || port.name.starts_with("v_new_");
+        match res_out {
+            None => {
+                assert!(
+                    is_kv,
+                    "{arch}: non-cache output `{}` was not materialized",
+                    port.name
+                );
+                carried_ports += 1;
+            }
+            Some(out) => {
+                assert!(
+                    !is_kv,
+                    "{arch}: cache output `{}` was materialized on the resident walk",
+                    port.name
+                );
+                assert_eq!(
+                    out.bytes, byte_out.bytes,
+                    "{arch}: `{}` differs resident vs byte",
+                    port.name
+                );
+            }
+        }
+    }
+    assert!(
+        carried_ports > 0,
+        "{arch}: the staged resident walk carried NOTHING — the override is not live"
+    );
+
+    // The banked truth equals the byte walk's cache outputs, bit for bit.
+    let carry = runner.take_kv_carry().expect("carry materializes");
+    assert_eq!(
+        carry.len(),
+        carried_ports,
+        "{arch}: carry entries != carried outputs"
+    );
+    for (name, bytes) in carry {
+        let out_name = name
+            .strip_prefix("past_k_")
+            .map(|l| format!("k_new_{l}"))
+            .or_else(|| name.strip_prefix("past_v_").map(|l| format!("v_new_{l}")))
+            .unwrap_or_else(|| panic!("{arch}: unexpected carry key `{name}`"));
+        let idx = out_ports
+            .iter()
+            .position(|p| p.name == out_name)
+            .unwrap_or_else(|| panic!("{arch}: no output port `{out_name}`"));
+        assert_eq!(
+            bytes, byte_walk[idx].bytes,
+            "{arch}: banked carry `{name}` != byte walk `{out_name}`"
+        );
+    }
+    eprintln!("[staged-carry] {arch}: {carried_ports} caches carried resident, banked bitwise");
 }

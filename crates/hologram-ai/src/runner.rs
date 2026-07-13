@@ -362,6 +362,12 @@ impl HoloRunner {
         Ok(result)
     }
 
+    /// Whether this runner currently holds a resident K/V carry (retained
+    /// cache labels from a previous [`Self::execute_kv_resident`] walk).
+    pub fn has_kv_carry(&self) -> bool {
+        !self.kv_carry.is_empty()
+    }
+
     /// Materialize the runner-resident K/V carry back to host bytes, keyed by
     /// the input port that would consume each cache (`past_k_l`/`past_v_l`).
     /// The boundary crossing for everything that needs the bytes host-side —
