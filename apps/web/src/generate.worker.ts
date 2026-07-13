@@ -17,6 +17,7 @@ import {
   preferThreadedPool,
   ensureReady,
   poolInfo,
+  lastPanic,
   type QuantEntry,
   type StagedSession,
 } from "./holo";
@@ -577,6 +578,30 @@ async function warmStagedSession(
   return session;
 }
 
+// An uncaught death in this worker otherwise reaches the page as a bare
+// `Event` with no message ("[object Event]") — catch it HERE, where the
+// detail still exists, and post a structured error. postMessage is
+// best-effort: the context may already be tearing down.
+self.addEventListener("error", (ev) => {
+  const at = ev.filename ? ` (${ev.filename}:${ev.lineno})` : "";
+  const detail = ev.message ? `${ev.message}${at}` : "uncaught error with no detail";
+  try {
+    self.postMessage({ type: "error", error: `generate worker crashed: ${detail}` });
+  } catch {
+    /* the worker is already gone */
+  }
+});
+self.addEventListener("unhandledrejection", (ev) => {
+  try {
+    self.postMessage({
+      type: "error",
+      error: `generate worker crashed (unhandled rejection): ${String((ev as PromiseRejectionEvent).reason)}`,
+    });
+  } catch {
+    /* the worker is already gone */
+  }
+});
+
 self.onmessage = async (e) => {
   // Control message from the main thread: a pool worker failed to instantiate.
   // Record it so the readiness poll in `holo.initThreaded` fails fast and falls
@@ -717,6 +742,12 @@ self.onmessage = async (e) => {
     }
     self.postMessage({ type: "done", text: result } satisfies StreamMessage);
   } catch (err) {
-    self.postMessage({ type: "error", error: String(err) });
+    // A trapped wasm call reads "RuntimeError: unreachable" — attach the
+    // recorded Rust panic so the surfaced error diagnoses itself.
+    const panic = lastPanic();
+    self.postMessage({
+      type: "error",
+      error: panic ? `${String(err)} — rust panic: ${panic}` : String(err),
+    });
   }
 };

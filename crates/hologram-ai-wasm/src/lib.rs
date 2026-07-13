@@ -63,10 +63,29 @@ mod wasm_futex {
     }
 }
 
-/// Surface Rust panics in the browser console. Runs on module init.
+/// The last Rust panic message. A trapped wasm call surfaces to JS as a bare
+/// `RuntimeError: unreachable` — the worker reads this to attach the actual
+/// panic text to the error it reports (a user must never see an undiagnosable
+/// crash).
+static LAST_PANIC: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+/// Surface Rust panics: the browser console gets the full hook output, and
+/// the message is RECORDED for [`last_panic`]. Runs on module init.
 #[wasm_bindgen(start)]
 pub fn start() {
-    console_error_panic_hook::set_once();
+    std::panic::set_hook(Box::new(|info| {
+        if let Ok(mut slot) = LAST_PANIC.lock() {
+            *slot = Some(info.to_string());
+        }
+        console_error_panic_hook::hook(info);
+    }));
+}
+
+/// The most recent Rust panic message, if any — cleared on read so a stale
+/// panic is never attributed to a later, unrelated failure.
+#[wasm_bindgen]
+pub fn last_panic() -> Option<String> {
+    LAST_PANIC.lock().ok().and_then(|mut s| s.take())
 }
 
 fn err(e: impl std::fmt::Display) -> JsValue {

@@ -172,6 +172,15 @@ async function initThreaded(): Promise<unknown> {
   return G;
 }
 
+/** The most recent Rust panic message, if any (cleared on read). A trapped
+ * wasm call surfaces to JS as a bare `RuntimeError: unreachable`; callers
+ * attach this to the error they report so a crash is never undiagnosable. */
+export function lastPanic(): string | null {
+  const g = G as unknown as { last_panic?: () => string | undefined } | null;
+  const panic = g?.last_panic?.();
+  return typeof panic === "string" && panic.length > 0 ? panic : null;
+}
+
 /** Inspect a compiled `.holo` — its input/output ports (positional, no names). */
 export async function describe(holo: Uint8Array): Promise<ModelInfo> {
   await ensureReady();
