@@ -80,7 +80,7 @@ feature = "features/suites/s1_acquisition/streamed_download.feature"
 
 [[row]]
 id = "supported-search"
-statement = "Model discovery lists only models whose architecture family the registry supports — the journey never begins on a model preflight would reject for family support."
+statement = "Model discovery preflights DERIVABILITY: search candidates run the same config preflight the download journey runs (the wasm binding over the parametric registry + derivation — never a name list in the app); derivable models are selectable, and a model the preflight refuses stays visible, greyed, annotated with the refusal reason verbatim — an honest refusal is information, not something to hide."
 stage = "S1"
 status = "build"
 oracles = ["journey-reference", "hf-hub"]
@@ -523,6 +523,26 @@ oracles = ["journey-reference"]
 tier = "suite"
 executor = "browser"
 feature = "features/suites/s4_application/browser_journey.feature"
+
+[[row]]
+id = "scaled-rope-journey"
+statement = "A checkpoint carrying an IMPLEMENTED rope_scaling law (llama3/yarn/linear/dynamic/longrope, and partial_rotary_factor) runs the whole browser journey — download, compile, chat streaming — with the engine synthesizing the scaled frequency tables at the realized positions; the law itself is pinned bit-level by the native rope_scaling_reference witnesses, and an UNIMPLEMENTED law is refused at preflight naming the type."
+stage = "S4"
+status = "build"
+oracles = ["journey-reference"]
+tier = "suite"
+executor = "browser"
+feature = "features/suites/s4_application/scaled_rope_journey.feature"
+
+[[row]]
+id = "model-switch"
+statement = "Switching models mid-session keeps chat streaming: two downloaded models are two directories, two archives, two sessions; the chat page switches between them (and back) without recompiling the world, wedging the stream store, or re-downloading anything already local."
+stage = "S4"
+status = "build"
+oracles = ["journey-reference"]
+tier = "suite"
+executor = "browser"
+feature = "features/suites/s4_application/model_switch.feature"
 
 [[row]]
 id = "warm-turn"
