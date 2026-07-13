@@ -21,6 +21,16 @@ export const MISSING_REPO = "hologram-fixture/does-not-exist";
 export const UNSUPPORTED_FAMILY_REPO = "hologram-fixture/unsupported-family";
 export const BAD_CONFIG_REPO = "hologram-fixture/bad-config";
 export const SEARCH_UNSUPPORTED_REPO = "hologram-fixture/gpt2-tiny";
+// The SAME committed fixture under a second identity — a genuine model switch
+// (two model dirs, two sessions) with zero extra fixture bytes.
+export const SECOND_FIXTURE_REPO = "hologram-fixture/handshake-tiny-b";
+// The fixture weights under a config that adds an IMPLEMENTED scaled-rope law
+// (llama3) — the full journey must download, compile, and stream chat with the
+// scaled frequency tables.
+export const ROPE_SCALED_REPO = "hologram-fixture/handshake-tiny-llama3rope";
+// The fixture config with an UNIMPLEMENTED rope_scaling type — preflight must
+// refuse naming the law, before any shard byte.
+export const ROPE_EXOTIC_REPO = "hologram-fixture/exotic-rope";
 
 const FIXTURE_FILES = [
   "config.json",
@@ -72,6 +82,26 @@ const TOO_LARGE_CONFIG = JSON.stringify({
   model_type: "llama",
 });
 const TOO_LARGE_SHARD_BYTES = 800 * 1024 ** 3;
+
+// The committed fixture config with extra keys layered on — the rope-law repos
+// share the fixture's weights (rope_scaling changes no tensor shape).
+const fixtureConfigWith = (extra) =>
+  JSON.stringify({
+    ...JSON.parse(readFileSync(path.join(FIXTURE_DIR, "config.json"), "utf8")),
+    ...extra,
+  });
+const ROPE_SCALED_CONFIG = fixtureConfigWith({
+  rope_scaling: {
+    rope_type: "llama3",
+    factor: 4.0,
+    low_freq_factor: 1.0,
+    high_freq_factor: 4.0,
+    original_max_position_embeddings: 32,
+  },
+});
+const ROPE_EXOTIC_CONFIG = fixtureConfigWith({
+  rope_scaling: { rope_type: "exotic", factor: 2.0 },
+});
 
 export function startFixtureServer() {
   const requests = [];
@@ -154,17 +184,35 @@ export function startFixtureServer() {
       );
       return;
     }
-    if (url.pathname === `/api/models/${FIXTURE_REPO}`) {
-      const siblings = FIXTURE_FILES.map((name) => {
-        const size = readFileSync(path.join(FIXTURE_DIR, name)).length;
-        return { rfilename: name, size };
-      });
+    for (const repo of [FIXTURE_REPO, SECOND_FIXTURE_REPO, ROPE_SCALED_REPO]) {
+      if (url.pathname === `/api/models/${repo}`) {
+        const siblings = FIXTURE_FILES.map((name) => {
+          const size =
+            repo === ROPE_SCALED_REPO && name === "config.json"
+              ? Buffer.byteLength(ROPE_SCALED_CONFIG)
+              : readFileSync(path.join(FIXTURE_DIR, name)).length;
+          return { rfilename: name, size };
+        });
+        send(
+          200,
+          JSON.stringify({
+            id: repo,
+            config: { architectures: ["LlamaForCausalLM"] },
+            siblings,
+          }),
+        );
+        return;
+      }
+    }
+    if (url.pathname === `/api/models/${ROPE_EXOTIC_REPO}`) {
       send(
         200,
         JSON.stringify({
-          id: FIXTURE_REPO,
-          config: { architectures: ["LlamaForCausalLM"] },
-          siblings,
+          id: ROPE_EXOTIC_REPO,
+          siblings: [
+            { rfilename: "config.json", size: Buffer.byteLength(ROPE_EXOTIC_CONFIG) },
+            { rfilename: "model.safetensors", size: 4 * 1024 ** 2 },
+          ],
         }),
       );
       return;
@@ -213,15 +261,33 @@ export function startFixtureServer() {
       return;
     }
 
-    const fixtureResolve = `/${FIXTURE_REPO}/resolve/main/`;
-    if (url.pathname.startsWith(fixtureResolve)) {
-      const name = url.pathname.slice(fixtureResolve.length);
-      const file = path.join(FIXTURE_DIR, name);
-      if (!FIXTURE_FILES.includes(name) || !existsSync(file)) {
-        send(404, "not found", "text/plain");
+    for (const repo of [FIXTURE_REPO, SECOND_FIXTURE_REPO, ROPE_SCALED_REPO]) {
+      const resolve = `/${repo}/resolve/main/`;
+      if (url.pathname.startsWith(resolve)) {
+        const name = url.pathname.slice(resolve.length);
+        if (repo === ROPE_SCALED_REPO && name === "config.json") {
+          sendBytes(Buffer.from(ROPE_SCALED_CONFIG));
+          return;
+        }
+        const file = path.join(FIXTURE_DIR, name);
+        if (!FIXTURE_FILES.includes(name) || !existsSync(file)) {
+          send(404, "not found", "text/plain");
+          return;
+        }
+        sendBytes(readFileSync(file));
         return;
       }
-      sendBytes(readFileSync(file));
+    }
+    const exoticResolve = `/${ROPE_EXOTIC_REPO}/resolve/main/`;
+    if (url.pathname.startsWith(exoticResolve)) {
+      const name = url.pathname.slice(exoticResolve.length);
+      if (name === "config.json") {
+        send(200, ROPE_EXOTIC_CONFIG);
+        return;
+      }
+      // Preflight must refuse on config alone: any shard request here is a
+      // failure the request log exposes.
+      send(500, "shard access must never happen for the exotic-rope repo", "text/plain");
       return;
     }
     const unsupportedResolve = `/${UNSUPPORTED_FAMILY_REPO}/resolve/main/`;

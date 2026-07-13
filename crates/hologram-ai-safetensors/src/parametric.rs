@@ -173,9 +173,18 @@ fn select_family(config: &Value, keys: &[String]) -> Result<FamilySpec> {
 /// manifest reveals are inferred (separate vs fused Q/K/V, separate vs fused
 /// gate/up, Q/K/V biases); anything the recipe cannot represent fails loud:
 /// a qk-normalized attention (a `q_norm`/`k_norm` tensor), or a manifest that
-/// is not a decoder at all. Sliding-window clamping is off (the config's own
-/// `sliding_window` still drives context), and the RoPE-altering knobs are
-/// rejected for a derived family exactly as for Phi3.
+/// is not a decoder at all. A declared `sliding_window` clamps the context
+/// ceiling exactly as for the registered windowed family (the recipe attends
+/// fully, which is exact only within the trained window); the RoPE knobs
+/// (`rope_scaling`, `partial_rotary_factor`) ride the parsed [`RopeSpec`].
+///
+/// THE CONTRACT this derivation states — and the limit of what a manifest can
+/// witness: matching the Llama tensor schema by NAME asserts the Llama layout
+/// by CONTENT, including the head-major row order within each projection.
+/// A checkpoint that reuses these names but permutes head rows is
+/// indistinguishable from here; families that actually differ (GPT-NeoX's
+/// fused `query_key_value`, GPT-2's `c_attn`) also NAME differently, so they
+/// fail loud on the schema check below rather than mis-building.
 fn derive_family(name: &str, keys: &[String]) -> Result<FamilySpec> {
     let has = |suffix: &str| keys.iter().any(|k| k.contains(suffix));
 
