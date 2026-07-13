@@ -30,7 +30,7 @@ use hologram_ai::materialize::DirKappaStore;
 use hologram_ai::quantized::{crystallize_quantized, crystallize_quantized_range};
 use hologram_ai::speculative::{Drafter, ModelDrafter};
 use hologram_ai::staged::{head_quant_chunks, quantizable_weights, GrowableStagedSession};
-use hologram_ai::DecodeSession;
+use hologram_ai::{DecodeSession, RopeSpec};
 use hologram_ai_common::lower::{quant_key, QuantMap};
 use hologram_ai_common::DType;
 
@@ -136,8 +136,12 @@ fn drive(
     let step = session
         .decode_runner_for(PROMPT.len())
         .unwrap_or_else(|e| panic!("decode step runner: {e:#}"));
-    let mut decode = DecodeSession::new(step, scale.dims.rope_theta as f32, ctx as u64)
-        .unwrap_or_else(|e| panic!("decode session: {e:#}"));
+    let mut decode = DecodeSession::new(
+        step,
+        RopeSpec::plain(scale.dims.rope_theta as f32),
+        ctx as u64,
+    )
+    .unwrap_or_else(|e| panic!("decode session: {e:#}"));
     let mut row = decode.feed(&PROMPT).expect("prefill");
     for _ in 0..GEN_STEPS {
         let next = row
@@ -210,8 +214,12 @@ fn model_drafter_reclaims_a_warm_session() {
     let runner = session
         .decode_runner_for(PROMPT.len())
         .expect("draft runner");
-    let draft_session = DecodeSession::new(runner, scale.dims.rope_theta as f32, ctx as u64)
-        .expect("draft decode session");
+    let draft_session = DecodeSession::new(
+        runner,
+        RopeSpec::plain(scale.dims.rope_theta as f32),
+        ctx as u64,
+    )
+    .expect("draft decode session");
 
     let mut drafter = ModelDrafter::new(draft_session);
     drafter.prefill(&PROMPT).expect("draft prefill");

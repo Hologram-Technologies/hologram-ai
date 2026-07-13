@@ -29,6 +29,7 @@
 //! seeing only new columns `≤ i`.
 
 use anyhow::{bail, ensure, Context, Result};
+use hologram_ai_common::rope::RopeSpec;
 
 use crate::engine::LmSession;
 
@@ -212,7 +213,9 @@ pub type DecodeRebuild<S> = Box<dyn FnMut(u64) -> Result<S>>;
 /// The carried state a pass reads and writes — split from the runners so a
 /// pass can borrow the state and a runner disjointly.
 struct DecodeState {
-    rope_theta: f32,
+    /// The model's complete rotary law (base, `rope_scaling`, partial
+    /// rotary) — the runtime table generator asks it for every pass's rows.
+    rope: RopeSpec,
     /// Per-layer past K/V byte buffers, each `kv · bucket · head_dim` f32s.
     past_k: Vec<Vec<u8>>,
     past_v: Vec<Vec<u8>>,
@@ -247,25 +250,11 @@ struct PassBuffers {
 }
 
 impl DecodeState {
-    /// Standard non-interleaved RoPE rows for absolute positions
-    /// `base..base+chunk` (`[chunk · head_dim]`, halves duplicated so
-    /// `cos[j]`/`sin[j]` pair with the rotate-half partner `j ± d/2`).
+    /// Non-interleaved RoPE rows for absolute positions `base..base+chunk`
+    /// (`[chunk · head_dim]`, halves duplicated to pair with the rotate-half
+    /// partner `j ± rotary_dim/2`) — the spec's complete frequency law.
     fn rope_rows(&self, base: usize, chunk: usize, d: usize) -> (Vec<f32>, Vec<f32>) {
-        let half = d / 2;
-        let mut cos = vec![0.0f32; chunk * d];
-        let mut sin = vec![0.0f32; chunk * d];
-        for i in 0..chunk {
-            for j in 0..half {
-                let inv_freq = 1.0 / (self.rope_theta as f64).powf(2.0 * j as f64 / d as f64);
-                let angle = (base + i) as f64 * inv_freq;
-                let (s, c) = (angle.sin() as f32, angle.cos() as f32);
-                cos[i * d + j] = c;
-                cos[i * d + j + half] = c;
-                sin[i * d + j] = s;
-                sin[i * d + j + half] = s;
-            }
-        }
-        (cos, sin)
+        self.rope.rows(base, chunk, d)
     }
 
     /// Tile per-position rope rows `[chunk, d]` to the head-major layout
@@ -750,17 +739,19 @@ fn kv_buffer_bytes(geom: &DecodeGeometry) -> Result<usize> {
 }
 
 impl<S: LmSession> DecodeSession<S> {
-    /// Open a session over a compiled step plan (`chunk = 1`). `rope_theta`
-    /// comes from the model's own config (the graph consumes rope as runtime
-    /// data, so the table generator lives with the engine); `context_length`
-    /// is the model's trained ceiling.
-    pub fn new(runner: S, rope_theta: f32, context_length: u64) -> Result<Self> {
+    /// Open a session over a compiled step plan (`chunk = 1`). `rope` is the
+    /// model's complete rotary law from its own config (the graph consumes
+    /// rope as runtime data, so the table generator lives with the engine);
+    /// `context_length` is the model's trained ceiling.
+    pub fn new(runner: S, rope: RopeSpec, context_length: u64) -> Result<Self> {
         let geom = DecodeGeometry::discover(&runner)?;
         ensure!(
             geom.chunk == 1,
             "the session's main runner must be the step plan (chunk 1), got chunk {}",
             geom.chunk
         );
+        rope.validate(geom.head_dim)
+            .map_err(|e| anyhow::anyhow!("the session's rotary law is malformed: {e}"))?;
         let kv_bytes = kv_buffer_bytes(&geom)?;
         Ok(Self {
             runner,
@@ -769,7 +760,7 @@ impl<S: LmSession> DecodeSession<S> {
             context_length,
             rebuild: None,
             state: DecodeState {
-                rope_theta,
+                rope,
                 past_k: vec![vec![0u8; kv_bytes]; geom.layers],
                 past_v: vec![vec![0u8; kv_bytes]; geom.layers],
                 cur_len: 0,

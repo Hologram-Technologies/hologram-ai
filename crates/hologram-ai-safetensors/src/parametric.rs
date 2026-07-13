@@ -14,6 +14,7 @@ use hologram_ai_common::ir::{
     dtype::DType, graph::AiGraph, node::TensorId, op::AiOp, shape::DimExpr,
 };
 use hologram_ai_common::opt::decode_plan::rewrite_decode_attention;
+use hologram_ai_common::rope::{RopeScaling, RopeSpec};
 use hologram_ai_common::MetaValue;
 use safetensors::{Dtype as SafeDtype, SafeTensors};
 use serde_json::Value;
@@ -71,28 +72,20 @@ struct FamilySpec {
     unsupported_knobs: &'static [&'static str],
 }
 
-/// Config keys that change RoPE / attention semantics the generic recipe does
-/// NOT implement — rejected for a DERIVED family (and the known families that
-/// list them), because ignoring them would be silently wrong, not a missing
-/// feature.
-const SEMANTIC_KNOBS: &[&str] = &["partial_rotary_factor", "rope_scaling"];
-
 /// The architecture-family registry: `config.architectures[0]` → structure.
 fn known_families() -> Vec<FamilySpec> {
     vec![
-        // The RoPE-altering knobs (`rope_scaling`: Llama-3's llama3 / long-context
-        // YaRN, `partial_rotary_factor`) are rejected for EVERY family, not
-        // silently ignored: the runtime RoPE uses plain `theta^(-2i/d)`
-        // frequencies (see `decode.rs`), so a checkpoint that sets them would be
-        // decoded at the WRONG positions — a silent wrong number. Failing loud
-        // here is correct until the scaled-frequency variants are implemented.
+        // The RoPE-altering knobs (`rope_scaling`, `partial_rotary_factor`)
+        // are parsed into the model's [`RopeSpec`] by [`parse_rope_spec`] —
+        // implemented laws build, unimplemented ones fail loud there naming
+        // the type/key.
         FamilySpec {
             name: "LlamaForCausalLM".into(),
             attention_qkv_bias: false,
             attention_fused_qkv: false,
             mlp_fused_gate_up: false,
             sliding_window_clamp: false,
-            unsupported_knobs: SEMANTIC_KNOBS,
+            unsupported_knobs: &[],
         },
         FamilySpec {
             name: "Qwen2ForCausalLM".into(),
@@ -100,7 +93,7 @@ fn known_families() -> Vec<FamilySpec> {
             attention_fused_qkv: false,
             mlp_fused_gate_up: false,
             sliding_window_clamp: false,
-            unsupported_knobs: SEMANTIC_KNOBS,
+            unsupported_knobs: &[],
         },
         // Tensor-identical to Llama (separate q/k/v and gate/up projections,
         // untied lm_head, no biases); sliding-window checkpoints clamp the
@@ -111,19 +104,18 @@ fn known_families() -> Vec<FamilySpec> {
             attention_fused_qkv: false,
             mlp_fused_gate_up: false,
             sliding_window_clamp: true,
-            unsupported_knobs: SEMANTIC_KNOBS,
+            unsupported_knobs: &[],
         },
         // Llama-family compute with fused qkv_proj / gate_up_proj checkpoint
-        // tensors, realized by compile-time Slice. Partial-rotary and
-        // rope-scaling variants (Phi-3-mini) are not implemented: those knobs
-        // change the RoPE semantics, so they fail loud instead of being ignored.
+        // tensors, realized by compile-time Slice; the long-context variants'
+        // `longrope` scaling rides on the parsed RopeSpec.
         FamilySpec {
             name: "Phi3ForCausalLM".into(),
             attention_qkv_bias: false,
             attention_fused_qkv: true,
             mlp_fused_gate_up: true,
             sliding_window_clamp: true,
-            unsupported_knobs: SEMANTIC_KNOBS,
+            unsupported_knobs: &[],
         },
     ]
 }
@@ -211,8 +203,12 @@ fn derive_family(name: &str, keys: &[String]) -> Result<FamilySpec> {
         attention_qkv_bias: has("self_attn.q_proj.bias"),
         attention_fused_qkv,
         mlp_fused_gate_up,
-        sliding_window_clamp: false,
-        unsupported_knobs: SEMANTIC_KNOBS,
+        // A derived checkpoint that declares `sliding_window` gets the same
+        // honest ceiling as the registered windowed family (Mistral): the
+        // recipe attends fully, which is EXACT only while the context never
+        // exceeds the trained window — so the window clamps the ceiling.
+        sliding_window_clamp: true,
+        unsupported_knobs: &[],
     })
 }
 
@@ -232,7 +228,9 @@ struct ModelConfig {
     vocab_size: u64,
     intermediate_size: u64,
     rms_norm_eps: f32,
-    rope_theta: f32,
+    /// The complete rotary law: `rope_theta`, `rope_scaling`, and
+    /// `partial_rotary_factor`, parsed by [`parse_rope_spec`].
+    rope: RopeSpec,
     max_position_embeddings: u64,
     /// `tie_word_embeddings`; absent means untied unless the manifest carries
     /// no separate `lm_head.weight` (see the LM-head wiring below).
@@ -283,7 +281,6 @@ impl ModelConfig {
         // library defaults (`rms_norm_eps = 1e-6`, `rope_theta = 10000.0`) —
         // a valid model, not a rejection. A present-but-malformed value fails.
         let rms_norm_eps = default_f64(config, "rms_norm_eps", 1e-6)? as f32;
-        let rope_theta = default_f64(config, "rope_theta", 10_000.0)? as f32;
         let max_position_embeddings = require_u64(config, "max_position_embeddings")?;
 
         // The recipe's MLP is SwiGLU (silu gate). A model that shares the
@@ -342,6 +339,8 @@ impl ModelConfig {
             })?),
         };
 
+        let rope = parse_rope_spec(config, head_dim)?;
+
         Ok(Self {
             hidden_size,
             num_hidden_layers,
@@ -351,7 +350,7 @@ impl ModelConfig {
             vocab_size,
             intermediate_size,
             rms_norm_eps,
-            rope_theta,
+            rope,
             max_position_embeddings,
             tie_word_embeddings: config_flag(config, "tie_word_embeddings"),
             attention_bias: config_flag(config, "attention_bias"),
@@ -361,10 +360,226 @@ impl ModelConfig {
     }
 }
 
+/// Parse the model's complete rotary law from `config.json`: `rope_theta`,
+/// `partial_rotary_factor`, and `rope_scaling` (types `default`, `linear`,
+/// `dynamic`, `llama3`, `yarn`, `longrope`/`su`), under the reference
+/// (`transformers` `modeling_rope_utils.py`) key conventions. Every semantic
+/// key is either consumed by the named law or refused by name — never
+/// silently ignored.
+pub fn parse_rope_spec(config: &Value, head_dim: u64) -> Result<RopeSpec> {
+    let base = default_f64(config, "rope_theta", 10_000.0)? as f32;
+
+    // `partial_rotary_factor` (Phi-2/GLM style): the leading fraction of each
+    // head rotates; the reference truncates to `int(head_dim · factor)`.
+    let rotary_dim = match config.get("partial_rotary_factor") {
+        None | Some(Value::Null) => None,
+        Some(v) => {
+            let f = v.as_f64().ok_or_else(|| {
+                anyhow!("config.json key `partial_rotary_factor` is present but not a number")
+            })?;
+            ensure!(
+                f > 0.0 && f <= 1.0,
+                "config.json `partial_rotary_factor` must be in (0, 1], got {f}"
+            );
+            Some((head_dim as f64 * f) as u32)
+        }
+    };
+
+    let scaling = match config.get("rope_scaling") {
+        None | Some(Value::Null) => RopeScaling::None,
+        Some(rs) => parse_rope_scaling(rs, config)?,
+    };
+
+    let spec = RopeSpec {
+        base,
+        rotary_dim,
+        scaling,
+    };
+    spec.validate(head_dim as usize)
+        .map_err(|e| anyhow!("config.json rotary law is malformed: {e}"))?;
+    Ok(spec)
+}
+
+/// The rotary law from a bare `config.json`, deriving `head_dim` by the same
+/// transformers convention as the recipe (explicit key, else hidden/heads) —
+/// for callers that hold only the config (the browser session layer).
+pub fn rope_spec_from_config(config: &Value) -> Result<RopeSpec> {
+    let heads = require_u64(config, "num_attention_heads")?;
+    let head_dim = match config.get("head_dim") {
+        Some(v) => v
+            .as_u64()
+            .ok_or_else(|| anyhow!("config.json key `head_dim` is not a positive integer"))?,
+        None => {
+            let hidden = require_u64(config, "hidden_size")?;
+            ensure!(
+                hidden % heads == 0,
+                "config.json: hidden_size ({hidden}) is not divisible by \
+                 num_attention_heads ({heads}) and no `head_dim` is given"
+            );
+            hidden / heads
+        }
+    };
+    parse_rope_spec(config, head_dim)
+}
+
+/// The `rope_scaling` object → frequency law. An unimplemented `rope_type`,
+/// or any key the named law does not consume (e.g. the DeepSeek-YaRN
+/// `mscale` variants), is refused by name: a scaling key changes where every
+/// token sits, so ignoring one is a silent wrong number.
+fn parse_rope_scaling(rs: &Value, config: &Value) -> Result<RopeScaling> {
+    let obj = rs
+        .as_object()
+        .ok_or_else(|| anyhow!("config.json `rope_scaling` must be an object or null"))?;
+    // `rope_type` is the current convention, `type` the legacy alias.
+    let ty = obj
+        .get("rope_type")
+        .or_else(|| obj.get("type"))
+        .and_then(Value::as_str)
+        .ok_or_else(|| {
+            anyhow!("config.json `rope_scaling` carries no `rope_type`/`type` string")
+        })?;
+    let allowed: &[&str] = match ty {
+        "default" => &["rope_type", "type"],
+        "linear" => &["rope_type", "type", "factor"],
+        "dynamic" => &[
+            "rope_type",
+            "type",
+            "factor",
+            "original_max_position_embeddings",
+        ],
+        "llama3" => &[
+            "rope_type",
+            "type",
+            "factor",
+            "low_freq_factor",
+            "high_freq_factor",
+            "original_max_position_embeddings",
+        ],
+        "yarn" => &[
+            "rope_type",
+            "type",
+            "factor",
+            "attention_factor",
+            "beta_fast",
+            "beta_slow",
+            "original_max_position_embeddings",
+        ],
+        "longrope" | "su" => &[
+            "rope_type",
+            "type",
+            "short_factor",
+            "long_factor",
+            "attention_factor",
+            "original_max_position_embeddings",
+        ],
+        other => bail!(
+            "config.json `rope_scaling` type `{other}` is not an implemented frequency law \
+             (implemented: default, linear, dynamic, llama3, yarn, longrope)"
+        ),
+    };
+    for key in obj.keys() {
+        ensure!(
+            allowed.contains(&key.as_str()),
+            "config.json `rope_scaling` (type `{ty}`) carries `{key}`, which this law does not \
+             consume — refusing to silently ignore a semantic scaling key"
+        );
+    }
+
+    let req_f64 = |k: &str| {
+        obj.get(k).and_then(Value::as_f64).ok_or_else(|| {
+            anyhow!("config.json `rope_scaling` type `{ty}` requires a numeric `{k}`")
+        })
+    };
+    let opt_f64 = |k: &str| obj.get(k).and_then(Value::as_f64);
+    // A position count: an integer, or a float that IS one (configs publish
+    // both spellings). Present-but-malformed fails loud — never a fallback.
+    let as_count = |v: &Value, k: &str| -> Result<u64> {
+        if let Some(u) = v.as_u64() {
+            return Ok(u);
+        }
+        if let Some(f) = v.as_f64() {
+            if f.fract() == 0.0 && f >= 0.0 {
+                return Ok(f as u64);
+            }
+        }
+        bail!("config.json `rope_scaling` key `{k}` is not a whole position count: {v}")
+    };
+    // The reference reads `original_max_position_embeddings` from the scaling
+    // object, then the config top level (Phi-3 publishes it there), then
+    // falls back to `max_position_embeddings` — absence falls through,
+    // malformity never does.
+    let original_max = || -> Result<u32> {
+        for source in [
+            obj.get("original_max_position_embeddings"),
+            config.get("original_max_position_embeddings"),
+        ] {
+            if let Some(v) = source.filter(|v| !v.is_null()) {
+                return Ok(as_count(v, "original_max_position_embeddings")? as u32);
+            }
+        }
+        Ok(require_u64(config, "max_position_embeddings")? as u32)
+    };
+
+    Ok(match ty {
+        "default" => RopeScaling::None,
+        "linear" => RopeScaling::Linear {
+            factor: req_f64("factor")?,
+        },
+        "dynamic" => RopeScaling::Dynamic {
+            factor: req_f64("factor")?,
+            original_max_position_embeddings: original_max()?,
+        },
+        "llama3" => RopeScaling::Llama3 {
+            factor: req_f64("factor")?,
+            low_freq_factor: req_f64("low_freq_factor")?,
+            high_freq_factor: req_f64("high_freq_factor")?,
+            original_max_position_embeddings: original_max()?,
+        },
+        "yarn" => RopeScaling::Yarn {
+            factor: req_f64("factor")?,
+            original_max_position_embeddings: original_max()?,
+            beta_fast: opt_f64("beta_fast").unwrap_or(32.0),
+            beta_slow: opt_f64("beta_slow").unwrap_or(1.0),
+            attention_factor: opt_f64("attention_factor"),
+        },
+        "longrope" | "su" => {
+            let factors = |k: &str| -> Result<Vec<f64>> {
+                obj.get(k)
+                    .and_then(Value::as_array)
+                    .and_then(|a| a.iter().map(|v| v.as_f64()).collect::<Option<Vec<f64>>>())
+                    .ok_or_else(|| {
+                        anyhow!(
+                            "config.json `rope_scaling` type `{ty}` requires a numeric \
+                             array `{k}`"
+                        )
+                    })
+            };
+            RopeScaling::LongRope {
+                short_factor: factors("short_factor")?,
+                long_factor: factors("long_factor")?,
+                original_max_position_embeddings: match obj
+                    .get("original_max_position_embeddings")
+                    .or_else(|| config.get("original_max_position_embeddings"))
+                    .filter(|v| !v.is_null())
+                {
+                    Some(v) => as_count(v, "original_max_position_embeddings")? as u32,
+                    None => bail!(
+                        "config.json `rope_scaling` type `{ty}` requires \
+                         `original_max_position_embeddings` (in the scaling object or at \
+                         the config top level) to place the short/long boundary"
+                    ),
+                },
+                max_position_embeddings: require_u64(config, "max_position_embeddings")? as u32,
+                attention_factor: opt_f64("attention_factor"),
+            }
+        }
+        _ => unreachable!("type matched against the allowed-key table above"),
+    })
+}
+
 /// A semantic config key the registry entry does not implement is never
 /// silently ignored: present and non-null, it fails the build loud naming
-/// the knob (e.g. Phi-3-mini's `partial_rotary_factor` / `rope_scaling`,
-/// which change the RoPE semantics the builder would otherwise misstate).
+/// the knob — a semantic config key the builder would otherwise misstate.
 fn reject_unsupported_knobs(family: &FamilySpec, config: &Value) -> Result<()> {
     for knob in family.unsupported_knobs {
         let carried = config.get(*knob).map(|v| !v.is_null()).unwrap_or(false);
@@ -428,11 +643,8 @@ pub fn validate_config(config: &Value) -> Result<()> {
         .and_then(Value::as_str)
         .ok_or_else(|| anyhow!("config.json is missing required key `architectures`"))?;
     let known = known_families().into_iter().find(|f| f.name == name);
-    match &known {
-        Some(known) => reject_unsupported_knobs(known, config)?,
-        // Unrecognized: defer the shape decision to the manifest at build, but
-        // still reject the semantic knobs the generic recipe cannot honor.
-        None => reject_semantic_knobs(name, config)?,
+    if let Some(known) = &known {
+        reject_unsupported_knobs(known, config)?;
     }
     // A recognized family surfaces its own missing-key error verbatim; an
     // UNRECOGNIZED architecture whose config cannot even supply the generic
@@ -450,20 +662,6 @@ pub fn validate_config(config: &Value) -> Result<()> {
                  (hidden_size, num_hidden_layers, num_attention_heads, vocab_size)"
             )
         })?;
-    }
-    Ok(())
-}
-
-/// Reject the globally-unsupported RoPE-altering knobs for an architecture the
-/// registry does not know by name (the same knobs a derived family lists).
-fn reject_semantic_knobs(name: &str, config: &Value) -> Result<()> {
-    for knob in SEMANTIC_KNOBS {
-        if config.get(*knob).is_some_and(|v| !v.is_null()) {
-            bail!(
-                "architecture `{name}` sets `{knob}`, which changes RoPE/attention semantics the \
-                 generic decoder recipe does not implement"
-            );
-        }
     }
     Ok(())
 }
@@ -1346,7 +1544,8 @@ impl<'a> DecoderRecipe<'a> {
             vec![v_out],
         );
 
-        // GQA — RoPE base from the model's own `rope_theta`.
+        // GQA — the rotary law from the model's own config (`rope_theta`,
+        // `rope_scaling`, `partial_rotary_factor`).
         let attn_out = builder.add_tensor(
             &format!("attn_out_{l}"),
             DType::F32,
@@ -1366,8 +1565,7 @@ impl<'a> DecoderRecipe<'a> {
                 causal: true,
                 heads_first: false,
                 qk_norm: false,
-                rope: true,
-                rope_base: cfg.rope_theta,
+                rope: Some(cfg.rope.clone()),
             },
             vec![q_out, k_out, v_out],
             vec![attn_out],
@@ -1926,7 +2124,7 @@ fn build_chunk_graph_with(recipe: &DecoderRecipe, bucket: u64, chunk: u64) -> Re
         .insert("decode_chunk".to_string(), MetaValue::Int(chunk as i64));
     graph.metadata.insert(
         "rope_theta".to_string(),
-        MetaValue::Float(recipe.cfg.rope_theta as f64),
+        MetaValue::Float(recipe.cfg.rope.base as f64),
     );
     Ok(graph)
 }
@@ -2086,7 +2284,7 @@ fn assemble_stage_graphs(
                     .insert("decode_chunk".to_string(), MetaValue::Int(chunk as i64));
                 graph.metadata.insert(
                     "rope_theta".to_string(),
-                    MetaValue::Float(recipe.cfg.rope_theta as f64),
+                    MetaValue::Float(recipe.cfg.rope.base as f64),
                 );
             }
         };
@@ -2479,7 +2677,7 @@ mod tests {
         assert!(eps.iter().all(|&e| (e - 1e-6).abs() < 1e-12));
 
         // θ, heads, KV heads, head dim come from the config.
-        let gqa: Vec<(u32, u32, u32, f32)> = graph
+        let gqa: Vec<(u32, u32, u32, Option<hologram_ai_common::RopeSpec>)> = graph
             .nodes
             .iter()
             .filter_map(|n| match n.op {
@@ -2487,17 +2685,17 @@ mod tests {
                     num_heads,
                     num_kv_heads,
                     head_dim,
-                    rope_base,
+                    ref rope,
                     ..
-                } => Some((num_heads, num_kv_heads, head_dim, rope_base)),
+                } => Some((num_heads, num_kv_heads, head_dim, rope.clone())),
                 _ => None,
             })
             .collect();
         assert_eq!(gqa.len(), 2);
-        assert!(gqa.iter().all(|&(h, kv, d, base)| h == 4
-            && kv == 2
-            && d == 16
-            && (base - 10000.0).abs() < 1e-3));
+        assert!(gqa.iter().all(|(h, kv, d, rope)| *h == 4
+            && *kv == 2
+            && *d == 16
+            && (rope.as_ref().expect("the recipe ropes q/k").base - 10000.0).abs() < 1e-3));
 
         // Untied: a separate `lm_head.weight` is declared.
         assert!(graph.tensor_names.values().any(|n| n == "lm_head.weight"));
@@ -2584,8 +2782,9 @@ mod tests {
 
         // θ comes from the config's `rope_theta` (Qwen2.5 convention: 1e6).
         assert!(graph.nodes.iter().any(|n| matches!(
-            n.op,
-            AiOp::GroupedQueryAttention { rope_base, .. } if (rope_base - 1_000_000.0).abs() < 1.0
+            &n.op,
+            AiOp::GroupedQueryAttention { rope: Some(spec), .. }
+                if (spec.base - 1_000_000.0).abs() < 1.0
         )));
 
         // An explicit context request flows into the metadata.
@@ -2647,7 +2846,7 @@ mod tests {
             .expect("a config omitting rope_theta / rms_norm_eps builds on the defaults");
 
         let cfg = ModelConfig::from_json(&config).expect("config extracts");
-        assert_eq!(cfg.rope_theta, 10_000.0, "rope_theta defaults to 10000");
+        assert_eq!(cfg.rope.base, 10_000.0, "rope_theta defaults to 10000");
         assert_eq!(cfg.rms_norm_eps, 1e-6, "rms_norm_eps defaults to 1e-6");
     }
 
@@ -2750,19 +2949,20 @@ mod tests {
     }
 
     #[test]
-    fn unrecognized_architecture_rejects_rope_scaling_at_preflight() {
-        // The semantic knobs (rope_scaling / partial_rotary_factor) are
-        // rejected even for a derived family — ignoring them is wrong, not
-        // missing.
+    fn unrecognized_architecture_accepts_implemented_rope_scaling_at_preflight() {
+        // The implemented frequency laws parse for a derived family exactly
+        // as for a registered one; an unimplemented law still fails loud
+        // naming the type (never silently ignored).
         let mut config = tiny_llama_config();
         config["architectures"] = serde_json::json!(["NovelForCausalLM"]);
         config["rope_scaling"] = serde_json::json!({ "type": "linear", "factor": 2.0 });
+        validate_config(&config).expect("an implemented scaling law preflights");
+
+        config["rope_scaling"] = serde_json::json!({ "type": "exotic", "factor": 2.0 });
         let err = validate_config(&config)
-            .expect_err("rope_scaling on an unrecognized family must fail loud");
-        assert!(
-            err.to_string().contains("rope_scaling"),
-            "names the knob: {err}"
-        );
+            .expect_err("an unimplemented rope_scaling type must fail loud");
+        let chain = format!("{err:#}");
+        assert!(chain.contains("exotic"), "names the type: {chain}");
     }
 
     #[test]
@@ -3015,37 +3215,64 @@ mod tests {
     }
 
     #[test]
-    fn phi3_unsupported_rope_knobs_fail_naming_the_knob() {
+    fn phi3_rope_knobs_build_the_spec_and_malformed_ones_fail_naming_the_knob() {
         let keys = fused_decoder_keys(2);
         let dtypes = vec![DType::F32; keys.len()];
 
+        // A well-formed longrope (Phi-3 long-context convention: the factor
+        // arrays sized rotary_dim/2, the pretrained boundary at the config
+        // top level) builds; its spec lands on the GQA nodes.
+        let mut config = tiny_phi3_config();
+        let head_dim = 16usize;
+        config["rope_scaling"] = serde_json::json!({
+            "type": "longrope",
+            "short_factor": vec![1.0; head_dim / 2],
+            "long_factor": vec![4.0; head_dim / 2],
+        });
+        config["original_max_position_embeddings"] = serde_json::json!(64);
+        let graph = build_parametric_graph_from_manifest(&config, &keys, &dtypes, None)
+            .expect("a well-formed longrope config builds");
+        assert!(graph.nodes.iter().any(|n| matches!(
+            &n.op,
+            AiOp::GroupedQueryAttention {
+                rope: Some(spec),
+                ..
+            } if matches!(spec.scaling, hologram_ai_common::RopeScaling::LongRope { .. })
+        )));
+
+        // A longrope missing its factor arrays fails loud naming what's missing.
         let mut config = tiny_phi3_config();
         config["rope_scaling"] = serde_json::json!({"type": "longrope"});
         let err = build_parametric_graph_from_manifest(&config, &keys, &dtypes, None)
             .err()
-            .expect("non-null rope_scaling must fail loud");
+            .expect("a longrope without factor arrays must fail loud");
         assert!(
-            err.to_string().contains("rope_scaling"),
-            "error should name the knob: {err}"
+            err.to_string().contains("short_factor"),
+            "error should name the missing key: {err}"
         );
 
+        // partial_rotary_factor resolves into the spec's rotary_dim.
         let mut config = tiny_phi3_config();
-        config["partial_rotary_factor"] = serde_json::json!(0.4);
-        let err = build_parametric_graph_from_manifest(&config, &keys, &dtypes, None)
-            .err()
-            .expect("partial_rotary_factor must fail loud");
-        assert!(
-            err.to_string().contains("partial_rotary_factor"),
-            "error should name the knob: {err}"
-        );
+        config["partial_rotary_factor"] = serde_json::json!(0.5);
+        let graph = build_parametric_graph_from_manifest(&config, &keys, &dtypes, None)
+            .expect("partial rotary builds");
+        assert!(graph.nodes.iter().any(|n| matches!(
+            &n.op,
+            AiOp::GroupedQueryAttention {
+                rope: Some(spec),
+                ..
+            } if spec.rotary_dim == Some((head_dim / 2) as u32)
+        )));
 
-        // The config-only preflight rejects the same knob with no manifest.
+        // A key the named law does not consume (DeepSeek-YaRN mscale) is
+        // refused by name — never silently ignored.
         let mut config = tiny_phi3_config();
-        config["rope_scaling"] = serde_json::json!({"type": "longrope"});
-        let err = validate_config(&config).expect_err("preflight must reject the knob too");
+        config["rope_scaling"] =
+            serde_json::json!({"type": "yarn", "factor": 4.0, "mscale": 0.707});
+        let err = validate_config(&config).expect_err("an unconsumed scaling key must fail loud");
         assert!(
-            err.to_string().contains("rope_scaling"),
-            "preflight error should name the knob: {err}"
+            err.to_string().contains("mscale"),
+            "preflight error should name the key: {err}"
         );
     }
 

@@ -32,7 +32,7 @@ use hologram_ai::materialize::{
 };
 use hologram_ai::runner::HoloRunner;
 use hologram_ai::staged::StagedRunner;
-use hologram_ai::{DecodeSession, LmSession, ModelCompiler, ModelSource};
+use hologram_ai::{DecodeSession, LmSession, ModelCompiler, ModelSource, RopeSpec};
 use hologram_ai_common::{shape_from_concrete, AiGraph, AiNode, AiOp, AiParam, DType, TensorInfo};
 use hologram_ai_conformance::witness::{parse_streamed_header, split_safetensors};
 use hologram_ai_core::domain::Kappa;
@@ -1544,14 +1544,19 @@ async fn then_attention_from_config(w: &mut BddWorld) {
     let gqa: Vec<(u32, u32, u32, f32)> = built_graph(w)
         .nodes
         .iter()
-        .filter_map(|n| match n.op {
+        .filter_map(|n| match &n.op {
             AiOp::GroupedQueryAttention {
                 num_heads,
                 num_kv_heads,
                 head_dim,
-                rope_base,
+                rope,
                 ..
-            } => Some((num_heads, num_kv_heads, head_dim, rope_base)),
+            } => Some((
+                *num_heads,
+                *num_kv_heads,
+                *head_dim,
+                rope.as_ref().expect("the recipe ropes q/k").base,
+            )),
             _ => None,
         })
         .collect();
@@ -3040,8 +3045,8 @@ fn run_shared_ledger_decode(
     let step = session
         .decode_runner_for(want)
         .expect("the step runner builds");
-    let mut decode =
-        DecodeSession::new(step, 10000.0, STG_WINDOW).expect("the decode session opens");
+    let mut decode = DecodeSession::new(step, RopeSpec::plain(10000.0), STG_WINDOW)
+        .expect("the decode session opens");
     if with_seeder {
         let chunk = 4u64.min(bucket as u64);
         if chunk >= 2 {
@@ -4300,7 +4305,8 @@ fn spec_decode_session(store: &Path, bucket: u64) -> DecodeSession<HoloRunner> {
         .expect("the fixture declares rope_theta") as f32;
     let runner =
         HoloRunner::from_bytes(decode_archive(store, bucket)).expect("decode archive loads");
-    DecodeSession::new(runner, theta, STG_WINDOW).expect("the decode session opens")
+    DecodeSession::new(runner, RopeSpec::plain(theta), STG_WINDOW)
+        .expect("the decode session opens")
 }
 
 const SPEC_DRAFT: usize = 4; // the verify runner's chunk K
@@ -4522,7 +4528,7 @@ async fn when_spec_across_boundary(w: &mut BddWorld) {
     let growing = |path: &Path, b: u64| -> DecodeSession<HoloRunner> {
         let runner = HoloRunner::from_bytes(decode_archive(path, b)).expect("decode archive loads");
         let rp = path.to_path_buf();
-        DecodeSession::new(runner, theta, STG_WINDOW)
+        DecodeSession::new(runner, RopeSpec::plain(theta), STG_WINDOW)
             .expect("the decode session opens")
             .with_rebuild(Box::new(move |bb| {
                 HoloRunner::from_bytes(decode_archive(&rp, bb))
@@ -4666,7 +4672,7 @@ async fn when_verify_chunked(w: &mut BddWorld) {
     );
     let mut mono_session = DecodeSession::new(
         HoloRunner::from_bytes(mono_decode).expect("mono decode loads"),
-        theta,
+        RopeSpec::plain(theta),
         STG_WINDOW,
     )
     .expect("mono session");
@@ -4688,7 +4694,7 @@ async fn when_verify_chunked(w: &mut BddWorld) {
     let mut staged_session = DecodeSession::new(
         StagedRunner::from_archives(staged_decode, Box::new(DirKappaStore::new(&store.path)))
             .expect("staged decode runner"),
-        theta,
+        RopeSpec::plain(theta),
         STG_WINDOW,
     )
     .expect("staged session");
@@ -4740,7 +4746,7 @@ async fn given_decode_kit(w: &mut BddWorld, bucket: usize) {
         .as_f64()
         .expect("the fixture declares rope_theta") as f32;
     let rebuild_path = store.path.clone();
-    let session = DecodeSession::new(runner, theta, STG_WINDOW)
+    let session = DecodeSession::new(runner, RopeSpec::plain(theta), STG_WINDOW)
         .expect("the decode session opens")
         .with_rebuild(Box::new(move |b| {
             HoloRunner::from_bytes(decode_archive(&rebuild_path, b))
@@ -4828,8 +4834,8 @@ async fn given_staged_decode(w: &mut BddWorld, bucket: usize) {
 
     let mono_runner = HoloRunner::from_bytes(decode_archive(&store.path, bucket as u64))
         .expect("the monolithic decode archive loads");
-    let mono =
-        DecodeSession::new(mono_runner, theta, STG_WINDOW).expect("the monolithic session opens");
+    let mono = DecodeSession::new(mono_runner, RopeSpec::plain(theta), STG_WINDOW)
+        .expect("the monolithic session opens");
 
     let manifest = staged_manifest(false);
     let (keys, shapes): (Vec<String>, Vec<Vec<u64>>) = manifest.into_iter().unzip();
@@ -4852,7 +4858,8 @@ async fn given_staged_decode(w: &mut BddWorld, bucket: usize) {
     .expect("the staged decode pipeline compiles");
     let runner = StagedRunner::from_archives(archives, Box::new(DirKappaStore::new(&store.path)))
         .expect("the staged decode runner builds");
-    let staged = DecodeSession::new(runner, theta, STG_WINDOW).expect("the staged session opens");
+    let staged = DecodeSession::new(runner, RopeSpec::plain(theta), STG_WINDOW)
+        .expect("the staged session opens");
 
     w.decode_staged = Some(DecodeStagedKit {
         store,
@@ -5659,13 +5666,13 @@ async fn given_quant_decode_kit(w: &mut BddWorld, bucket: usize) {
         .expect("the fixture declares rope_theta") as f32;
     let f32_session = DecodeSession::new(
         HoloRunner::from_bytes(f32_archive).expect("the F32 decode archive loads"),
-        theta,
+        RopeSpec::plain(theta),
         STG_WINDOW,
     )
     .expect("the F32 decode session opens");
     let quant_session = DecodeSession::new(
         HoloRunner::from_bytes(quant_archive).expect("the quantized decode archive loads"),
-        theta,
+        RopeSpec::plain(theta),
         STG_WINDOW,
     )
     .expect("the quantized decode session opens");
