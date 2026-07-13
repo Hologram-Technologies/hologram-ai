@@ -402,9 +402,14 @@ export function Chat() {
       // stops the next prompt being built one flush short (the turn-3 truncation
       // the handshake reference gate caught).
       const finalText = chatStream.getSnapshot().text;
-      const committed: Message[] = finalText
-        ? [...base, { role: "assistant", text: finalText }]
-        : base;
+      // ALWAYS commit the assistant turn, even empty. A turn that generates no
+      // text (the model chose end-of-sequence immediately) must not vanish:
+      // dropping it leaves a dangling user turn that corrupts the next
+      // multi-turn prompt (two consecutive user turns), and a silently blank
+      // reply is indistinguishable from a hang to the user. The empty string
+      // is the faithful transcript ("the model said nothing"); the render
+      // shows an honest no-output notice for it.
+      const committed: Message[] = [...base, { role: "assistant", text: finalText }];
       setMessages(committed);
       persist(committed);
     } catch (e) {
@@ -470,14 +475,23 @@ export function Chat() {
           <div className="empty">Pick an archive and send a prompt.</div>
         ) : (
           <>
-            {messages.map((m, i) => (
-              <div key={i} className={`bubble ${m.role}`}>
-                <div className="role">{m.role}</div>
-                <MessageBody
-                  text={m.role === "assistant" ? cleanAssistantText(m.text) : m.text}
-                />
-              </div>
-            ))}
+            {messages.map((m, i) => {
+              const shown = m.role === "assistant" ? cleanAssistantText(m.text) : m.text;
+              return (
+                <div key={i} className={`bubble ${m.role}`}>
+                  <div className="role">{m.role}</div>
+                  {m.role === "assistant" && shown.length === 0 ? (
+                    // An honest notice, never a silent blank: the model emitted
+                    // no text (an immediate end-of-sequence for this prompt).
+                    <div className="md notice">
+                      (no output — the model produced no text for this prompt)
+                    </div>
+                  ) : (
+                    <MessageBody text={shown} />
+                  )}
+                </div>
+              );
+            })}
             {/* The live in-flight completion (from the module store), rendered
                 whether or not this route was mounted when it started. Before the
                 first token it shows the honest startup narration. */}
