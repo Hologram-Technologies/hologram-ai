@@ -278,6 +278,19 @@ export function startFixtureServer() {
         return;
       }
     }
+    // The search-derivability probe fetches THIS repo's config at search
+    // time (never at download — the repo is refused before that): serve it
+    // so the annotation carries the preflight's own reason.
+    const searchUnsupportedResolve = `/${SEARCH_UNSUPPORTED_REPO}/resolve/main/`;
+    if (url.pathname.startsWith(searchUnsupportedResolve)) {
+      const name = url.pathname.slice(searchUnsupportedResolve.length);
+      if (name === "config.json") {
+        send(200, UNSUPPORTED_FAMILY_CONFIG);
+        return;
+      }
+      send(500, "shard access must never happen for the gpt2 search repo", "text/plain");
+      return;
+    }
     const exoticResolve = `/${ROPE_EXOTIC_REPO}/resolve/main/`;
     if (url.pathname.startsWith(exoticResolve)) {
       const name = url.pathname.slice(exoticResolve.length);

@@ -349,13 +349,15 @@ Then("the unsupported-family model appears refused with the preflight reason", a
   // The refused repo is NOT hidden: it renders greyed with the preflight's
   // own error verbatim (the GPT-2 fixture cannot supply the generic decoder
   // schema, so the reason names the architecture).
-  const row = this.page.locator(".list-item", { hasText: SEARCH_UNSUPPORTED_REPO });
+  // The annotation lands when the async probe resolves — wait for the
+  // ANNOTATED row, not merely the row (reading too early races the probe).
+  const row = this.page.locator(".list-item", {
+    hasText: SEARCH_UNSUPPORTED_REPO,
+  });
   await row.first().waitFor({ timeout: 10_000 });
-  const text = await row.first().innerText();
-  assert.ok(
-    text.includes("Not runnable:"),
-    `the refused repo must be annotated, not hidden:\n${text}`,
-  );
+  const annotated = row.filter({ hasText: "Not runnable:" });
+  await annotated.first().waitFor({ timeout: 10_000 });
+  const text = await annotated.first().innerText();
   assert.ok(
     text.includes("GPT2LMHeadModel"),
     `the annotation must carry the preflight reason verbatim (naming the architecture):\n${text}`,
