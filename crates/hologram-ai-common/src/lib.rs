@@ -19,7 +19,7 @@ pub use exec_context::{ContextBundle, PatchPruneContext, Section, SECTION_PATCH_
 pub use hologram_ai_quant::{QuantDescriptor, QuantScheme, ScaleDtype};
 pub use ir::{
     canonical_vars, shape_from_concrete, ActQuant, AiGraph, AiNode, AiOp, AiParam, ConstraintStore,
-    DType, Dim, DimExpr, DimVarEntry, DimVarId, DimVarSource, DimVarTable, ImportWarning, KvLayout,
+    DType, Dim, DimExpr, DimVarEntry, DimVarId, DimVarSource, DimVarTable, ImportWarning,
     MetaValue, NodeId, ScatterReduce, SemanticHint, Shape, ShapeConstraint, ShapeError, TensorId,
     TensorInfo, ValidationError, WeightLayout,
 };

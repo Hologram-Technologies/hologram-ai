@@ -35,10 +35,10 @@ impl OptPipeline {
         };
         use crate::rules::{
             pattern_rules::{
-                add_rmsnorm_rules, attention_fusion_rules, kv_slot_injection_rules,
-                layernorm_rules, matmul_activation_rules, norm_projection_rule, position_ids_rules,
-                rmsnorm_rules, scalar_absorption_rules, slice_to_gather_rules,
-                swiglu_projection_rules, swiglu_rules,
+                add_rmsnorm_rules, attention_fusion_rules, layernorm_rules,
+                matmul_activation_rules, norm_projection_rule, position_ids_rules, rmsnorm_rules,
+                scalar_absorption_rules, slice_to_gather_rules, swiglu_projection_rules,
+                swiglu_rules,
             },
             RulePass,
         };
@@ -144,7 +144,6 @@ impl OptPipeline {
             // generation loop.
             Box::new(RulePass::new("PositionIdsInjection", position_ids_rules())),
             Box::new(RulePass::new("AttentionFusion", attention_fusion_rules())),
-            Box::new(RulePass::new("KvSlotInjection", kv_slot_injection_rules())),
             // Rewrite non-axis-0 slices (RoPE rotate_half, QKV/gate-up splits)
             // into first-class Gather. ADR-0018 declarative rule using
             // `Replacement::custom` — the rewrite mints a new i64 indices
@@ -172,7 +171,7 @@ impl OptPipeline {
     /// Runs the generic pipeline plus `PatchPruneInjection` (when
     /// `budget_ratio < 1.0`) followed by a second shape propagation
     /// pass to update all downstream shapes. Skips LLM-specific passes
-    /// (attention fusion, KV-cache injection).
+    /// (attention fusion, position-ids injection).
     pub fn vit(budget_ratio: f32) -> Self {
         use super::{
             const_dedup::ConstantDeduplication, const_eval::ConstantEvaluation,
@@ -205,7 +204,7 @@ impl OptPipeline {
     ///
     /// Runs shape/data propagation, constant evaluation/folding, op
     /// decomposition, and dead node elimination. Skips attention fusion,
-    /// KV-cache injection, and other LLM-specific passes.
+    /// position-ids injection, and other LLM-specific passes.
     pub fn generic() -> Self {
         use super::{
             const_dedup::ConstantDeduplication, const_eval::ConstantEvaluation,

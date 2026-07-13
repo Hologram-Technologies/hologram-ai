@@ -144,10 +144,6 @@ pub enum DesugarKind {
     Einsum {
         equation: String,
     },
-    /// ALiBi positional bias → a compile-time slope constant added to scores.
-    AlibiSlope,
-    /// Causal attention mask → a compile-time lower-triangular constant.
-    CausalMask,
     /// `Shape(start,end)` → a compile-time `i64` constant of the operand dims.
     Shape {
         start: Option<i64>,
@@ -315,8 +311,7 @@ pub fn dispatch(op: &AiOp) -> OpPlan {
         // a faithful SDPA: causal + grouped-query + scale). kv_heads is derived
         // by the compiler from the K operand's head dim. MultiHeadAttention
         // carries no layout/rope fields: its importers emit the kernel layout
-        // directly (heads-first, no fused rope). FlashAttentionHint carries no
-        // semantics → default (non-causal, 1/√d).
+        // directly (heads-first, no fused rope).
         A::MultiHeadAttention { scale, causal, .. } => P::Desugar(DesugarKind::Attention {
             causal: *causal,
             scale_bits: scale.map(|s| s.to_bits()).unwrap_or(0),
@@ -335,7 +330,6 @@ pub fn dispatch(op: &AiOp) -> OpPlan {
             heads_first: *heads_first,
             rope: rope.clone(),
         }),
-        A::FlashAttentionHint => P::Operandized(OpKind::Attention),
         // v0.9.0 split-KV decode attention (ADR-0019): the six operands
         // `[q, k_past, v_past, k_new, v_new, mask]` pass straight through to the
         // six-input `OpKind::Attention` (κ119). The mask is the sole masking
@@ -357,8 +351,6 @@ pub fn dispatch(op: &AiOp) -> OpPlan {
 
         // ── Positional encoding ─────────────────────────────────────────────
         A::RotaryEmbedding { .. } => P::Operandized(OpKind::RotaryEmbedding),
-        A::AlibiSlope => P::Desugar(DesugarKind::AlibiSlope),
-        A::CausalMask => P::Desugar(DesugarKind::CausalMask),
 
         // ── Shape manipulation ──────────────────────────────────────────────
         A::Reshape { .. } | A::Flatten { .. } | A::Squeeze { .. } | A::Unsqueeze { .. } => {
@@ -609,9 +601,6 @@ pub fn dispatch(op: &AiOp) -> OpPlan {
         // to a materialized constant it folds at import, otherwise it is a
         // structural relabel realized as Identity over the masked value.
         A::Trilu { .. } | A::Identity => P::Identity,
-        // KV-cache is removed; the injection pass does not run, so a K/V slot
-        // op is a pass-through of its tensor (reuse is content-addressed, §5.3).
-        A::KvSlotWrite { .. } | A::KvSlotRead { .. } => P::Identity,
 
         A::Opaque { op_type, .. } => {
             // An opaque op is an import defect, not a runtime concern: the
