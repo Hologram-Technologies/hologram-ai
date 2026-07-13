@@ -1,21 +1,6 @@
 use super::{dtype::DType, param::AiParam};
 use hologram_ai_quant::QuantScheme;
 
-/// Data layout for K/V tensors in the KV cache pipeline.
-///
-/// Determines how KvWrite transposes data before storing and how KvRead
-/// transposes after reading. The layout must match the attention kernel's
-/// `heads_first` flag to ensure correct attention computation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum KvLayout {
-    /// `[kv_heads, seq, head_dim]` — heads are the outermost dimension.
-    /// Used by ONNX models after the head-reshaping Transpose.
-    HeadsFirst,
-    /// `[seq, kv_heads, head_dim]` — sequence positions are outermost.
-    /// Used by GGUF models where weights are stored seq-first.
-    SeqFirst,
-}
-
 /// Behavioral category for shape/dtype/value inference.
 ///
 /// Most `AiOp` variants fall into a standard category with uniform inference
@@ -189,15 +174,12 @@ pub enum AiOp {
         /// Set by `PreAttentionFusion` pass.
         rope: Option<crate::rope::RopeSpec>,
     },
-    /// Hint from importer; lowering decides if flash attention is available.
-    FlashAttentionHint,
 
     // ── Positional encoding ────────────────────────────────────────────────
     RotaryEmbedding {
         base: f32,
         dim: u32,
     },
-    AlibiSlope,
 
     // ── Shape manipulation ─────────────────────────────────────────────────
     Reshape {
@@ -443,8 +425,6 @@ pub enum AiOp {
     // ── Embeddings ─────────────────────────────────────────────────────────
     /// token_ids → embedding vectors via weight-table lookup.
     Embed,
-    /// Generate causal attention mask.
-    CausalMask,
 
     // ── Quantization (explicit in IR) ──────────────────────────────────────
     Quantize {
@@ -468,26 +448,6 @@ pub enum AiOp {
     QuantizedMatMul {
         lhs_scheme: QuantScheme,
         rhs_scheme: QuantScheme,
-    },
-
-    // ── KV-cache ─────────────────────────────────────────────────────────────
-    /// Write a K or V tensor into the KV-cache for a given layer.
-    /// `is_key`: true for the K tensor, false for V.
-    KvSlotWrite {
-        layer: usize,
-        is_key: bool,
-        n_kv_heads: u32,
-        head_dim: u32,
-        /// Data layout of the K/V tensor entering KvWrite.
-        layout: KvLayout,
-    },
-    /// Read cached K/V tensors from the KV-cache for a given layer.
-    KvSlotRead {
-        layer: usize,
-        n_kv_heads: u32,
-        head_dim: u32,
-        /// Data layout expected by the downstream attention kernel.
-        layout: KvLayout,
     },
 
     // ── v0.9.0 resident-KV decode (ADR-0019) ───────────────────────────────
@@ -660,8 +620,6 @@ impl AiOp {
             | AiOp::RotaryEmbedding { .. }
             | AiOp::FusedSwiGLU
             | AiOp::FusedLayerNormResidual { .. }
-            | AiOp::KvSlotWrite { .. }
-            | AiOp::KvSlotRead { .. }
             // Split-KV decode attention: output = q shape (first input).
             // KvCacheWrite: output = cache shape (first input). Both preserve
             // the first-input shape, so the generic ShapePreserving rule holds.
@@ -686,8 +644,6 @@ impl AiOp {
             | AiOp::Einsum { .. }
             | AiOp::MultiHeadAttention { .. }
             | AiOp::GroupedQueryAttention { .. }
-            | AiOp::FlashAttentionHint
-            | AiOp::AlibiSlope
             | AiOp::Reshape { .. }
             | AiOp::Transpose { .. }
             | AiOp::Concat { .. }
@@ -712,7 +668,6 @@ impl AiOp {
             | AiOp::ArgMax { .. }
             | AiOp::ArgMin { .. }
             | AiOp::Embed
-            | AiOp::CausalMask
             | AiOp::QuantizedMatMul { .. }
             | AiOp::Cast { .. }
             | AiOp::Constant { .. }

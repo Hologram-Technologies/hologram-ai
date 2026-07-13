@@ -576,8 +576,6 @@ impl<'a> Ctx<'a> {
             DesugarKind::Einsum { equation } => self.desugar_einsum(node, &equation),
             DesugarKind::Shape { start, end } => self.desugar_shape(node, start, end),
             DesugarKind::Range => self.desugar_range(node),
-            DesugarKind::CausalMask => self.desugar_causal_mask(node),
-            DesugarKind::AlibiSlope => self.desugar_alibi(node),
             DesugarKind::TopK { axis, largest, .. } => self.desugar_topk(node, axis, largest),
             DesugarKind::NonZero => self.desugar_nonzero(node),
             DesugarKind::Compress { axis } => self.desugar_compress(node, axis),
@@ -766,42 +764,6 @@ impl<'a> Ctx<'a> {
             x += delta;
         }
         let src = self.const_i64(&vals);
-        self.bind_out(node, src)
-    }
-
-    /// Causal attention mask: lower-triangular 0 / upper -inf, [seq, seq].
-    fn desugar_causal_mask(&mut self, node: &AiNode) -> Result<()> {
-        let dims = self.out_dims(node)?;
-        let (r, c) = match dims.as_slice() {
-            [.., r, c] => (*r as usize, *c as usize),
-            _ => anyhow::bail!("CausalMask output must be at least rank-2"),
-        };
-        let mut vals = vec![0f32; r * c];
-        for i in 0..r {
-            for j in (i + 1)..c {
-                vals[i * c + j] = f32::NEG_INFINITY;
-            }
-        }
-        let src = self.const_f32(&vals, &dims);
-        self.bind_out(node, src)
-    }
-
-    /// ALiBi slope bias: per-head geometric slopes broadcast over positions.
-    fn desugar_alibi(&mut self, node: &AiNode) -> Result<()> {
-        let dims = self.out_dims(node)?;
-        let n: usize = dims.iter().product::<u64>() as usize;
-        // Slopes are a fixed function of head count (2^(-8/h) geometric series);
-        // the concrete bias grid is known once shapes are concrete.
-        let heads = dims.first().copied().unwrap_or(1) as usize;
-        let mut vals = vec![0f32; n];
-        let per = n / heads.max(1);
-        for h in 0..heads {
-            let slope = 2f32.powf(-8.0 * (h as f32 + 1.0) / heads as f32);
-            for k in 0..per {
-                vals[h * per + k] = slope * k as f32;
-            }
-        }
-        let src = self.const_f32(&vals, &dims);
         self.bind_out(node, src)
     }
 

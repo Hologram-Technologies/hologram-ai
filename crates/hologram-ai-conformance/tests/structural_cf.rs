@@ -28,7 +28,7 @@
 #![cfg(feature = "structural")]
 
 use hologram_ai::{HoloRunner, ModelCompiler, ModelSource};
-use hologram_ai_common::ir::op::{KvLayout, ScatterReduce};
+use hologram_ai_common::ir::op::ScatterReduce;
 use hologram_ai_common::lower::{dispatch, OpPlan};
 use hologram_ai_common::{ActQuant, AiOp, DType, WeightLayout};
 use hologram_ai_conformance::ort_runner::onnx_builder;
@@ -106,17 +106,13 @@ fn every_ai_op_variant() -> Vec<AiOp> {
             causal: false,
             heads_first: true,
             qk_norm: false,
-            rope: false,
-            rope_base: 10000.0,
+            rope: None,
         },
-        AiOp::FlashAttentionHint,
         // Positional
         AiOp::RotaryEmbedding {
             base: 10000.0,
             dim: 1,
         },
-        AiOp::AlibiSlope,
-        AiOp::CausalMask,
         // Shape manipulation
         AiOp::Reshape { allow_zero: false },
         AiOp::Transpose { perm: v_u32() },
@@ -305,20 +301,6 @@ fn every_ai_op_variant() -> Vec<AiOp> {
         AiOp::QuantizedMatMul {
             lhs_scheme: QuantScheme::Q8_0,
             rhs_scheme: QuantScheme::Q8_0,
-        },
-        // KV-cache (passthrough in the UOR-native runtime)
-        AiOp::KvSlotWrite {
-            layer: 0,
-            is_key: true,
-            n_kv_heads: 1,
-            head_dim: 1,
-            layout: KvLayout::HeadsFirst,
-        },
-        AiOp::KvSlotRead {
-            layer: 0,
-            n_kv_heads: 1,
-            head_dim: 1,
-            layout: KvLayout::HeadsFirst,
         },
         // Fused ops
         AiOp::FusedSwiGLU,

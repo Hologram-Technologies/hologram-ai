@@ -255,7 +255,7 @@ enum ReplacementOp {
     /// Used by rewrites that don't fit the single-node-replace model:
     /// `SliceToGather` (emits a new `i64[]` indices param + a Gather
     /// node), `NormProjectionFusion` (multi-output projection), the
-    /// injection passes (`KvSlotInjection`, `PositionIdsInjection`).
+    /// `PositionIdsInjection` pass.
     Custom(fn(&mut AiGraph, &HashMap<VarId, TensorId>, usize) -> Option<AiNode>),
 }
 
@@ -583,10 +583,9 @@ impl RuleSet {
         }
 
         // Apply rewrites + removals in one pass over `nodes`. Custom
-        // rewrites may have appended new nodes during the sweep (e.g.
-        // KvSlotInjection appends KvSlotWrite nodes); those are at
-        // indices >= original n and were never marked for removal —
-        // copy them through verbatim.
+        // rewrites may have appended new nodes during the sweep; those
+        // are at indices >= original n and were never marked for
+        // removal — copy them through verbatim.
         let mut new_nodes = Vec::with_capacity(graph.nodes.len());
         for (idx, node) in graph.nodes.iter().enumerate() {
             if to_remove.get(idx).copied().unwrap_or(false) {
