@@ -392,9 +392,11 @@ export function Chat() {
         eos: sessionMeta?.eosTokenId,
         promptTemplate: promptTemplateForGen,
       });
-      // Commit the final completion, persisting DIRECTLY. `generate` emits the
-      // final `chat://line` synchronously before it resolves, so the store's
-      // snapshot IS the completed text here. Writing localStorage (not relying
+      // Commit the final completion, persisting DIRECTLY. Every `chat://line`
+      // delta is emitted (and accumulated by the store) before `generate`
+      // resolves, so the store's snapshot IS the completed text here — the
+      // deltas join byte-identically to the worker's final `done` text.
+      // Writing localStorage (not relying
       // on a setState a torn-down component would ignore) is what makes the turn
       // survive a route change; committing before the composer re-enables also
       // stops the next prompt being built one flush short (the turn-3 truncation

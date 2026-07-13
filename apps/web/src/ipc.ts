@@ -335,7 +335,9 @@ async function downloadOne(model: { hfId: string; quantize: string }): Promise<v
       // text (config.json is also parsed below).
       const basename = file.rfilename.split('/').pop()!;
       const isBinary = basename === "tokenizer.model";
-      const body: string | Uint8Array = isBinary
+      // Typed over a plain ArrayBuffer (never ArrayBufferLike): OPFS
+      // `write()` rejects a view that could sit on a SharedArrayBuffer.
+      const body: string | Uint8Array<ArrayBuffer> = isBinary
         ? new Uint8Array(await response!.arrayBuffer())
         : await response!.text();
       // Exact basename only: tokenizer_config.json / generation_config.json
@@ -907,7 +909,9 @@ export async function generate(opts: GenerateOpts): Promise<number> {
         // longer uses (M1), so it does not linger pinning the shared memory.
         terminatePool();
       } else if (e.data.type === 'token') {
-        emitLine("chat://line", { stream: "stdout", line: e.data.text });
+        // One incremental delta per token event — the stream store
+        // accumulates; re-emitting a running string here would be O(N²).
+        emitLine("chat://line", { stream: "stdout", line: e.data.delta });
       } else if (e.data.type === 'progress') {
         // Narration of the honest work behind the first token (window
         // compiles, per-stage materialization) — a status channel, never
@@ -921,7 +925,8 @@ export async function generate(opts: GenerateOpts): Promise<number> {
           __hologram_completions?: { prompt: string; text: string }[];
         };
         (g.__hologram_completions ??= []).push({ prompt: opts.prompt, text: e.data.text });
-        emitLine("chat://line", { stream: "stdout", line: e.data.text });
+        // No chat://line here: the store already accumulated every delta —
+        // re-emitting the full text would double the bubble.
         // The worker stays alive: it holds the warm staged session (row
         // `warm-turn`) — the next turn reuses the resident window instead
         // of rebuilding it. Cancel/error still terminate.
