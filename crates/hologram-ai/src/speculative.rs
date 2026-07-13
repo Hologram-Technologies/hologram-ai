@@ -4,11 +4,16 @@
 //! A decode step is the substrate matmul kernel's worst shape (`M = 1`); the
 //! `decode_shape` bench measures an `M = K` pass at a fraction of the wall-clock
 //! of `K` single steps. Speculative decoding exploits that: DRAFT `K`
-//! continuation tokens cheaply, VERIFY them all in one `M = K` pass (the verify
-//! head, [`crate::decode::DecodeSession::verify`]), and ACCEPT the longest
-//! prefix the model would itself have produced. For greedy (temperature 0) the
-//! result is byte-identical to single-step decode — a pure speedup whose size is
-//! the draft's acceptance rate.
+//! continuation tokens cheaply, then run ONE FOLDED `M = 1 + K` verify batch
+//! ([`crate::decode::DecodeSession::speculate`]) that commits the model's own
+//! pending token as its first row and ACCEPTS the longest draft prefix the
+//! model would itself have produced. Folding the commit into the batch is what
+//! lets the verify runner alone carry the resident K/V truth across batches
+//! (ADR-0019) — no per-batch step on the session runner, no per-batch cache
+//! traversals; the truth hands back only at regime boundaries
+//! ([`crate::decode::DecodeSession::end_speculation`]). The result is
+//! byte-identical to single-step decode under the same token rule — greedy OR
+//! sampled — a pure speedup whose size is the draft's acceptance rate.
 //!
 //! Two drafters share the ONE verify/accept/commit loop, because that loop is
 //! drafter-AGNOSTIC — only the TARGET's own token rule decides what is emitted,
