@@ -116,6 +116,26 @@ impl Dims {
         rms_norm_eps: 1e-6,
     };
 
+    /// DEEP — production ATTENTION geometry at a runnable size: head_dim 128
+    /// (the real Qwen/Llama value, `hidden/heads = 1024/8`), GQA `kv_heads = 2`,
+    /// SwiGLU, 12 layers, context 512. The committed `MODEST` scale runs at
+    /// head_dim 64 and the fixture at head_dim 16; the browser's real-model hang
+    /// only appears at the production head_dim, so this scale is the fast
+    /// (native, seconds) reproduction of that path. `head_dim * heads ==
+    /// hidden_size` is the only structural constraint.
+    pub const DEEP: Dims = Dims {
+        hidden_size: 1024,
+        layers: 12,
+        num_attention_heads: 8,
+        num_key_value_heads: 2,
+        head_dim: 128,
+        intermediate_size: 2048,
+        vocab_size: 512,
+        max_position_embeddings: 512,
+        rope_theta: 10_000.0,
+        rms_norm_eps: 1e-6,
+    };
+
     /// LARGE — a ~20-billion-parameter-class template (round, tied to no single
     /// published model): at the full 44 layers this is ≈ 20 B parameters. The
     /// embed/head (128 k × 6144) and each layer stage are already at 20B-class

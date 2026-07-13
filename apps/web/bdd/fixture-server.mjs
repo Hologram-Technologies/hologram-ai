@@ -31,6 +31,12 @@ export const ROPE_SCALED_REPO = "hologram-fixture/handshake-tiny-llama3rope";
 // The fixture config with an UNIMPLEMENTED rope_scaling type — preflight must
 // refuse naming the law, before any shard byte.
 export const ROPE_EXOTIC_REPO = "hologram-fixture/exotic-rope";
+// A DEEP hermetic model (30 layers), SYNTHESIZED at serve time from the same
+// deterministic weight law as the committed fixture (zero repo bytes): the
+// real-model journey SHAPE — many stages, the int8 tier, growth — that the
+// 2-layer fixture cannot exercise (the class of failure that shipped in
+// PR #13/#14 hid exactly here).
+export const DEEP_FIXTURE_REPO = "hologram-fixture/deep-tiny";
 
 const FIXTURE_FILES = [
   "config.json",
@@ -102,6 +108,100 @@ const ROPE_SCALED_CONFIG = fixtureConfigWith({
 const ROPE_EXOTIC_CONFIG = fixtureConfigWith({
   rope_scaling: { rope_type: "exotic", factor: 2.0 },
 });
+
+// ── The synthesized deep fixture ─────────────────────────────────────────────
+
+// PRODUCTION-SHAPE dims: head_dim 128 (hidden/heads = 1024/8), GQA kv_heads 2,
+// SwiGLU MLP, 12 layers — the exact attention geometry the v0.9.0 fused decode
+// path runs on real Qwen/Llama checkpoints, which the committed fixture's
+// head_dim 16 never exercised. Context 512 so a longer prompt grows the bucket
+// (the regrow path). Vocab 512 reuses the committed tokenizer.
+const DEEP_LAYERS = 12;
+const DEEP_HIDDEN = 1024;
+const DEEP_HEADS = 8;
+const DEEP_KV_HEADS = 2;
+const DEEP_INTER = 2048;
+const DEEP_VOCAB = 512;
+const DEEP_CONFIG = JSON.stringify({
+  architectures: ["LlamaForCausalLM"],
+  hidden_size: DEEP_HIDDEN,
+  intermediate_size: DEEP_INTER,
+  num_hidden_layers: DEEP_LAYERS,
+  num_attention_heads: DEEP_HEADS,
+  num_key_value_heads: DEEP_KV_HEADS,
+  vocab_size: DEEP_VOCAB,
+  rms_norm_eps: 1e-6,
+  rope_theta: 10000.0,
+  max_position_embeddings: 512,
+  tie_word_embeddings: false,
+  torch_dtype: "float32",
+  bos_token_id: 1,
+  eos_token_id: 2,
+  model_type: "llama",
+});
+
+/** The deep manifest: the Llama tensor schema at the deep dims. */
+function deepManifest() {
+  const kv = DEEP_KV_HEADS * (DEEP_HIDDEN / DEEP_HEADS);
+  const m = [["model.embed_tokens.weight", [DEEP_VOCAB, DEEP_HIDDEN]]];
+  for (let l = 0; l < DEEP_LAYERS; l++) {
+    const p = `model.layers.${l}`;
+    m.push([`${p}.input_layernorm.weight`, [DEEP_HIDDEN]]);
+    m.push([`${p}.self_attn.q_proj.weight`, [DEEP_HIDDEN, DEEP_HIDDEN]]);
+    m.push([`${p}.self_attn.k_proj.weight`, [kv, DEEP_HIDDEN]]);
+    m.push([`${p}.self_attn.v_proj.weight`, [kv, DEEP_HIDDEN]]);
+    m.push([`${p}.self_attn.o_proj.weight`, [DEEP_HIDDEN, DEEP_HIDDEN]]);
+    m.push([`${p}.post_attention_layernorm.weight`, [DEEP_HIDDEN]]);
+    m.push([`${p}.mlp.gate_proj.weight`, [DEEP_INTER, DEEP_HIDDEN]]);
+    m.push([`${p}.mlp.up_proj.weight`, [DEEP_INTER, DEEP_HIDDEN]]);
+    m.push([`${p}.mlp.down_proj.weight`, [DEEP_HIDDEN, DEEP_INTER]]);
+  }
+  m.push(["model.norm.weight", [DEEP_HIDDEN]]);
+  m.push(["lm_head.weight", [DEEP_VOCAB, DEEP_HIDDEN]]);
+  return m;
+}
+
+/** The committed fixture generator's exact weight law (xtask fixture.rs
+ * `bytes_for`): norms are 1.0, everything else cycles ((k % 13) − 6) · 0.01. */
+function deepTensorBytes(name, dims) {
+  const n = dims.reduce((a, b) => a * b, 1);
+  const norm = name.includes("layernorm") || name.endsWith(".norm.weight");
+  const out = Buffer.alloc(n * 4);
+  for (let k = 0; k < n; k++) {
+    out.writeFloatLE(norm ? 1.0 : ((k % 13) - 6) * 0.01, k * 4);
+  }
+  return out;
+}
+
+/** Assemble a valid single-file safetensors image (u64-LE header length,
+ * JSON header, raw little-endian tensor data), built once per process. */
+let deepSafetensors = null;
+function deepSafetensorsBytes() {
+  if (deepSafetensors) return deepSafetensors;
+  const manifest = deepManifest();
+  const header = {};
+  let offset = 0;
+  const buffers = [];
+  for (const [name, dims] of manifest) {
+    const bytes = deepTensorBytes(name, dims);
+    header[name] = { dtype: "F32", shape: dims, data_offsets: [offset, offset + bytes.length] };
+    offset += bytes.length;
+    buffers.push(bytes);
+  }
+  const headerJson = Buffer.from(JSON.stringify(header));
+  const len = Buffer.alloc(8);
+  len.writeBigUInt64LE(BigInt(headerJson.length));
+  deepSafetensors = Buffer.concat([len, headerJson, ...buffers]);
+  return deepSafetensors;
+}
+
+// The deep repo serves the committed fixture's tokenizer/config companions
+// (vocab 512 covers DEEP_VOCAB) with its own config.json + synthesized shard.
+const DEEP_COMPANIONS = [
+  "tokenizer.json",
+  "tokenizer_config.json",
+  "generation_config.json",
+];
 
 export function startFixtureServer() {
   const requests = [];
@@ -204,6 +304,25 @@ export function startFixtureServer() {
         return;
       }
     }
+    if (url.pathname === `/api/models/${DEEP_FIXTURE_REPO}`) {
+      const siblings = [
+        { rfilename: "config.json", size: Buffer.byteLength(DEEP_CONFIG) },
+        { rfilename: "model.safetensors", size: deepSafetensorsBytes().length },
+        ...DEEP_COMPANIONS.map((name) => ({
+          rfilename: name,
+          size: readFileSync(path.join(FIXTURE_DIR, name)).length,
+        })),
+      ];
+      send(
+        200,
+        JSON.stringify({
+          id: DEEP_FIXTURE_REPO,
+          config: { architectures: ["LlamaForCausalLM"] },
+          siblings,
+        }),
+      );
+      return;
+    }
     if (url.pathname === `/api/models/${ROPE_EXOTIC_REPO}`) {
       send(
         200,
@@ -289,6 +408,24 @@ export function startFixtureServer() {
         return;
       }
       send(500, "shard access must never happen for the gpt2 search repo", "text/plain");
+      return;
+    }
+    const deepResolve = `/${DEEP_FIXTURE_REPO}/resolve/main/`;
+    if (url.pathname.startsWith(deepResolve)) {
+      const name = url.pathname.slice(deepResolve.length);
+      if (name === "config.json") {
+        send(200, DEEP_CONFIG);
+        return;
+      }
+      if (name === "model.safetensors") {
+        sendBytes(deepSafetensorsBytes());
+        return;
+      }
+      if (DEEP_COMPANIONS.includes(name)) {
+        sendBytes(readFileSync(path.join(FIXTURE_DIR, name)));
+        return;
+      }
+      send(404, "not found", "text/plain");
       return;
     }
     const exoticResolve = `/${ROPE_EXOTIC_REPO}/resolve/main/`;
