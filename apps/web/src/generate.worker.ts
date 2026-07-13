@@ -1,6 +1,6 @@
 // The generation worker (journey stages S3 + S4): materialize the k-form
 // archive against the OPFS κ-store, then run the real generation loop,
-// streaming tokens back to the page.
+// streaming token DELTAS back to the page.
 //
 // Materialization is resolution, not loading: each κ-map entry is read from
 // `tensors/{κ}.bin` through a sync access handle (worker-only API), re-hashed
@@ -216,6 +216,15 @@ async function readModelText(dir: FileSystemDirectoryHandle, name: string): Prom
   const handle = await dir.getFileHandle(name);
   return (await handle.getFile()).text();
 }
+
+/** The generation stream's wire protocol (worker → page): `token` carries the
+ * newly decoded text DELTA — an incremental chunk, never the running string —
+ * and `done` carries the complete final text. Consumers ACCUMULATE deltas into
+ * the displayed text; the streaming field is named `delta` (not `text`) so a
+ * stale full-string consumer fails to compile instead of silently
+ * misrendering. The law (asserted below before `done` is posted): the
+ * concatenation of every `token` delta is byte-identical to `done`'s text. */
+export type StreamMessage = { type: "token"; delta: string } | { type: "done"; text: string };
 
 type DerivedEntry = { stages: Uint8Array[]; kappas: string[] };
 
@@ -653,10 +662,19 @@ self.onmessage = async (e) => {
         self.postMessage({ type: "warmed" });
         return;
       }
-      const result = session.generate(prompt, genOpts as never, (text: string) => {
-        self.postMessage({ type: "token", text });
+      // The worker-side accumulator exists ONLY to witness byte-identity: the
+      // deltas the page accumulates must equal the text the loop returns.
+      let streamed = "";
+      const result = session.generate(prompt, genOpts as never, (delta: string) => {
+        streamed += delta;
+        self.postMessage({ type: "token", delta } satisfies StreamMessage);
       });
-      self.postMessage({ type: "done", text: result });
+      if (streamed !== result) {
+        throw new Error(
+          `stream deltas diverged from the final text (${streamed.length} vs ${result.length} chars) — the delta protocol is broken`,
+        );
+      }
+      self.postMessage({ type: "done", text: result } satisfies StreamMessage);
       // Idle anneal (row `idle-derivation`): with the turn delivered, derive
       // the next window bucket's archives into the derived store — off the
       // per-token path, no weights moved. A later crossing resolves instead
@@ -681,16 +699,23 @@ self.onmessage = async (e) => {
       return;
     }
     const material = await materializeFromOpfs(holoBytes, modelDir);
+    let streamed = "";
     const result = await wasmGenerate(
       material,
       prompt,
       genOpts,
       tokenizerBytes,
-      (text: string) => {
-        self.postMessage({ type: "token", text });
+      (delta: string) => {
+        streamed += delta;
+        self.postMessage({ type: "token", delta } satisfies StreamMessage);
       },
     );
-    self.postMessage({ type: "done", text: result });
+    if (streamed !== result) {
+      throw new Error(
+        `stream deltas diverged from the final text (${streamed.length} vs ${result.length} chars) — the delta protocol is broken`,
+      );
+    }
+    self.postMessage({ type: "done", text: result } satisfies StreamMessage);
   } catch (err) {
     self.postMessage({ type: "error", error: String(err) });
   }

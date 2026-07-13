@@ -1091,20 +1091,70 @@ impl GenOpts {
     }
 }
 
-/// A `Write` sink that accumulates the generated text and streams the running
-/// string to an optional JS callback — shared by [`generate`] and
-/// [`StagedChatSession::generate`].
+/// Advance the streaming UTF-8 boundary: append `buf` to `pending`, split off
+/// everything that now forms complete UTF-8 and return it, leaving the 0–3
+/// trailing bytes of a character whose remaining bytes have not arrived yet in
+/// `pending` for the next call. Definitely invalid UTF-8 — a sequence no
+/// continuation byte could ever complete — is an error, never silently dropped
+/// or reinterpreted. Pure (no JS types), so the boundary law is host-testable:
+/// the concatenation of every returned chunk equals the concatenation of every
+/// `buf`, and no chunk ever ends inside a character.
+fn drain_complete_utf8(pending: &mut Vec<u8>, buf: &[u8]) -> Result<String, std::str::Utf8Error> {
+    pending.extend_from_slice(buf);
+    match std::str::from_utf8(pending) {
+        // Common case — the shared loops write whole `StreamingDecoder` deltas,
+        // so the pending bytes are usually already complete.
+        Ok(_) => Ok(String::from_utf8(std::mem::take(pending)).expect("just validated")),
+        Err(e) if e.error_len().is_none() => {
+            // The tail is an incomplete character: hold it back, emit the rest.
+            let tail = pending.split_off(e.valid_up_to());
+            let complete = std::mem::replace(pending, tail);
+            Ok(String::from_utf8(complete).expect("prefix validated by from_utf8"))
+        }
+        Err(e) => Err(e),
+    }
+}
+
+/// A `Write` sink that accumulates the generated text (the final return value)
+/// and streams each newly complete UTF-8 DELTA to an optional JS callback —
+/// shared by [`generate`], [`StagedChatSession::generate`] and
+/// [`DecodeChatSession::generate`]. Writes arrive as incremental chunks (the
+/// shared loops stream `StreamingDecoder` deltas), so the callback receives
+/// DELTAS, never the running string; bytes of a character split across writes
+/// are held back until it completes ([`drain_complete_utf8`]). The law: the
+/// concatenation of every callback delta is byte-identical to the returned
+/// text.
 struct CallbackSink<'a> {
+    /// Every byte written — the final returned text.
     buffer: Vec<u8>,
+    /// Trailing bytes of a not-yet-complete UTF-8 character, held back from
+    /// the callback and prepended to the next write.
+    pending: Vec<u8>,
     callback: Option<&'a js_sys::Function>,
+}
+
+impl<'a> CallbackSink<'a> {
+    fn new(callback: Option<&'a js_sys::Function>) -> Self {
+        Self {
+            buffer: Vec::new(),
+            pending: Vec::new(),
+            callback,
+        }
+    }
 }
 
 impl std::io::Write for CallbackSink<'_> {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
         self.buffer.extend_from_slice(buf);
         if let Some(cb) = self.callback {
-            if let Ok(s) = String::from_utf8(self.buffer.clone()) {
-                let _ = cb.call1(&JsValue::NULL, &JsValue::from_str(&s));
+            let delta = drain_complete_utf8(&mut self.pending, buf).map_err(|e| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("generated stream is not UTF-8: {e}"),
+                )
+            })?;
+            if !delta.is_empty() {
+                let _ = cb.call1(&JsValue::NULL, &JsValue::from_str(&delta));
             }
         }
         Ok(buf.len())
@@ -1143,10 +1193,7 @@ pub fn generate(
 
     // A precompiled `.holo` is a fixed-window session.
     let mut session = FixedSession::new(runner);
-    let mut sink = CallbackSink {
-        buffer: Vec::new(),
-        callback: callback.as_ref(),
-    };
+    let mut sink = CallbackSink::new(callback.as_ref());
     generate_stream(&mut session, &tokenizer, &templated, &cfg, &mut sink)
         .map_err(|e| err(format!("generate: {e:#}")))?;
     String::from_utf8(sink.buffer).map_err(err)
@@ -1433,8 +1480,8 @@ impl StagedChatSession {
     }
 
     /// One chat turn over the warm session: the same `generate_stream` loop,
-    /// streaming the running completion to `callback`. Returns the generated
-    /// text.
+    /// streaming each newly decoded text DELTA to `callback` (the consumer
+    /// accumulates). Returns the generated text.
     pub fn generate(
         &mut self,
         prompt: &str,
@@ -1444,10 +1491,7 @@ impl StagedChatSession {
         let opts = GenOpts::from_js(opts)?;
         let cfg = opts.config();
         let templated = apply_template(opts.prompt_template.as_deref(), prompt);
-        let mut sink = CallbackSink {
-            buffer: Vec::new(),
-            callback: callback.as_ref(),
-        };
+        let mut sink = CallbackSink::new(callback.as_ref());
         generate_stream(
             &mut self.session,
             &self.tokenizer,
@@ -1646,8 +1690,8 @@ impl DecodeChatSession {
     }
 
     /// One chat turn over the decode loop — prompt prefill as decode steps,
-    /// one step per generated token — streaming the running completion to
-    /// `callback`. Cross-turn K/V retention lives in the loop itself: a
+    /// one step per generated token — streaming each newly decoded text DELTA
+    /// to `callback`. Cross-turn K/V retention lives in the loop itself: a
     /// transcript extending its own history rewinds to the shared prefix
     /// and pays only its novel suffix. Returns the generated text.
     pub fn generate(
@@ -1821,10 +1865,7 @@ impl DecodeChatSession {
             }
         }
 
-        let mut sink = CallbackSink {
-            buffer: Vec::new(),
-            callback: callback.as_ref(),
-        };
+        let mut sink = CallbackSink::new(callback.as_ref());
 
         // Speculative decode (row `speculative-decode`): a `K ≥ 2` draft at ANY
         // temperature. Build a verify runner at the session's OWN bucket (they
@@ -1973,6 +2014,57 @@ mod tests {
             3,
             "three distinct keys — the two chunks do not collide"
         );
+    }
+
+    /// [`drain_complete_utf8`] under the WORST chunking — one byte per write:
+    /// a multibyte character split across writes never emits partial bytes
+    /// (every emitted chunk ends on a character boundary, so every prefix of
+    /// the accumulation is a prefix of the text), and the accumulation equals
+    /// the concatenation with nothing held back at the end. Plain host
+    /// `#[test]`: the helper is pure Rust — this is the delta-boundary law
+    /// [`CallbackSink`]'s JS callback stream rests on.
+    #[test]
+    fn utf8_delta_boundary_never_splits_a_character_and_accumulates_exactly() {
+        // 1-, 2-, 3- and 4-byte characters, adjacent in every order.
+        let text = "a\u{00E9}\u{2192}\u{1F980}x\u{1F980}\u{2192}\u{00E9}b";
+        let bytes = text.as_bytes();
+        let mut pending = Vec::new();
+        let mut emitted = String::new();
+        for b in bytes {
+            let delta =
+                drain_complete_utf8(&mut pending, std::slice::from_ref(b)).expect("valid stream");
+            emitted.push_str(&delta);
+            assert!(
+                text.starts_with(&emitted),
+                "emitted a byte sequence the text does not begin with: {emitted:?}"
+            );
+        }
+        assert_eq!(emitted, text, "accumulation equals concatenation");
+        assert!(pending.is_empty(), "a finished stream holds nothing back");
+    }
+
+    /// An incomplete character emits NOTHING until its last byte arrives, then
+    /// emits exactly the whole character — the held-back tail is prepended to
+    /// the next write, not dropped or flushed early.
+    #[test]
+    fn utf8_delta_boundary_holds_an_incomplete_tail_across_writes() {
+        let crab = "\u{1F980}".as_bytes(); // 4 bytes
+        let mut pending = Vec::new();
+        let first = drain_complete_utf8(&mut pending, &crab[..2]).expect("incomplete, not invalid");
+        assert_eq!(first, "", "a half-written character must not surface");
+        assert_eq!(pending, &crab[..2], "the partial bytes are held back");
+        let rest = drain_complete_utf8(&mut pending, &crab[2..]).expect("now complete");
+        assert_eq!(rest, "\u{1F980}", "completion emits the whole character");
+        assert!(pending.is_empty());
+    }
+
+    /// Definitely invalid UTF-8 — bytes no continuation could complete — is an
+    /// error, never silently skipped (fail loud, not stream corrupt text).
+    #[test]
+    fn utf8_delta_boundary_rejects_invalid_bytes_loudly() {
+        let mut pending = Vec::new();
+        drain_complete_utf8(&mut pending, &[b'o', b'k', 0xFF])
+            .expect_err("0xFF can never begin a UTF-8 sequence");
     }
 
     // [1,4]·[4,4 identity] matmul — for describe/run.

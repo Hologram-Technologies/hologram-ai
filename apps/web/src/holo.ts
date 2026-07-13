@@ -486,7 +486,10 @@ export async function createDecodeSession(
 }
 
 export interface StagedSession {
-  generate(prompt: string, opts: GenOpts, callback?: (text: string) => void): string;
+  /** One chat turn. `callback` streams each newly decoded text DELTA — an
+   * incremental chunk, never the running string — and the deltas concatenate
+   * byte-identically to the returned text. */
+  generate(prompt: string, opts: GenOpts, callback?: (delta: string) => void): string;
   materialization_count(): bigint;
   derived_hits(): bigint;
   prederive_next_window(): number | undefined;
@@ -554,14 +557,16 @@ export interface GenOpts {
 /**
  * Autoregressive text generation over a compiled causal LM. The tokenizer is
  * read from the archive's baked-in extension unless `tokenizer` (a
- * `tokenizer.json`'s bytes) is given. Returns the generated text.
+ * `tokenizer.json`'s bytes) is given. `callback` streams each newly decoded
+ * text DELTA (never the running string); the deltas concatenate
+ * byte-identically to the returned text.
  */
 export async function generate(
   holo: Uint8Array,
   prompt: string,
   opts: GenOpts = {},
   tokenizer?: Uint8Array,
-  callback?: (text: string) => void,
+  callback?: (delta: string) => void,
 ): Promise<string> {
   await ensureReady();
   return G!.generate(holo, tokenizer ?? undefined, prompt, opts, callback);

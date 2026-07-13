@@ -14,14 +14,21 @@
 // generation's cumulative text + status regardless of which route is mounted,
 // so `Chat` renders the live bubble whenever it is on screen, and the completed
 // turn is committed (and persisted) by the sender independent of mount state.
+//
+// WIRE vs STORE: each `chat://line` stdout event carries one text DELTA (the
+// worker's `token` messages stream incremental chunks, never the running
+// string — see `StreamMessage` in generate.worker.ts). The store ACCUMULATES
+// the deltas, so its consumers keep reading the full cumulative text; only the
+// wire format is delta.
 
 import { onProcessLine } from "./ipc";
 
 export interface ChatStreamState {
   /** The archive whose generation is in flight (`null` when idle). */
   archive: string | null;
-  /** Cumulative decoded text of the in-flight completion (a SNAPSHOT per event,
-   * so consumers REPLACE, never append). */
+  /** Cumulative decoded text of the in-flight completion — the store's
+   * accumulation of the wire's per-event DELTAS. Consumers read the full
+   * text; they never see (or append) individual deltas. */
   text: string;
   /** The startup narration (window compile / stage materialization) shown
    * before the first token, so a large model's honest startup is visible. */
@@ -67,7 +74,15 @@ function set(next: Partial<ChatStreamState>, immediate: boolean) {
 // asynchronously; we never unlisten (the store lives for the app's lifetime).
 void onProcessLine("chat://line", (l) => {
   if (l.stream === "stderr") return;
-  set({ text: l.line, ...(l.line ? { status: "" } : {}) }, false);
+  if (typeof l.line !== "string") {
+    // A stale producer still posting the pre-delta message shape would land
+    // here as `undefined` and render literal "undefined" into the transcript —
+    // fail loud instead of silently wrong.
+    throw new Error("chat://line carried a non-string delta — stream protocol mismatch");
+  }
+  // Each stdout event is a DELTA: accumulate (the first non-empty delta also
+  // clears the startup narration).
+  set({ text: state.text + l.line, ...(l.line ? { status: "" } : {}) }, false);
 });
 void onProcessLine("chat://status", (l) => {
   if (l.stream === "stderr") return;
