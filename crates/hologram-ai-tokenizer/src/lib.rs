@@ -26,6 +26,8 @@ pub mod archive;
 mod bpe;
 mod config;
 mod native;
+mod sentencepiece;
+mod streaming;
 mod unigram;
 mod vocab;
 mod wordpiece;
@@ -35,6 +37,7 @@ pub use config::{
     TokenizerConfig,
 };
 pub use native::NativeTokenizer;
+pub use streaming::StreamingDecoder;
 pub use vocab::{MergeRules, VocabTable};
 
 /// Tokenizer trait for text ↔ token ID conversion.

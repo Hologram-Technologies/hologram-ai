@@ -82,6 +82,8 @@ pub enum NormStep {
     Lowercase,
     StripAccents,
     PrependSpace,
+    /// Trim + collapse runs of spaces (SentencePiece `remove_extra_whitespaces`).
+    RemoveExtraWhitespace,
     Replace {
         pattern: String,
         replacement: String,
