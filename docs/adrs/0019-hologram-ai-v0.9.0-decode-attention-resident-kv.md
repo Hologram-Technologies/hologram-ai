@@ -1,8 +1,12 @@
 # ADR-0019: Adopt v0.9.0 fused decode-attention + resident KV (κ-move)
 
-**Status:** Proposed — adoption gated on the v0.9.0 release (upstream PR #41,
-in-flight). This ADR is the plan to *adopt*, not to reimplement; the primitives
-are the substrate's.
+**Status:** Accepted — v0.9.0 published (`22b0ce1`, upstream PR #41 merged) and
+fully adopted: the fused resident-KV path IS production decode (mono + staged,
+PR #13 deployed / PR #14), and speculative decode is FOLDED onto it (the
+pending token commits as the first row of each verify batch, so the verify
+runner alone carries the resident truth across batches — witnessed in
+`tests/speculative_resident.rs`). This ADR was the plan to *adopt*, not to
+reimplement; the primitives are the substrate's.
 
 **Date:** 2026-07-12. **Branch:** `feat/wasm-threads` (decode work continues here).
 **Supersedes the "our-side capture" sketch in** `docs/notes/throughput-latency-analysis.md`

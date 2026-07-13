@@ -335,14 +335,37 @@ impl RopeSpec {
     /// `rotary_dim..head_dim` held at `cos=1, sin=0` (identity under
     /// `x·cos + rotate_half(x)·sin`).
     pub fn rows(&self, pos: usize, chunk: usize, head_dim: usize) -> (Vec<f32>, Vec<f32>) {
+        let seq_len = pos + chunk;
+        let freqs = self.inv_freqs(head_dim, seq_len);
+        let scale = self.attention_factor(seq_len);
+        let mut cos = vec![0.0f32; chunk * head_dim];
+        let mut sin = vec![0.0f32; chunk * head_dim];
+        self.rows_into(pos, chunk, head_dim, &freqs, scale, &mut cos, &mut sin);
+        (cos, sin)
+    }
+
+    /// The row-assembly law behind [`rows`](RopeSpec::rows), writing into
+    /// caller-owned buffers — the allocation-free entry for a per-step engine
+    /// that caches `inv_freqs`/`attention_factor` (both are position-free for
+    /// the length-independent laws). `cos`/`sin` must be `chunk · head_dim`;
+    /// `freqs` must be this spec's `inv_freqs` at the realized length.
+    #[allow(clippy::too_many_arguments)]
+    pub fn rows_into(
+        &self,
+        pos: usize,
+        chunk: usize,
+        head_dim: usize,
+        freqs: &[f64],
+        scale: f32,
+        cos: &mut [f32],
+        sin: &mut [f32],
+    ) {
         let d = head_dim;
         let r = self.rotary_dim(d);
         let half = r / 2;
-        let seq_len = pos + chunk;
-        let freqs = self.inv_freqs(d, seq_len);
-        let scale = self.attention_factor(seq_len);
-        let mut cos = vec![0.0f32; chunk * d];
-        let mut sin = vec![0.0f32; chunk * d];
+        assert_eq!(cos.len(), chunk * d, "cos buffer is chunk · head_dim");
+        assert_eq!(sin.len(), chunk * d, "sin buffer is chunk · head_dim");
+        assert_eq!(freqs.len(), half, "freqs are rotary_dim/2 pairs");
         for i in 0..chunk {
             for j in 0..half {
                 let angle = (pos + i) as f64 * freqs[j];
@@ -357,7 +380,6 @@ impl RopeSpec {
                 sin[i * d + j] = 0.0;
             }
         }
-        (cos, sin)
     }
 }
 
