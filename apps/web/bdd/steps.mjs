@@ -7,7 +7,7 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 import { referenceTranscript } from "./world.mjs";
-import { BAD_CONFIG_REPO, FIXTURE_REPO, MISSING_REPO, SEARCH_UNSUPPORTED_REPO, TOO_LARGE_REPO, UNSUPPORTED_FAMILY_REPO } from "./fixture-server.mjs";
+import { BAD_CONFIG_REPO, FIXTURE_REPO, MISSING_REPO, ROPE_EXOTIC_REPO, ROPE_SCALED_REPO, SEARCH_UNSUPPORTED_REPO, SECOND_FIXTURE_REPO, TOO_LARGE_REPO, UNSUPPORTED_FAMILY_REPO } from "./fixture-server.mjs";
 
 const WEB_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const ROOT = path.resolve(WEB_DIR, "../..");
@@ -71,6 +71,93 @@ Given("the app is open in the browser against the live HuggingFace Hub", async f
 // Matched keyword-agnostically (used as both When and background Given).
 When("the fixture model is downloaded", async function () {
   await this.downloadModel(FIXTURE_DISPLAY);
+});
+
+const SECOND_FIXTURE_DISPLAY = "handshake-tiny B (switch target)";
+const ROPE_SCALED_DISPLAY = "handshake-tiny (llama3-scaled rope)";
+
+/** The fixture catalogue entry under another identity (same chat contract). */
+async function installFixtureAlias(world, id, hfId, displayName) {
+  const reference = referenceTranscript();
+  await installCustomEntry(world, {
+    id,
+    hfId,
+    displayName,
+    description: "Fixture alias.",
+    modality: "text-chat",
+    size: "tiny",
+    approxArchiveMb: 1,
+    quantize: "none",
+    promptTemplate: reference.template,
+    stop: ["\nUser:"],
+    chatTurnSeparator: reference.separator,
+    maxTokens: reference.max_tokens,
+  });
+}
+
+When("the second fixture model is downloaded", async function () {
+  await installFixtureAlias(this, "handshake-tiny-b", SECOND_FIXTURE_REPO, SECOND_FIXTURE_DISPLAY);
+  await this.downloadModel(SECOND_FIXTURE_DISPLAY);
+});
+
+When("the llama3-scaled fixture model is downloaded", async function () {
+  await installFixtureAlias(this, "handshake-tiny-llama3rope", ROPE_SCALED_REPO, ROPE_SCALED_DISPLAY);
+  await this.downloadModel(ROPE_SCALED_DISPLAY);
+});
+
+/** Select the compiled archive whose OPFS dir is exactly `dirId` (option
+ * values are `models/<dir>/<artifact>`; a label match would collide on the
+ * shared `handshake-tiny` prefix). */
+async function selectArchiveByDir(world, dirId) {
+  const select = world.page.locator("select").first();
+  const values = await select.locator("option").evaluateAll((os) => os.map((o) => o.value));
+  const value = values.find((v) => v.startsWith(`models/${dirId}/`));
+  assert.ok(value, `no compiled archive for ${dirId}; options: ${JSON.stringify(values)}`);
+  await select.selectOption(value);
+}
+
+When("the user chats on the llama3-scaled fixture model", async function () {
+  await this.gotoChat();
+  await this.page.locator("input[type=number]").fill("0");
+  await selectArchiveByDir(this, "handshake-tiny-llama3rope");
+  await this.sendChat(HANDSHAKE[0]);
+});
+
+Then("the llama3-scaled turn streams a non-empty completion", async function () {
+  const completions = await this.page.evaluate(
+    () => globalThis.__hologram_completions ?? [],
+  );
+  if (completions.length === 0) {
+    const bubbles = await this.page.locator(".bubble.assistant").allInnerTexts();
+    assert.fail(`the scaled-rope generation did not complete; bubbles: ${JSON.stringify(bubbles)}`);
+  }
+  assert.ok(
+    cleanCompletion(completions.at(-1).text).length > 0,
+    `the scaled-rope turn must stream non-empty text: ${JSON.stringify(completions)}`,
+  );
+});
+
+When("the user switches the chat to the second fixture model", async function () {
+  await selectArchiveByDir(this, "handshake-tiny-b");
+});
+
+When("the user switches the chat back to the first fixture model", async function () {
+  await selectArchiveByDir(this, "handshake-tiny");
+});
+
+When("the user sends a chat message on the switched model", async function () {
+  await this.sendChat(HANDSHAKE[0]);
+});
+
+Then("no download requests were repeated for the first model", async function () {
+  const log = await this.fixtureRequests();
+  const firstModelShards = log.filter(
+    (p) => p.includes(`/${FIXTURE_REPO}/resolve/`) && p.includes("model.safetensors") && !p.includes("#"),
+  );
+  assert.ok(
+    firstModelShards.length <= 1,
+    `switching back must not re-download the first model's shard: ${JSON.stringify(firstModelShards)}`,
+  );
 });
 
 Then("every tensor in the fixture manifest is persisted under its κ in OPFS", async function () {
@@ -258,22 +345,20 @@ Then("the search results include the supported fixture model", async function ()
   await results.first().waitFor({ timeout: 10_000 });
 });
 
-Then("the search results do not include the unsupported-family model", async function () {
-  const body = await this.page.locator("body").innerText();
+Then("the unsupported-family model appears refused with the preflight reason", async function () {
+  // The refused repo is NOT hidden: it renders greyed with the preflight's
+  // own error verbatim (the GPT-2 fixture cannot supply the generic decoder
+  // schema, so the reason names the architecture).
+  const row = this.page.locator(".list-item", { hasText: SEARCH_UNSUPPORTED_REPO });
+  await row.first().waitFor({ timeout: 10_000 });
+  const text = await row.first().innerText();
   assert.ok(
-    !body.includes(SEARCH_UNSUPPORTED_REPO),
-    `the GPT2-family repo must be filtered out of discovery:\n${body}`,
+    text.includes("Not runnable:"),
+    `the refused repo must be annotated, not hidden:\n${text}`,
   );
-});
-
-Then("each search result names its architecture family", async function () {
-  const metas = await this.page
-    .locator(".list-item", { hasText: FIXTURE_REPO })
-    .locator(".meta")
-    .allInnerTexts();
   assert.ok(
-    metas.some((m) => m.includes("Family: LlamaForCausalLM")),
-    `the result must carry its family badge: ${JSON.stringify(metas)}`,
+    text.includes("GPT2LMHeadModel"),
+    `the annotation must carry the preflight reason verbatim (naming the architecture):\n${text}`,
   );
 });
 
@@ -308,6 +393,19 @@ Then("the journey is rejected at preflight naming the family", async function ()
   assert.ok(
     body.includes("GPT2LMHeadModel"),
     `the rejection must name the unsupported family:\n${body}`,
+  );
+});
+
+When("downloading a model whose config carries an unimplemented rope-scaling law", async function () {
+  await attemptRejectedDownload(this, "exotic-rope", ROPE_EXOTIC_REPO, "exotic rope model");
+  this.rejectedRepo = ROPE_EXOTIC_REPO;
+});
+
+Then("the journey is rejected at preflight naming the rope law", async function () {
+  const body = await this.page.locator("body").innerText();
+  assert.ok(
+    body.includes("exotic"),
+    `the rejection must name the unimplemented rope_scaling type:\n${body}`,
   );
 });
 

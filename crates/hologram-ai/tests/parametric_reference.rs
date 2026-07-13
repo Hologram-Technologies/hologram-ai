@@ -335,15 +335,16 @@ fn pipeline_logits_match_naive_reference() {
 /// same fixture weights the whole-window graph binds, decomposed attention
 /// over a `bucket`-row past window.
 fn build_decode_graph(bucket: u64) -> AiGraph {
+    build_decode_graph_for(&config_json(), bucket)
+}
+
+fn build_decode_graph_for(config: &serde_json::Value, bucket: u64) -> AiGraph {
     let tensors = fixture_tensors();
     let keys: Vec<String> = tensors.iter().map(|(n, _, _)| n.clone()).collect();
     let dtypes = vec![DType::F32; keys.len()];
     let mut graph =
         hologram_ai_safetensors::parametric::build_parametric_decode_graph_from_manifest(
-            &config_json(),
-            &keys,
-            &dtypes,
-            bucket,
+            config, &keys, &dtypes, bucket,
         )
         .expect("decode graph builds");
     let mut name_to_id: HashMap<String, u32> = HashMap::new();
@@ -406,6 +407,33 @@ fn assert_decode_matches_window(mut session: DecodeSession<HoloRunner>, label: &
 fn decode_plan_matches_whole_window_per_position() {
     // Bucket ≥ token count: every step runs in the initial archive.
     assert_decode_matches_window(decode_session(8), "fixed bucket");
+}
+
+#[test]
+fn unregistered_architecture_decodes_bit_identically_to_the_registered_family() {
+    // The derived-family path is not a weightless probe: an architecture the
+    // registry does NOT know, whose manifest matches the generic decoder
+    // schema, must build and DECODE end to end — and because the derivation
+    // states the same structure the registered family states, the same
+    // weights must produce bit-identical logits at every step.
+    let mut derived_config = config_json();
+    derived_config["architectures"] = serde_json::json!(["NovelForCausalLM"]);
+    let derived_runner =
+        HoloRunner::from_bytes(compile(build_decode_graph_for(&derived_config, 8)))
+            .expect("the derived architecture's decode archive loads");
+    let mut derived =
+        DecodeSession::new(derived_runner, RopeSpec::plain(THETA as f32), WINDOW as u64)
+            .expect("the derived decode session opens");
+    let mut registered = decode_session(8);
+    for (t, &tok) in TOKENS.iter().enumerate() {
+        let d = derived.step(tok as i64).expect("derived decode step");
+        let r = registered.step(tok as i64).expect("registered decode step");
+        assert_eq!(
+            d, r,
+            "derived vs registered logits diverge at position {t} — the derivation \
+             no longer states the registered structure"
+        );
+    }
 }
 
 /// Build the chunked-prefill seeder graph (row `chunked-prefill`) with

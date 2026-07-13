@@ -24,6 +24,11 @@ Feature: Model preflight — validate before any shard byte moves
     Then the journey is rejected at preflight naming the missing key
     And no shard bytes were transferred for the rejected model
 
+  Scenario: an unimplemented rope-scaling law is rejected naming it
+    When downloading a model whose config carries an unimplemented rope-scaling law
+    Then the journey is rejected at preflight naming the rope law
+    And no shard bytes were transferred for the rejected model
+
   Scenario: the fixture model passes preflight
     When the fixture model is downloaded
     Then the preflight validated the model before the first shard byte
