@@ -1499,7 +1499,9 @@ pub struct DecodeChatSession {
     growable: std::rc::Rc<std::cell::RefCell<hologram_ai::staged::GrowableStagedSession>>,
     session: Option<hologram_ai::decode::DecodeSession<hologram_ai::staged::StagedRunner<'static>>>,
     tokenizer: NativeTokenizer,
-    rope_theta: f32,
+    /// The model's complete rotary law, parsed from its own config.json
+    /// (`rope_theta`, `rope_scaling`, `partial_rotary_factor`).
+    rope: hologram_ai::RopeSpec,
     context_length: u64,
     /// The model's own vocabulary size (from config.json) — the pairing guard:
     /// a paired draft must cover the target's vocabulary, because the draft
@@ -1514,7 +1516,7 @@ pub struct DecodeChatSession {
         Option<std::rc::Rc<std::cell::RefCell<hologram_ai::staged::GrowableStagedSession>>>,
     draft_session:
         Option<hologram_ai::decode::DecodeSession<hologram_ai::staged::StagedRunner<'static>>>,
-    draft_rope_theta: f32,
+    draft_rope: Option<hologram_ai::RopeSpec>,
     draft_context_length: u64,
     /// The carried K/V of this decode PAIR, charged against the host ceiling so
     /// residency admission shrinks as the bucket grows (row `decode-plan`).
@@ -1568,14 +1570,12 @@ impl DecodeChatSession {
             on_progress,
         )?;
         let context_length = hologram_ai::SessionProvider::max_window(&growable) as u64;
-        // Rope tables are runtime data the ENGINE synthesizes; the base comes
-        // from the model's own config (absent = the RoPE-paper default the
-        // parametric recipe also assumes for a config without the key).
+        // Rope tables are runtime data the ENGINE synthesizes; the law comes
+        // from the model's own config — the same parse the parametric recipe
+        // ran at build (`rope_theta`, `rope_scaling`, `partial_rotary_factor`).
         let config: serde_json::Value = serde_json::from_str(config_json).map_err(err)?;
-        let rope_theta = config
-            .get("rope_theta")
-            .and_then(|v| v.as_f64())
-            .unwrap_or(10000.0) as f32;
+        let rope = hologram_ai_safetensors::parametric::rope_spec_from_config(&config)
+            .map_err(|e| err(format!("rotary law: {e:#}")))?;
         // The vocabulary the pairing guard compares (a draft must cover it). A
         // config without `vocab_size` cannot be pairing-checked, so a later
         // `attach_draft` refuses rather than risk an out-of-range draft Gather.
@@ -1587,12 +1587,12 @@ impl DecodeChatSession {
             growable: std::rc::Rc::new(std::cell::RefCell::new(growable)),
             session: None,
             tokenizer,
-            rope_theta,
+            rope,
             context_length,
             vocab_size,
             draft_growable: None,
             draft_session: None,
-            draft_rope_theta: 0.0,
+            draft_rope: None,
             draft_context_length: 0,
             kv_charge: std::rc::Rc::new(std::cell::Cell::new((0, 0))),
         })
@@ -1640,7 +1640,7 @@ impl DecodeChatSession {
             target.share_residency_with(&mut paired);
         }
         self.draft_growable = Some(std::rc::Rc::clone(&draft.growable));
-        self.draft_rope_theta = draft.rope_theta;
+        self.draft_rope = Some(draft.rope.clone());
         self.draft_context_length = draft.context_length;
         Ok(())
     }
@@ -1688,7 +1688,7 @@ impl DecodeChatSession {
                 .map_err(|e| err(format!("decode pipeline: {e:#}")))?;
             let session = hologram_ai::decode::DecodeSession::new(
                 runner,
-                self.rope_theta,
+                self.rope.clone(),
                 self.context_length,
             )
             .map_err(|e| err(format!("decode session: {e:#}")))?;
@@ -1732,7 +1732,7 @@ impl DecodeChatSession {
         if self.draft_session.is_none() {
             if let Some(dg) = self.draft_growable.clone() {
                 let dctx = self.draft_context_length;
-                let dtheta = self.draft_rope_theta;
+                let drope = self.draft_rope.clone();
                 let dprompt = self
                     .tokenizer
                     .encode(&templated)
@@ -1750,7 +1750,9 @@ impl DecodeChatSession {
                     hologram_ai::decode::DecodeSession<hologram_ai::staged::StagedRunner<'static>>,
                 > {
                     let drunner = dg.borrow_mut().decode_runner_for(dwant)?;
-                    let dsession = hologram_ai::decode::DecodeSession::new(drunner, dtheta, dctx)?;
+                    let drope = drope
+                        .ok_or_else(|| anyhow::anyhow!("the paired draft carries no rotary law"))?;
+                    let dsession = hologram_ai::decode::DecodeSession::new(drunner, drope, dctx)?;
 
                     // The pair shares ONE address space: charge the DRAFT's own
                     // carried K/V alongside the target's, at build and at regrow.

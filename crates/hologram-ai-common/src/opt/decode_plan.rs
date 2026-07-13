@@ -156,17 +156,23 @@ impl<'g> Emitter<'g> {
     }
 
     /// `x · cos + rotate_half(x) · sin` on head-major flat rows
-    /// (`[n, head_dim]` against exact-shape tables).
+    /// (`[n, head_dim]` against exact-shape tables). The rotate-half pairing
+    /// is `j ± rotary_dim/2` within the rotated block `[..rotary_dim]`; a
+    /// partial-rotary head (`rotary_dim < head_dim`) carries its pass-through
+    /// tail into the rotated operand unchanged, where the engine's table law
+    /// (`cos = 1, sin = 0` on `[rotary_dim..]`) makes it exact identity.
+    #[allow(clippy::too_many_arguments)]
     fn rope(
         &mut self,
         x: TensorId,
         n: u64,
         head_dim: u64,
+        rotary_dim: u64,
         cos: TensorId,
         sin: TensorId,
         name: &str,
     ) -> TensorId {
-        let half = head_dim / 2;
+        let half = rotary_dim / 2;
         let x_lo = self.tensor(&format!("{name}_lo"), DType::F32, &[n, half]);
         self.node(
             AiOp::Slice {
@@ -183,7 +189,7 @@ impl<'g> Emitter<'g> {
             AiOp::Slice {
                 axes: vec![1],
                 starts: vec![half as i64],
-                ends: vec![head_dim as i64],
+                ends: vec![rotary_dim as i64],
                 steps: vec![1],
             },
             vec![x],
@@ -192,7 +198,31 @@ impl<'g> Emitter<'g> {
         let neg_hi = self.tensor(&format!("{name}_neg_hi"), DType::F32, &[n, half]);
         self.node(AiOp::Neg, vec![x_hi], vec![neg_hi]);
         let rot = self.tensor(&format!("{name}_rot"), DType::F32, &[n, head_dim]);
-        self.node(AiOp::Concat { axis: 1 }, vec![neg_hi, x_lo], vec![rot]);
+        if rotary_dim == head_dim {
+            self.node(AiOp::Concat { axis: 1 }, vec![neg_hi, x_lo], vec![rot]);
+        } else {
+            // Pass-through tail rides along; its sin table is exactly 0.
+            let x_tail = self.tensor(
+                &format!("{name}_tail"),
+                DType::F32,
+                &[n, head_dim - rotary_dim],
+            );
+            self.node(
+                AiOp::Slice {
+                    axes: vec![1],
+                    starts: vec![rotary_dim as i64],
+                    ends: vec![head_dim as i64],
+                    steps: vec![1],
+                },
+                vec![x],
+                vec![x_tail],
+            );
+            self.node(
+                AiOp::Concat { axis: 1 },
+                vec![neg_hi, x_lo, x_tail],
+                vec![rot],
+            );
+        }
         let x_cos = self.tensor(&format!("{name}_cos"), DType::F32, &[n, head_dim]);
         self.node(AiOp::Mul, vec![x, cos], vec![x_cos]);
         let rot_sin = self.tensor(&format!("{name}_sin"), DType::F32, &[n, head_dim]);
@@ -641,13 +671,16 @@ pub fn rewrite_decode_attention(
             em.emit_head_major(v_tid, kv, chunk, dh, heads_first, &format!("dv_{layer}"));
 
         // RoPE as data at the absolute positions (tables pre-expanded to the
-        // head-major layout by the engine).
-        let (q_r, k_r) = if rope {
+        // head-major layout by the engine, under the spec's frequency law —
+        // the plan only needs the structural rotate-half pairing width).
+        let (q_r, k_r) = if let Some(spec) = &rope {
+            let rot = spec.rotary_dim(dh as usize) as u64;
             (
                 em.rope(
                     q_flat,
                     h * chunk,
                     dh,
+                    rot,
                     cos_q,
                     sin_q,
                     &format!("dq_rope_{layer}"),
@@ -656,6 +689,7 @@ pub fn rewrite_decode_attention(
                     k_flat,
                     kv * chunk,
                     dh,
+                    rot,
                     cos_k,
                     sin_k,
                     &format!("dk_rope_{layer}"),

@@ -33,6 +33,7 @@ pub use compiler::{
 };
 pub use decode::{DecodeGeometry, DecodeSession};
 pub use engine::{FixedSession, GrowableSession, LmSession, SessionProvider};
+pub use hologram_ai_common::rope::{RopeScaling, RopeSpec};
 pub use hologram_ai_common::{AiGraph, AiNode, AiOp, DType, NodeId, Shape, TensorId, TensorInfo};
 pub use hologram_ai_core::{
     reduce, AiAppManifest, AiEvent, AiView, AppEntryKind, CompletedInference, FailedInference,

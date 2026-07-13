@@ -184,11 +184,10 @@ pub enum AiOp {
         /// If true, apply RmsNorm to Q and K before computing attention scores.
         /// Set by `PreAttentionFusion` pass; QK-norm weights are extra inputs.
         qk_norm: bool,
-        /// If true, apply RoPE to Q and K before computing attention scores.
+        /// `Some` = apply RoPE to Q and K before the scores, under the spec's
+        /// complete frequency law (base, `rope_scaling`, partial rotary).
         /// Set by `PreAttentionFusion` pass.
-        rope: bool,
-        /// RoPE base frequency (default 10000.0). Only used when `rope=true`.
-        rope_base: f32,
+        rope: Option<crate::rope::RopeSpec>,
     },
     /// Hint from importer; lowering decides if flash attention is available.
     FlashAttentionHint,

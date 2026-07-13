@@ -55,7 +55,7 @@ use std::time::Instant;
 use hologram_ai::materialize::DirKappaStore;
 use hologram_ai::quantized::crystallize_quantized;
 use hologram_ai::staged::{quantizable_weights, GrowableStagedSession};
-use hologram_ai::DecodeSession;
+use hologram_ai::{DecodeSession, RopeSpec};
 use hologram_ai_common::lower::QuantMap;
 use hologram_ai_common::DType;
 
@@ -382,8 +382,12 @@ fn measure_scale(scale: FamilyScale) -> ScaleResult {
     let step = session
         .decode_runner_for(want)
         .expect("the decode step runner builds");
-    let mut decode = DecodeSession::new(step, scale.dims.rope_theta as f32, ctx as u64)
-        .expect("the decode session opens");
+    let mut decode = DecodeSession::new(
+        step,
+        RopeSpec::plain(scale.dims.rope_theta as f32),
+        ctx as u64,
+    )
+    .expect("the decode session opens");
     if chunk >= 2 {
         let seeder = session
             .chunk_runner_for(want, chunk)

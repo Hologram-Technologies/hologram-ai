@@ -540,8 +540,7 @@ impl<'a> Ctx<'a> {
                 scale_bits,
                 heads_first,
                 rope,
-                rope_base,
-            } => self.desugar_attention(node, causal, scale_bits, heads_first, rope, rope_base),
+            } => self.desugar_attention(node, causal, scale_bits, heads_first, rope),
             DesugarKind::Concat { axis } => self.desugar_concat(node, axis),
             DesugarKind::Constant => self.desugar_constant(node),
             DesugarKind::Split { axis, sizes } => self.desugar_split(node, axis, &sizes),
@@ -675,7 +674,10 @@ impl<'a> Ctx<'a> {
         }
     }
 
-    /// Emit a canonical contiguous `Slice` along one axis.
+    /// Emit a canonical contiguous `Slice` along one axis. Axis 0 uses the
+    /// three-operand `(data, starts, ends)` form — the only one the substrate
+    /// realizes as a zero-movement view (`slice_view_bytes` rejects the
+    /// axes/steps-carrying form outright).
     fn slice_axis(
         &mut self,
         data: InputSource,
@@ -687,10 +689,13 @@ impl<'a> Ctx<'a> {
     ) -> InputSource {
         let starts = self.const_i64(&[start]);
         let ends = self.const_i64(&[end]);
-        let axes = self.const_i64(&[axis as i64]);
-        let steps = self.const_i64(&[1]);
         let mut out = in_dims.to_vec();
         out[axis] = (end - start).max(0) as u64;
+        if axis == 0 {
+            return self.op(OpKind::Slice, &[data, starts, ends], dtype, &out);
+        }
+        let axes = self.const_i64(&[axis as i64]);
+        let steps = self.const_i64(&[1]);
         self.op(
             OpKind::Slice,
             &[data, starts, ends, axes, steps],
@@ -975,12 +980,11 @@ impl<'a> Ctx<'a> {
         causal: bool,
         scale_bits: u32,
         heads_first: bool,
-        rope: bool,
-        rope_base: f32,
+        rope: Option<crate::rope::RopeSpec>,
     ) -> Result<()> {
         // Heads-first without rope is exactly the canonical op (the proven
         // ONNX-fused SDPA path): one node, all operands flowing through.
-        if heads_first && !rope {
+        if heads_first && rope.is_none() {
             let nid = self.emit_simple(node, OpKind::Attention)?;
             self.graph
                 .set_attention_attrs(nid, AttentionAttrs { causal, scale_bits });
@@ -1012,10 +1016,10 @@ impl<'a> Ctx<'a> {
             }
         }
 
-        if rope {
+        if let Some(spec) = &rope {
             for slot in qkv.iter_mut().take(2) {
                 let dims = slot.1.clone();
-                slot.0 = self.rope_rotate(slot.0, dtype, &dims, rope_base)?;
+                slot.0 = self.rope_rotate(slot.0, dtype, &dims, spec)?;
             }
         }
 
@@ -1040,44 +1044,79 @@ impl<'a> Ctx<'a> {
 
     /// Apply rotary embeddings to a `[batch, heads, seq, head_dim]` tensor via
     /// the canonical `RotaryEmbedding` op (rotate-half, non-interleaved: the
-    /// pair partner of element `j` is `j ± head_dim/2`, matching the kernel).
-    /// The kernel reads cos/sin at each element's flat index with `head_dim` =
-    /// the operand's last dim, so the compile-time `[1, 1, seq, head_dim]`
-    /// tables — `cos[s][j] = cos(s · base^(-2(j mod d/2)/d))`, the standard
-    /// `inv_freq = base^(-2i/d)` — are Expand-broadcast over batch and heads.
+    /// pair partner of element `j` is `j ± last_dim/2`, matching the kernel).
+    /// The kernel reads cos/sin at each element's flat index with the pair
+    /// width = the operand's last dim, so the compile-time `[1, 1, seq, r]`
+    /// tables carry the spec's complete frequency law (`rope_scaling`,
+    /// attention temperature) and are Expand-broadcast over batch and heads.
+    /// A partial-rotary spec (`r < head_dim`) rotates the sliced block
+    /// `[..r]` — where the kernel's `r/2` pairing is exactly the reference
+    /// pairing — and passes `[r..]` through untouched.
     fn rope_rotate(
         &mut self,
         src: InputSource,
         dtype: DTypeId,
         dims: &[u64],
-        base: f32,
+        spec: &crate::rope::RopeSpec,
     ) -> Result<InputSource> {
         anyhow::ensure!(
             dtype == DTypeId(DTYPE_F32),
             "RoPE lowering builds f32 cos/sin tables; operand dtype {dtype:?} is unsupported"
         );
         let (seq, d) = (dims[2], dims[3]);
+        spec.validate(d as usize).map_err(|e| anyhow::anyhow!(e))?;
+        // A compile-time table's forward length is the graph's PADDED seq dim,
+        // so a length-dependent law would be baked at the wrong realized
+        // length — refuse loud; the decode plan realizes these laws exactly.
         anyhow::ensure!(
-            d > 0 && d % 2 == 0 && base > 0.0,
-            "RoPE needs an even head_dim and a positive base (head_dim {d}, base {base})"
+            !spec.scaling.length_dependent(),
+            "the whole-window plan bakes rope tables at its padded window ({seq}), which \
+             misstates a length-dependent frequency law ({:?}) — decode realizes it exactly",
+            spec.scaling
         );
-        let half = d / 2;
-        let mut cos = Vec::with_capacity((seq * d) as usize);
-        let mut sin = Vec::with_capacity((seq * d) as usize);
+        let r = spec.rotary_dim(d as usize) as u64;
+        let freqs = spec.inv_freqs(d as usize, seq as usize);
+        let scale = spec.attention_factor(seq as usize);
+        let half = (r / 2) as usize;
+        let mut cos = Vec::with_capacity((seq * r) as usize);
+        let mut sin = Vec::with_capacity((seq * r) as usize);
         for s in 0..seq {
-            for j in 0..d {
-                let inv_freq = (base as f64).powf(-2.0 * (j % half) as f64 / d as f64);
-                let angle = s as f64 * inv_freq;
-                cos.push(angle.cos() as f32);
-                sin.push(angle.sin() as f32);
+            for j in 0..r as usize {
+                let angle = s as f64 * freqs[j % half];
+                cos.push(angle.cos() as f32 * scale);
+                sin.push(angle.sin() as f32 * scale);
             }
         }
-        let table_dims = [1, 1, seq, d];
+        let rot_dims = [dims[0], dims[1], seq, r];
+        let table_dims = [1, 1, seq, r];
         let cos_c = self.const_f32(&cos, &table_dims);
         let sin_c = self.const_f32(&sin, &table_dims);
-        let cos_b = self.broadcast_to(cos_c, dtype, &table_dims, dims);
-        let sin_b = self.broadcast_to(sin_c, dtype, &table_dims, dims);
-        Ok(self.op(OpKind::RotaryEmbedding, &[src, cos_b, sin_b], dtype, dims))
+        let cos_b = self.broadcast_to(cos_c, dtype, &table_dims, &rot_dims);
+        let sin_b = self.broadcast_to(sin_c, dtype, &table_dims, &rot_dims);
+        if r == d {
+            return Ok(self.op(OpKind::RotaryEmbedding, &[src, cos_b, sin_b], dtype, dims));
+        }
+        // Partial rotary: rotate `[..r]`, pass `[r..]` through, rejoin on the
+        // last axis. The substrate realizes Slice/Concat on axis 0 only, so
+        // the head axis is transposed to the front for the split and the
+        // join (the perm is its own inverse). Non-decode path only; the
+        // decode plan realizes the same split in its rope tables.
+        let perm = [3u32, 1, 2, 0];
+        let front_dims = [d, dims[1], seq, dims[0]];
+        let front = self.transpose(src, dtype, dims, &perm);
+        let rot_front = self.slice_axis(front, dtype, &front_dims, 0, 0, r as i64);
+        let pass_front = self.slice_axis(front, dtype, &front_dims, 0, r as i64, d as i64);
+        let rot_front_dims = [r, dims[1], seq, dims[0]];
+        let x_rot = self.transpose(rot_front, dtype, &rot_front_dims, &perm);
+        let rotated = self.op(
+            OpKind::RotaryEmbedding,
+            &[x_rot, cos_b, sin_b],
+            dtype,
+            &rot_dims,
+        );
+        let rot_t = self.transpose(rotated, dtype, &rot_dims, &perm);
+        let joined_t = self.op(OpKind::Concat, &[rot_t, pass_front], dtype, &front_dims);
+        Ok(self.transpose(joined_t, dtype, &front_dims, &perm))
     }
 
     /// Emit `Transpose(src)` by `perm` (synthesizing the i64 perm operand the

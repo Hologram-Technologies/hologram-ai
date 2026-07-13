@@ -1025,8 +1025,7 @@ pub fn build_ai_graph(
                     causal: true,
                     heads_first: true,
                     qk_norm: false,
-                    rope: false,
-                    rope_base: 0.0,
+                    rope: None,
                 },
                 vec![q_t_tid, k_t_tid, v_t_tid],
                 vec![out_4d_tid]

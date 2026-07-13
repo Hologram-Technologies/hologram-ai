@@ -38,7 +38,7 @@ fn unique_store_dir(tag: &str) -> std::path::PathBuf {
 use hologram_ai::materialize::DirKappaStore;
 use hologram_ai::quantized::{crystallize_quantized, crystallize_quantized_range};
 use hologram_ai::staged::{head_quant_chunks, quantizable_weights, GrowableStagedSession};
-use hologram_ai::DecodeSession;
+use hologram_ai::{DecodeSession, RopeSpec};
 use hologram_ai_common::lower::{quant_key, QuantMap};
 use hologram_ai_common::DType;
 
@@ -186,8 +186,12 @@ fn drive(scale: &FamilyScale, quantize_head: bool) -> Outcome {
         .decode_runner_for(want)
         .unwrap_or_else(|e| panic!("{arch}: decode step runner: {e:#}"));
     let stage_count = step.stage_count();
-    let mut decode = DecodeSession::new(step, scale.dims.rope_theta as f32, ctx as u64)
-        .unwrap_or_else(|e| panic!("{arch}: decode session: {e:#}"));
+    let mut decode = DecodeSession::new(
+        step,
+        RopeSpec::plain(scale.dims.rope_theta as f32),
+        ctx as u64,
+    )
+    .unwrap_or_else(|e| panic!("{arch}: decode session: {e:#}"));
 
     // Feed WITHOUT a seeder: prompt steps one at a time on the step runner, so
     // token 1 materializes every stage and tokens 2.. are resident hits.

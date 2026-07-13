@@ -25,7 +25,7 @@ use hologram_ai::engine::LmSession;
 use hologram_ai::materialize::DirKappaStore;
 use hologram_ai::quantized::{crystallize_quantized, crystallize_quantized_range};
 use hologram_ai::staged::{head_quant_chunks, quantizable_weights, GrowableStagedSession};
-use hologram_ai::DecodeSession;
+use hologram_ai::{DecodeSession, RopeSpec};
 use hologram_ai_common::lower::{quant_key, QuantMap};
 use hologram_ai_common::DType;
 
@@ -132,7 +132,12 @@ fn decode_throughput_latency_and_overhead_attribution() {
     let stage_count = step.stage_count();
     let compile_ms = compile_t.elapsed().as_secs_f64() * 1e3;
 
-    let mut decode = DecodeSession::new(step, scale.dims.rope_theta as f32, ctx as u64).unwrap();
+    let mut decode = DecodeSession::new(
+        step,
+        RopeSpec::plain(scale.dims.rope_theta as f32),
+        ctx as u64,
+    )
+    .unwrap();
     let prompt: Vec<i64> = (0..PROMPT_LEN as i64)
         .map(|i| (i * 7 + 1) % scale.dims.vocab_size as i64)
         .collect();

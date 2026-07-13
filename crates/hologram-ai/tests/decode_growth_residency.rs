@@ -29,7 +29,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use hologram_ai::materialize::DirKappaStore;
 use hologram_ai::staged::GrowableStagedSession;
-use hologram_ai::DecodeSession;
+use hologram_ai::{DecodeSession, RopeSpec};
 use hologram_ai_common::DType;
 
 fn unique_store_dir(tag: &str) -> std::path::PathBuf {
@@ -92,13 +92,17 @@ fn growth_frees_the_outgoing_runner_before_rebuilding() {
         .expect("initial step runner (bucket = MIN_WINDOW)");
     let g = Rc::clone(&session);
     let rec = Rc::clone(&at_rebuild);
-    let mut decode = DecodeSession::new(step, scale.dims.rope_theta as f32, ctx as u64)
-        .expect("decode session")
-        .with_rebuild(Box::new(move |bucket| {
-            // Read BEFORE building the wider runner — sequential borrows.
-            rec.borrow_mut().push(g.borrow().resident_footprint());
-            g.borrow_mut().decode_runner_for(bucket as usize)
-        }));
+    let mut decode = DecodeSession::new(
+        step,
+        RopeSpec::plain(scale.dims.rope_theta as f32),
+        ctx as u64,
+    )
+    .expect("decode session")
+    .with_rebuild(Box::new(move |bucket| {
+        // Read BEFORE building the wider runner — sequential borrows.
+        rec.borrow_mut().push(g.borrow().resident_footprint());
+        g.borrow_mut().decode_runner_for(bucket as usize)
+    }));
 
     let bucket0 = decode.geometry().bucket;
     // Prefill a couple of tokens so the step runner materializes (footprint > 0),
@@ -150,12 +154,16 @@ fn every_growth_frees_the_step_runner_and_the_seeder() {
         .expect("initial step runner");
     let g = Rc::clone(&session);
     let rec = Rc::clone(&at_rebuild);
-    let mut decode = DecodeSession::new(step, scale.dims.rope_theta as f32, ctx as u64)
-        .expect("decode session")
-        .with_rebuild(Box::new(move |bucket| {
-            rec.borrow_mut().push(g.borrow().resident_footprint());
-            g.borrow_mut().decode_runner_for(bucket as usize)
-        }));
+    let mut decode = DecodeSession::new(
+        step,
+        RopeSpec::plain(scale.dims.rope_theta as f32),
+        ctx as u64,
+    )
+    .expect("decode session")
+    .with_rebuild(Box::new(move |bucket| {
+        rec.borrow_mut().push(g.borrow().resident_footprint());
+        g.borrow_mut().decode_runner_for(bucket as usize)
+    }));
 
     // Install a prefill SEEDER (chunk > 1) so BOTH a step runner and a seeder are
     // resident before the first growth — growth must free both.
@@ -234,12 +242,16 @@ fn a_declared_generation_budget_never_regrows_mid_turn() {
         .expect("budget-sized step runner");
     let g = Rc::clone(&session);
     let flag = Rc::clone(&grew);
-    let mut decode = DecodeSession::new(step, scale.dims.rope_theta as f32, ctx as u64)
-        .expect("decode session")
-        .with_rebuild(Box::new(move |bucket| {
-            *flag.borrow_mut() = true;
-            g.borrow_mut().decode_runner_for(bucket as usize)
-        }));
+    let mut decode = DecodeSession::new(
+        step,
+        RopeSpec::plain(scale.dims.rope_theta as f32),
+        ctx as u64,
+    )
+    .expect("decode session")
+    .with_rebuild(Box::new(move |bucket| {
+        *flag.borrow_mut() = true;
+        g.borrow_mut().decode_runner_for(bucket as usize)
+    }));
 
     decode.feed(&prompt).expect("prefill");
     for t in 0..GEN_BUDGET as i64 {

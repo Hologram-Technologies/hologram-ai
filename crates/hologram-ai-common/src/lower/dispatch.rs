@@ -72,10 +72,10 @@ pub enum DesugarKind {
         /// `true` ⇒ Q/K/V already carry the kernel layout `[B, H, S, D]`;
         /// `false` ⇒ seq-first `[B, S, H, D]`, transposed around the op.
         heads_first: bool,
-        /// Apply rotary embeddings (rotate-half, non-interleaved) to Q/K
-        /// before the canonical op, tables built from `rope_base`.
-        rope: bool,
-        rope_base: f32,
+        /// `Some` ⇒ apply rotary embeddings (rotate-half, non-interleaved) to
+        /// Q/K before the canonical op, tables built from the spec's full
+        /// frequency law (base, `rope_scaling`, partial rotary).
+        rope: Option<crate::rope::RopeSpec>,
     },
     /// `Concat(axis)` → flat (axis-0) `Concat` chain. hologram's Concat is a flat
     /// byte append (axis-0 only), so a non-axis-0 concat is realized by
@@ -321,22 +321,19 @@ pub fn dispatch(op: &AiOp) -> OpPlan {
             causal: *causal,
             scale_bits: scale.map(|s| s.to_bits()).unwrap_or(0),
             heads_first: true,
-            rope: false,
-            rope_base: 0.0,
+            rope: None,
         }),
         A::GroupedQueryAttention {
             scale,
             causal,
             heads_first,
             rope,
-            rope_base,
             ..
         } => P::Desugar(DesugarKind::Attention {
             causal: *causal,
             scale_bits: scale.map(|s| s.to_bits()).unwrap_or(0),
             heads_first: *heads_first,
-            rope: *rope,
-            rope_base: *rope_base,
+            rope: rope.clone(),
         }),
         A::FlashAttentionHint => P::Operandized(OpKind::Attention),
         // v0.9.0 split-KV decode attention (ADR-0019): the six operands

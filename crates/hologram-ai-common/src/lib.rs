@@ -9,6 +9,7 @@ pub mod ir;
 pub mod lower;
 pub mod mem;
 pub mod opt;
+pub mod rope;
 pub mod rules;
 pub mod sections;
 
@@ -28,4 +29,5 @@ pub use opt::{
     AggressiveShapePropagation, ConstantDeduplication, OptPipeline, Pass, ShapeHealing,
     ShapeOraclePass,
 };
+pub use rope::{RopeScaling, RopeSpec};
 pub use rules::{pattern_rules::slice_to_gather_rules, RulePass};

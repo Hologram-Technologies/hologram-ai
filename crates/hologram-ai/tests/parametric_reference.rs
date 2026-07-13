@@ -11,7 +11,7 @@
 
 use hologram_ai::materialize::{kappa_of, materialize_archive, DirKappaStore};
 use hologram_ai::runner::HoloRunner;
-use hologram_ai::{DecodeSession, ModelCompiler, ModelSource};
+use hologram_ai::{DecodeSession, ModelCompiler, ModelSource, RopeSpec};
 use hologram_ai_common::{shape_from_concrete, AiGraph, AiParam, DType, TensorInfo};
 use std::collections::HashMap;
 
@@ -363,7 +363,7 @@ fn build_decode_graph(bucket: u64) -> AiGraph {
 
 fn decode_session(bucket: u64) -> DecodeSession<HoloRunner> {
     let runner = HoloRunner::from_bytes(compile(build_decode_graph(bucket))).expect("decode loads");
-    DecodeSession::new(runner, THETA as f32, WINDOW as u64)
+    DecodeSession::new(runner, RopeSpec::plain(THETA as f32), WINDOW as u64)
         .expect("decode session opens")
         .with_rebuild(Box::new(|b| {
             HoloRunner::from_bytes(compile(build_decode_graph(b)))
