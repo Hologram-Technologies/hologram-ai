@@ -723,7 +723,12 @@ pub fn generate_stream_speculative<S: LmSession>(
     let budget = cfg
         .max_tokens
         .map_or(remaining_window, |n| n.min(remaining_window));
-    let draft_cap = max_draft.max(1);
+    // The folded batch is 1 (pending) + k (draft) rows through the verify
+    // plan, whose chunk is the BATCH capacity — the draft cap reserves the
+    // pending slot. A verify plan of chunk 1 cannot hold a draft at all
+    // under the fold, so speculation never engages (plain decode, never
+    // worse).
+    let draft_cap = max_draft.saturating_sub(1);
 
     let mut generated: Vec<u32> = Vec::new();
     // Incremental detokenization — same O(N)-total delta streaming as
@@ -763,7 +768,7 @@ pub fn generate_stream_speculative<S: LmSession>(
     // truth is handed back (`end_speculation`, one sync) only at regime
     // boundaries: bucket retire, an empty draft falling back to plain steps,
     // and turn end.
-    let mut speculate = true;
+    let mut speculate = draft_cap > 0;
     let mut pending: Option<i64> = None;
     while generated.len() < budget {
         let cap = draft_cap.min(budget - generated.len());
