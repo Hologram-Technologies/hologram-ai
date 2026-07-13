@@ -935,10 +935,20 @@ impl<S: LmSession> DecodeSession<S> {
     /// rows for positions `0..len` stay live, rows past `len` become
     /// unrealized (masked out until overwritten). Cross-turn retention:
     /// a new sequence sharing a realized prefix pays only its suffix.
+    /// No truth sync is needed here: a resident carry holds the FULL bucket,
+    /// and every row past the rewound length is erased by the decode mask
+    /// until overwritten — the carried labels remain exactly as valid as the
+    /// host bytes. A `Poisoned` carry heals at `len == 0`: with no realized
+    /// positions, every row is masked-unreachable, so ANY bucket content is
+    /// the correct empty state (a rewind INTO lost content stays poisoned and
+    /// keeps failing loud).
     pub fn rewind_to(&mut self, len: usize) {
         let len = len.min(self.state.cur_len);
         self.state.cur_len = len;
         self.state.tokens.truncate(len);
+        if len == 0 && self.truth == KvTruth::Poisoned {
+            self.truth = KvTruth::Host;
+        }
     }
 
     /// The realized token at each carried position, in order.

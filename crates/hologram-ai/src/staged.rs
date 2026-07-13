@@ -602,6 +602,14 @@ pub struct StagedRunner<'a> {
     /// instrument of the `performance-contract` row.
     last_dispatched: u64,
     last_skipped: u64,
+    /// Resident-KV truth shadow (ADR-0019 increment 3b, staged): when a stage
+    /// session holding a K/V carry is evicted (budget pressure, an explicit
+    /// `evict_resident`), its carried caches are materialized HERE first —
+    /// keyed by the consuming input port (`past_k_l`/`past_v_l`) — so the
+    /// truth survives the drop and re-ingests (one hash) when the stage next
+    /// walks. Empty in the byte regime and whenever every carrying stage is
+    /// resident.
+    kv_shadow: HashMap<String, Vec<u8>>,
     /// Environment headroom probe consulted at admission (see
     /// [`AdmissionProbe`]). `None` = admission by byte budget alone.
     admission_probe: Option<AdmissionProbe<'a>>,
@@ -762,6 +770,7 @@ impl<'a> StagedRunner<'a> {
             last_dispatched: 0,
             last_skipped: 0,
             materialization_count: 0,
+            kv_shadow: HashMap::new(),
             admission_probe: None,
             expected_stage_bytes: Vec::new(),
             verified: std::rc::Rc::new(std::cell::RefCell::new(std::collections::HashSet::new())),
@@ -843,13 +852,8 @@ impl<'a> StagedRunner<'a> {
     pub fn set_residency_budget(&mut self, bytes: u64) {
         self.residency_budget = bytes;
         if bytes == 0 {
-            for slot in self.resident.iter_mut() {
-                *slot = None;
-            }
-            self.resident_bytes = 0;
-            // Return this runner's whole share to the shared ledger.
-            self.residency.borrow_mut().footprint -= self.resident_footprint;
-            self.resident_footprint = 0;
+            // Same carry-banking discipline as [`Self::evict_resident`].
+            self.evict_resident();
         }
     }
 
@@ -872,6 +876,18 @@ impl<'a> StagedRunner<'a> {
     /// pressure). A no-op when nothing is resident.
     pub fn evict_resident(&mut self) {
         for slot in self.resident.iter_mut() {
+            // A carrying stage banks its K/V truth before the labels die with
+            // the session. A resolve failure here is a substrate invariant
+            // violation (a just-retained label must resolve) — fail loud
+            // rather than silently losing the carried context.
+            if let Some((runner, _, _)) = slot.as_mut() {
+                if runner.has_kv_carry() {
+                    let banked = runner
+                        .take_kv_carry()
+                        .expect("materializing an evicted stage's K/V carry");
+                    self.kv_shadow.extend(banked);
+                }
+            }
             *slot = None;
         }
         self.resident_bytes = 0;
@@ -963,8 +979,38 @@ impl<'a> StagedRunner<'a> {
     /// One windowed forward pass: stages in order, previous outputs feeding
     /// the next stage's inputs, one materialized session resident at a time.
     fn execute_window(&mut self, inputs: &[&[u8]]) -> Result<Vec<OutputBuffer>> {
+        let outputs = self.execute_window_kv(inputs, false, false)?;
+        outputs
+            .into_iter()
+            .map(|o| o.context("byte-mode window produced an unmaterialized output"))
+            .collect()
+    }
+
+    /// [`Self::execute_window`], generalized over the resident-KV regime
+    /// (ADR-0019 increment 3b). In the resident regime each stage session owns
+    /// the K/V carry for ITS layers: the stage's `HoloRunner` binds the cache
+    /// labels it retained on its previous walk (no re-hash; the κ120 write
+    /// moves in place) and its updated caches stay unmaterialized — surfaced
+    /// pipeline KV outputs return `None`. A carrying stage that must be
+    /// dropped (budget) materializes its carry into `kv_shadow` first and
+    /// re-ingests it (one hash) when it next walks — the truth survives every
+    /// eviction. `resident_kv = false` is the exact byte path.
+    fn execute_window_kv(
+        &mut self,
+        inputs: &[&[u8]],
+        resident_kv: bool,
+        carry: bool,
+    ) -> Result<Vec<Option<OutputBuffer>>> {
+        if !resident_kv || !carry {
+            // The caller's bytes are the truth everywhere: byte regime, or a
+            // fresh resident ingest. Stale shadow entries must not shadow them
+            // (each stage's HoloRunner drains its own stale leases on a
+            // carry-false walk).
+            self.kv_shadow.clear();
+        }
         let mut carried: HashMap<String, Vec<u8>> = HashMap::new();
-        let mut surfaced: Vec<Option<Vec<u8>>> = (0..self.surfaced_count).map(|_| None).collect();
+        let mut surfaced: Vec<Option<Option<Vec<u8>>>> =
+            (0..self.surfaced_count).map(|_| None).collect();
         self.last_dispatched = 0;
         self.last_skipped = 0;
         for stage in 0..self.stage_count {
@@ -1034,18 +1080,32 @@ impl<'a> StagedRunner<'a> {
                 loaded
             };
 
+            // Resident-KV regime: this stage walks on its own carried labels
+            // when it still holds them AND the caller declared the carry
+            // current; otherwise it re-ingests bytes — from the shadow where
+            // its carry was banked at eviction, else the pipeline inputs.
+            let stage_carry = resident_kv && carry && runner.has_kv_carry();
             // Each input port draws from its resolved source: a pipeline
-            // input by index, or the previous stage's same-named output.
+            // input by index (or the shadow-banked truth for a KV port whose
+            // stage was evicted), or the previous stage's same-named output.
             let refs: Vec<&[u8]> = self.feeds[stage]
                 .iter()
                 .map(|feed| match feed {
-                    Feed::Pipeline(i) => inputs.get(*i).copied().with_context(|| {
-                        format!(
-                            "stage {stage} needs pipeline input `{}` but only {} inputs were passed",
-                            self.input_ports[*i].name,
-                            inputs.len()
-                        )
-                    }),
+                    Feed::Pipeline(i) => {
+                        if resident_kv && carry && !stage_carry {
+                            if let Some(shadow) = self.kv_shadow.get(&self.input_ports[*i].name)
+                            {
+                                return Ok(shadow.as_slice());
+                            }
+                        }
+                        inputs.get(*i).copied().with_context(|| {
+                            format!(
+                                "stage {stage} needs pipeline input `{}` but only {} inputs were passed",
+                                self.input_ports[*i].name,
+                                inputs.len()
+                            )
+                        })
+                    }
                     Feed::Carried(name) => {
                         carried.get(name).map(Vec::as_slice).with_context(|| {
                             format!("stage {stage} expects `{name}` from the previous stage")
@@ -1053,11 +1113,29 @@ impl<'a> StagedRunner<'a> {
                     }
                 })
                 .collect::<Result<_>>()?;
-            let outputs = runner
-                .execute(&refs)
-                .with_context(|| format!("executing stage {stage}"))?;
+            let outputs: Vec<Option<OutputBuffer>> = if resident_kv {
+                runner
+                    .execute_kv_resident(&refs, stage_carry)
+                    .with_context(|| format!("executing stage {stage} (resident KV)"))?
+            } else {
+                runner
+                    .execute(&refs)
+                    .with_context(|| format!("executing stage {stage}"))?
+                    .into_iter()
+                    .map(Some)
+                    .collect()
+            };
             self.last_dispatched += runner.last_dispatched() as u64;
             self.last_skipped += runner.last_skipped() as u64;
+            if resident_kv {
+                // The stage now carries its caches as labels — any shadow
+                // entries for its KV ports were just re-ingested.
+                for feed in &self.feeds[stage] {
+                    if let Feed::Pipeline(i) = feed {
+                        self.kv_shadow.remove(&self.input_ports[*i].name);
+                    }
+                }
+            }
 
             // Keep the session resident while it fits the budget; otherwise it
             // drops here, before the next stage materializes — the residency
@@ -1110,12 +1188,23 @@ impl<'a> StagedRunner<'a> {
                 ledger.peak = ledger.peak.max(ledger.footprint);
                 drop(ledger);
                 self.resident[stage] = Some((runner, weight, footprint));
-            } else if weight > 0 && self.resident_bytes > 0 {
-                tracing::debug!(
-                    stage,
-                    footprint,
-                    "residency full — the stage streams per pass (projection, not refusal)"
-                );
+            } else {
+                // The stage drops here (the residency window). A carrying
+                // stage banks its K/V truth into the shadow FIRST — the labels
+                // die with the session, the truth must not.
+                if runner.has_kv_carry() {
+                    let banked = runner
+                        .take_kv_carry()
+                        .context("banking an evicted stage's K/V carry")?;
+                    self.kv_shadow.extend(banked);
+                }
+                if weight > 0 && self.resident_bytes > 0 {
+                    tracing::debug!(
+                        stage,
+                        footprint,
+                        "residency full — the stage streams per pass (projection, not refusal)"
+                    );
+                }
             }
             // Peak WEIGHT residency — the cache metric the witnesses assert —
             // tracks the packed weight bytes, not the execution transient.
@@ -1125,26 +1214,31 @@ impl<'a> StagedRunner<'a> {
 
             if stage + 1 == self.stage_count {
                 // Pipeline outputs: the final stage's own outputs, then the
-                // surfaced intermediates (every stage ran, so all are filled).
+                // surfaced intermediates (every stage ran, so all are filled —
+                // a `None` inner value is a resident-carried cache).
                 let final_n = self.output_ports.len() - self.surfaced_count;
                 let mut result = outputs;
                 for (k, slot) in surfaced.into_iter().enumerate() {
-                    let bytes = slot.with_context(|| {
+                    let produced = slot.with_context(|| {
                         format!(
                             "surfaced output `{}` was never produced",
                             self.output_ports[final_n + k].name
                         )
                     })?;
-                    result.push(OutputBuffer { bytes });
+                    result.push(produced.map(|bytes| OutputBuffer { bytes }));
                 }
                 return Ok(result);
             }
             for (port, out) in outputs.into_iter().enumerate() {
                 match &self.sinks[stage][port] {
                     Sink::Carry(name) => {
+                        // A cross-stage activation is never a resident cache.
+                        let out = out.with_context(|| {
+                            format!("carried activation `{name}` was not materialized")
+                        })?;
                         carried.insert(name.clone(), out.bytes);
                     }
-                    Sink::Surface(k) => surfaced[*k] = Some(out.bytes),
+                    Sink::Surface(k) => surfaced[*k] = Some(out.map(|o| o.bytes)),
                 }
             }
         }
@@ -1184,6 +1278,26 @@ impl LmSession for StagedRunner<'_> {
 
     fn execute(&mut self, inputs: &[&[u8]]) -> Result<Vec<OutputBuffer>> {
         self.execute_window(inputs)
+    }
+
+    fn execute_kv_resident(
+        &mut self,
+        inputs: &[&[u8]],
+        carry: bool,
+    ) -> Result<Vec<Option<OutputBuffer>>> {
+        self.execute_window_kv(inputs, true, carry)
+    }
+
+    fn take_kv_carry(&mut self) -> Result<Vec<(String, Vec<u8>)>> {
+        // The truth is split between the eviction shadow and the stages that
+        // still hold labels — drain both.
+        let mut out: Vec<(String, Vec<u8>)> = self.kv_shadow.drain().collect();
+        for slot in self.resident.iter_mut() {
+            if let Some((runner, _, _)) = slot.as_mut() {
+                out.extend(runner.take_kv_carry()?);
+            }
+        }
+        Ok(out)
     }
 
     fn pass_dispatched(&self) -> u64 {
