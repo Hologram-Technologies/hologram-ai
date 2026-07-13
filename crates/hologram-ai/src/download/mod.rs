@@ -7,6 +7,10 @@ use hf_api::{HfClient, ModelInfo};
 
 const COMPANION_FILES: &[&str] = &[
     "tokenizer.json",
+    // SentencePiece fallback for repos that ship no tokenizer.json; the
+    // loader sniffs either format by content. Like every companion, an
+    // absent file is skipped, never an error.
+    "tokenizer.model",
     "config.json",
     "tokenizer_config.json",
     "special_tokens_map.json",
@@ -329,6 +333,15 @@ mod tests {
             resolve_format(&info, &DownloadFormat::Onnx, None).is_err(),
             "an explicit ONNX request with no ONNX must fail loud"
         );
+    }
+
+    /// A repo that ships only the SentencePiece `tokenizer.model` still
+    /// downloads a loadable tokenizer: it is on the companion list (and the
+    /// json stays too — companions are best-effort, absence never fails).
+    #[test]
+    fn companions_cover_sentencepiece_tokenizer_model() {
+        assert!(COMPANION_FILES.contains(&"tokenizer.model"));
+        assert!(COMPANION_FILES.contains(&"tokenizer.json"));
     }
 
     #[test]

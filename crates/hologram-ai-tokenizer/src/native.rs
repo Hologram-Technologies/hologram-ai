@@ -1,17 +1,20 @@
 //! `NativeTokenizer` — concrete tokenizer implementation.
 
 use crate::bpe::BpeEncoder;
-use crate::config::{TokenizerAlgorithm, TokenizerConfig};
+use crate::config::{
+    NormStep, NormalizationConfig, PreTokenizerConfig, TokenizerAlgorithm, TokenizerConfig,
+};
 use crate::unigram::UnigramEncoder;
 use crate::vocab::VocabTable;
 use crate::wordpiece::WordPieceEncoder;
 use crate::Tokenizer;
+use alloc::borrow::Cow;
 use alloc::string::String;
 use alloc::vec::Vec;
 
 // ── Host-shell-only imports (JSON loading) ───────────────────────────────────
 #[cfg(feature = "std")]
-use crate::config::{NormalizationConfig, PreTokenizerConfig, SpecialTokens};
+use crate::config::SpecialTokens;
 #[cfg(feature = "std")]
 use crate::vocab::MergeRules;
 #[cfg(feature = "std")]
@@ -88,10 +91,32 @@ impl NativeTokenizer {
 
 #[cfg(feature = "std")]
 impl NativeTokenizer {
-    /// Construct from a HuggingFace `tokenizer.json` file.
+    /// Construct from a tokenizer file. The conventional name is
+    /// `tokenizer.json`, but some HF repos ship only the SentencePiece
+    /// `tokenizer.model`; when the `.json` path is absent its `.model` sibling
+    /// is read instead (`from_tokenizer_json_bytes` sniffs either format by
+    /// content, never by name).
     pub fn from_tokenizer_json(path: &Path) -> Result<Self> {
-        let data = std::fs::read(path)
-            .with_context(|| format!("reading tokenizer file: {}", path.display()))?;
+        let data = match std::fs::read(path) {
+            Ok(data) => data,
+            Err(e)
+                if e.kind() == std::io::ErrorKind::NotFound
+                    && path.file_name().is_some_and(|n| n == "tokenizer.json") =>
+            {
+                let sibling = path.with_file_name("tokenizer.model");
+                std::fs::read(&sibling).with_context(|| {
+                    format!(
+                        "reading tokenizer file: {} (and its SentencePiece sibling {})",
+                        path.display(),
+                        sibling.display()
+                    )
+                })?
+            }
+            Err(e) => {
+                return Err(e)
+                    .with_context(|| format!("reading tokenizer file: {}", path.display()))
+            }
+        };
         let mut tok = Self::from_tokenizer_json_bytes(&data)?;
         // The eos/bos IDENTITY lives in the sibling `tokenizer_config.json`, not
         // in `tokenizer.json` (which only lists tokens, never which one ends a
@@ -137,20 +162,48 @@ impl NativeTokenizer {
         }
     }
 
-    /// Construct from in-memory HuggingFace `tokenizer.json` bytes — used to load
-    /// the tokenizer baked into a `.holo` archive extension (no file needed).
+    /// Construct from in-memory tokenizer bytes — a HuggingFace
+    /// `tokenizer.json` or a SentencePiece `tokenizer.model` (ModelProto),
+    /// told apart by content, never by file name. Also loads the tokenizer
+    /// baked into a `.holo` archive extension (no file needed); the `_json`
+    /// name is kept because the wasm ABI calls it.
+    ///
+    /// `.tiktoken` rank files are refused by name: they underdetermine the
+    /// tokenizer (see the error text), so loading one would be silently wrong.
     pub fn from_tokenizer_json_bytes(bytes: &[u8]) -> Result<Self> {
-        let json: serde_json::Value =
-            serde_json::from_slice(bytes).context("parsing tokenizer JSON")?;
+        let body = strip_bom_and_ws(bytes);
+        if body.first() == Some(&b'{') {
+            let json: serde_json::Value =
+                serde_json::from_slice(body).context("parsing tokenizer JSON")?;
 
-        let model = &json["model"];
-        let model_type = model["type"].as_str().context("missing model.type")?;
+            let model = &json["model"];
+            let model_type = model["type"].as_str().context("missing model.type")?;
 
-        match model_type {
-            "BPE" => Self::from_bpe_json(&json),
-            "Unigram" => Self::from_unigram_json(&json),
-            "WordPiece" => Self::from_wordpiece_json(&json),
-            other => bail!("unsupported tokenizer model type: {other:?}"),
+            return match model_type {
+                "BPE" => Self::from_bpe_json(&json),
+                "Unigram" => Self::from_unigram_json(&json),
+                "WordPiece" => Self::from_wordpiece_json(&json),
+                other => bail!("unsupported tokenizer model type: {other:?}"),
+            };
+        }
+        if looks_like_tiktoken_ranks(body) {
+            bail!(
+                "refusing `.tiktoken` rank data: the file only carries `<base64 token> <rank>` \
+                 lines — the pre-tokenization regex that defines token boundaries lives in the \
+                 reference code, not in the file, so loading it here would tokenize silently \
+                 wrong; use the model's tokenizer.json instead"
+            );
+        }
+        match crate::sentencepiece::config_from_model_proto(bytes) {
+            Ok(config) => Ok(Self::from_config(config)),
+            Err(crate::sentencepiece::SpError::Refused(why)) => {
+                bail!("refusing SentencePiece tokenizer.model: {why}")
+            }
+            Err(crate::sentencepiece::SpError::NotModelProto(why)) => bail!(
+                "unrecognized tokenizer bytes (first byte {:?}): not tokenizer.json (no leading \
+                 '{{'), not `.tiktoken` rank lines, and not a SentencePiece ModelProto ({why})",
+                body.first().copied()
+            ),
         }
     }
 
@@ -308,12 +361,59 @@ impl NativeTokenizer {
         }
     }
 
+    /// Apply the normalization steps the runtime implements (`Sequence` — the
+    /// SentencePiece loader emits it). NFC/NFKC remain stored-but-unapplied,
+    /// as before.
+    fn normalize<'t>(&self, text: &'t str) -> Cow<'t, str> {
+        let NormalizationConfig::Sequence(steps) = &self.config.normalization else {
+            return Cow::Borrowed(text);
+        };
+        let mut out = Cow::Borrowed(text);
+        for step in steps {
+            match step {
+                NormStep::RemoveExtraWhitespace => {
+                    let trimmed = out.trim_matches(' ');
+                    let mut collapsed = String::with_capacity(trimmed.len());
+                    let mut prev_space = false;
+                    for ch in trimmed.chars() {
+                        if ch == ' ' && prev_space {
+                            continue;
+                        }
+                        prev_space = ch == ' ';
+                        collapsed.push(ch);
+                    }
+                    out = Cow::Owned(collapsed);
+                }
+                NormStep::PrependSpace => out = Cow::Owned(format!(" {out}")),
+                _ => {}
+            }
+        }
+        out
+    }
+
     fn encode_raw(&self, text: &str) -> Vec<u32> {
+        let normalized = self.normalize(text);
+        let text = normalized.as_ref();
         match &self.backend {
             EncoderBackend::Bpe(enc) => enc.encode(text),
             EncoderBackend::Unigram { vocab, scores } => {
                 let enc = UnigramEncoder::new(vocab, scores);
-                enc.encode(text)
+                // SentencePiece Viterbi segments the whole normalized
+                // sentence, so the Metaspace ▁-escaping + dummy prefix are
+                // applied to the text directly (no word splitting needed).
+                if let PreTokenizerConfig::Metaspace {
+                    replacement,
+                    prepend,
+                } = &self.config.pre_tokenizer
+                {
+                    let mut t = text.replace(' ', &String::from(*replacement));
+                    if *prepend {
+                        t.insert(0, *replacement);
+                    }
+                    enc.encode(&t)
+                } else {
+                    enc.encode(text)
+                }
             }
             EncoderBackend::WordPiece {
                 vocab,
@@ -338,13 +438,59 @@ impl NativeTokenizer {
     fn decode_raw(&self, tokens: &[u32]) -> String {
         match &self.backend {
             EncoderBackend::Bpe(enc) => enc.decode(tokens),
-            EncoderBackend::Unigram { vocab, .. } | EncoderBackend::WordPiece { vocab, .. } => {
-                tokens
-                    .iter()
-                    .filter_map(|&id| vocab.id_to_str(id))
-                    .collect::<Vec<_>>()
-                    .join("")
+            EncoderBackend::Unigram { vocab, .. } => {
+                // SentencePiece decode: byte pieces (`<0xNN>`) reassemble to
+                // raw bytes before UTF-8 recovery; ▁ renders as space; the
+                // dummy prefix that encode prepended is stripped once.
+                let mut bytes = Vec::new();
+                for &id in tokens {
+                    if self.config.byte_fallback {
+                        if let Some(b) = vocab
+                            .id_to_str(id)
+                            .and_then(crate::bpe::parse_byte_fallback)
+                        {
+                            bytes.push(b);
+                            continue;
+                        }
+                    }
+                    if let Some(tok) = vocab.id_to_token.get(id as usize) {
+                        bytes.extend_from_slice(tok);
+                    }
+                }
+                let text = String::from_utf8_lossy(&bytes);
+                match &self.config.pre_tokenizer {
+                    PreTokenizerConfig::Metaspace {
+                        replacement,
+                        prepend,
+                    } => {
+                        let text = text.replace(*replacement, " ");
+                        if *prepend {
+                            String::from(text.strip_prefix(' ').unwrap_or(&text))
+                        } else {
+                            text
+                        }
+                    }
+                    _ => {
+                        // With ▁-escaping off, the dummy prefix is a plain
+                        // leading space.
+                        let prepended = matches!(
+                            &self.config.normalization,
+                            NormalizationConfig::Sequence(steps)
+                                if steps.iter().any(|s| matches!(s, NormStep::PrependSpace))
+                        );
+                        if prepended {
+                            String::from(text.strip_prefix(' ').unwrap_or(&text))
+                        } else {
+                            text.into_owned()
+                        }
+                    }
+                }
             }
+            EncoderBackend::WordPiece { vocab, .. } => tokens
+                .iter()
+                .filter_map(|&id| vocab.id_to_str(id))
+                .collect::<Vec<_>>()
+                .join(""),
         }
     }
 }
@@ -398,6 +544,38 @@ impl Tokenizer for NativeTokenizer {
     fn token_to_id(&self, token: &str) -> Option<u32> {
         self.vocab_table().str_to_id(token)
     }
+}
+
+// ── Format sniffing helpers (host shell) ────────────────────────────────
+
+/// UTF-8 BOM + leading ASCII whitespace, stripped for format sniffing.
+#[cfg(feature = "std")]
+fn strip_bom_and_ws(bytes: &[u8]) -> &[u8] {
+    let b = bytes.strip_prefix(&[0xEF, 0xBB, 0xBF]).unwrap_or(bytes);
+    let start = b
+        .iter()
+        .position(|c| !c.is_ascii_whitespace())
+        .unwrap_or(b.len());
+    &b[start..]
+}
+
+/// A `.tiktoken` rank file: `<base64 token> <decimal rank>` per line.
+/// Detected so the refusal can name the format instead of surfacing a
+/// generic parse failure.
+#[cfg(feature = "std")]
+fn looks_like_tiktoken_ranks(body: &[u8]) -> bool {
+    let line = body.split(|&b| b == b'\n').next().unwrap_or(&[]);
+    let line = line.strip_suffix(b"\r").unwrap_or(line);
+    let Some(space) = line.iter().position(|&b| b == b' ') else {
+        return false;
+    };
+    let (token, rank) = (&line[..space], &line[space + 1..]);
+    !token.is_empty()
+        && !rank.is_empty()
+        && token
+            .iter()
+            .all(|&b| b.is_ascii_alphanumeric() || b == b'+' || b == b'/' || b == b'=')
+        && rank.iter().all(u8::is_ascii_digit)
 }
 
 // ── JSON parsing helpers (host shell) ───────────────────────────────────

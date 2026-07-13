@@ -309,7 +309,7 @@ fn unicode_to_byte_table() -> HashMap<char, u8> {
 }
 
 /// Parse a byte-fallback token like `<0x41>` → Some(0x41).
-fn parse_byte_fallback(token: &str) -> Option<u8> {
+pub(crate) fn parse_byte_fallback(token: &str) -> Option<u8> {
     let inner = token.strip_prefix("<0x")?.strip_suffix('>')?;
     u8::from_str_radix(inner, 16).ok()
 }

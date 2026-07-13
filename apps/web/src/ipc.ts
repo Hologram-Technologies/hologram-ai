@@ -308,7 +308,7 @@ async function downloadOne(model: { hfId: string; quantize: string }): Promise<v
 
   if (safetensorsFiles.length > 0) {
     // Safetensors flow
-    const companionNames = ["config.json", "tokenizer.json", "tokenizer_config.json", "generation_config.json", "special_tokens_map.json"];
+    const companionNames = ["config.json", "tokenizer.json", "tokenizer.model", "tokenizer_config.json", "generation_config.json", "special_tokens_map.json"];
     const companions = siblings.filter((f: any) => companionNames.includes(f.rfilename.split('/').pop()!));
   
     let configText = "";
@@ -330,11 +330,18 @@ async function downloadOne(model: { hfId: string; quantize: string }): Promise<v
         }
       }
       
-      const text = await response!.text();
+      // tokenizer.model is a binary SentencePiece protobuf — a text
+      // round-trip re-encodes as UTF-8 and corrupts it. JSON companions stay
+      // text (config.json is also parsed below).
+      const basename = file.rfilename.split('/').pop()!;
+      const isBinary = basename === "tokenizer.model";
+      const body: string | Uint8Array = isBinary
+        ? new Uint8Array(await response!.arrayBuffer())
+        : await response!.text();
       // Exact basename only: tokenizer_config.json / generation_config.json
       // also end with "config.json" and must never shadow the model config.
-      if (file.rfilename.split('/').pop() === "config.json") {
-        configText = text;
+      if (basename === "config.json") {
+        configText = body as string;
       }
       
       const parts = file.rfilename.split('/');
@@ -345,7 +352,7 @@ async function downloadOne(model: { hfId: string; quantize: string }): Promise<v
       const fileName = parts[parts.length - 1];
       const handle = await currentDir.getFileHandle(fileName, { create: true });
       const writable = await handle.createWritable();
-      await writable.write(text);
+      await writable.write(body);
       await writable.close();
     }
     
