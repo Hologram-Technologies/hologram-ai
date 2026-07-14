@@ -232,31 +232,6 @@ impl<'g> Emitter<'g> {
         out
     }
 
-    /// Contiguous axis-0 slice `[start, start+len)`.
-    fn slice0(
-        &mut self,
-        src: TensorId,
-        name: &str,
-        start: u64,
-        len: u64,
-        tail: &[u64],
-    ) -> TensorId {
-        let mut dims = vec![len];
-        dims.extend_from_slice(tail);
-        let out = self.tensor(name, DType::F32, &dims);
-        self.node(
-            AiOp::Slice {
-                axes: vec![0],
-                starts: vec![start as i64],
-                ends: vec![(start + len) as i64],
-                steps: vec![1],
-            },
-            vec![src],
-            vec![out],
-        );
-        out
-    }
-
     /// A seq-C 4-D projection (`[1,C,rows,dh]` or heads-first `[1,rows,C,dh]`)
     /// to head-major flat `[rows·C, dh]` — plus the `[rows, C, dh]` 3-D form.
     fn emit_head_major(
@@ -286,68 +261,6 @@ impl<'g> Emitter<'g> {
         let flat = self.tensor(&format!("{name}_flat"), DType::F32, &[rows * chunk, dh]);
         self.node(AiOp::Reshape { allow_zero: false }, vec![hf3], vec![flat]);
         (hf3, flat)
-    }
-
-    /// One kv-group's masked scaled-dot-product attention over the fixed bucket
-    /// plus this chunk's own keys: `softmax(q_jᵀ·[past_k ∥ k_new] + mask) ·
-    /// [past_v ∥ v_new] → [g·chunk, dh]`, strictly 2-D.
-    ///
-    /// This whole per-group `Concat`/`Transpose`/`MatMul`/`Softmax`/`MatMul`
-    /// chain is the **seam** the v0.9.0 fused `DecodeAttention` (κ119) collapses
-    /// into a single pooled, split-KV kernel (ADR-0019). Keeping it in one named
-    /// method makes that swap a localized change and keeps the layer emitter
-    /// readable. `span = bucket + chunk` is the `[past ∥ new]` key count.
-    #[allow(clippy::too_many_arguments)]
-    fn emit_kv_group_attention(
-        &mut self,
-        q_s: TensorId,
-        past_k: TensorId,
-        past_v: TensorId,
-        k_r: TensorId,
-        v_flat: TensorId,
-        mask: TensorId,
-        j: u64,
-        g: u64,
-        chunk: u64,
-        bucket: u64,
-        dh: u64,
-        span: u64,
-        layer: usize,
-    ) -> TensorId {
-        let n = format!("l{layer}_kv{j}");
-        // Head-major rows: group j's heads occupy rows j·g·C..(j+1)·g·C.
-        let q_j = self.slice0(q_s, &format!("dqj_{n}"), j * g * chunk, g * chunk, &[dh]);
-
-        let pk3 = self.slice0(past_k, &format!("dpk3_{n}"), j, 1, &[bucket, dh]);
-        let pk = self.tensor(&format!("dpk_{n}"), DType::F32, &[bucket, dh]);
-        self.node(AiOp::Reshape { allow_zero: false }, vec![pk3], vec![pk]);
-        let kn = self.slice0(k_r, &format!("dkn_{n}"), j * chunk, chunk, &[dh]);
-        let keys = self.tensor(&format!("dkeys_{n}"), DType::F32, &[span, dh]);
-        self.node(AiOp::Concat { axis: 0 }, vec![pk, kn], vec![keys]);
-        let keys_t = self.tensor(&format!("dkeyst_{n}"), DType::F32, &[dh, span]);
-        self.node(
-            AiOp::Transpose { perm: vec![1, 0] },
-            vec![keys],
-            vec![keys_t],
-        );
-
-        let scores = self.tensor(&format!("dscores_{n}"), DType::F32, &[g * chunk, span]);
-        self.node(AiOp::MatMul, vec![q_j, keys_t], vec![scores]);
-        let masked = self.tensor(&format!("dmasked_{n}"), DType::F32, &[g * chunk, span]);
-        self.node(AiOp::Add, vec![scores, mask], vec![masked]);
-        let probs = self.tensor(&format!("dprobs_{n}"), DType::F32, &[g * chunk, span]);
-        self.node(AiOp::Softmax { axis: 1 }, vec![masked], vec![probs]);
-
-        let pv3 = self.slice0(past_v, &format!("dpv3_{n}"), j, 1, &[bucket, dh]);
-        let pv = self.tensor(&format!("dpv_{n}"), DType::F32, &[bucket, dh]);
-        self.node(AiOp::Reshape { allow_zero: false }, vec![pv3], vec![pv]);
-        let vn = self.slice0(v_flat, &format!("dvn_{n}"), j * chunk, chunk, &[dh]);
-        let vals = self.tensor(&format!("dvals_{n}"), DType::F32, &[span, dh]);
-        self.node(AiOp::Concat { axis: 0 }, vec![pv, vn], vec![vals]);
-
-        let out_j = self.tensor(&format!("dout_{n}"), DType::F32, &[g * chunk, dh]);
-        self.node(AiOp::MatMul, vec![probs, vals], vec![out_j]);
-        out_j
     }
 
     /// Restore a head-major attention result (`src`, either flat `[h·C, dh]` or
@@ -388,61 +301,6 @@ impl<'g> Emitter<'g> {
                 vec![out_tid],
             );
         }
-    }
-
-    /// Legacy per-group SDPA decomposition + head-major carried-K/V outputs
-    /// (the NEW rows only; the driver splices them into the host cache). This is
-    /// the substrate-version-agnostic path, unchanged in behavior.
-    #[allow(clippy::too_many_arguments)]
-    fn emit_legacy_attention(
-        &mut self,
-        q_r: TensorId,
-        k_r: TensorId,
-        v_flat: TensorId,
-        v_hf3: TensorId,
-        past_k: TensorId,
-        past_v: TensorId,
-        mask: TensorId,
-        out_tid: TensorId,
-        scale: Option<f32>,
-        h: u64,
-        kv: u64,
-        g: u64,
-        chunk: u64,
-        bucket: u64,
-        dh: u64,
-        heads_first: bool,
-        layer: usize,
-    ) {
-        // Attention scale folded into q once.
-        let scale_val = scale.unwrap_or(1.0 / (dh as f32).sqrt());
-        let scale_c = self.const_f32(&format!("dscale_{layer}"), &[scale_val], &[1, 1]);
-        let q_s = self.tensor(&format!("dq_scaled_{layer}"), DType::F32, &[h * chunk, dh]);
-        self.node(AiOp::Mul, vec![q_r, scale_c], vec![q_s]);
-
-        let span = bucket + chunk;
-        let mut group_outs = Vec::with_capacity(kv as usize);
-        for j in 0..kv {
-            group_outs.push(self.emit_kv_group_attention(
-                q_s, past_k, past_v, k_r, v_flat, mask, j, g, chunk, bucket, dh, span, layer,
-            ));
-        }
-        // Chain-concat the kv groups (head-major) → [h·C, dh].
-        let mut acc = group_outs[0];
-        for (j, &t) in group_outs.iter().enumerate().skip(1) {
-            let rows = (j as u64 + 1) * g * chunk;
-            let cat = self.tensor(&format!("dcat_l{layer}_{j}"), DType::F32, &[rows, dh]);
-            self.node(AiOp::Concat { axis: 0 }, vec![acc, t], vec![cat]);
-            acc = cat;
-        }
-        self.restore_head_output(acc, out_tid, h, chunk, dh, heads_first, layer);
-
-        // Carried K/V rows leave head-major ([kv, C, dh]) so the engine's
-        // per-head splice is contiguous.
-        let k_out = self.tensor(&format!("dknew_{layer}"), DType::F32, &[kv, chunk, dh]);
-        self.node(AiOp::Reshape { allow_zero: false }, vec![k_r], vec![k_out]);
-        self.output(k_out, &new_key_port(layer));
-        self.output(v_hf3, &new_value_port(layer));
     }
 
     /// The v0.9.0 fused **split-KV** decode attention (`DecodeAttention`, κ119)
@@ -540,7 +398,6 @@ pub fn rewrite_decode_attention(
     bucket: u64,
     chunk: u64,
     layer_base: usize,
-    resident_kv: bool,
 ) -> Result<DecodeRewrite> {
     ensure!(bucket > 0, "decode bucket must be non-empty");
     ensure!(chunk > 0, "decode chunk must be non-empty");
@@ -557,8 +414,8 @@ pub fn rewrite_decode_attention(
     }
 
     let mut em = Emitter::new(graph);
-    // (cos_q, sin_q, cos_k, sin_k, mask, pos, head_dim) — `pos` is 0/unused in
-    // the legacy path, the runtime ring-write position in the resident-KV path.
+    // (cos_q, sin_q, cos_k, sin_k, mask, pos, head_dim) — `pos` is the runtime
+    // ring-write position for the fused resident-KV cache update.
     let mut shared: Option<(
         TensorId,
         TensorId,
@@ -598,7 +455,6 @@ pub fn rewrite_decode_attention(
             kv > 0 && h % kv == 0,
             "attention head grouping {h}/{kv} is not integral (layer {layer})"
         );
-        let g = h / kv;
 
         let q_tid = *node.inputs.first().context("GQA node missing Q input")?;
         let k_tid = *node.inputs.get(1).context("GQA node missing K input")?;
@@ -618,25 +474,18 @@ pub fn rewrite_decode_attention(
         );
 
         // Shared runtime ports, created at the first attention node. The mask is
-        // the sole visibility authority; its rows are the query positions. The
-        // legacy per-group decomposition replicates them per group (`g·chunk`
-        // rows), while the fused kernel groups internally and applies one
-        // per-position mask (`chunk` rows) — and adds a runtime `pos` operand for
-        // the ring write. `pos` is unused (id 0) in the legacy path.
+        // the sole visibility authority; its rows are the query positions — the
+        // fused kernel groups internally and applies one per-position mask
+        // (`chunk` rows) — and a runtime `pos` operand drives the ring write.
         let (cos_q, sin_q, cos_k, sin_k, mask, pos_port, shared_dh) =
             *shared.get_or_insert_with(|| {
                 let cos_q = em.input(DECODE_ROPE_COS_Q_PORT, DType::F32, &[h * chunk, dh]);
                 let sin_q = em.input(DECODE_ROPE_SIN_Q_PORT, DType::F32, &[h * chunk, dh]);
                 let cos_k = em.input(DECODE_ROPE_COS_K_PORT, DType::F32, &[kv * chunk, dh]);
                 let sin_k = em.input(DECODE_ROPE_SIN_K_PORT, DType::F32, &[kv * chunk, dh]);
-                if resident_kv {
-                    let mask = em.input(DECODE_MASK_PORT, DType::F32, &[chunk, bucket + chunk]);
-                    let pos = em.input(DECODE_POS_PORT, DType::INT32, &[1]);
-                    (cos_q, sin_q, cos_k, sin_k, mask, pos, dh)
-                } else {
-                    let mask = em.input(DECODE_MASK_PORT, DType::F32, &[g * chunk, bucket + chunk]);
-                    (cos_q, sin_q, cos_k, sin_k, mask, 0, dh)
-                }
+                let mask = em.input(DECODE_MASK_PORT, DType::F32, &[chunk, bucket + chunk]);
+                let pos = em.input(DECODE_POS_PORT, DType::INT32, &[1]);
+                (cos_q, sin_q, cos_k, sin_k, mask, pos, dh)
             });
         ensure!(
             shared_dh == dh,
@@ -644,20 +493,12 @@ pub fn rewrite_decode_attention(
              the shared rope tables cannot serve both"
         );
 
-        // Per-layer carried K/V ports. The fused kernel takes rank-4
-        // `[1, kv, bucket, dh]`; the legacy decomposition slices a rank-3
-        // `[kv, bucket, dh]` per group.
-        let (past_k, past_v) = if resident_kv {
-            (
-                em.input(&past_key_port(layer), DType::F32, &[1, kv, bucket, dh]),
-                em.input(&past_value_port(layer), DType::F32, &[1, kv, bucket, dh]),
-            )
-        } else {
-            (
-                em.input(&past_key_port(layer), DType::F32, &[kv, bucket, dh]),
-                em.input(&past_value_port(layer), DType::F32, &[kv, bucket, dh]),
-            )
-        };
+        // Per-layer carried K/V ports: the fused kernel takes the whole rank-4
+        // `[1, kv, bucket, dh]` cache (bound by κ-label next step, no host splice).
+        let (past_k, past_v) = (
+            em.input(&past_key_port(layer), DType::F32, &[1, kv, bucket, dh]),
+            em.input(&past_value_port(layer), DType::F32, &[1, kv, bucket, dh]),
+        );
 
         em.nodes.clear();
 
@@ -667,7 +508,7 @@ pub fn rewrite_decode_attention(
             em.emit_head_major(q_tid, h, chunk, dh, heads_first, &format!("dq_{layer}"));
         let (_, k_flat) =
             em.emit_head_major(k_tid, kv, chunk, dh, heads_first, &format!("dk_{layer}"));
-        let (v_hf3, v_flat) =
+        let (_, v_flat) =
             em.emit_head_major(v_tid, kv, chunk, dh, heads_first, &format!("dv_{layer}"));
 
         // RoPE as data at the absolute positions (tables pre-expanded to the
@@ -699,51 +540,28 @@ pub fn rewrite_decode_attention(
             (q_flat, k_flat)
         };
 
-        // Emit the attention core + carried-K/V outputs. Two forms, one seam:
-        // the legacy per-group SDPA decomposition, or the v0.9.0 fused
-        // split-KV DecodeAttention + KvCacheWrite (ADR-0019). Both consume the
-        // same roped q/k and head-major v; they differ only in how the masked
-        // attention and the cache update are expressed.
-        if resident_kv {
-            em.emit_fused_attention(
-                q_r,
-                k_r,
-                v_flat,
-                past_k,
-                past_v,
-                mask,
-                pos_port,
-                out_tid,
-                scale,
-                h,
-                kv,
-                chunk,
-                bucket,
-                dh,
-                heads_first,
-                layer,
-            );
-        } else {
-            em.emit_legacy_attention(
-                q_r,
-                k_r,
-                v_flat,
-                v_hf3,
-                past_k,
-                past_v,
-                mask,
-                out_tid,
-                scale,
-                h,
-                kv,
-                g,
-                chunk,
-                bucket,
-                dh,
-                heads_first,
-                layer,
-            );
-        }
+        // Emit the attention core + carried-K/V outputs: the v0.9.0 fused
+        // split-KV DecodeAttention (κ119) + KvCacheWrite ring-move (κ120),
+        // ADR-0019 — one pooled masked-attention over `[past ∥ chunk]` and an
+        // in-place cache update the driver carries by κ-label.
+        em.emit_fused_attention(
+            q_r,
+            k_r,
+            v_flat,
+            past_k,
+            past_v,
+            mask,
+            pos_port,
+            out_tid,
+            scale,
+            h,
+            kv,
+            chunk,
+            bucket,
+            dh,
+            heads_first,
+            layer,
+        );
 
         replacements.push((pos, std::mem::take(&mut em.nodes)));
         report = Some(DecodeRewrite {
