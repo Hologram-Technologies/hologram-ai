@@ -90,6 +90,13 @@ portability:
     cargo build --target thumbv7em-none-eabi -p hologram-ai-tokenizer --no-default-features
     cargo check --target wasm32-unknown-unknown -p hologram-ai-wasm
 
+# Run the REAL substrate decode kernels compiled to the wasm target the browser
+# ships (not just `cargo check`): the bare κ119/κ120 fused step, the resident-KV
+# carry/steal at production head_dim 128, and the legacy-decode guard. The blind
+# spot that let the v0.9.0 `unreachable` trap reach the deployed instance.
+wasm-test:
+    wasm-pack test --node crates/hologram-ai-wasm
+
 # No canonical-instance constant leaks into generic code.
 anti-hardcode:
     ./scripts/anti-hardcode.sh
@@ -119,5 +126,5 @@ journey-live:
 
 # ── The full local gate ─────────────────────────────────────────────────────
 
-vv: fmt lint doc test bdd honesty oracles report anti-hardcode structural portability web-install web-unit wasm journey pin-check
+vv: fmt lint doc test bdd honesty oracles report anti-hardcode structural portability wasm-test web-install web-unit wasm journey pin-check
     @echo "V&V: all gates green."

@@ -53,6 +53,12 @@ jobs:
       - name: Install web deps
         working-directory: apps/web
         run: pnpm install --frozen-lockfile
+      - name: Browser decode kernels in-wasm (wasm-pack test --node)
+        # Gates the deploy: runs the REAL substrate decode kernels compiled to
+        # the wasm target the browser ships (bare κ119/κ120 fused step + the
+        # resident-KV carry/steal at production head_dim 128 + the legacy-decode
+        # guard). `cargo check` only proves it builds; this proves it RUNS.
+        run: wasm-pack test --node crates/hologram-ai-wasm
       - name: Build wasm binding (single-threaded fallback)
         working-directory: apps/web
         run: pnpm wasm

@@ -25,11 +25,32 @@ use hologram_ai_common::rope::{RopeScaling, RopeSpec};
 /// kernel path, however, traps `RuntimeError: unreachable` on a real model's
 /// second (carried-past) decode step at production scale — the deployed
 /// regression (see `docs/notes/upstream-issue-v090-wasm-decode-unreachable.md`).
+///
+/// The trap is now LOCALIZED by hermetic in-wasm repros (`hologram-ai-wasm`
+/// `wasm-pack test --node`): the bare κ119/κ120 kernel over a realized past
+/// (`fused_decode_over_realized_past_in_wasm`) and the resident-KV carry/steal
+/// over two walks (`fused_resident_carry_two_walks_in_wasm`) BOTH pass in wasm
+/// at head_dim 128 — so the in-place move and the carried-label read are sound.
+/// The remaining differentiator, by elimination, is the STAGED carry across a
+/// dropped-and-rematerialized stage (the `kv_shadow` bank/restore rebinding the
+/// carried cache label after eviction) — the exact combination
+/// `decode_family_coverage` drives natively (int8, staged, budget 1) and PASSES,
+/// so the fault is wasm-specific to that path. See the upstream issue for the
+/// precise faulting seam handed to the substrate.
+///
 /// Because `fused == legacy` bit-for-bit, the browser falls back to the legacy
 /// decomposition — the proven pre-v0.9.0 decode — with NO change in output,
 /// only in which kernels run, until the substrate's wasm decode path is
 /// verified at scale. Native keeps the fused path (faster, fully tested).
 const FUSED_RESIDENT_DECODE: bool = !cfg!(target_arch = "wasm32");
+
+/// Whether this build compiles the fused resident-KV decode (see
+/// [`FUSED_RESIDENT_DECODE`]). Exposed so a guard test can assert the browser
+/// (wasm) ships the legacy decomposition — the trapping fused path must stay
+/// disabled on wasm until the substrate's staged carry-across-eviction is fixed.
+pub fn fused_resident_decode_enabled() -> bool {
+    FUSED_RESIDENT_DECODE
+}
 use hologram_ai_common::MetaValue;
 use safetensors::{Dtype as SafeDtype, SafeTensors};
 use serde_json::Value;
