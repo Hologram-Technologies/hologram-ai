@@ -83,6 +83,32 @@ grow correctness but on a monolithic runner.
 
 ## The plan (parametric, by tier)
 
+### ⚠ Refinement (found while implementing) — the F32 execution transient constrains staging
+
+`stage_transient_bound` (`staged.rs:484`) = `3·weight_bytes + 8·elements`: a stage's
+walk transiently widens its panel to **two full F32 images** (`8·elements`). For int8
+(`weight_bytes ≈ elements`) that is ~11× the packed weight. A 13-layer int8 stage
+(~611 MB packed) would transiently need ~6.7 GB — over the 4 GiB ceiling. So **fine
+staging is partly REQUIRED by the F32 transient, not only by the activation reserve**,
+and admission reserves the largest single walk (`max_walk`, `staged.rs:1172-1173`)
+against the shared ledger. Consequences for the plan:
+
+- The re-materialization the log shows is dominated by **window GROWTH** (each doubling
+  builds a fresh empty runner → re-pages all stages), NOT per-token within a bucket
+  (stages do stay resident within a bucket). So **Tier 2 (resident-across-growth) is
+  the larger real win; Tier 1 must not simply coarsen** — a coarser stage whose F32
+  transient exceeds the ceiling would OVER-COMMIT → the same `unreachable`.
+- Tier 1's per-bucket recompute must therefore choose the COARSEST granularity whose
+  worst-stage transient (`stage_transient_bound`) still fits the ceiling AND whose
+  resident set + `max_walk` fits the budget — a tighter constraint than "weights fit".
+  The `set_expected_stage_bytes` footprints are load-bearing and must be validated
+  against the real model's measured stage bytes.
+
+**Verification requirement (hard):** because a wrong granularity/footprint over-commits
+into the exact trap, Tier 1/2 MUST be validated on the real 1.5B model in the browser
+(measured stage bytes + no over-commit at each bucket). Native fixtures are monolithic
+and cannot exercise this. Do NOT land Tier 1/2 on native tests alone.
+
 ### Tier 1 — recompute `layers_per_stage` per bucket (eliminates ① and most of ③)
 
 The decode path already recompiles archives per bucket; make it recompute the
