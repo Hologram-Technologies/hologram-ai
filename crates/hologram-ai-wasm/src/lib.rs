@@ -2337,10 +2337,9 @@ mod tests {
     }
 
     /// Drive the fused resident-KV decode over TWO carried walks in-wasm — the
-    /// path NO existing test exercised (`v090_fused_equals_legacy` drives bare
-    /// `execute`, never `execute_kv_resident`). Build a 1-layer GQA decoder,
-    /// `rewrite_decode_attention(.., resident_kv = true)` (bypassing the wasm
-    /// gate that forces `false`), then two `execute_kv_resident` walks: walk 1
+    /// path bare `execute` does not exercise. Build a 1-layer GQA decoder,
+    /// `rewrite_decode_attention` (the sole, fused decode form), then two
+    /// `execute_kv_resident` walks: walk 1
     /// `carry = false` (host K/V is the truth — the first decode step), then
     /// walk 2 `carry = true` — the FIRST walk that `release_label`s the retained
     /// cache so κ120 does the in-place MOVE and κ119 reads the carried past by
@@ -2390,7 +2389,7 @@ mod tests {
             tensor_names: HashMap::new(),
             topo_cache: Default::default(),
         };
-        rewrite_decode_attention(&mut graph, bucket, 1, 0, true)
+        rewrite_decode_attention(&mut graph, bucket, 1, 0)
             .expect("rewrite the single GQA layer to fused resident-KV");
         let archive = ModelCompiler::default()
             .compile(ModelSource::AiGraph(graph))
@@ -2506,22 +2505,6 @@ mod tests {
         web_sys::console::log_1(&JsValue::from_str(
             "REPRO: resident-KV carry (2 walks) head_dim 128 — OK in wasm",
         ));
-    }
-
-    /// Guard: the browser (wasm) ships the FUSED resident-KV decode — the fast
-    /// path the substrate verified sound on the wasm target in v0.10.0 (the
-    /// staged carry-across-eviction that trapped `unreachable` in v0.9.0). The
-    /// hermetic repros above and the staged head_dim-128 browser gate
-    /// (`deep_model_journey.feature`) witness it end to end; this locks the
-    /// capability so a silent regression to the slow legacy fallback turns red.
-    #[wasm_bindgen_test]
-    fn browser_ships_fused_decode_verified_on_wasm_in_v0_10() {
-        assert!(
-            hologram_ai_safetensors::parametric::fused_resident_decode_enabled(),
-            "the wasm build must compile the FUSED resident-KV decode — hologram \
-             v0.10.0 fixed the staged carry-across-eviction trap on the wasm \
-             target (docs/notes/upstream-issue-v090-wasm-decode-unreachable.md)"
-        );
     }
 }
 

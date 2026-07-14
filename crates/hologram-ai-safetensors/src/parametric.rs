@@ -16,40 +16,15 @@ use hologram_ai_common::ir::{
 use hologram_ai_common::opt::decode_plan::rewrite_decode_attention;
 use hologram_ai_common::rope::{RopeScaling, RopeSpec};
 
-/// Whether decode compiles the FUSED resident-KV path (κ119 `DecodeAttention`
-/// with the κ120 `KvCacheWrite` move) or the legacy decomposition. The fused
-/// path is the production decode on EVERY target, wasm included.
-///
-/// History: v0.9.0's fused **wasm** kernels trapped `RuntimeError: unreachable`
-/// on a real model's staged carry-across-eviction step at production head_dim
-/// (the deployed regression), so the browser fell back to the legacy
-/// decomposition (`fused == legacy` bit-for-bit — no output change, only which
-/// kernels run). Two hermetic in-wasm repros (`hologram-ai-wasm`,
-/// `wasm-pack test --node`) localized it by elimination — the bare κ119/κ120
-/// kernel over a realized past and the resident-KV carry/steal both PASS in
-/// wasm at head_dim 128 — to the staged carry across a dropped-and-
-/// rematerialized stage (the `kv_shadow` bank/restore rebinding the carried
-/// cache label after eviction). The legacy fallback, moreover, could not even
-/// COMPILE that shape (`CompletenessFailure` on MQA staged decode at head_dim
-/// 128 — a legacy-only limit the fused form does not share), so the "mitigation"
-/// was itself defective for staged real models.
-///
-/// **hologram v0.10.0 fixes the substrate wasm path.** Both hermetic repros and
-/// the staged head_dim-128 browser gate (`deep_model_journey.feature`: staging,
-/// eviction, and multi-token carry) are green with the fused path on the wasm
-/// target — so the browser now ships the fused decode, the same fast, tested
-/// path as native (`decode_family_coverage` / `v090_*` / `parametric_reference`).
-/// See `docs/notes/upstream-issue-v090-wasm-decode-unreachable.md`.
-const FUSED_RESIDENT_DECODE: bool = true;
-
-/// Whether this build compiles the fused resident-KV decode (the private
-/// `FUSED_RESIDENT_DECODE` constant). Exposed so a guard test can assert the browser
-/// (wasm) ships the fused path — the fast decode the substrate verified on the
-/// wasm target in v0.10.0. If a future regression forces a fallback, that guard
-/// turns red instead of silently shipping the slow (or trapping) path.
-pub fn fused_resident_decode_enabled() -> bool {
-    FUSED_RESIDENT_DECODE
-}
+// Decode compiles the FUSED resident-KV path only (κ119 `DecodeAttention` +
+// κ120 `KvCacheWrite` κ-move, ADR-0019) on EVERY target. The legacy per-group
+// SDPA decomposition was retired: v0.9.0's fused wasm kernels trapped
+// `RuntimeError: unreachable` on the staged carry-across-eviction step, and the
+// interim legacy fallback could not even COMPILE that shape (`CompletenessFailure`
+// on MQA staged decode) — hologram v0.10.0 fixed the substrate wasm path, and the
+// fused decode is verified end to end (native `decode_family_coverage`, the
+// `wasm-pack test --node` repros, and the staged head_dim-128 browser gate). See
+// `docs/notes/upstream-issue-v090-wasm-decode-unreachable.md`.
 use hologram_ai_common::MetaValue;
 use safetensors::{Dtype as SafeDtype, SafeTensors};
 use serde_json::Value;
@@ -2152,7 +2127,7 @@ fn build_chunk_graph_with(recipe: &DecoderRecipe, bucket: u64, chunk: u64) -> Re
     builder.add_output(logits, "logits");
 
     let mut graph = builder.build();
-    let rewrite = rewrite_decode_attention(&mut graph, bucket, chunk, 0, FUSED_RESIDENT_DECODE)?;
+    let rewrite = rewrite_decode_attention(&mut graph, bucket, chunk, 0)?;
     ensure!(
         rewrite.layers as u64 == recipe.cfg.num_hidden_layers,
         "decode rewrite touched {} attention nodes, expected {} layers",
@@ -2378,13 +2353,7 @@ fn assemble_stage_graphs(
             // Decompose this stage's fused attention over the carried past —
             // absolute layer indices, so the pipeline's K/V port names are
             // the model's layer numbers regardless of the partition.
-            let rewrite = rewrite_decode_attention(
-                &mut graph,
-                bucket,
-                chunk,
-                start as usize,
-                FUSED_RESIDENT_DECODE,
-            )?;
+            let rewrite = rewrite_decode_attention(&mut graph, bucket, chunk, start as usize)?;
             ensure!(
                 rewrite.layers as u64 == end - start,
                 "decode rewrite touched {} attention nodes in stage {s}, expected {}",
