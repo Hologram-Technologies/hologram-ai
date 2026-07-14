@@ -107,9 +107,24 @@ try {
   const words = out.split(/\s+/).filter(Boolean).length;
   console.log(`  W8A8 browser decode: ~${words} words in ${(genMs / 1000).toFixed(1)}s`);
 
+  // MEASURE, do not assume: read the real cross-origin-isolation state and the
+  // pool status the worker recorded (`pool: multi-threaded decode active (N
+  // workers)` / `pool: single-threaded decode`). On GitHub Pages isolation comes
+  // from the coi-serviceworker; on a local preview it comes from vite headers —
+  // either way this reports what ACTUALLY ran, not a hard-coded label.
+  const isolated = await page.evaluate(() => globalThis.crossOriginIsolated === true);
+  const poolLine =
+    (await page.evaluate(
+      () => (globalThis.__hologram_status ?? []).filter((l) => /^pool:/.test(l)).at(-1) ?? "",
+    )) || "(no pool status recorded)";
+  const threaded = /multi-threaded/.test(poolLine);
+  const label = threaded ? `multi-threaded (${poolLine})` : "single-threaded";
+  console.log(`  crossOriginIsolated=${isolated}; decode ran ${label}`);
+  if (isolated) ok("page is cross-origin-isolated (SharedArrayBuffer / threads available)");
+  else console.log("  (note: not isolated — single-threaded fallback; expected on first load or Safari)");
+
   // Warm turn: window already compiled/resident, so this rate is closer to
-  // steady-state decode than the TTFT-inclusive first turn. Bounded by
-  // single-threaded wasm — GitHub Pages sets no COOP/COEP, so no threads.
+  // steady-state decode than the TTFT-inclusive first turn.
   {
     const t = Date.now();
     await page.locator(".composer textarea").fill("Tell me a short fact about the sun.");
@@ -118,7 +133,8 @@ try {
     const b = page.locator(".bubble.assistant");
     const warmOut = (await b.nth((await b.count()) - 1).innerText()).trim();
     const toks = Math.round(warmOut.split(/\s+/).filter(Boolean).length * 1.3);
-    console.log(`  W8A8 warm decode: ~${toks} tok in ${((Date.now()-t)/1000).toFixed(1)}s → ${(toks/((Date.now()-t)/1000)).toFixed(1)} tok/s (single-threaded wasm)`);
+    const secs = (Date.now() - t) / 1000;
+    console.log(`  W8A8 warm decode: ~${toks} tok in ${secs.toFixed(1)}s → ${(toks / secs).toFixed(1)} tok/s (${label})`);
   }
 
   if (pageErrors.length === 0) ok("no uncaught page errors");
