@@ -12,20 +12,33 @@ import { chromium } from "playwright";
 
 const DEPLOY_URL =
   process.env.HAI_DEPLOY_URL || "https://hologram-technologies.github.io/hologram-ai/";
-const MODEL = {
-  id: "smollm2-135m-instruct",
-  hfId: "HuggingFaceTB/SmolLM2-135M-Instruct",
-  displayName: "SmolLM2 135M Instruct",
-  description: "Deployed W8A8 probe (user-added).",
-  modality: "text-chat",
-  size: "135M",
-  approxArchiveMb: 0,
-  quantize: "int8",
-  promptTemplate: null,
-  stop: [],
-  chatTurnSeparator: null,
-};
-const PROMPT = "The capital of France is";
+
+// PARAMETRIC — probe ANY model, no hard-coded architecture. Set HAI_PROBE_MODEL
+// to a JSON catalogue entry (at minimum `hfId`), and HAI_PROBE_PROMPT / _EXPECT
+// to a factual prompt and a regex its greedy completion must contain. Default:
+// SmolLM2-135M (a fast integration SMOKE — not a usable model). Popular usable
+// architectures (Qwen2.5, Llama-3.2, …) are probed by passing their entry here;
+// the app derives staging/residency/quant automatically for whatever it is.
+const MODEL = process.env.HAI_PROBE_MODEL
+  ? JSON.parse(process.env.HAI_PROBE_MODEL)
+  : {
+      hfId: "HuggingFaceTB/SmolLM2-135M-Instruct",
+      displayName: "SmolLM2 135M Instruct",
+    };
+// Sensible catalogue-entry defaults the app expects, without overriding a
+// caller-supplied field. The app is parametric — it needs only `hfId` + int8.
+MODEL.id ??= MODEL.hfId.split("/").pop().toLowerCase();
+MODEL.displayName ??= MODEL.hfId.split("/").pop();
+MODEL.description ??= "Live real-model probe (user-added).";
+MODEL.modality ??= "text-chat";
+MODEL.size ??= "";
+MODEL.approxArchiveMb ??= 0;
+MODEL.quantize ??= "int8";
+MODEL.promptTemplate ??= null;
+MODEL.stop ??= [];
+MODEL.chatTurnSeparator ??= null;
+const PROMPT = process.env.HAI_PROBE_PROMPT || "The capital of France is";
+const EXPECT = new RegExp(process.env.HAI_PROBE_EXPECT || "paris", "i");
 
 function ok(m) {
   console.log(`  ✓ ${m}`);
@@ -59,8 +72,10 @@ try {
   await page.waitForSelector("h1:has-text('Models')");
   const row = page.locator(".list-item", { hasText: MODEL.displayName });
   const tDl = Date.now();
+  // A usable model may be gigabytes: allow generous download+compile time.
+  const DL_TIMEOUT = Number(process.env.HAI_PROBE_DL_TIMEOUT_MS || 1_800_000);
   await row.locator("button", { hasText: "Download" }).click();
-  await row.locator("button", { hasText: "Ready" }).waitFor({ timeout: 600_000 });
+  await row.locator("button", { hasText: "Ready" }).waitFor({ timeout: DL_TIMEOUT });
   ok(`downloaded + int8-quantized + compiled → Ready (${((Date.now() - tDl) / 1000).toFixed(0)}s)`);
 
   await page.goto(`${DEPLOY_URL}#/chat`);
@@ -69,9 +84,10 @@ try {
   if (await temp.count()) await temp.first().fill("0");
 
   const tGen = Date.now();
+  const GEN_TIMEOUT = Number(process.env.HAI_PROBE_GEN_TIMEOUT_MS || 600_000);
   await page.locator(".composer textarea").fill(PROMPT);
   await page.locator(".composer button", { hasText: "Send" }).click();
-  await page.locator(".composer button", { hasText: "Send" }).waitFor({ timeout: 300_000 });
+  await page.locator(".composer button", { hasText: "Send" }).waitFor({ timeout: GEN_TIMEOUT });
   const genMs = Date.now() - tGen;
   const bubbles = page.locator(".bubble.assistant .md");
   const out = (await bubbles.nth((await bubbles.count()) - 1).innerText()).trim();
@@ -79,8 +95,8 @@ try {
   console.log(`  [gen] "${PROMPT}" → "${out}"`);
   if (out.length > 0) ok("completion is non-empty");
   else fail("completion is empty");
-  // Coherence: SmolLM2-135M greedily answers this factual prompt with "Paris".
-  if (/paris/i.test(out)) ok("completion is coherent (contains 'Paris')");
+  // Coherence: the model greedily answers this factual prompt with EXPECT.
+  if (EXPECT.test(out)) ok(`completion is coherent (matches ${EXPECT})`);
   else fail(`completion not coherent for the prompt: "${out}"`);
 
   const words = out.split(/\s+/).filter(Boolean).length;
@@ -93,7 +109,7 @@ try {
     const t = Date.now();
     await page.locator(".composer textarea").fill("Tell me a short fact about the sun.");
     await page.locator(".composer button", { hasText: "Send" }).click();
-    await page.locator(".composer button", { hasText: "Send" }).waitFor({ timeout: 300_000 });
+    await page.locator(".composer button", { hasText: "Send" }).waitFor({ timeout: GEN_TIMEOUT });
     const b = page.locator(".bubble.assistant");
     const warmOut = (await b.nth((await b.count()) - 1).innerText()).trim();
     const toks = Math.round(warmOut.split(/\s+/).filter(Boolean).length * 1.3);

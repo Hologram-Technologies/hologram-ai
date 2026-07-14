@@ -179,6 +179,11 @@ class HologramWorld {
         promptTemplate: null,
         stop: [],
         chatTurnSeparator: null,
+        // Cap generation: single-threaded wasm decodes a real model at a few
+        // tok/s, so an UNBOUNDED three-turn handshake runs many minutes. A short
+        // cap keeps the multi-turn coherence + history check while staying a
+        // practical lane (the deploy gate's single-turn probe covers throughput).
+        maxTokens: 24,
       };
       await this.page.addInitScript(
         (entryJson) => localStorage.setItem("hologram_catalogue_custom", entryJson),
