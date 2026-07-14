@@ -41,7 +41,7 @@ enum Command {
         /// Fixed sequence length for compilation (default: model's context_length).
         #[arg(long, value_name = "N")]
         seq_len: Option<u64>,
-        /// Weight quantization scheme: 'none'/'f32' or 'int8'.
+        /// Weight quantization scheme: 'none'/'f32', 'int8', or 'int4'.
         #[arg(long, value_name = "SCHEME")]
         quantize: Option<String>,
         /// Scale spatial dims (H, W) of 4-D inputs by this factor for lower

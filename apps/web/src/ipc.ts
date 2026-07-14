@@ -901,19 +901,25 @@ export async function generate(opts: GenerateOpts): Promise<number> {
   // decode at that temperature); a stale/absent verify pipeline falls back to
   // plain decode. Off by default — the verify pipeline costs residency and
   // prompt-lookup drafting only speeds up repetitive text, so it is a knob.
+  // Speculative decode (row `speculative-decode`): draft width K (>= 2). Works at
+  // ANY temperature (the accept rule samples per absolute position — byte-identical
+  // to plain decode); a stale/absent verify pipeline falls back to plain decode.
   const specKnob = Number(localStorage.getItem("hologram_speculative") ?? "");
-  if (Number.isFinite(specKnob) && specKnob >= 2) {
-    genOpts.speculative_draft = Math.floor(specKnob);
-  }
+  let draftWidth = Number.isFinite(specKnob) && specKnob >= 2 ? Math.floor(specKnob) : 0;
 
-  // Speculative draft pairing (row `speculative-draft-pairing`): only when
-  // speculating, resolve the target's paired draft model dir (if the catalogue
-  // pairs one AND it is compiled locally) so the worker builds and attaches it
-  // as the drafter. Absent/uncompiled ⇒ the worker drafts by prompt-lookup —
-  // never load-bearing, so this only ever adds speed.
-  const draftModelDir = genOpts.speculative_draft
-    ? await resolveDraftModelDir(archiveParts[1])
-    : undefined;
+  // Speculative draft pairing (row `speculative-draft-pairing`): resolve the
+  // target's paired draft model dir (catalogue pairs one AND it is compiled
+  // locally). A compiled paired draft is near-free — same vocabulary, warm across
+  // turns — and byte-identical, so AUTO-ENGAGE model-drafting by default when one
+  // is present: using a fast option that is already there rather than hiding it
+  // behind a devtools knob. Prompt-lookup (no paired draft) stays opt-in — it
+  // costs verify-pipeline residency and only helps repetitive text.
+  const pairedDraftDir = await resolveDraftModelDir(archiveParts[1]);
+  if (!draftWidth && pairedDraftDir) draftWidth = 4; // default width for auto-engaged pairing
+  if (draftWidth) genOpts.speculative_draft = draftWidth;
+  // Attach the paired draft only when actually speculating; else the worker drafts
+  // by prompt-lookup (never load-bearing — only ever adds speed).
+  const draftModelDir = draftWidth ? pairedDraftDir : undefined;
 
   // A real turn opens an assistant line; a prewarm is invisible to the chat.
   if (!opts.warm) emitLine("chat://line", { stream: "stdout", line: "" });
@@ -1007,6 +1013,24 @@ export async function generate(opts: GenerateOpts): Promise<number> {
       }
     };
     
+    // Surface any performance-DEGRADING override so a stale devtools knob cannot
+    // SILENTLY pin this session to a slow path forever (the default is the fast
+    // path; these only trip when explicitly turned off/forced). Visible in the
+    // status tail, not just the console.
+    for (const [key, isBad, msg] of [
+      ["hologram_threads", (v: string) => v === "0", "multi-threaded decode pool DISABLED"],
+      ["hologram_decode_plan", (v: string) => v === "0", "fast per-token decode plan DISABLED (slow window forward)"],
+      ["hologram_weight_budget", (v: string) => !!v, "weight-tier paging FORCED (stages evict per token)"],
+      ["hologram_stage_window", (v: string) => !!v, "staging window FORCED (may partition unnecessarily)"],
+    ] as [string, (v: string) => boolean, string][]) {
+      const v = localStorage.getItem(key) ?? "";
+      if (isBad(v)) {
+        const line = `⚠ performance override active: ${msg} — clear localStorage ${key} to restore the optimal path`;
+        console.warn(`[hologram] ${line}`);
+        emitLine("chat://status", { stream: "stdout", line });
+      }
+    }
+
     activeWorker.postMessage({
       holoBytes,
       modelDir: archiveParts[1],
