@@ -117,6 +117,13 @@ jobs:
         with:
           path: './_site'
 
+  # Deploy is gated `journey → build → deploy`, and `journey` now includes the
+  # real-model gate (a real HuggingFace model decoded on the deploy bundle), so
+  # a broken real model blocks publish. RECOMMENDED (repo setting, not
+  # expressible here): add a required-reviewer protection rule to the
+  # `github-pages` environment (Settings → Environments) so main→Pages is a
+  # deliberate promotion, not an automatic push. GitHub Pages has no canary, so
+  # the pre-deploy gates above are the last line before users.
   deploy:
     needs: [journey, build]
     runs-on: ubuntu-latest
