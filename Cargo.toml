@@ -16,17 +16,19 @@ repository  = "https://github.com/uor-framework/hologram-ai"
 # Consumers depend on the individual member crates, pinned together to one
 # Hologram-Technologies/hologram revision.
 #
-# Pinned to substrate **v0.9.0** by explicit rev `22b0ce1` (the PR #41 merge
-# commit == annotated tag `v0.9.0^{}` on Hologram-Technologies/hologram). Pin by
-# REV not `tag =`: a `tag =` pin re-resolves against the local git db, and a
-# STALE db silently locked the WRONG commit once (18f553d, an ancestor of v0.8.1
-# with no prefill pooling). An explicit rev is unambiguous and cannot mis-resolve.
-# v0.9.0 lands the fused, pooled, KV-cache-aware masked DECODE ATTENTION (κ119) +
+# Pinned to substrate **v0.10.0** by explicit rev `47a4955` (annotated tag
+# `v0.10.0^{}` on Hologram-Technologies/hologram). Pin by REV not `tag =`: a
+# `tag =` pin re-resolves against the local git db, and a STALE db silently
+# locked the WRONG commit once (18f553d, an ancestor of v0.8.1 with no prefill
+# pooling). An explicit rev is unambiguous and cannot mis-resolve.
+# v0.9.0 landed the fused, pooled, KV-cache-aware masked DECODE ATTENTION (κ119) +
 # the resident-KV `KvCacheWrite` κ-move (κ120) + κ-leases — the fix for the three
 # long-context decode ceilings hologram-ai measured (ADR-0019: the recopy, the
-# per-token BLAKE3 re-hash, and the mask). It supersedes v0.8.2 (which pooled the
-# m>1 prefill GEMM, ADR-0018); decode admission stays bit-for-bit compatible.
-# Advance all crates together.
+# per-token BLAKE3 re-hash, and the mask). **v0.10.0** fixes the v0.9.0 wasm decode
+# trap: the fused path's staged carry-across-eviction step traps `unreachable` on
+# wasm32 at production head_dim (the deployed regression — see
+# docs/notes/upstream-issue-v090-wasm-decode-unreachable.md), so the browser now
+# ships the fused decode on ALL targets. Advance all crates together.
 # Runtime-core crates (types/ops/graph) are no_std-capable (default = []).
 #
 # The host-shell stack (compiler/exec/archive/backend/host) is pinned
@@ -37,18 +39,18 @@ repository  = "https://github.com/uor-framework/hologram-ai"
 # embedder-pool futex (multi-threaded decode) instead of the busy-spin std path.
 # A member-level `default-features = false` on a workspace-inherited dep is
 # ignored by Cargo, so the flag MUST live here. See ADR-0018.
-hologram-types    = { git = "https://github.com/Hologram-Technologies/hologram.git", rev = "22b0ce136ca7cf9c9d356657d870881fa169b0a1" }
-hologram-ops      = { git = "https://github.com/Hologram-Technologies/hologram.git", rev = "22b0ce136ca7cf9c9d356657d870881fa169b0a1" }
-hologram-graph    = { git = "https://github.com/Hologram-Technologies/hologram.git", rev = "22b0ce136ca7cf9c9d356657d870881fa169b0a1" }
-hologram-compiler = { git = "https://github.com/Hologram-Technologies/hologram.git", rev = "22b0ce136ca7cf9c9d356657d870881fa169b0a1", default-features = false }
+hologram-types    = { git = "https://github.com/Hologram-Technologies/hologram.git", rev = "47a4955611f79c586380ad73b92f2958a81ad00f" }
+hologram-ops      = { git = "https://github.com/Hologram-Technologies/hologram.git", rev = "47a4955611f79c586380ad73b92f2958a81ad00f" }
+hologram-graph    = { git = "https://github.com/Hologram-Technologies/hologram.git", rev = "47a4955611f79c586380ad73b92f2958a81ad00f" }
+hologram-compiler = { git = "https://github.com/Hologram-Technologies/hologram.git", rev = "47a4955611f79c586380ad73b92f2958a81ad00f", default-features = false }
 # `parallel` (rayon) is NOT pinned here — it cannot run on wasm32 (no threads).
 # It is an opt-in feature, enabled by default for native consumers (the
 # `hologram-ai` lib/CLI) via their own `parallel` feature, and left off for the
 # `hologram-ai-wasm` browser build. See ADR-0017.
-hologram-exec     = { git = "https://github.com/Hologram-Technologies/hologram.git", rev = "22b0ce136ca7cf9c9d356657d870881fa169b0a1", default-features = false }
-hologram-archive  = { git = "https://github.com/Hologram-Technologies/hologram.git", rev = "22b0ce136ca7cf9c9d356657d870881fa169b0a1", default-features = false, features = ["model-formats"] }
-hologram-backend  = { git = "https://github.com/Hologram-Technologies/hologram.git", rev = "22b0ce136ca7cf9c9d356657d870881fa169b0a1", default-features = false, features = ["cpu"] }
-hologram-host     = { git = "https://github.com/Hologram-Technologies/hologram.git", rev = "22b0ce136ca7cf9c9d356657d870881fa169b0a1", default-features = false }
+hologram-exec     = { git = "https://github.com/Hologram-Technologies/hologram.git", rev = "47a4955611f79c586380ad73b92f2958a81ad00f", default-features = false }
+hologram-archive  = { git = "https://github.com/Hologram-Technologies/hologram.git", rev = "47a4955611f79c586380ad73b92f2958a81ad00f", default-features = false, features = ["model-formats"] }
+hologram-backend  = { git = "https://github.com/Hologram-Technologies/hologram.git", rev = "47a4955611f79c586380ad73b92f2958a81ad00f", default-features = false, features = ["cpu"] }
+hologram-host     = { git = "https://github.com/Hologram-Technologies/hologram.git", rev = "47a4955611f79c586380ad73b92f2958a81ad00f", default-features = false }
 holospaces        = { git = "https://github.com/Hologram-Technologies/holospaces.git", branch = "main" }
 
 # workspace-internal

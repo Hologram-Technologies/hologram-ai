@@ -16,38 +16,37 @@ use hologram_ai_common::ir::{
 use hologram_ai_common::opt::decode_plan::rewrite_decode_attention;
 use hologram_ai_common::rope::{RopeScaling, RopeSpec};
 
-/// Whether decode compiles the v0.9.0 FUSED resident-KV path (κ119
-/// `DecodeAttention` + κ120 `KvCacheWrite` move) or the legacy decomposition.
+/// Whether decode compiles the FUSED resident-KV path (κ119 `DecodeAttention`
+/// + κ120 `KvCacheWrite` move) or the legacy decomposition. The fused path is
+/// the production decode on EVERY target, wasm included.
 ///
-/// The fused path is the NATIVE production decode — witnessed bit-exact against
-/// the legacy form and against a reference forward at production head_dim by
-/// `decode_family_coverage` / `v090_*` / `parametric_reference`. Its **wasm**
-/// kernel path, however, traps `RuntimeError: unreachable` on a real model's
-/// second (carried-past) decode step at production scale — the deployed
-/// regression (see `docs/notes/upstream-issue-v090-wasm-decode-unreachable.md`).
+/// History: v0.9.0's fused **wasm** kernels trapped `RuntimeError: unreachable`
+/// on a real model's staged carry-across-eviction step at production head_dim
+/// (the deployed regression), so the browser fell back to the legacy
+/// decomposition (`fused == legacy` bit-for-bit — no output change, only which
+/// kernels run). Two hermetic in-wasm repros (`hologram-ai-wasm`,
+/// `wasm-pack test --node`) localized it by elimination — the bare κ119/κ120
+/// kernel over a realized past and the resident-KV carry/steal both PASS in
+/// wasm at head_dim 128 — to the staged carry across a dropped-and-
+/// rematerialized stage (the `kv_shadow` bank/restore rebinding the carried
+/// cache label after eviction). The legacy fallback, moreover, could not even
+/// COMPILE that shape (`CompletenessFailure` on MQA staged decode at head_dim
+/// 128 — a legacy-only limit the fused form does not share), so the "mitigation"
+/// was itself defective for staged real models.
 ///
-/// The trap is now LOCALIZED by hermetic in-wasm repros (`hologram-ai-wasm`
-/// `wasm-pack test --node`): the bare κ119/κ120 kernel over a realized past
-/// (`fused_decode_over_realized_past_in_wasm`) and the resident-KV carry/steal
-/// over two walks (`fused_resident_carry_two_walks_in_wasm`) BOTH pass in wasm
-/// at head_dim 128 — so the in-place move and the carried-label read are sound.
-/// The remaining differentiator, by elimination, is the STAGED carry across a
-/// dropped-and-rematerialized stage (the `kv_shadow` bank/restore rebinding the
-/// carried cache label after eviction) — the exact combination
-/// `decode_family_coverage` drives natively (int8, staged, budget 1) and PASSES,
-/// so the fault is wasm-specific to that path. See the upstream issue for the
-/// precise faulting seam handed to the substrate.
-///
-/// Because `fused == legacy` bit-for-bit, the browser falls back to the legacy
-/// decomposition — the proven pre-v0.9.0 decode — with NO change in output,
-/// only in which kernels run, until the substrate's wasm decode path is
-/// verified at scale. Native keeps the fused path (faster, fully tested).
-const FUSED_RESIDENT_DECODE: bool = !cfg!(target_arch = "wasm32");
+/// **hologram v0.10.0 fixes the substrate wasm path.** Both hermetic repros and
+/// the staged head_dim-128 browser gate (`deep_model_journey.feature`, staging
+/// + eviction + multi-token carry) are green with the fused path on the wasm
+/// target — so the browser now ships the fused decode, the same fast, tested
+/// path as native (`decode_family_coverage` / `v090_*` / `parametric_reference`).
+/// See `docs/notes/upstream-issue-v090-wasm-decode-unreachable.md`.
+const FUSED_RESIDENT_DECODE: bool = true;
 
 /// Whether this build compiles the fused resident-KV decode (see
 /// [`FUSED_RESIDENT_DECODE`]). Exposed so a guard test can assert the browser
-/// (wasm) ships the legacy decomposition — the trapping fused path must stay
-/// disabled on wasm until the substrate's staged carry-across-eviction is fixed.
+/// (wasm) ships the fused path — the fast decode the substrate verified on the
+/// wasm target in v0.10.0. If a future regression forces a fallback, that guard
+/// turns red instead of silently shipping the slow (or trapping) path.
 pub fn fused_resident_decode_enabled() -> bool {
     FUSED_RESIDENT_DECODE
 }
