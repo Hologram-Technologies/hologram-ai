@@ -1,10 +1,13 @@
 import { useEffect, useRef, useState } from "react";
 import {
   KnownModelStatus,
+  StoredModel,
   WorkspacePaths,
   compileKnownModel,
   downloadKnownModel,
   listKnownModels,
+  listStoredModels,
+  removeStoredModel,
   addCustomModel,
   onProcessLine,
   workspacePaths,
@@ -40,13 +43,24 @@ const probeCache = new ProbeCache();
 export function Models() {
   const [paths, setPaths] = useState<WorkspacePaths | null>(null);
   const [models, setModels] = useState<KnownModelStatus[]>([]);
+  const [stored, setStored] = useState<StoredModel[]>([]);
   const [busy, setBusy] = useState<Busy>(null);
   const [tail, setTail] = useState<string[]>([]);
 
   async function refresh() {
-    const [p, m] = await Promise.all([workspacePaths(), listKnownModels()]);
+    const [p, m, s] = await Promise.all([
+      workspacePaths(),
+      listKnownModels(),
+      listStoredModels(),
+    ]);
     setPaths(p);
     setModels(m);
+    setStored(s);
+  }
+
+  async function onRemoveStored(dir: string) {
+    await removeStoredModel(dir);
+    await refresh();
   }
 
   useEffect(() => {
@@ -344,6 +358,41 @@ export function Models() {
             </p>
             <div className="list">{featured.map(renderModelItem)}</div>
           </>
+        )}
+
+        <h2 style={{ fontSize: 16, marginTop: 32, marginBottom: 8 }}>
+          Stored on this device
+        </h2>
+        <p className="meta" style={{ marginTop: 0, marginBottom: 16 }}>
+          Everything occupying this browser's local storage (OPFS) — the source
+          of truth for what the chat menu can offer. Removing a model deletes it
+          here immediately; browser "clear site data" does not reliably purge
+          this storage, so this is the authoritative control.
+        </p>
+        {stored.length === 0 ? (
+          <p className="meta" style={{ marginTop: 0 }}>
+            Nothing stored — the chat menu is empty until you download a model.
+          </p>
+        ) : (
+          <div className="list">
+            {stored.map((s) => (
+              <div className="list-item" key={s.dir} data-stored-model={s.dir}>
+                <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                  <strong>{s.dir}</strong>
+                  <div className="meta">
+                    {s.compiled ? "compiled" : s.downloaded ? "downloaded (not compiled)" : "partial"}
+                  </div>
+                </div>
+                <button
+                  onClick={() => onRemoveStored(s.dir).catch(console.error)}
+                  disabled={busy !== null}
+                  title={`Remove ${s.dir} from this device`}
+                >
+                  Remove
+                </button>
+              </div>
+            ))}
+          </div>
         )}
 
         {tail.length > 0 && (
