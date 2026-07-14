@@ -53,7 +53,20 @@ pnpm run build
 echo "10. Running web app tests..."
 pnpm run test
 
-echo "11. Browser BDD (the CI/Deploy journey gate: hermetic download→compile→run→handshake)..."
+SKIPPED=""
+
+echo "11. Browser decode kernels in-wasm (wasm-pack test --node — the real κ119/κ120 kernels)..."
+# The blind spot that let the v0.9.0 `unreachable` trap ship: `cargo check`
+# proved the wasm binding builds; nothing RAN its decode kernels. Guarded so a
+# machine without wasm-pack still pushes (CI runs it authoritatively).
+if command -v wasm-pack >/dev/null 2>&1; then
+    wasm-pack test --node crates/hologram-ai-wasm
+else
+    echo "   (skipped: wasm-pack is not installed)"
+    SKIPPED="$SKIPPED wasm-decode-kernels"
+fi
+
+echo "12. Browser BDD (the CI/Deploy journey gate: hermetic download→compile→run→handshake)..."
 # Rust changes reach the browser only through the wasm binding, so rebuild it
 # before driving the journey — this is exactly what caught a residency
 # regression the vitest suite could not see. Guarded so a machine without
@@ -62,7 +75,14 @@ if command -v wasm-pack >/dev/null 2>&1 && ls "$HOME/.cache/ms-playwright"/chrom
     pnpm run wasm
     pnpm run bdd
 else
-    echo "   (skipped: wasm-pack or the Playwright Chromium is not installed — CI runs the browser BDD authoritatively)"
+    echo "   (skipped: wasm-pack or the Playwright Chromium is not installed)"
+    SKIPPED="$SKIPPED browser-journey"
 fi
 
-echo "Pre-push checks passed successfully!"
+if [ -n "$SKIPPED" ]; then
+    echo ""
+    echo "Pre-push checks passed — but these gates were SKIPPED locally and are NOT verified:$SKIPPED"
+    echo "CI runs them authoritatively and WILL block the merge if they fail. Do not treat this push as green."
+else
+    echo "Pre-push checks passed successfully (browser gates included)!"
+fi
