@@ -525,6 +525,16 @@ executor = "browser"
 feature = "features/suites/s4_application/browser_journey.feature"
 
 [[row]]
+id = "chat-model-menu"
+statement = "The chat interface hard-codes no models: its selection menu is populated SOLELY by the compiled archives in local storage (OPFS). A fresh instance offers nothing to chat with; a model merely added to the catalogue (or still downloading) never appears until it is compiled; a compiled model appears by exactly its on-disk archive path. Because browser \"clear site data\" does not reliably purge OPFS, the Models page lists everything actually stored and lets the user REMOVE it — removing a model clears it from storage and from the menu at once."
+stage = "S4"
+status = "build"
+oracles = ["journey-reference"]
+tier = "suite"
+executor = "browser"
+feature = "features/suites/s4_application/chat_model_menu.feature"
+
+[[row]]
 id = "deep-model-journey"
 statement = "The browser runs a checkpoint at PRODUCTION attention geometry — head_dim 128 (the real Qwen/Llama value), grouped-query attention, many stages, the int8 tier — end to end: download, compile, and a chat turn that COMPLETES and commits its assistant reply honestly (a turn that emits no text shows an explicit no-output notice, never a silent blank or a vanished turn). The committed handshake fixture runs at head_dim 16 and below the pool's parallel-dispatch threshold, so this is the first journey to exercise the real head_dim and an actual multi-worker GEMV dispatch; a worker that dies surfaces a diagnostic cause, never an opaque event."
 stage = "S4"

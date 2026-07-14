@@ -2,7 +2,7 @@
 Feature: A real-model-shape checkpoint runs the whole browser journey
   The committed handshake fixture is 2 layers — too shallow to exercise the
   real-model path: many stages, the int8 quantized tier, bucket growth, and
-  the multi-stage decode window. A deep (30-layer) fixture, SYNTHESIZED at
+  the multi-stage decode window. A fixture at production head_dim (128), SYNTHESIZED at
   serve time from the same deterministic weight law (zero repo bytes), drives
   that shape hermetically — the class of failure a shallow fixture cannot
   catch (a decode session that hangs or crashes only past N stages / at the
