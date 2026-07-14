@@ -17,8 +17,8 @@ use hologram_ai_common::opt::decode_plan::rewrite_decode_attention;
 use hologram_ai_common::rope::{RopeScaling, RopeSpec};
 
 /// Whether decode compiles the FUSED resident-KV path (κ119 `DecodeAttention`
-/// + κ120 `KvCacheWrite` move) or the legacy decomposition. The fused path is
-/// the production decode on EVERY target, wasm included.
+/// with the κ120 `KvCacheWrite` move) or the legacy decomposition. The fused
+/// path is the production decode on EVERY target, wasm included.
 ///
 /// History: v0.9.0's fused **wasm** kernels trapped `RuntimeError: unreachable`
 /// on a real model's staged carry-across-eviction step at production head_dim
@@ -35,8 +35,8 @@ use hologram_ai_common::rope::{RopeScaling, RopeSpec};
 /// was itself defective for staged real models.
 ///
 /// **hologram v0.10.0 fixes the substrate wasm path.** Both hermetic repros and
-/// the staged head_dim-128 browser gate (`deep_model_journey.feature`, staging
-/// + eviction + multi-token carry) are green with the fused path on the wasm
+/// the staged head_dim-128 browser gate (`deep_model_journey.feature`: staging,
+/// eviction, and multi-token carry) are green with the fused path on the wasm
 /// target — so the browser now ships the fused decode, the same fast, tested
 /// path as native (`decode_family_coverage` / `v090_*` / `parametric_reference`).
 /// See `docs/notes/upstream-issue-v090-wasm-decode-unreachable.md`.
