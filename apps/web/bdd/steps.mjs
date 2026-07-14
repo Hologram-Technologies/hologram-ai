@@ -1186,13 +1186,22 @@ Then("the model reaches the runnable state", async function () {
   await row.locator("button", { hasText: "Ready" }).waitFor({ timeout: 10_000 });
 });
 
-When("the user completes the three-message handshake", async function () {
-  await this.gotoChat();
-  await this.page.locator("input[type=number]").fill("0");
-  for (const message of HANDSHAKE) {
-    await this.sendChat(message, { timeoutMs: 1_500_000 });
-  }
-});
+When(
+  "the user completes the three-message handshake",
+  // A REAL model decoding three full turns in single-threaded wasm is slow
+  // (~3.4 tok/s measured), so the cucumber step needs a budget well past the
+  // 180 s default — otherwise a correct-but-slow turn times out at the STEP
+  // level while `sendChat`'s own timeout has room to spare. 15 min covers three
+  // long turns.
+  { timeout: 900_000 },
+  async function () {
+    await this.gotoChat();
+    await this.page.locator("input[type=number]").fill("0");
+    for (const message of HANDSHAKE) {
+      await this.sendChat(message, { timeoutMs: 1_500_000 });
+    }
+  },
+);
 
 Then(
   "every assistant turn streams a non-empty completion respecting stop conditions",

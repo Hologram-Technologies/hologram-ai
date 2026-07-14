@@ -76,6 +76,26 @@ jobs:
       - name: Browser BDD (hermetic journey + handshake)
         working-directory: apps/web
         run: pnpm bdd
+      - name: Live real-model gate (real HuggingFace SmolLM2 on the deploy bundle)
+        # The gate that would have caught the deployed real-model crash: a REAL
+        # model (HuggingFaceTB/SmolLM2-135M-Instruct) is downloaded from real
+        # HuggingFace THROUGH the built app, int8-quantized, compiled, and decoded
+        # in real Chromium — asserting a coherent, error-free completion. It runs
+        # against a local preview of the SAME bundle this workflow deploys, so a
+        # real-model break BLOCKS the deploy instead of reaching users. The
+        # hermetic journey proves the deployed SHAPE; this proves real weights +
+        # tokenizer + int8 + the fused decode work end to end before publish.
+        working-directory: apps/web
+        run: |
+          pnpm build
+          pnpm exec vite preview --host 127.0.0.1 --port 4173 --strictPort &
+          PREVIEW_PID=$!
+          trap 'kill $PREVIEW_PID 2>/dev/null || true' EXIT
+          for i in $(seq 1 60); do
+            curl -sf http://127.0.0.1:4173/hologram-ai/ >/dev/null && break
+            sleep 1
+          done
+          HAI_DEPLOY_URL=http://127.0.0.1:4173/hologram-ai/ node bdd/probe-deployed-live.mjs
       - name: Pool registration witness (Node worker_threads)
         working-directory: apps/web
         run: node bdd/probe-pool-registration.mjs

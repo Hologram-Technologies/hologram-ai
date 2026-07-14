@@ -3,7 +3,14 @@ Feature: The live model journey
   The full journey — download, compile, materialize, run, three-message
   handshake — completes in real Chromium against the pinned
   HuggingFaceTB/SmolLM2-135M-Instruct from the live HuggingFace Hub.
-  Runs in the scheduled architecture matrix (network + model weights).
+
+  Thorough real-model verification, run via `pnpm bdd:live` (network + real
+  model weights; slow — single-threaded wasm decodes at a few tok/s). The Pages
+  DEPLOY is gated by the leaner single-turn real-model probe
+  (`bdd/probe-deployed-live.mjs`, wired into `.github/workflows/pages.yml`),
+  which downloads this same model through the deploy bundle and asserts a
+  coherent, error-free completion before publish. This three-turn journey is
+  the deeper local/manual check.
 
   Scenario: SmolLM2-135M-Instruct completes the journey
     Given the app is open in the browser against the live HuggingFace Hub
