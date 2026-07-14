@@ -142,6 +142,40 @@ jobs:
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
+    outputs:
+      page_url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - id: deployment
         uses: actions/deploy-pages@v5
+
+  # Post-deploy: verify the LIVE instance is cross-origin-isolated, i.e. the
+  # multi-threaded decode pool (ADR-0018) actually engages in production. On
+  # GitHub Pages this rests entirely on the coi-serviceworker (Pages sends no
+  # COOP/COEP), and NO other gate exercises the SW-on-real-Pages path — the
+  # pre-deploy real-model gate runs against a vite preview whose headers bypass
+  # the SW. If isolation silently breaks, every user's decode drops to
+  # single-threaded; this turns the workflow red instead.
+  isolation-smoke:
+    needs: deploy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: apps/web/pnpm-lock.yaml
+      - name: Install web deps
+        working-directory: apps/web
+        run: pnpm install --frozen-lockfile
+      - name: Install Chromium
+        working-directory: apps/web
+        run: pnpm exec playwright install --with-deps chromium
+      - name: Verify the deployed instance is cross-origin-isolated (pool can engage)
+        working-directory: apps/web
+        env:
+          HAI_URL: ${{ needs.deploy.outputs.page_url }}
+        run: node bdd/probe-cross-origin-isolation.mjs
