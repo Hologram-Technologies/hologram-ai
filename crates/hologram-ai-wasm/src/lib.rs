@@ -2508,18 +2508,19 @@ mod tests {
         ));
     }
 
-    /// Guard: the browser (wasm) MUST ship the legacy decode decomposition, not
-    /// the fused resident-KV path that traps `unreachable` on the deployed
-    /// model's staged carry-across-eviction step. This locks the mitigation in
-    /// place until the substrate's wasm staged-carry path is fixed and verified
-    /// — flipping the gate back on for wasm turns this red before it can deploy.
+    /// Guard: the browser (wasm) ships the FUSED resident-KV decode — the fast
+    /// path the substrate verified sound on the wasm target in v0.10.0 (the
+    /// staged carry-across-eviction that trapped `unreachable` in v0.9.0). The
+    /// hermetic repros above and the staged head_dim-128 browser gate
+    /// (`deep_model_journey.feature`) witness it end to end; this locks the
+    /// capability so a silent regression to the slow legacy fallback turns red.
     #[wasm_bindgen_test]
-    fn browser_ships_legacy_decode_not_the_trapping_fused_path() {
+    fn browser_ships_fused_decode_verified_on_wasm_in_v0_10() {
         assert!(
-            !hologram_ai_safetensors::parametric::fused_resident_decode_enabled(),
-            "the wasm build must NOT compile the fused resident-KV decode — it \
-             traps `unreachable` on the deployed model's staged carry-across-\
-             eviction step (docs/notes/upstream-issue-v090-wasm-decode-unreachable.md)"
+            hologram_ai_safetensors::parametric::fused_resident_decode_enabled(),
+            "the wasm build must compile the FUSED resident-KV decode — hologram \
+             v0.10.0 fixed the staged carry-across-eviction trap on the wasm \
+             target (docs/notes/upstream-issue-v090-wasm-decode-unreachable.md)"
         );
     }
 }

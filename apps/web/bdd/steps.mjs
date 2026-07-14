@@ -228,6 +228,53 @@ When("the user sends a chat message on the deep fixture model", { timeout: 420_0
   }
 });
 
+Given("the deep fixture is staged under a small weight-paging budget", async function () {
+  // The DEPLOYED shape at PRODUCTION head_dim: force the deep (head_dim 128)
+  // fixture to PARTITION into several stages, and a weight-tier budget below any
+  // single stage's weight set so each stage PAGES from the OPFS κ-store and
+  // EVICTS under the budget between tokens — staging + eviction + the resident
+  // K/V carry across a dropped-and-rematerialized stage, the exact seam the
+  // deployed model trapped on. The shallow fixtures reach this only at head_dim
+  // 16. Clear any stale mono compile so the download recompiles staged (the
+  // κ-store keeps the tensors — dedup).
+  await this.page.evaluate(async () => {
+    // A stage-plan budget that FORCES the head_dim-128 fixture to partition into
+    // >1 stage, plus a 1 MB weight-tier budget below any single stage's weight
+    // set so each stage pages from the κ-store and evicts between decode steps.
+    localStorage.setItem("hologram_stage_window", "2500000");
+    localStorage.setItem("hologram_weight_budget", "1");
+    const root = await navigator.storage.getDirectory();
+    try {
+      const models = await root.getDirectoryHandle("models");
+      await models.removeEntry("deep-tiny", { recursive: true });
+    } catch {
+      // No prior compile in this storage partition — nothing to remove.
+    }
+  });
+});
+
+Then(
+  "the deep fixture compiled to multiple stages and paged its weights under the budget",
+  async function () {
+    // It actually STAGED at head_dim 128 (not mono): the compiled bundle carries
+    // more than one stage. A silent mono compile would make this scenario a dark
+    // gate — proving the staged path only if it truly staged.
+    const meta = await this.opfsModelFile("deep-tiny", "stages.json");
+    assert.ok(meta, "deep-tiny stages.json missing — the download did not compile staged");
+    const parsed = JSON.parse(Buffer.from(meta).toString("utf8"));
+    assert.ok(
+      parsed.stageCount > 1,
+      `expected a multi-stage bundle at head_dim 128, got stageCount=${parsed.stageCount}`,
+    );
+    // It actually PAGED/evicted: the worker narrates the weight-tier budget.
+    const log = await statusLog(this);
+    assert.ok(
+      log.some((l) => /weight-tier paging|stages resident within/i.test(l)),
+      `the deep-fixture decode must page its weights under the budget:\n${log.join("\n")}`,
+    );
+  },
+);
+
 Then("the real-shape turn completes and its assistant reply is committed honestly", async function () {
   // The real-model SHAPE (head_dim 128, many stages, int8) runs end to end in
   // the browser: the turn completes (asserted above — no crash, a completion

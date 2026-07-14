@@ -8,6 +8,17 @@ runner alone carries the resident truth across batches — witnessed in
 `tests/speculative_resident.rs`). This ADR was the plan to *adopt*, not to
 reimplement; the primitives are the substrate's.
 
+**Update 2026-07-14 — repinned to v0.10.0 (`47a4955`).** v0.9.0's fused decode
+kernels trapped `RuntimeError: unreachable` on the **wasm32** target at the
+staged carry-across-eviction step (production head_dim, real models — the
+deployed regression), so the browser briefly fell back to the legacy
+decomposition. That fallback was itself defective (`CompletenessFailure`
+compiling the MQA staged decode at head_dim 128 — a legacy-only limit). hologram
+**v0.10.0** fixes the wasm path; we adopted it and re-enabled the fused decode on
+ALL targets, verified BEFORE deploy by hermetic `wasm-pack test --node` repros
+and the staged head_dim-128 browser gate (`deep_model_journey.feature`). See
+`docs/notes/upstream-issue-v090-wasm-decode-unreachable.md`.
+
 **Date:** 2026-07-12. **Branch:** `feat/wasm-threads` (decode work continues here).
 **Supersedes the "our-side capture" sketch in** `docs/notes/throughput-latency-analysis.md`
 §2b / lever G — v0.9.0 provides the primitive, so we adopt rather than hand-roll a

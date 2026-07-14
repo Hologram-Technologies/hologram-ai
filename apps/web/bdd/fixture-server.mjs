@@ -111,18 +111,20 @@ const ROPE_EXOTIC_CONFIG = fixtureConfigWith({
 
 // ── The synthesized deep fixture ─────────────────────────────────────────────
 
-// PRODUCTION-SHAPE dims: head_dim 128 (hidden/heads = 1024/8), GQA kv_heads 2,
-// SwiGLU MLP, 12 layers — the exact attention geometry the v0.9.0 fused decode
+// PRODUCTION head_dim (128 = DEEP_HIDDEN/DEEP_HEADS = 256/2), GQA (kv_heads 1),
+// SwiGLU MLP, 6 layers — the exact attention geometry the v0.9.0 fused decode
 // path runs on real Qwen/Llama checkpoints, which the committed fixture's
 // head_dim 16 never exercised. Context 512 so a longer prompt grows the bucket
 // (the regrow path). Vocab 512 reuses the committed tokenizer.
-// SMALL but PRODUCTION head_dim (128 = 256/2): a tiny hidden keeps every stage
-// fast to compile so the forced 1-layer STAGING + residency eviction — the
-// deployed real-model shape (many stages dropped and re-materialized between
-// steps, the kv_shadow carry path) — is exercised in wasm without a
-// multi-minute compile. head_dim 128 is the production value the shallow
-// fixtures never reached; the staged carry across an evicted stage is the one
-// path untested in the browser.
+//
+// SMALL hidden by design: it keeps every stage fast to compile so the forced
+// STAGING + residency eviction — the deployed real-model shape (stages dropped
+// and re-materialized between decode steps, the kv_shadow carry path) — is
+// exercised in wasm without a multi-minute compile. head_dim 128 is the
+// production value the shallow fixtures never reached; the staged carry across
+// an evicted stage is the one browser path the head_dim-16 fixtures cannot
+// reach (see `deep_model_journey.feature`, the staged scenario). The dims below
+// are the source of truth — keep this comment matched to them.
 const DEEP_LAYERS = 6;
 const DEEP_HIDDEN = 256;
 const DEEP_HEADS = 2;
