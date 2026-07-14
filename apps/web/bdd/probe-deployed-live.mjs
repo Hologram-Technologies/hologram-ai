@@ -37,6 +37,11 @@ MODEL.quantize ??= "int8";
 MODEL.promptTemplate ??= null;
 MODEL.stop ??= [];
 MODEL.chatTurnSeparator ??= null;
+// BOUND generation: a factual coherence check needs only the first few tokens,
+// and some small models ramble without emitting a stop token — an unbounded
+// turn can run many minutes single-threaded. Cap it (env-tunable) so the probe
+// is robust for ANY model, not just the well-behaved ones.
+MODEL.maxTokens ??= Number(process.env.HAI_PROBE_MAX_TOKENS || 40);
 const PROMPT = process.env.HAI_PROBE_PROMPT || "The capital of France is";
 const EXPECT = new RegExp(process.env.HAI_PROBE_EXPECT || "paris", "i");
 

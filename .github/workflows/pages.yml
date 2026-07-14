@@ -76,16 +76,25 @@ jobs:
       - name: Browser BDD (hermetic journey + handshake)
         working-directory: apps/web
         run: pnpm bdd
-      - name: Live real-model gate (real HuggingFace SmolLM2 on the deploy bundle)
-        # The gate that would have caught the deployed real-model crash: a REAL
-        # model (HuggingFaceTB/SmolLM2-135M-Instruct) is downloaded from real
-        # HuggingFace THROUGH the built app, int8-quantized, compiled, and decoded
-        # in real Chromium — asserting a coherent, error-free completion. It runs
-        # against a local preview of the SAME bundle this workflow deploys, so a
-        # real-model break BLOCKS the deploy instead of reaching users. The
-        # hermetic journey proves the deployed SHAPE; this proves real weights +
-        # tokenizer + int8 + the fused decode work end to end before publish.
+      - name: Live real-model gate (real HuggingFace Qwen2.5-0.5B on the deploy bundle)
+        # The gate that would have caught the deployed real-model crash: a REAL,
+        # POPULAR model (Qwen/Qwen2.5-0.5B-Instruct — the Qwen2.5 family users
+        # actually run, not a 135M smoke) downloaded from real HuggingFace THROUGH
+        # the built app, int8-quantized, compiled, and decoded in real Chromium —
+        # asserting a coherent, error-free completion. It runs against a local
+        # preview of the SAME bundle this workflow deploys, so a real-model break
+        # BLOCKS the deploy instead of reaching users. The hermetic journey proves
+        # the deployed SHAPE; this proves real weights + tokenizer + int8 + the
+        # fused decode end to end before publish. The scheduled architecture matrix
+        # (architectures.yml) runs Qwen2.5-1.5B — the exact head_dim-128 staged
+        # shape that trapped `unreachable` on v0.9.0 and now decodes on v0.10.0.
+        # PARAMETRIC: swap HAI_PROBE_MODEL for any architecture; the app derives
+        # staging/residency/quant automatically.
         working-directory: apps/web
+        env:
+          HAI_PROBE_MODEL: '{"hfId":"Qwen/Qwen2.5-0.5B-Instruct","displayName":"Qwen2.5 0.5B Instruct","size":"0.5B","quantize":"int8"}'
+          HAI_PROBE_PROMPT: "The capital of France is"
+          HAI_PROBE_EXPECT: "paris"
         run: |
           pnpm build
           pnpm exec vite preview --host 127.0.0.1 --port 4173 --strictPort &
