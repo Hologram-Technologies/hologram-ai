@@ -42,8 +42,8 @@ use hologram_ai_common::rope::{RopeScaling, RopeSpec};
 /// See `docs/notes/upstream-issue-v090-wasm-decode-unreachable.md`.
 const FUSED_RESIDENT_DECODE: bool = true;
 
-/// Whether this build compiles the fused resident-KV decode (see
-/// [`FUSED_RESIDENT_DECODE`]). Exposed so a guard test can assert the browser
+/// Whether this build compiles the fused resident-KV decode (the private
+/// `FUSED_RESIDENT_DECODE` constant). Exposed so a guard test can assert the browser
 /// (wasm) ships the fused path — the fast decode the substrate verified on the
 /// wasm target in v0.10.0. If a future regression forces a fallback, that guard
 /// turns red instead of silently shipping the slow (or trapping) path.
