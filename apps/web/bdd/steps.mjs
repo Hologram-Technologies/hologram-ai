@@ -95,17 +95,109 @@ async function installFixtureAlias(world, id, hfId, displayName) {
   });
 }
 
-const DEEP_FIXTURE_DISPLAY = "deep-tiny (30-layer hermetic fixture)";
+// ── Chat model menu: compiled-only invariant ────────────────────────────────
+
+Given("a fresh instance with no compiled models", async function () {
+  // The hermetic world starts with an empty OPFS; assert it explicitly so a
+  // leaked/persisted model would fail here, not silently pass downstream.
+  await this.gotoChat();
+});
+
+Then(/^the chat model menu (?:still )?offers no models to select$/, async function () {
+  // Self-contained: navigate to the chat page (which waits for its own
+  // readiness) rather than assume a prior step left us there.
+  await this.gotoChat();
+  const options = await this.page
+    .locator("select")
+    .first()
+    .locator("option")
+    .evaluateAll((os) => os.map((o) => ({ value: o.value, text: o.textContent })));
+  // The only option is the disabled "No compiled archives" placeholder (empty
+  // value) — nothing selectable, nothing hard-coded.
+  const selectable = options.filter((o) => o.value && o.value.length > 0);
+  assert.equal(
+    selectable.length,
+    0,
+    `the chat menu must offer no models on a fresh instance, got ${JSON.stringify(options)}`,
+  );
+});
+
+When("a model is added to the catalogue but not downloaded", async function () {
+  // A user-added entry (catalogue DATA) that is NOT downloaded/compiled must
+  // never reach the chat menu.
+  await installCustomEntry(this, {
+    ...BARE_ENTRY,
+    id: "added-not-downloaded",
+    hfId: "hologram-fixture/added-not-downloaded",
+    displayName: "added but not downloaded",
+  });
+  await this.gotoChat();
+});
+
+Then("the chat model menu lists exactly the compiled fixture model", async function () {
+  await this.gotoChat();
+  const select = this.page.locator("select").first();
+  // A closed <select>'s <option>s are `hidden`, so poll their VALUES (present
+  // in the DOM) rather than wait for visibility.
+  await this.page.waitForFunction(
+    () =>
+      Array.from(document.querySelector("select")?.options ?? []).some((o) =>
+        o.value.startsWith("models/handshake-tiny/"),
+      ),
+    { timeout: 10_000 },
+  );
+  const options = await select
+    .locator("option")
+    .evaluateAll((os) => os.map((o) => ({ value: o.value, text: o.textContent })));
+  const selectable = options.filter((o) => o.value && o.value.length > 0);
+  assert.equal(
+    selectable.length,
+    1,
+    `exactly the one compiled model must be offered, got ${JSON.stringify(options)}`,
+  );
+  // Its value is an on-disk archive path — never a bare model id or a
+  // catalogue name.
+  assert.match(
+    selectable[0].value,
+    /^models\/handshake-tiny\/.+/,
+    `the menu entry must be a compiled archive path, got ${JSON.stringify(selectable[0])}`,
+  );
+});
+
+Then("the stored-models list shows the fixture model", async function () {
+  await this.gotoModels();
+  const row = this.page.locator("[data-stored-model='handshake-tiny']");
+  await row.first().waitFor({ timeout: 10_000 });
+});
+
+When("the user removes the fixture model from this device", async function () {
+  await this.gotoModels();
+  const row = this.page.locator("[data-stored-model='handshake-tiny']");
+  await row.first().waitFor({ timeout: 10_000 });
+  await row.locator("button", { hasText: "Remove" }).click();
+  // The removal awaits an OPFS recursive delete + refresh; wait for the row
+  // to disappear so the subsequent assertions see the settled state.
+  await row.first().waitFor({ state: "detached", timeout: 10_000 });
+});
+
+Then("the stored-models list is empty", async function () {
+  await this.gotoModels();
+  await this.page.waitForSelector("h2:has-text('Stored on this device')");
+  const rows = await this.page.locator("[data-stored-model]").count();
+  assert.equal(rows, 0, `storage must be empty after removal, ${rows} model(s) remain`);
+});
+
+const DEEP_FIXTURE_DISPLAY = "deep-tiny (head_dim-128 hermetic fixture)";
 
 Given("the deep hermetic fixture model is available", async function () {
   await this.installDeepFixture();
 });
 
-When("the deep fixture model is downloaded", async function () {
-  await this.downloadModel(DEEP_FIXTURE_DISPLAY, { timeoutMs: 600_000 });
+When("the deep fixture model is downloaded", { timeout: 600_000 }, async function () {
+  await this.downloadModel(DEEP_FIXTURE_DISPLAY, { timeoutMs: 540_000 });
 });
 
-When("the user sends a chat message on the deep fixture model", async function () {
+When("the user sends a chat message on the deep fixture model", { timeout: 420_000 }, async function () {
   await this.gotoChat();
   await this.page.locator("input[type=number]").first().fill("0");
   await selectArchiveByDir(this, "deep-tiny");

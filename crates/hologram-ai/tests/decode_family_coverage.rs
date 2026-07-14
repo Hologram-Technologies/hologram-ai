@@ -290,6 +290,34 @@ fn decode_generates_at_production_head_dim_int8_staged() {
             tokens, again,
             "{arch}: head_dim-128 decode is not reproducible"
         );
+
+        // The DEPLOYED shape: production head_dim UNDER stage-eviction pressure.
+        // The deployed Qwen (34 stages, footprint-bounded) traps `unreachable`
+        // on the SECOND decode step — the first step that binds the RESIDENT
+        // K/V carry across a stage that was dropped and re-materialized. The
+        // head_dim-128 run above is generous-budget (no eviction) and the
+        // eviction test runs at head_dim 64; only THIS combination
+        // (head_dim 128 + budget 1) reproduces it. Bit-identical to the
+        // resident path, or the carried truth was lost across the drop.
+        let (evict_rows, evict_tokens) =
+            decode_family_rows_at(&scale, Some(QuantTier::Int8), None, 1);
+        assert_eq!(
+            evict_tokens, tokens,
+            "{arch}: head_dim-128 decode under stage-eviction pressure diverged — \
+             the resident K/V carry is unsound across a stage drop at production head_dim"
+        );
+        for (i, (r, w)) in logits
+            .iter()
+            .zip(evict_rows.last().expect("rows"))
+            .enumerate()
+        {
+            assert_eq!(
+                r.to_bits(),
+                w.to_bits(),
+                "{arch}: head_dim-128 final logit cell {i} differs under eviction \
+                 pressure — the banked carry did not round-trip bit-exactly"
+            );
+        }
     }
 }
 

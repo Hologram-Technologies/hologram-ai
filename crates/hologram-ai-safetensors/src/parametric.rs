@@ -15,6 +15,21 @@ use hologram_ai_common::ir::{
 };
 use hologram_ai_common::opt::decode_plan::rewrite_decode_attention;
 use hologram_ai_common::rope::{RopeScaling, RopeSpec};
+
+/// Whether decode compiles the v0.9.0 FUSED resident-KV path (κ119
+/// `DecodeAttention` + κ120 `KvCacheWrite` move) or the legacy decomposition.
+///
+/// The fused path is the NATIVE production decode — witnessed bit-exact against
+/// the legacy form and against a reference forward at production head_dim by
+/// `decode_family_coverage` / `v090_*` / `parametric_reference`. Its **wasm**
+/// kernel path, however, traps `RuntimeError: unreachable` on a real model's
+/// second (carried-past) decode step at production scale — the deployed
+/// regression (see `docs/notes/upstream-issue-v090-wasm-decode-unreachable.md`).
+/// Because `fused == legacy` bit-for-bit, the browser falls back to the legacy
+/// decomposition — the proven pre-v0.9.0 decode — with NO change in output,
+/// only in which kernels run, until the substrate's wasm decode path is
+/// verified at scale. Native keeps the fused path (faster, fully tested).
+const FUSED_RESIDENT_DECODE: bool = !cfg!(target_arch = "wasm32");
 use hologram_ai_common::MetaValue;
 use safetensors::{Dtype as SafeDtype, SafeTensors};
 use serde_json::Value;
@@ -2117,7 +2132,7 @@ fn build_chunk_graph_with(recipe: &DecoderRecipe, bucket: u64, chunk: u64) -> Re
     builder.add_output(logits, "logits");
 
     let mut graph = builder.build();
-    let rewrite = rewrite_decode_attention(&mut graph, bucket, chunk, 0, true)?;
+    let rewrite = rewrite_decode_attention(&mut graph, bucket, chunk, 0, FUSED_RESIDENT_DECODE)?;
     ensure!(
         rewrite.layers as u64 == recipe.cfg.num_hidden_layers,
         "decode rewrite touched {} attention nodes, expected {} layers",
@@ -2343,8 +2358,13 @@ fn assemble_stage_graphs(
             // Decompose this stage's fused attention over the carried past —
             // absolute layer indices, so the pipeline's K/V port names are
             // the model's layer numbers regardless of the partition.
-            let rewrite =
-                rewrite_decode_attention(&mut graph, bucket, chunk, start as usize, true)?;
+            let rewrite = rewrite_decode_attention(
+                &mut graph,
+                bucket,
+                chunk,
+                start as usize,
+                FUSED_RESIDENT_DECODE,
+            )?;
             ensure!(
                 rewrite.layers as u64 == end - start,
                 "decode rewrite touched {} attention nodes in stage {s}, expected {}",

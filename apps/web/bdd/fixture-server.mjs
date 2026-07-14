@@ -31,7 +31,7 @@ export const ROPE_SCALED_REPO = "hologram-fixture/handshake-tiny-llama3rope";
 // The fixture config with an UNIMPLEMENTED rope_scaling type — preflight must
 // refuse naming the law, before any shard byte.
 export const ROPE_EXOTIC_REPO = "hologram-fixture/exotic-rope";
-// A DEEP hermetic model (30 layers), SYNTHESIZED at serve time from the same
+// A DEEP hermetic model at PRODUCTION head_dim (128), SYNTHESIZED at serve time from the same
 // deterministic weight law as the committed fixture (zero repo bytes): the
 // real-model journey SHAPE — many stages, the int8 tier, growth — that the
 // 2-layer fixture cannot exercise (the class of failure that shipped in
@@ -116,11 +116,18 @@ const ROPE_EXOTIC_CONFIG = fixtureConfigWith({
 // path runs on real Qwen/Llama checkpoints, which the committed fixture's
 // head_dim 16 never exercised. Context 512 so a longer prompt grows the bucket
 // (the regrow path). Vocab 512 reuses the committed tokenizer.
-const DEEP_LAYERS = 12;
-const DEEP_HIDDEN = 1024;
-const DEEP_HEADS = 8;
-const DEEP_KV_HEADS = 2;
-const DEEP_INTER = 2048;
+// SMALL but PRODUCTION head_dim (128 = 256/2): a tiny hidden keeps every stage
+// fast to compile so the forced 1-layer STAGING + residency eviction — the
+// deployed real-model shape (many stages dropped and re-materialized between
+// steps, the kv_shadow carry path) — is exercised in wasm without a
+// multi-minute compile. head_dim 128 is the production value the shallow
+// fixtures never reached; the staged carry across an evicted stage is the one
+// path untested in the browser.
+const DEEP_LAYERS = 6;
+const DEEP_HIDDEN = 256;
+const DEEP_HEADS = 2;
+const DEEP_KV_HEADS = 1;
+const DEEP_INTER = 512;
 const DEEP_VOCAB = 512;
 const DEEP_CONFIG = JSON.stringify({
   architectures: ["LlamaForCausalLM"],
@@ -197,11 +204,17 @@ function deepSafetensorsBytes() {
 
 // The deep repo serves the committed fixture's tokenizer/config companions
 // (vocab 512 covers DEEP_VOCAB) with its own config.json + synthesized shard.
-const DEEP_COMPANIONS = [
-  "tokenizer.json",
-  "tokenizer_config.json",
-  "generation_config.json",
-];
+const DEEP_COMPANIONS = ["tokenizer.json", "tokenizer_config.json"];
+// The deep fixture serves its OWN generation_config with eos moved to an
+// unused high token so the deterministic noise weights do NOT emit
+// end-of-sequence on the first step — the turn generates multiple tokens and
+// thereby exercises the SECOND decode step, the first that binds the resident
+// K/V carry (where the deployed real model traps `unreachable`).
+const DEEP_GENERATION_CONFIG = JSON.stringify({
+  bos_token_id: 1,
+  chat_template: "User:\n{prompt}\nAssistant:\n",
+  eos_token_id: 500,
+});
 
 export function startFixtureServer() {
   const requests = [];
@@ -308,6 +321,7 @@ export function startFixtureServer() {
       const siblings = [
         { rfilename: "config.json", size: Buffer.byteLength(DEEP_CONFIG) },
         { rfilename: "model.safetensors", size: deepSafetensorsBytes().length },
+        { rfilename: "generation_config.json", size: Buffer.byteLength(DEEP_GENERATION_CONFIG) },
         ...DEEP_COMPANIONS.map((name) => ({
           rfilename: name,
           size: readFileSync(path.join(FIXTURE_DIR, name)).length,
@@ -419,6 +433,10 @@ export function startFixtureServer() {
       }
       if (name === "model.safetensors") {
         sendBytes(deepSafetensorsBytes());
+        return;
+      }
+      if (name === "generation_config.json") {
+        send(200, DEEP_GENERATION_CONFIG);
         return;
       }
       if (DEEP_COMPANIONS.includes(name)) {

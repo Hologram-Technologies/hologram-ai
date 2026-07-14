@@ -95,7 +95,6 @@ class HologramWorld {
    * many stages) and point the app at the fixture server — the real-model
    * journey SHAPE with zero network. Must run before navigation. */
   async installDeepFixture() {
-    const reference = referenceTranscript();
     await this.page.addInitScript(
       ([base, entryJson]) => {
         localStorage.setItem("hologram_hf_base", base);
@@ -108,16 +107,18 @@ class HologramWorld {
         JSON.stringify({
           id: "deep-tiny",
           hfId: DEEP_FIXTURE_REPO,
-          displayName: "deep-tiny (30-layer hermetic fixture)",
+          displayName: "deep-tiny (head_dim-128 hermetic fixture)",
           description: "The real-model-shape journey fixture (many stages, int8).",
           modality: "text-chat",
           size: "tiny-deep",
           approxArchiveMb: 28,
           quantize: "int8",
-          promptTemplate: reference.template,
-          stop: ["\nUser:"],
-          chatTurnSeparator: reference.separator,
-          maxTokens: reference.max_tokens,
+          promptTemplate: "User:\n{prompt}\nAssistant:\n",
+          stop: [],
+          chatTurnSeparator: "\nAssistant: {response}\nUser: ",
+          // Enough tokens to run well past the SECOND decode step (the first
+          // resident-K/V-carry step) where the deployed model traps.
+          maxTokens: 6,
         }),
       ],
     );
