@@ -226,3 +226,75 @@ jobs:
         env:
           HOLOGRAM_AI_QWEN2_ONNX: ${{ github.workspace }}/models/Qwen2.5-0.5B-Instruct/model.onnx
         run: cargo test --release -p hologram-ai-conformance --features=onnx-spec --test real_model_generation_qwen2 -- --nocapture
+
+  # The REAL browser path on a POPULAR, USABLE model. The native jobs above run
+  # real models on the NATIVE target; NOTHING ran a real model through the WASM
+  # decode kernels — the exact blind spot the deployed `unreachable` crash
+  # exposed. This closes it: Qwen2.5-1.5B (head_dim 128, 28 layers, 34 STAGED
+  # archives — the exact deployed-crash shape, fixed in v0.10.0) is downloaded
+  # from real HuggingFace THROUGH the built app, int8-quantized, staged-compiled,
+  # and decoded in real Chromium on the wasm build the browser ships, asserting a
+  # coherent, error-free completion. Slow by nature (single-threaded wasm, GitHub
+  # Pages sets no COOP/COEP → no threads; ~0.6 tok/s for a 1.5B staged model), so
+  # it is a scheduled lane, not a per-PR gate. Parametric: swap HAI_PROBE_MODEL
+  # for any architecture — the app derives staging/residency/quant automatically.
+  qwen25-1_5b-browser:
+    name: Qwen2.5-1.5B-Instruct (browser / wasm)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install protoc
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - name: Nightly + rust-src for the multi-threaded wasm build (ADR-0018)
+        run: |
+          rustup toolchain install "$HAI_WASM_THREADS_NIGHTLY" --profile minimal --component rust-src
+          rustup target add wasm32-unknown-unknown --toolchain "$HAI_WASM_THREADS_NIGHTLY"
+        env:
+          HAI_WASM_THREADS_NIGHTLY: nightly-2026-07-09
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: arch-qwen25-browser
+      - name: Install wasm-pack
+        run: curl -fsSL https://rustwasm.github.io/wasm-pack/installer/init.sh | sh
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: apps/web/pnpm-lock.yaml
+      - name: Install web deps
+        working-directory: apps/web
+        run: pnpm install --frozen-lockfile
+      - name: Build wasm binding (single-threaded fallback)
+        working-directory: apps/web
+        run: pnpm wasm
+      - name: Build wasm binding (multi-threaded pool)
+        working-directory: apps/web
+        run: pnpm wasm:threads
+        env:
+          HAI_WASM_THREADS_NIGHTLY: nightly-2026-07-09
+      - name: Install Chromium
+        working-directory: apps/web
+        run: pnpm exec playwright install --with-deps chromium
+      - name: Real Qwen2.5-1.5B in the browser (download → int8 → staged → decode)
+        working-directory: apps/web
+        env:
+          HAI_PROBE_MODEL: '{"hfId":"Qwen/Qwen2.5-1.5B-Instruct","displayName":"Qwen2.5 1.5B Instruct","size":"1.5B","quantize":"int8"}'
+          HAI_PROBE_PROMPT: "The capital of France is"
+          HAI_PROBE_EXPECT: "paris"
+        run: |
+          pnpm build
+          pnpm exec vite preview --host 127.0.0.1 --port 4173 --strictPort &
+          PREVIEW_PID=$!
+          trap 'kill $PREVIEW_PID 2>/dev/null || true' EXIT
+          for i in $(seq 1 60); do
+            curl -sf http://127.0.0.1:4173/hologram-ai/ >/dev/null && break
+            sleep 1
+          done
+          HAI_DEPLOY_URL=http://127.0.0.1:4173/hologram-ai/ node bdd/probe-deployed-live.mjs
