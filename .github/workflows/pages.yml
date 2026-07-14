@@ -95,6 +95,10 @@ jobs:
           HAI_PROBE_MODEL: '{"hfId":"Qwen/Qwen2.5-0.5B-Instruct","displayName":"Qwen2.5 0.5B Instruct","size":"0.5B","quantize":"int8"}'
           HAI_PROBE_PROMPT: "The capital of France is"
           HAI_PROBE_EXPECT: "paris"
+          # Bound the wait so a stalled model fails cleanly rather than hanging the
+          # deploy (0.5B reaches Ready in ~30s locally; a CI runner, a few minutes).
+          HAI_PROBE_DL_TIMEOUT_MS: "900000"
+          HAI_PROBE_GEN_TIMEOUT_MS: "300000"
         run: |
           pnpm build
           pnpm exec vite preview --host 127.0.0.1 --port 4173 --strictPort &
