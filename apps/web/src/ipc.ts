@@ -48,6 +48,8 @@ export interface CompiledArchive {
   name: string;
   path: string;
   sizeBytes: number;
+  /** The OPFS model directory this archive lives in (for removal). */
+  dir: string;
 }
 
 export interface LogEntry {
@@ -226,9 +228,9 @@ export async function listKnownModels(): Promise<KnownModelStatus[]> {
 export async function listCompiledArchives(): Promise<CompiledArchive[]> {
   const root = await getOpfsDir();
   const modelsDir = await root.getDirectoryHandle("models", { create: true });
-  
+
   const archives: CompiledArchive[] = [];
-  
+
   // @ts-ignore
   for await (const [name, handle] of modelsDir.entries()) {
     if (handle.kind === "directory") {
@@ -241,13 +243,71 @@ export async function listCompiledArchives(): Promise<CompiledArchive[]> {
             name: childName === "stages.json" ? `${name} (staged)` : `${name}/${childName.replace(".holo", "")}`,
             path: `models/${name}/${childName}`,
             sizeBytes: file.size,
+            dir: name,
           });
         }
       }
     }
   }
-  
+
   return archives;
+}
+
+/** A model directory actually present in OPFS — the SOURCE OF TRUTH for what
+ * is stored on this device, independent of the catalogue (an orphan whose
+ * catalogue/localStorage entry was cleared still lives here). */
+export interface StoredModel {
+  /** The OPFS directory name (the HF repo's last path segment). */
+  dir: string;
+  /** Whether a raw weight file (.safetensors/.onnx) is present. */
+  downloaded: boolean;
+  /** Whether a compiled archive (.holo / stages.json) is present. */
+  compiled: boolean;
+}
+
+/** Every model directory in OPFS `models/`, whatever its catalogue status —
+ * so the UI can show, and REMOVE, exactly what occupies local storage
+ * (browser "clear site data" does not reliably purge OPFS; the app must give
+ * the user explicit control). */
+export async function listStoredModels(): Promise<StoredModel[]> {
+  const root = await getOpfsDir();
+  const modelsDir = await root.getDirectoryHandle("models", { create: true });
+  const stored: StoredModel[] = [];
+  // @ts-ignore
+  for await (const [dir, handle] of modelsDir.entries()) {
+    if (handle.kind !== "directory") continue;
+    let downloaded = false;
+    let compiled = false;
+    async function scan(d: FileSystemDirectoryHandle): Promise<void> {
+      // @ts-ignore
+      for await (const [n, h] of d.entries()) {
+        if (h.kind === "file") {
+          if (n.endsWith(".safetensors") || n.endsWith(".onnx")) downloaded = true;
+          if (n.endsWith(".holo") || n === "stages.json") compiled = true;
+        } else if (h.kind === "directory") {
+          await scan(h as FileSystemDirectoryHandle);
+        }
+      }
+    }
+    await scan(handle as FileSystemDirectoryHandle);
+    stored.push({ dir, downloaded, compiled });
+  }
+  return stored;
+}
+
+/** Remove a stored model from OPFS — its whole `models/<dir>/` tree. The
+ * shared κ-store (`tensors/`) is content-addressed and deduplicated across
+ * models, so it is NOT touched here (a separate GC reclaims unreferenced κs);
+ * removing the model directory is what clears it from every menu immediately.
+ * Naming a directory that does not exist is not an error (idempotent). */
+export async function removeStoredModel(dir: string): Promise<void> {
+  const root = await getOpfsDir();
+  const modelsDir = await root.getDirectoryHandle("models", { create: true });
+  await modelsDir.removeEntry(dir, { recursive: true }).catch((e: unknown) => {
+    // A missing entry is a no-op; anything else is a real failure the caller
+    // must see (a silent failure would leave the model stubbornly present).
+    if ((e as { name?: string })?.name !== "NotFoundError") throw e;
+  });
 }
 
 type Listener = (line: ProcessLine) => void;
