@@ -2211,6 +2211,317 @@ mod tests {
         let result = compute_kappa(bytes);
         assert_eq!(result, expected);
     }
+
+    /// Build the bare v0.9.0 fused decode step in OUR IR and drive it once over a
+    /// REALIZED past: `attn = DecodeAttention(q, k_past, v_past, k_new, v_new,
+    /// mask)` (κ119) plus two `KvCacheWrite`s (κ120) at `pos = 3` with a mask
+    /// that reveals columns 0..=3 — so κ119 reads real keys, exactly as the
+    /// deployed model does on the step after prefill. The native witness
+    /// `v090_fused_decode_lowering.rs` does this at head_dim 16 and PASSES; this
+    /// helper compiles AND executes it entirely in-wasm at an arbitrary head_dim.
+    fn fused_decode_over_realized_past(d: u64) {
+        use hologram_ai::HoloRunner;
+        const B: u64 = 1;
+        const H: u64 = 4;
+        const HKV: u64 = 2;
+        const BUCKET: u64 = 8;
+
+        let (q, kp, vp, kn, vn, mask, pos, attn, kc, vc) = (0u32, 1, 2, 3, 4, 5, 6, 7, 8, 9);
+        let mut tinfo = HashMap::new();
+        tinfo.insert(q, ti(DType::F32, &[B, H, 1, d]));
+        tinfo.insert(kp, ti(DType::F32, &[B, HKV, BUCKET, d]));
+        tinfo.insert(vp, ti(DType::F32, &[B, HKV, BUCKET, d]));
+        tinfo.insert(kn, ti(DType::F32, &[B, HKV, 1, d]));
+        tinfo.insert(vn, ti(DType::F32, &[B, HKV, 1, d]));
+        tinfo.insert(mask, ti(DType::F32, &[1, BUCKET + 1]));
+        tinfo.insert(pos, ti(DType::INT32, &[1]));
+        tinfo.insert(attn, ti(DType::F32, &[B, H, 1, d]));
+        tinfo.insert(kc, ti(DType::F32, &[B, HKV, BUCKET, d]));
+        tinfo.insert(vc, ti(DType::F32, &[B, HKV, BUCKET, d]));
+        let g = AiGraph {
+            name: "fused_decode_step".into(),
+            nodes: vec![
+                AiNode::new(
+                    0,
+                    AiOp::DecodeAttention,
+                    vec![q, kp, vp, kn, vn, mask],
+                    vec![attn],
+                ),
+                AiNode::new(1, AiOp::KvCacheWrite, vec![kp, kn, pos], vec![kc]),
+                AiNode::new(2, AiOp::KvCacheWrite, vec![vp, vn, pos], vec![vc]),
+            ],
+            inputs: vec![q, kp, vp, kn, vn, mask, pos],
+            outputs: vec![attn, kc, vc],
+            input_names: Vec::new(),
+            output_names: Vec::new(),
+            params: HashMap::new(),
+            tensor_info: tinfo,
+            metadata: HashMap::new(),
+            warnings: Vec::new(),
+            dim_vars: Default::default(),
+            shape_constraints: Default::default(),
+            subgraphs: HashMap::new(),
+            tensor_names: HashMap::new(),
+            topo_cache: Default::default(),
+        };
+        let archive = ModelCompiler::default()
+            .compile(ModelSource::AiGraph(g))
+            .expect("the fused decode step compiles in-wasm");
+
+        let planes = (B * HKV) as usize;
+        let (bucket, dd) = (BUCKET as usize, d as usize);
+        let f32s = |n: usize, seed: usize| -> Vec<f32> {
+            (0..n)
+                .map(|i| (((i * 13 + seed * 7) % 41) as f32 - 20.0) * 0.043)
+                .collect()
+        };
+        let to_le = |v: &[f32]| -> Vec<u8> { v.iter().flat_map(|x| x.to_le_bytes()).collect() };
+        let pos_v = 3u32;
+        let mask_v: Vec<f32> = (0..(bucket + 1))
+            .map(|j| {
+                if j <= pos_v as usize {
+                    0.0
+                } else {
+                    f32::NEG_INFINITY
+                }
+            })
+            .collect();
+        let inputs: Vec<Vec<u8>> = vec![
+            to_le(&f32s((B * H * d) as usize, 1)),
+            to_le(&f32s(planes * bucket * dd, 2)),
+            to_le(&f32s(planes * bucket * dd, 3)),
+            to_le(&f32s(planes * dd, 4)),
+            to_le(&f32s(planes * dd, 5)),
+            to_le(&mask_v),
+            pos_v.to_le_bytes().to_vec(),
+        ];
+        let refs: Vec<&[u8]> = inputs.iter().map(|v| v.as_slice()).collect();
+        let mut runner = HoloRunner::from_bytes(archive.bytes)
+            .expect("archive loads in-wasm through HoloRunner");
+        let out = runner
+            .execute(&refs)
+            .expect("the fused decode step executes in-wasm");
+        let attn_out: Vec<f32> = out[0]
+            .bytes
+            .chunks_exact(4)
+            .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+            .collect();
+        assert_eq!(
+            attn_out.len(),
+            (B * H * d) as usize,
+            "head_dim {d}: attention output is q-shaped"
+        );
+        assert!(
+            attn_out.iter().all(|x| x.is_finite()),
+            "head_dim {d}: fused decode over a realized past is finite in wasm — no trap"
+        );
+    }
+
+    /// REPRO A — the bare κ119/κ120 kernel over a realized past, in-wasm. The
+    /// deployed browser streams token 1, then traps `RuntimeError: unreachable`
+    /// on the first decode step that reads a realized past (Qwen2.5-1.5B,
+    /// head_dim 128). This drives the SAME bare fused step the native witness
+    /// passes — compiled and executed entirely in-wasm — at head_dim 16 (the
+    /// native size) then the production head_dim 128. RESULT: both pass, so the
+    /// bare kernel over a realized past is sound in wasm; the trap is elsewhere.
+    #[wasm_bindgen_test]
+    fn fused_decode_over_realized_past_in_wasm() {
+        fused_decode_over_realized_past(16);
+        web_sys::console::log_1(&JsValue::from_str(
+            "REPRO: head_dim 16 bare fused decode over a realized past — OK in wasm",
+        ));
+        fused_decode_over_realized_past(128);
+        web_sys::console::log_1(&JsValue::from_str(
+            "REPRO: head_dim 128 bare fused decode over a realized past — OK in wasm",
+        ));
+    }
+
+    /// Drive the fused resident-KV decode over TWO carried walks in-wasm — the
+    /// path NO existing test exercised (`v090_fused_equals_legacy` drives bare
+    /// `execute`, never `execute_kv_resident`). Build a 1-layer GQA decoder,
+    /// `rewrite_decode_attention(.., resident_kv = true)` (bypassing the wasm
+    /// gate that forces `false`), then two `execute_kv_resident` walks: walk 1
+    /// `carry = false` (host K/V is the truth — the first decode step), then
+    /// walk 2 `carry = true` — the FIRST walk that `release_label`s the retained
+    /// cache so κ120 does the in-place MOVE and κ119 reads the carried past by
+    /// label. That is exactly the second decode step the deployed Qwen traps on.
+    fn fused_resident_two_walks(h: u64, kv: u64, dh: u64, bucket: u64) {
+        use hologram_ai::HoloRunner;
+        use hologram_ai_common::opt::decode_plan::{
+            past_key_port, past_value_port, rewrite_decode_attention, DECODE_MASK_PORT,
+            DECODE_POS_PORT, DECODE_ROPE_COS_K_PORT, DECODE_ROPE_COS_Q_PORT,
+            DECODE_ROPE_SIN_K_PORT, DECODE_ROPE_SIN_Q_PORT,
+        };
+
+        let (q, k, v, attn) = (0u32, 1, 2, 3);
+        let mut tinfo = HashMap::new();
+        tinfo.insert(q, ti(DType::F32, &[1, h, 1, dh]));
+        tinfo.insert(k, ti(DType::F32, &[1, kv, 1, dh]));
+        tinfo.insert(v, ti(DType::F32, &[1, kv, 1, dh]));
+        tinfo.insert(attn, ti(DType::F32, &[1, h, 1, dh]));
+        let mut graph = AiGraph {
+            name: "gqa1".into(),
+            nodes: vec![AiNode::new(
+                0,
+                AiOp::GroupedQueryAttention {
+                    num_heads: h as u32,
+                    num_kv_heads: kv as u32,
+                    head_dim: dh as u32,
+                    scale: None,
+                    causal: true,
+                    heads_first: true,
+                    qk_norm: false,
+                    rope: Some(hologram_ai_common::RopeSpec::plain(10000.0)),
+                },
+                vec![q, k, v],
+                vec![attn],
+            )],
+            inputs: vec![q, k, v],
+            outputs: vec![attn],
+            input_names: vec!["q".into(), "k".into(), "v".into()],
+            output_names: vec!["attn".into()],
+            params: HashMap::new(),
+            tensor_info: tinfo,
+            metadata: HashMap::new(),
+            warnings: Vec::new(),
+            dim_vars: Default::default(),
+            shape_constraints: Default::default(),
+            subgraphs: HashMap::new(),
+            tensor_names: HashMap::new(),
+            topo_cache: Default::default(),
+        };
+        rewrite_decode_attention(&mut graph, bucket, 1, 0, true)
+            .expect("rewrite the single GQA layer to fused resident-KV");
+        let archive = ModelCompiler::default()
+            .compile(ModelSource::AiGraph(graph))
+            .expect("fused resident-KV decoder compiles in-wasm");
+        let mut runner = HoloRunner::from_bytes(archive.bytes)
+            .expect("archive loads in-wasm through HoloRunner");
+
+        let f32s = |n: usize, seed: usize| -> Vec<f32> {
+            (0..n)
+                .map(|i| (((i * 31 + seed * 17) % 53) as f32 - 26.0) * 0.037)
+                .collect()
+        };
+        let to_le = |v: &[f32]| -> Vec<u8> { v.iter().flat_map(|x| x.to_le_bytes()).collect() };
+        let realized = (bucket / 2).max(1);
+        let mut named: HashMap<String, Vec<u8>> = HashMap::new();
+        named.insert("q".into(), to_le(&f32s((h * dh) as usize, 1)));
+        named.insert("k".into(), to_le(&f32s((kv * dh) as usize, 2)));
+        named.insert("v".into(), to_le(&f32s((kv * dh) as usize, 3)));
+        named.insert(
+            DECODE_ROPE_COS_Q_PORT.into(),
+            to_le(&vec![1.0; (h * dh) as usize]),
+        );
+        named.insert(
+            DECODE_ROPE_SIN_Q_PORT.into(),
+            to_le(&vec![0.0; (h * dh) as usize]),
+        );
+        named.insert(
+            DECODE_ROPE_COS_K_PORT.into(),
+            to_le(&vec![1.0; (kv * dh) as usize]),
+        );
+        named.insert(
+            DECODE_ROPE_SIN_K_PORT.into(),
+            to_le(&vec![0.0; (kv * dh) as usize]),
+        );
+        let kv_bytes = (kv * bucket * dh) as usize;
+        named.insert(past_key_port(0), to_le(&f32s(kv_bytes, 4)));
+        named.insert(past_value_port(0), to_le(&f32s(kv_bytes, 5)));
+        // One query row's visibility over [bucket past ∥ 1 new key] (resident
+        // form → exactly one mask row).
+        let row: Vec<f32> = (0..bucket + 1)
+            .map(|j| {
+                if j < realized || j == bucket {
+                    0.0
+                } else {
+                    f32::NEG_INFINITY
+                }
+            })
+            .collect();
+        named.insert(DECODE_MASK_PORT.into(), to_le(&row));
+        named.insert(
+            DECODE_POS_PORT.into(),
+            (realized as u32).to_le_bytes().to_vec(),
+        );
+
+        let order = |runner: &HoloRunner, named: &HashMap<String, Vec<u8>>| -> Vec<Vec<u8>> {
+            runner
+                .input_port_info()
+                .iter()
+                .map(|p| {
+                    named
+                        .get(&p.name)
+                        .unwrap_or_else(|| panic!("no test data for input port `{}`", p.name))
+                        .clone()
+                })
+                .collect()
+        };
+
+        // Walk 1: carry = false — the first decode step (host K/V is the truth).
+        let bufs1 = order(&runner, &named);
+        let refs1: Vec<&[u8]> = bufs1.iter().map(|b| b.as_slice()).collect();
+        runner
+            .execute_kv_resident(&refs1, false)
+            .expect("walk 1 (carry=false) executes in-wasm");
+        assert!(
+            runner.has_kv_carry(),
+            "walk 1 must leave a resident K/V carry"
+        );
+
+        // Walk 2: carry = true — releases the retained cache label so κ120 MOVES
+        // in place and κ119 reads the carried past by label. THE deployed step.
+        let bufs2 = order(&runner, &named);
+        let refs2: Vec<&[u8]> = bufs2.iter().map(|b| b.as_slice()).collect();
+        let out2 = runner
+            .execute_kv_resident(&refs2, true)
+            .expect("walk 2 (carry=true) executes in-wasm — the deployed trap step");
+        let attn2 = out2
+            .iter()
+            .flatten()
+            .next()
+            .expect("walk 2 yields the attention output");
+        let vals: Vec<f32> = attn2
+            .bytes
+            .chunks_exact(4)
+            .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+            .collect();
+        assert!(
+            !vals.is_empty() && vals.iter().all(|x| x.is_finite()),
+            "head_dim {dh}: fused resident-KV carry (walk 2, the in-place move) is finite in wasm — no trap"
+        );
+    }
+
+    /// REPRO B — the resident-KV carry/steal path in-wasm, at head_dim 16 then
+    /// the production head_dim 128. The console marker pins which head_dim a
+    /// trap lands on. Native `decode_family_coverage` drives this exact carry
+    /// (int8, staged, evicted) and PASSES — so a trap here is wasm-specific.
+    #[wasm_bindgen_test]
+    fn fused_resident_carry_two_walks_in_wasm() {
+        fused_resident_two_walks(4, 2, 16, 6);
+        web_sys::console::log_1(&JsValue::from_str(
+            "REPRO: resident-KV carry (2 walks) head_dim 16 — OK in wasm",
+        ));
+        fused_resident_two_walks(4, 2, 128, 8);
+        web_sys::console::log_1(&JsValue::from_str(
+            "REPRO: resident-KV carry (2 walks) head_dim 128 — OK in wasm",
+        ));
+    }
+
+    /// Guard: the browser (wasm) MUST ship the legacy decode decomposition, not
+    /// the fused resident-KV path that traps `unreachable` on the deployed
+    /// model's staged carry-across-eviction step. This locks the mitigation in
+    /// place until the substrate's wasm staged-carry path is fixed and verified
+    /// — flipping the gate back on for wasm turns this red before it can deploy.
+    #[wasm_bindgen_test]
+    fn browser_ships_legacy_decode_not_the_trapping_fused_path() {
+        assert!(
+            !hologram_ai_safetensors::parametric::fused_resident_decode_enabled(),
+            "the wasm build must NOT compile the fused resident-KV decode — it \
+             traps `unreachable` on the deployed model's staged carry-across-\
+             eviction step (docs/notes/upstream-issue-v090-wasm-decode-unreachable.md)"
+        );
+    }
 }
 
 #[cfg(test)]
