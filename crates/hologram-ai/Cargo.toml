@@ -1,0 +1,16 @@
+[package]
+name        = "hologram-ai"
+description = "Production Rust API: compile Hugging Face or local model sources through uor-r4 into .holo InferenceModel layers and serve deterministic R4G1 inference."
+version.workspace     = true
+edition.workspace     = true
+rust-version.workspace = true
+license.workspace     = true
+repository.workspace  = true
+
+[dependencies]
+hologram-ai-core       = { workspace = true, features = ["std"] }
+hologram-ai-bundle     = { workspace = true, features = ["std"] }
+hologram-ai-r4         = { workspace = true }
+hologram-ai-huggingface = { workspace = true }
+hologram-archive       = { workspace = true }
+hologram-space         = { workspace = true }

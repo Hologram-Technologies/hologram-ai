@@ -1,132 +1,43 @@
 [workspace]
 resolver = "2"
 members = [
-    "crates/*",
-    "xtask",
+    "crates/hologram-ai-core",
+    "crates/hologram-ai-bundle",
+    "crates/hologram-ai-r4",
+    "crates/hologram-ai-huggingface",
+    "crates/hologram-ai",
 ]
 
 [workspace.package]
 version     = "0.1.0"
 edition     = "2021"
+rust-version = "1.85"
 license     = "MIT OR Apache-2.0"
-repository  = "https://github.com/uor-framework/hologram-ai"
+repository  = "https://github.com/Hologram-Technologies/hologram-ai"
 
 [workspace.dependencies]
-# hologram is UOR-native: there is no umbrella `hologram` crate anymore.
-# Consumers depend on the individual member crates, pinned together to one
-# Hologram-Technologies/hologram revision.
-#
-# Pinned to substrate **v0.10.0** by explicit rev `47a4955` (annotated tag
-# `v0.10.0^{}` on Hologram-Technologies/hologram). Pin by REV not `tag =`: a
-# `tag =` pin re-resolves against the local git db, and a STALE db silently
-# locked the WRONG commit once (18f553d, an ancestor of v0.8.1 with no prefill
-# pooling). An explicit rev is unambiguous and cannot mis-resolve.
-# v0.9.0 landed the fused, pooled, KV-cache-aware masked DECODE ATTENTION (κ119) +
-# the resident-KV `KvCacheWrite` κ-move (κ120) + κ-leases — the fix for the three
-# long-context decode ceilings hologram-ai measured (ADR-0019: the recopy, the
-# per-token BLAKE3 re-hash, and the mask). **v0.10.0** fixes the v0.9.0 wasm decode
-# trap: the fused path's staged carry-across-eviction step traps `unreachable` on
-# wasm32 at production head_dim (the deployed regression — see
-# docs/notes/upstream-issue-v090-wasm-decode-unreachable.md), so the browser now
-# ships the fused decode on ALL targets. Advance all crates together.
-# Runtime-core crates (types/ops/graph) are no_std-capable (default = []).
-#
-# The host-shell stack (compiler/exec/archive/backend/host) is pinned
-# `default-features = false` so its `std` is OPT-IN, re-enabled by the default-on
-# `std` feature on `hologram-ai` / `hologram-ai-common` (native lib/CLI/benches
-# unchanged). The `hologram-ai-wasm` browser build omits `std`, resolving the
-# stack no_std — which is what makes `hologram-backend` compile its `Atomics.wait`
-# embedder-pool futex (multi-threaded decode) instead of the busy-spin std path.
-# A member-level `default-features = false` on a workspace-inherited dep is
-# ignored by Cargo, so the flag MUST live here. See ADR-0018.
-hologram-types    = { git = "https://github.com/Hologram-Technologies/hologram.git", rev = "47a4955611f79c586380ad73b92f2958a81ad00f" }
-hologram-ops      = { git = "https://github.com/Hologram-Technologies/hologram.git", rev = "47a4955611f79c586380ad73b92f2958a81ad00f" }
-hologram-graph    = { git = "https://github.com/Hologram-Technologies/hologram.git", rev = "47a4955611f79c586380ad73b92f2958a81ad00f" }
-hologram-compiler = { git = "https://github.com/Hologram-Technologies/hologram.git", rev = "47a4955611f79c586380ad73b92f2958a81ad00f", default-features = false }
-# `parallel` (rayon) is NOT pinned here — it cannot run on wasm32 (no threads).
-# It is an opt-in feature, enabled by default for native consumers (the
-# `hologram-ai` lib/CLI) via their own `parallel` feature, and left off for the
-# `hologram-ai-wasm` browser build. See ADR-0017.
-hologram-exec     = { git = "https://github.com/Hologram-Technologies/hologram.git", rev = "47a4955611f79c586380ad73b92f2958a81ad00f", default-features = false }
-hologram-archive  = { git = "https://github.com/Hologram-Technologies/hologram.git", rev = "47a4955611f79c586380ad73b92f2958a81ad00f", default-features = false, features = ["model-formats"] }
-hologram-backend  = { git = "https://github.com/Hologram-Technologies/hologram.git", rev = "47a4955611f79c586380ad73b92f2958a81ad00f", default-features = false, features = ["cpu"] }
-hologram-host     = { git = "https://github.com/Hologram-Technologies/hologram.git", rev = "47a4955611f79c586380ad73b92f2958a81ad00f", default-features = false }
-holospaces        = { git = "https://github.com/Hologram-Technologies/holospaces.git", branch = "main" }
+# ── Internal ────────────────────────────────────────────────────────────────
+hologram-ai-core       = { path = "crates/hologram-ai-core", default-features = false }
+hologram-ai-bundle     = { path = "crates/hologram-ai-bundle", default-features = false }
+hologram-ai-r4         = { path = "crates/hologram-ai-r4" }
+hologram-ai-huggingface = { path = "crates/hologram-ai-huggingface" }
 
-# workspace-internal
-hologram-ai-quant  = { path = "crates/hologram-ai-quant" }
-# `default-features = false` (its default is `std`): keeps the substrate `std`
-# forwarding opt-in so the wasm graph (onnx/safetensors/tokenizer/wasm all pull
-# this crate) resolves no_std; native re-enables via `hologram-ai/std`. ADR-0018.
-hologram-ai-common = { path = "crates/hologram-ai-common", default-features = false }
-hologram-ai-onnx   = { path = "crates/hologram-ai-onnx" }
-hologram-ai-tokenizer = { path = "crates/hologram-ai-tokenizer" }
-hologram-ai-safetensors = { path = "crates/hologram-ai-safetensors" }
-hologram-ai-core   = { path = "crates/hologram-ai-core" }
-hologram-ai-model  = { path = "crates/hologram-ai-model" }
+# ── hologram (`.holo` container + layer model) ─────────────────────────────
+# Pinned base: Hologram-Technologies/hologram @ 94ecb886811115491a77c8229e494965bea03fc2
+# plus the PR-ready branch `feature/inference-model-layer` (.holo v4 +
+# LayerKind::InferenceModel). Path deps until that PR merges upstream; then
+# replace with: { git = "https://github.com/Hologram-Technologies/hologram.git", rev = "<merge-sha>" }.
+# See docs/upstream/hologram-contract.md.
+hologram-archive = { path = "../hologram-im/crates/hologram-archive" }
+hologram-space   = { path = "../hologram-im/crates/hologram-space" }
 
-criterion     = { version = "0.5", features = ["html_reports"] }
+# ── uor-r4 (compiler + R4G1 runtime) ────────────────────────────────────────
+# Pinned base: UOR-Foundation/uor-r4 @ f1b4859e65363eda9aa7dbeb0db467d93c8f4b02
+# plus the PR-ready branch `feature/typed-integration-facade` (crate uor-r4-api).
+# Path dep until that PR merges upstream; then replace with:
+# { git = "https://github.com/UOR-Foundation/uor-r4.git", rev = "<merge-sha>" }.
+# See docs/upstream/uor-r4-contract.md. Wired in Phase 4 (hologram-ai-r4).
+#uor-r4-api = { path = "../uor-r4-facade/crates/uor-r4-api" }
 
-# third-party
-anyhow        = "1"
-thiserror     = "2"
-half          = { version = "2", features = ["std"] }
-smallvec      = { version = "1", features = ["union"] }
-bytes         = "1"
-memmap2       = "0.9"
-bytemuck      = { version = "1", features = ["derive"] }
-indexmap      = { version = "2", features = ["serde"] }
-serde         = { version = "1", features = ["derive"] }
-serde_json    = "1"
-toml          = "0.8"
-tracing       = "0.1"
-futures       = "0.3"
-approx        = "0.5"
-clap          = { version = "4", features = ["derive"] }
-prost         = "0.13"
-reqwest       = { version = "0.12", features = ["json", "stream", "rustls-tls"], default-features = false }
-indicatif     = "0.17"
-tokio         = { version = "1", features = ["rt-multi-thread", "fs", "io-util", "time"] }
-tempfile      = "3"
-sha2          = "0.10"
-dirs          = "5"
-which         = "7"
-rayon         = "1"
-rkyv          = "0.8"
-blake3        = "1"
-parking_lot   = "0.12"
-
-# Keep debug symbols but optimize enough for usable LLM inference (~10-50x faster).
-[profile.dev]
-opt-level = 2
-
-# Release: full optimization with thin LTO and single codegen unit.
-# codegen-units = 1 yields 10-20% for compute-bound workloads.
-# Whole-program (fat) LTO adds cross-crate inlining (benefits hologram base kernels).
-#
-# `lto = "thin"` here was BOTH incoherent and broken. Incoherent: with a single
-# codegen unit there is nothing for ThinLTO to thin — its whole design is to
-# parallelize across many units. Broken: `thin` + `codegen-units = 1` drops a
-# generic instantiation of std's own vendored hashbrown, and the release link of
-# `real_model_generation` fails with
-#
-#   rust-lld: error: undefined symbol:
-#     <hashbrown::raw::RawTable<(String, ())>>::reserve_rehash::<…>
-#     >>> referenced by hologram_ai … HashMap<String, (), RandomState>::insert
-#
-# `hologram-ai` has no hashbrown dependency; it calls `std::collections::HashSet
-# <String>::insert`. Reproduced from a cold build on rustc 1.95.0 AND 1.97.0, so
-# it is not toolchain drift. Bisected: `lto = "off"` links, `thin` +
-# `codegen-units = 16` links, and `fat` + `codegen-units = 1` links — the last
-# preserves the whole-program optimization the benchmark numbers were measured
-# under, so it is the one taken.
-#
-# This sank the nightly Architecture Regression Matrix from 2026-06-22 until
-# 2026-07-10 — 20+ consecutive red runs, live SmolLM2 + Qwen2.5 coverage dark —
-# while `ci` stayed green. It flipped mid-stream on an UNCHANGED commit
-# (b10a544 green 06-21, red 06-22, same rustc 1.96.0), because
-# `Swatinem/rust-cache` was restoring an already-linked test binary. The link
-# failure predated the flip; the cache merely hid it.
-[profile.release]
-lto = "fat"
-codegen-units = 1
+# ── Third-party ─────────────────────────────────────────────────────────────
+blake3 = "1"

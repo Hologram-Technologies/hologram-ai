@@ -1,0 +1,16 @@
+[package]
+name        = "hologram-ai-bundle"
+description = "Deterministic R4 inference bundle (schema v1) encoder, parser, and validation."
+version.workspace     = true
+edition.workspace     = true
+rust-version.workspace = true
+license.workspace     = true
+repository.workspace  = true
+
+[features]
+default = ["std"]
+std = ["hologram-ai-core/std"]
+
+[dependencies]
+hologram-ai-core = { workspace = true }
+blake3 = { workspace = true }

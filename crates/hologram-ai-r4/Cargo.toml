@@ -1,0 +1,12 @@
+[package]
+name        = "hologram-ai-r4"
+description = "Private uor-r4 compiler/runtime adapter for hologram-ai (typed boundaries only)."
+version.workspace     = true
+edition.workspace     = true
+rust-version.workspace = true
+license.workspace     = true
+repository.workspace  = true
+
+[dependencies]
+hologram-ai-core   = { workspace = true, features = ["std"] }
+hologram-ai-bundle = { workspace = true, features = ["std"] }
