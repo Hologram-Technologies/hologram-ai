@@ -16,6 +16,28 @@ no GPU backend, no ONNX/ORT, no external inference provider, no runtime
 network access — and no tensor-plan fallback. See
 [ADR-0002](docs/adrs/0002-r4g1-only-inference.md).
 
+## Status
+
+This is a clean-break rewrite; the previous tensor/ONNX compiler has been
+removed. The end-to-end flow is verified on a real model:
+`HuggingFaceTB/SmolLM2-135M-Instruct` compiles through uor-r4 into a
+self-contained `.holo` and runs R4G1 generation through the official Hologram
+loader (`engine = uor-r4`, `artifact_format = R4G1`). `cargo fmt`, `clippy
+-D warnings`, the workspace test suite, the hermetic end-to-end fixture, and
+the zero-allocation steady-state census all pass.
+
+It lands as three coordinated pull requests and depends on two **minimal,
+additive** upstream patches (contracts under [`docs/upstream/`](docs/upstream/)):
+
+- [`uor-r4`](https://github.com/UOR-Foundation/uor-r4) — a typed `uor-r4-api`
+  integration crate.
+- [`hologram`](https://github.com/Hologram-Technologies/hologram) — `.holo` v4
+  plus the `InferenceModel` layer kind.
+
+Until those merge, the workspace pins them by git revision. Native macOS/Linux
+Rust is exercised today; the `hologram ai` CLI and the Python / TypeScript SDKs
+activate once the upstream FFI/SDK patch lands (see **Platform support** below).
+
 ## How it works
 
 ```text
@@ -44,6 +66,7 @@ let compiled = hologram_ai::Compiler::builder()
     .entry("ai.default")
     .cache_dir(".cache/hf")
     .work_dir(".cache/work")
+    .build()?
     .compile_to_path("model.holo")?;
 
 // Load, discover, select, and run.
