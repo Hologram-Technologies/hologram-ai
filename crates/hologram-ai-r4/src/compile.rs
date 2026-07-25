@@ -62,7 +62,16 @@ pub struct CompileOptions {
     pub regions_budget: Option<usize>,
     /// Cover induction memory budget override (MiB).
     pub memory_budget_mb: Option<u64>,
+    /// Maximum number of automatic resumes of an incomplete teacher corpus
+    /// (`None` = [`DEFAULT_MAX_RESUMES`]). Resuming re-invokes the upstream
+    /// compile against the same work directory, which continues from its
+    /// own checkpoint; it does not affect artifact bytes, so this field is
+    /// deliberately excluded from [`CompileOptions::canonical_digest`].
+    pub max_resumes: Option<u32>,
 }
+
+/// Default bound on automatic corpus-completion resumes per compile call.
+pub const DEFAULT_MAX_RESUMES: u32 = 8;
 
 impl CompileOptions {
     /// Convert to the upstream facade options: upstream defaults, patched
@@ -131,9 +140,10 @@ impl CompileOptions {
 ///   so an in-flight stage runs to its next progress report; a cancelled
 ///   run is then reported as [`ErrorCategory::Cancelled`] and its
 ///   outputs discarded).
-/// - An incomplete teacher corpus is [`ErrorCategory::Compile`] with the
-///   upstream resume hint in the message: re-run with the same
-///   `work_dir` to resume from the checkpoint.
+/// - An incomplete teacher corpus is automatically resumed against the
+///   same `work_dir` (bounded by `max_resumes`, default
+///   [`DEFAULT_MAX_RESUMES`]); exceeding the bound is
+///   [`ErrorCategory::Compile`] with the upstream resume hint.
 /// - On completion, assembles the deterministic bundle: uor-r4/R4G1
 ///   mandatory components, normalized R4 default status policy, ABI
 ///   versions from the facade, and provenance from `identity`,
@@ -160,37 +170,49 @@ pub fn compile_source_to_bundle(
         work_dir: work_dir.to_path_buf(),
         options: options.to_upstream(),
     };
-    let outcome = uor_r4_api::compile(&request, &mut |event: uor_r4_api::ProgressEvent| {
-        // Progress events bracket every stage boundary, so this is the
-        // adapter's cooperative cancellation checkpoint mid-compile.
-        if cancellation.is_cancelled() {
-            cancelled = true;
-        }
-        progress.on_progress(ProgressEvent {
-            stage: stage_name(event.stage).to_owned(),
-            percent: Some(event.percent),
-            detail: event.label.to_owned(),
-        });
-    })
-    .map_err(map_compile_error)?;
+    let max_resumes = options.max_resumes.unwrap_or(DEFAULT_MAX_RESUMES);
+    let mut attempt = 0u32;
+    let model = loop {
+        let outcome = uor_r4_api::compile(&request, &mut |event: uor_r4_api::ProgressEvent| {
+            // Progress events bracket every stage boundary, so this is the
+            // adapter's cooperative cancellation checkpoint mid-compile.
+            if cancellation.is_cancelled() {
+                cancelled = true;
+            }
+            progress.on_progress(ProgressEvent {
+                stage: stage_name(event.stage).to_owned(),
+                percent: Some(event.percent),
+                detail: event.label.to_owned(),
+            });
+        })
+        .map_err(map_compile_error)?;
 
-    if cancelled || cancellation.is_cancelled() {
-        return Err(AiError::cancelled(
-            "compile cancelled; partial outputs remain in the work directory",
-        ));
-    }
-
-    let model = match outcome {
-        uor_r4_api::CompileOutcome::Complete(model) => model,
-        uor_r4_api::CompileOutcome::Incomplete { resume_hint } => {
-            return Err(AiError::new(
-                ErrorCategory::Compile,
-                format!(
-                    "compile incomplete: {} (work dir: {})",
-                    resume_hint.detail,
-                    resume_hint.work_dir.display()
-                ),
+        if cancelled || cancellation.is_cancelled() {
+            return Err(AiError::cancelled(
+                "compile cancelled; partial outputs remain in the work directory",
             ));
+        }
+
+        match outcome {
+            uor_r4_api::CompileOutcome::Complete(model) => break model,
+            uor_r4_api::CompileOutcome::Incomplete { resume_hint } => {
+                attempt += 1;
+                if attempt > max_resumes {
+                    return Err(AiError::new(
+                        ErrorCategory::Compile,
+                        format!(
+                            "compile incomplete after {max_resumes} resumes: {} (work dir: {})",
+                            resume_hint.detail,
+                            resume_hint.work_dir.display()
+                        ),
+                    ));
+                }
+                progress.on_progress(ProgressEvent {
+                    stage: "observe".into(),
+                    percent: None,
+                    detail: format!("resuming incomplete corpus (attempt {attempt})"),
+                });
+            }
         }
     };
 

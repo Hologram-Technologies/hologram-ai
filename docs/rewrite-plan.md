@@ -14,8 +14,10 @@ Supersedes every pre-rewrite architecture document (moved to `docs/archive/`).
 Upstream patches are developed in sibling worktrees (PR-ready branches, not yet
 merged upstream):
 
-- `../uor-r4-facade` — branch `feature/typed-integration-facade` (off `f1b4859`)
-- `../hologram-im` — branch `feature/inference-model-layer` (off `94ecb88`)
+- `../uor-r4-facade` — branch `feature/typed-integration-facade`, tip
+  `384a0e9` (off `f1b4859`)
+- `../hologram-im` — branch `feature/inference-model-layer`, tip `fdd1190`
+  (off `94ecb88`)
 
 Until those PRs merge, this workspace depends on them by **path** (see root
 `Cargo.toml`); the `Cargo.toml` comments name the exact git revs to substitute.
@@ -244,3 +246,16 @@ before engine init, capability⇔processor consistency.
 - uor-r4's deployed scorer (`GraphScorer`) is std-only today; zero-alloc
   guarantees are asserted at the `R4Engine` step boundary, inherited from
   uor-r4's own contract checks.
+- Generation delegates to upstream `R4Engine::generate_into`: stream events
+  are emitted as a post-run batch, and session cancellation is honored at
+  run entry, not between generation steps (upstream exports no mid-run
+  hook; duplicating its policy loop would fork the algorithm — ADR-0001).
+  Compile cancellation IS honored between stages.
+- Hugging Face branch/tag resolution (`Revision::Resolve`) recovers the
+  resolved commit from `hf` download metadata; when unavailable it fails
+  with guidance to pin. Only full-SHA pinning carries the complete
+  immutability guarantee.
+- The `hologram ai` CLI group and FFI surface are written and verified
+  against a documented stub on the hologram side; enabling them requires
+  uncommenting one dependency line per crate (see
+  docs/upstream/hologram-contract.md) until hologram-ai is pinned by rev.

@@ -44,8 +44,8 @@ jobs:
           # patch-ready diffs mirrored under docs/upstream/patches/.
           mv hologram-im ../hologram-im
           mv uor-r4-facade ../uor-r4-facade
-          git -C ../hologram-im apply docs/upstream/patches/hologram-inference-model.patch 2>/dev/null || true
-          git -C ../uor-r4-facade apply docs/upstream/patches/uor-r4-typed-facade.patch 2>/dev/null || true
+          git -C ../hologram-im apply "$PWD/docs/upstream/patches/hologram-inference-model.patch"
+          git -C ../uor-r4-facade apply "$PWD/docs/upstream/patches/uor-r4-typed-facade.patch"
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
       - run: cargo test --workspace --all-features

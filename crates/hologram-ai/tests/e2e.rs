@@ -70,6 +70,9 @@ fn fixture_compile_to_inference() {
 
     // Session: R4G1 prediction and deterministic generation.
     let model = app.model("ai.default").unwrap();
+    // Persist the bundle for the allocation-census test
+    // (HOLOGRAM_AI_R4_FIXTURE_BUNDLE).
+    std::fs::write(work.join("fixture.r4bundle"), model.bundle_bytes()).unwrap();
     let mut session = model.session().unwrap();
 
     let completion = session

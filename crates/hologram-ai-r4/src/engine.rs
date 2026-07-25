@@ -248,15 +248,12 @@ impl Engine {
         };
         let mapped_status = status.status.map(map_status);
 
-        // Post-run event batch (may allocate inside the sink or in the
-        // Text payload; the steady-state loop above is the counted path).
+        // Post-run event batch — non-allocating events only. Text decoding
+        // allocates and therefore lives in the facade's convenience layer
+        // (ADR-0009): this path must stay allocation-free even though the
+        // batch runs after the upstream loop.
         for &token in &output_tokens[..status.count] {
             events.on_event(StreamEvent::Token(token));
-        }
-        if self.has_tokenizer && status.count > 0 {
-            if let Ok(text) = self.decode_tokens(&output_tokens[..status.count]) {
-                events.on_event(StreamEvent::Text(text));
-            }
         }
         if let Some(status) = mapped_status {
             events.on_event(StreamEvent::Status(status));

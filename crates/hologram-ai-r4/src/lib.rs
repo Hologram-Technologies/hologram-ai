@@ -49,5 +49,8 @@
 pub mod compile;
 pub mod engine;
 
-pub use compile::{compile_source_to_bundle, CompileOptions, SourceIdentity, COMPILER_REVISION};
+pub use compile::{
+    compile_source_to_bundle, CompileOptions, SourceIdentity, COMPILER_REVISION,
+    DEFAULT_MAX_RESUMES,
+};
 pub use engine::{Engine, FinishInfo, PredictOutcome, Prediction};

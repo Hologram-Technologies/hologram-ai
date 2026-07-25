@@ -1,8 +1,10 @@
 # Upstream contract: uor-r4
 
 Base revision: `f1b4859e65363eda9aa7dbeb0db467d93c8f4b02` (UOR-Foundation/uor-r4 main)
-Patch branch: `feature/typed-integration-facade` (worktree `../uor-r4-facade`)
-Status: PR-ready branch in progress; hologram-ai consumes it by path until merged.
+Patch branch: `feature/typed-integration-facade`, tip `384a0e9` (worktree `../uor-r4-facade`)
+Status: implemented and gate-green; consumed by path until merged upstream.
+Patch-ready diff: `docs/upstream/patches/uor-r4-typed-facade.patch` (verified
+to apply cleanly against the base revision).
 
 ## What hologram-ai needs (and why)
 
@@ -67,7 +69,8 @@ Semantics hologram-ai relies on:
   no `unwrap`/`expect` on recoverable paths;
 - deterministic outputs: no HashMap-order, clock, or RNG dependence.
 
-## Currently missing upstream (gaps this patch closes)
+## Previously missing upstream (gaps this patch closes — all delivered in
+## `384a0e9`)
 
 1. Typed compile request/response (today: three CLI-shaped stages taking
    `&[String]`, `Result<(), String>`, conventional filenames; resumability

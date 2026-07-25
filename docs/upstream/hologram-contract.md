@@ -1,8 +1,11 @@
 # Upstream contract: hologram
 
 Base revision: `94ecb886811115491a77c8229e494965bea03fc2` (Hologram-Technologies/hologram main, v0.12.1+46)
-Patch branch: `feature/inference-model-layer` (worktree `../hologram-im`)
-Status: PR-ready branch in progress; hologram-ai consumes it by path until merged.
+Patch branch: `feature/inference-model-layer`, tip `fdd1190` (worktree `../hologram-im`)
+Status: implemented and gate-green (default build); consumed by path until
+merged upstream. Patch-ready diff:
+`docs/upstream/patches/hologram-inference-model.patch` (verified to apply
+cleanly against the base revision).
 
 ## What hologram-ai needs (and why)
 
