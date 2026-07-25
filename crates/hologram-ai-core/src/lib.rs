@@ -9,3 +9,23 @@
 #![forbid(unsafe_code)]
 
 extern crate alloc;
+
+pub mod canon;
+pub mod error;
+pub mod inference;
+pub mod manifest;
+pub mod progress;
+pub mod value;
+
+pub use error::{AiError, AiResult, ErrorCategory};
+pub use inference::{
+    EventSink, FinishReason, InferenceCompletion, InferenceOutput, InferenceRequest,
+    InferenceRequestBuilder, NullEventSink, ResolutionStatus, StreamEvent, Witness,
+};
+pub use manifest::{
+    AbiVersions, ArtifactDescriptor, ArtifactRole, InferenceModelManifest, ModelProvenance,
+    OperationDescriptor, StatusPolicy, ARTIFACT_FORMAT_R4G1, ENGINE_UOR_R4,
+    MANIFEST_SCHEMA_VERSION,
+};
+pub use progress::{CancellationToken, NullProgressSink, ProgressEvent, ProgressSink};
+pub use value::{MediaData, Payload, Value, ValueDescriptor, ValueKind};
