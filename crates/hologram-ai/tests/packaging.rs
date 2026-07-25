@@ -31,9 +31,9 @@ fn text_generate_op() -> OperationDescriptor {
 /// A schema-valid text-model bundle with dummy component payloads (bundle
 /// validation checks roles/digests/consistency, not graph semantics).
 fn text_model_bundle(name: &str) -> Vec<u8> {
-    let mut b = BundleBuilder::new(ENGINE_UOR_R4, ARTIFACT_FORMAT_R4G1, name);
-    b.set_operations(vec![text_generate_op()]);
-    b.set_status_policy(StatusPolicy::R4_DEFAULT);
+    let mut b = BundleBuilder::new(ENGINE_UOR_R4, ARTIFACT_FORMAT_R4G1, name)
+        .set_operations(vec![text_generate_op()])
+        .set_status_policy(StatusPolicy::R4_DEFAULT);
     b.add_component(ArtifactRole::Graph, b"fake-scored-r4g1-graph")
         .unwrap();
     b.add_component(ArtifactRole::SignatureArtifact, b"fake-signature-artifact")
@@ -105,11 +105,8 @@ fn duplicate_entry_names_are_rejected() {
 
 #[test]
 fn empty_entry_name_is_rejected() {
-    let err = hologram_ai::build_model_archive(&[ModelLayer::uor_r4(
-        "",
-        text_model_bundle("a"),
-    )])
-    .unwrap_err();
+    let err = hologram_ai::build_model_archive(&[ModelLayer::uor_r4("", text_model_bundle("a"))])
+        .unwrap_err();
     assert_eq!(err.category(), ErrorCategory::InvalidArgument);
 }
 
@@ -127,8 +124,7 @@ fn model_layers_can_be_added_to_a_broader_application() {
     // manifest, prepend a wasm layer, set primary = 0.
     let loader = hologram_archive::HoloLoader::from_bytes(&base).unwrap();
     let plan = loader.into_plan().unwrap();
-    let mut manifest =
-        hologram_space::AppManifest::decode(plan.app_manifest().unwrap()).unwrap();
+    let mut manifest = hologram_space::AppManifest::decode(plan.app_manifest().unwrap()).unwrap();
     manifest
         .layers
         .insert(0, hologram_space::Layer::wasm(wasm_kappa, "_start"));
@@ -153,10 +149,12 @@ fn model_layers_can_be_added_to_a_broader_application() {
     assert_eq!(app.models().len(), 2);
     let loader = hologram_archive::HoloLoader::from_bytes(&extended).unwrap();
     let plan = loader.into_plan().unwrap();
-    let manifest =
-        hologram_space::AppManifest::decode(plan.app_manifest().unwrap()).unwrap();
+    let manifest = hologram_space::AppManifest::decode(plan.app_manifest().unwrap()).unwrap();
     assert_eq!(manifest.primary, Some(0));
-    assert_eq!(manifest.layers[0].kind, hologram_space::LayerKind::WasmCodemodule);
+    assert_eq!(
+        manifest.layers[0].kind,
+        hologram_space::LayerKind::WasmCodemodule
+    );
     // Manifest order is initialization order; model entries are unaffected.
     assert_eq!(manifest.layers[1].entry, "ai.default");
     assert_eq!(manifest.layers[2].entry, "ai.fusion");

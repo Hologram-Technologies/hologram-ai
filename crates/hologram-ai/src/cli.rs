@@ -45,15 +45,24 @@ fn run(f: impl FnOnce() -> AiResult<CliOutput>) -> CliOutput {
 pub struct DownloadArgs {
     pub repository: String,
     pub revision: String,
-    pub cache_dir: PathBuf,
     pub offline: bool,
     pub json: bool,
+}
+
+/// The default cache root: `$HOLOGRAM_AI_CACHE_DIR` or `~/.cache/hologram-ai`.
+pub(crate) fn default_cache_dir() -> PathBuf {
+    if let Some(dir) = std::env::var_os("HOLOGRAM_AI_CACHE_DIR") {
+        return PathBuf::from(dir);
+    }
+    let home = std::env::var_os("HOME").unwrap_or_default();
+    PathBuf::from(home).join(".cache/hologram-ai")
 }
 
 /// Download and validate an immutable HF revision. Never compiles.
 pub fn download(args: DownloadArgs) -> CliOutput {
     run(|| {
-        let provider = HuggingFaceProvider::new(&args.cache_dir).with_offline(args.offline);
+        let provider =
+            HuggingFaceProvider::new(default_cache_dir().join("hf")).with_offline(args.offline);
         let request = SourceRequest::hf_repo(
             &args.repository,
             hologram_ai_huggingface::Revision::Pinned(args.revision.clone()),
@@ -79,7 +88,10 @@ pub fn download(args: DownloadArgs) -> CliOutput {
             format!(
                 "downloaded {} @ {}\ncache: {}\nfrom cache: {}",
                 args.repository,
-                acquired.resolved_revision.as_deref().unwrap_or(&args.revision),
+                acquired
+                    .resolved_revision
+                    .as_deref()
+                    .unwrap_or(&args.revision),
                 acquired.source_dir.display(),
                 acquired.from_cache,
             )
@@ -95,9 +107,6 @@ pub struct CompileArgs {
     pub source: Option<PathBuf>,
     pub output: PathBuf,
     pub entry: Option<String>,
-    pub cache_dir: Option<PathBuf>,
-    pub work_dir: Option<PathBuf>,
-    pub offline: bool,
     pub json: bool,
 }
 
@@ -118,20 +127,20 @@ pub fn compile(args: CompileArgs) -> CliOutput {
         };
         let mut builder = Compiler::builder()
             .source(source)
-            .entry(args.entry.clone().unwrap_or_else(|| DEFAULT_ENTRY.into()))
-            .offline(args.offline);
-        if let Some(dir) = &args.cache_dir {
-            builder = builder.cache_dir(dir);
-        }
-        if let Some(dir) = &args.work_dir {
-            builder = builder.work_dir(dir);
+            .entry(args.entry.clone().unwrap_or_else(|| DEFAULT_ENTRY.into()));
+        if args.repository.is_some() {
+            builder = builder.cache_dir(default_cache_dir().join("hf"));
         }
         let compiled = builder.build()?.compile_to_path(&args.output)?;
         let text = if args.json {
             let mut s = String::from("{");
             json_kv(&mut s, "output", &args.output.display().to_string());
             json_kv_sep(&mut s, "entry", &compiled.entry);
-            json_kv_sep(&mut s, "archiveFingerprint", &hex(&compiled.archive_fingerprint));
+            json_kv_sep(
+                &mut s,
+                "archiveFingerprint",
+                &hex(&compiled.archive_fingerprint),
+            );
             if let Some(rev) = &compiled.source_revision {
                 json_kv_sep(&mut s, "sourceRevision", rev);
             }
@@ -155,7 +164,7 @@ pub fn compile(args: CompileArgs) -> CliOutput {
 
 /// `hologram ai inspect <file.holo> [--json]`
 pub struct InspectArgs {
-    pub archive: PathBuf,
+    pub file: PathBuf,
     pub json: bool,
 }
 
@@ -163,7 +172,7 @@ pub struct InspectArgs {
 /// inference engine.
 pub fn inspect(args: InspectArgs) -> CliOutput {
     run(|| {
-        let app = Application::open_path(&args.archive)?;
+        let app = Application::open_path(&args.file)?;
         let mut text = String::new();
         if args.json {
             text.push_str("{\"archiveFingerprint\":\"");
@@ -192,7 +201,11 @@ pub fn inspect(args: InspectArgs) -> CliOutput {
             }
             text.push_str("]}");
         } else {
-            let _ = writeln!(text, "archive fingerprint: {}", hex(&app.archive_fingerprint()));
+            let _ = writeln!(
+                text,
+                "archive fingerprint: {}",
+                hex(&app.archive_fingerprint())
+            );
             let _ = writeln!(text, "model services: {}", app.models().len());
             for m in app.models() {
                 let _ = writeln!(
@@ -203,11 +216,8 @@ pub fn inspect(args: InspectArgs) -> CliOutput {
                     m.manifest().artifact_format
                 );
                 for op in m.operations() {
-                    let modalities: Vec<String> = op
-                        .inputs
-                        .iter()
-                        .map(|v| format!("{:?}", v.kind))
-                        .collect();
+                    let modalities: Vec<String> =
+                        op.inputs.iter().map(|v| format!("{:?}", v.kind)).collect();
                     let _ = writeln!(
                         text,
                         "    op {} [{}] -> streaming {}",
@@ -228,7 +238,7 @@ pub fn inspect(args: InspectArgs) -> CliOutput {
 
 /// `hologram ai infer <file.holo> [--model entry] [--operation op] …`
 pub struct InferArgs {
-    pub archive: PathBuf,
+    pub file: PathBuf,
     pub model: Option<String>,
     pub operation: Option<String>,
     pub prompt: Option<String>,
@@ -239,7 +249,7 @@ pub struct InferArgs {
 /// Run one inference. Never downloads or recompiles.
 pub fn infer(args: InferArgs) -> CliOutput {
     run(|| {
-        let app = Application::open_path(&args.archive)?;
+        let app = Application::open_path(&args.file)?;
         let model = match &args.model {
             Some(entry) => app.model(entry)?,
             None => app.default_model()?,
@@ -258,7 +268,11 @@ pub fn infer(args: InferArgs) -> CliOutput {
         let text = if args.json {
             let mut s = String::from("{");
             json_kv(&mut s, "text", text_out);
-            json_kv_sep(&mut s, "finishReason", finish_reason_name(completion.finish_reason));
+            json_kv_sep(
+                &mut s,
+                "finishReason",
+                finish_reason_name(completion.finish_reason),
+            );
             if let Some(status) = completion.status {
                 json_kv_sep(&mut s, "status", status_name(status));
             }

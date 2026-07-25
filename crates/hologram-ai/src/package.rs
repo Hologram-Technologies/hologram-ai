@@ -5,9 +5,7 @@
 //! the `.holo` wire format by hand.
 
 use hologram_ai_core::{AiError, AiResult, ErrorCategory, ENGINE_UOR_R4};
-use hologram_space::{
-    address_bytes, AppManifest, Capabilities, CapabilitySet, Layer, Realization,
-};
+use hologram_space::{address_bytes, AppManifest, Capabilities, CapabilitySet, Layer, Realization};
 
 /// One model layer to package: a deterministic R4 inference bundle plus its
 /// callable service identity.
@@ -66,7 +64,11 @@ fn build_layers(models: &[ModelLayer]) -> AiResult<Vec<Layer>> {
     for m in models {
         m.validate()?;
         let content = address_bytes(&m.bundle);
-        layers.push(Layer::inference_model(content, m.entry.clone(), m.engine.clone()));
+        layers.push(Layer::inference_model(
+            content,
+            m.entry.clone(),
+            m.engine.clone(),
+        ));
     }
     Ok(layers)
 }
@@ -123,7 +125,12 @@ pub fn build_model_archive(models: &[ModelLayer]) -> AiResult<Vec<u8>> {
     };
     let blobs = models
         .iter()
-        .map(|m| (address_bytes(&m.bundle).as_bytes().to_vec(), m.bundle.clone()))
+        .map(|m| {
+            (
+                address_bytes(&m.bundle).as_bytes().to_vec(),
+                m.bundle.clone(),
+            )
+        })
         .collect();
     assemble(manifest, blobs)
 }
@@ -152,7 +159,10 @@ pub fn add_model_layers(archive: &[u8], models: &[ModelLayer]) -> AiResult<Vec<u
     let new_layers = build_layers(models)?;
     manifest.layers.extend(new_layers);
     for m in models {
-        blobs.push((address_bytes(&m.bundle).as_bytes().to_vec(), m.bundle.clone()));
+        blobs.push((
+            address_bytes(&m.bundle).as_bytes().to_vec(),
+            m.bundle.clone(),
+        ));
     }
     assemble(manifest, blobs)
 }

@@ -11,6 +11,8 @@
 mod application;
 pub mod cli;
 mod compiler;
+pub mod ffi;
+mod json;
 mod model;
 mod package;
 mod session;

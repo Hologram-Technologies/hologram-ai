@@ -7,6 +7,7 @@ use crate::session::Session;
 
 /// A model service selected from an [`crate::Application`]. Holds the
 /// verified bundle bytes; the engine is initialized per [`Session`].
+#[derive(Debug)]
 pub struct Model {
     entry: String,
     engine: String,
@@ -15,11 +16,7 @@ pub struct Model {
 }
 
 impl Model {
-    pub(crate) fn from_bundle(
-        entry: &str,
-        engine: &str,
-        bundle: Vec<u8>,
-    ) -> AiResult<Self> {
+    pub(crate) fn from_bundle(entry: &str, engine: &str, bundle: Vec<u8>) -> AiResult<Self> {
         let parsed = Bundle::parse(&bundle)?;
         Ok(Self {
             entry: entry.into(),

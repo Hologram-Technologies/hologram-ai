@@ -17,12 +17,18 @@ done
 grep -RIn --include=Cargo.toml '^\[\[bin\]\]' crates/ && fail "public binary target found"
 
 # 3. tless_store.bin must never be referenced as a bundle component.
-grep -RIn 'tless_store' crates/ --include='*.rs' \
-    | grep -viE 'never|exclud|forbidden|guard' \
-    && fail "tless_store reference in crate code"
+#    Documentation and exclusion tests may name it; component-assembly code
+#    may not. Only non-comment lines in library src/ count.
+BAD_STORE="$(grep -RIn 'tless_store' crates/*/src --include='*.rs' \
+    | grep -vE ':\s*//|//.*tless_store' \
+    | grep -viE 'never|exclud|forbidden|guard' || true)"
+[ -z "$BAD_STORE" ] || { printf '%s\n' "$BAD_STORE"; fail "tless_store reference in crate code"; }
 
-# 4. uor-r4 types must not leak outside the adapter crate.
-LEAK="$(grep -RIn 'uor_r4' crates/ --include='*.rs' -l | grep -v '^crates/hologram-ai-r4/' || true)"
+# 4. uor-r4 crate types must not leak outside the adapter crate. (Our own
+#    `hologram_ai_r4` crate, the `ModelLayer::uor_r4` constructor, and the
+#    ENGINE_UOR_R4 id string are fine — they name no upstream type.)
+LEAK="$(grep -RInE 'uor_r4_(api|core|graph|model|proof|router)' crates/ --include='*.rs' -l \
+    | grep -v '^crates/hologram-ai-r4/' || true)"
 [ -z "$LEAK" ] || fail "uor-r4 references outside hologram-ai-r4: $LEAK"
 
 # 5. Networking/process execution only in the acquisition crate.

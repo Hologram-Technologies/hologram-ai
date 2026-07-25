@@ -160,7 +160,10 @@ fn discover_models(
             .ok_or_else(|| {
                 AiError::new(
                     ErrorCategory::ArchiveDecode,
-                    format!("model '{}' content blob missing (thin archive)", layer.entry),
+                    format!(
+                        "model '{}' content blob missing (thin archive)",
+                        layer.entry
+                    ),
                 )
             })?;
         let bundle = Bundle::parse(content)?;
@@ -174,7 +177,7 @@ fn discover_models(
     Ok(out)
 }
 
-fn find_blob(archive: &[u8], kappa: &[u8]) -> AiResult<&[u8]> {
+fn find_blob<'a>(archive: &'a [u8], kappa: &[u8]) -> AiResult<&'a [u8]> {
     let loader = hologram_archive::HoloLoader::from_bytes(archive)
         .map_err(|e| AiError::new(ErrorCategory::ArchiveDecode, format!("loader: {e}")))?;
     let plan = loader

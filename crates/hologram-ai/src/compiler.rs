@@ -185,7 +185,11 @@ impl Compiler {
     /// Compile and write exactly one `.holo` to `output` (atomic:
     /// staged write + rename). Returns the compiled model summary.
     pub fn compile_to_path(self, output: impl AsRef<Path>) -> AiResult<CompiledModel> {
-        self.compile_inner(&mut NullProgressSink, &CancellationToken::new(), Some(output.as_ref()))
+        self.compile_inner(
+            &mut NullProgressSink,
+            &CancellationToken::new(),
+            Some(output.as_ref()),
+        )
     }
 
     /// Like [`Compiler::compile_to_path`] with progress and cancellation.

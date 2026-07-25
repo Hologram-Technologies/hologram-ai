@@ -41,7 +41,8 @@
 //! Unknown engine/artifact-format strings are accepted: the uor-r4/R4G1
 //! mandatory-role rules then simply do not apply (capability⇔processor
 //! consistency is engine-agnostic and still enforced). Unknown bundle
-//! schema versions are rejected with [`ErrorCategory::AbiMismatch`].
+//! schema versions are rejected with
+//! [`hologram_ai_core::ErrorCategory::AbiMismatch`].
 
 #![cfg_attr(not(feature = "std"), no_std)]
 #![forbid(unsafe_code)]

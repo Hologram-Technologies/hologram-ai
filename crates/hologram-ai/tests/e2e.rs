@@ -46,22 +46,27 @@ fn fixture_compile_to_inference() {
         .compile_to_path(&output)
         .unwrap();
 
-    assert!(output.exists(), "compile must terminate with a .holo archive");
+    assert!(
+        output.exists(),
+        "compile must terminate with a .holo archive"
+    );
     assert_eq!(compiled.entry, "ai.default");
 
     // Load through the official reader path; inspect without inference.
     let app = hologram_ai::Application::open_path(&output).unwrap();
     assert_eq!(app.models().len(), 1);
     let descriptor = &app.models()[0];
-    assert_eq!(descriptor.engine(), "uor-r4", "the engine must be R4G1/uor-r4");
+    assert_eq!(
+        descriptor.engine(),
+        "uor-r4",
+        "the engine must be R4G1/uor-r4"
+    );
     let manifest = descriptor.manifest();
     assert_eq!(manifest.artifact_format, "R4G1");
-    assert!(
-        manifest
-            .artifacts
-            .iter()
-            .any(|a| a.role == hologram_ai_core::ArtifactRole::Graph)
-    );
+    assert!(manifest
+        .artifacts
+        .iter()
+        .any(|a| a.role == hologram_ai_core::ArtifactRole::Graph));
 
     // Session: R4G1 prediction and deterministic generation.
     let model = app.model("ai.default").unwrap();
@@ -134,7 +139,11 @@ fn compile_emits_only_holo_and_bundle_excludes_tls_store() {
         let model = app.model("ai.default").unwrap();
         let bundle = hologram_ai_bundle::Bundle::parse_verified(model.bundle_bytes()).unwrap();
         for (_, component) in bundle.components() {
-            assert_ne!(component, store_bytes.as_slice(), "tless_store must never ship");
+            assert_ne!(
+                component,
+                store_bytes.as_slice(),
+                "tless_store must never ship"
+            );
         }
     }
 }

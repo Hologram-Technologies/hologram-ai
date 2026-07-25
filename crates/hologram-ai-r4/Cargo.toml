@@ -10,3 +10,9 @@ repository.workspace  = true
 [dependencies]
 hologram-ai-core   = { workspace = true, features = ["std"] }
 hologram-ai-bundle = { workspace = true, features = ["std"] }
+# The ONLY uor-r4 dependency in the workspace (ADR-0001). All
+# current-upstream compatibility shims live behind this crate's narrow
+# public surface; no uor-r4 type appears in a public signature.
+uor-r4-api = { workspace = true }
+blake3     = { workspace = true }
+serde_json = "1.0"
