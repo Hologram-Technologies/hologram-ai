@@ -9,4 +9,4 @@ repository.workspace  = true
 
 [dependencies]
 hologram-ai-core = { workspace = true, features = ["std"] }
-blake3 = { workspace = true }
+blake3 = { workspace = true, features = ["std"] }

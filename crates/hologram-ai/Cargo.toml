@@ -14,3 +14,4 @@ hologram-ai-r4         = { workspace = true }
 hologram-ai-huggingface = { workspace = true }
 hologram-archive       = { workspace = true }
 hologram-space         = { workspace = true }
+blake3                 = { workspace = true, features = ["std"] }
