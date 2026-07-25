@@ -416,6 +416,7 @@ dependencies = [
 [[package]]
 name = "hologram-archive"
 version = "0.12.1"
+source = "git+https://github.com/Hologram-Technologies/hologram.git?rev=fdd119045ab7ef595132b651915b16ed1618039c#fdd119045ab7ef595132b651915b16ed1618039c"
 dependencies = [
  "hashbrown",
  "hologram-compute",
@@ -433,6 +434,7 @@ dependencies = [
 [[package]]
 name = "hologram-compute"
 version = "0.12.1"
+source = "git+https://github.com/Hologram-Technologies/hologram.git?rev=fdd119045ab7ef595132b651915b16ed1618039c#fdd119045ab7ef595132b651915b16ed1618039c"
 dependencies = [
  "bytemuck",
  "hologram-ops",
@@ -449,6 +451,7 @@ dependencies = [
 [[package]]
 name = "hologram-graph"
 version = "0.12.1"
+source = "git+https://github.com/Hologram-Technologies/hologram.git?rev=fdd119045ab7ef595132b651915b16ed1618039c#fdd119045ab7ef595132b651915b16ed1618039c"
 dependencies = [
  "hologram-ops",
  "hologram-types",
@@ -459,6 +462,7 @@ dependencies = [
 [[package]]
 name = "hologram-ops"
 version = "0.12.1"
+source = "git+https://github.com/Hologram-Technologies/hologram.git?rev=fdd119045ab7ef595132b651915b16ed1618039c#fdd119045ab7ef595132b651915b16ed1618039c"
 dependencies = [
  "hologram-types",
  "libm",
@@ -469,6 +473,7 @@ dependencies = [
 [[package]]
 name = "hologram-space"
 version = "0.12.1"
+source = "git+https://github.com/Hologram-Technologies/hologram.git?rev=fdd119045ab7ef595132b651915b16ed1618039c#fdd119045ab7ef595132b651915b16ed1618039c"
 dependencies = [
  "async-trait",
  "hashbrown",
@@ -480,6 +485,7 @@ dependencies = [
 [[package]]
 name = "hologram-types"
 version = "0.12.1"
+source = "git+https://github.com/Hologram-Technologies/hologram.git?rev=fdd119045ab7ef595132b651915b16ed1618039c#fdd119045ab7ef595132b651915b16ed1618039c"
 dependencies = [
  "uor-foundation",
  "uor-foundation-sdk",
@@ -909,6 +915,7 @@ dependencies = [
 [[package]]
 name = "uor-r4-api"
 version = "0.1.0"
+source = "git+https://github.com/UOR-Foundation/uor-r4.git?rev=9e9f0e9fff5efca6d3d18589d7926e4b1bc6d276#9e9f0e9fff5efca6d3d18589d7926e4b1bc6d276"
 dependencies = [
  "blake3",
  "serde_json",
@@ -922,6 +929,7 @@ dependencies = [
 [[package]]
 name = "uor-r4-core"
 version = "0.1.0"
+source = "git+https://github.com/UOR-Foundation/uor-r4.git?rev=9e9f0e9fff5efca6d3d18589d7926e4b1bc6d276#9e9f0e9fff5efca6d3d18589d7926e4b1bc6d276"
 dependencies = [
  "blake3",
  "ciborium",
@@ -937,6 +945,7 @@ dependencies = [
 [[package]]
 name = "uor-r4-graph-certify"
 version = "0.1.0"
+source = "git+https://github.com/UOR-Foundation/uor-r4.git?rev=9e9f0e9fff5efca6d3d18589d7926e4b1bc6d276#9e9f0e9fff5efca6d3d18589d7926e4b1bc6d276"
 dependencies = [
  "blake3",
  "ciborium",
@@ -952,6 +961,7 @@ dependencies = [
 [[package]]
 name = "uor-r4-graph-cli"
 version = "0.1.0"
+source = "git+https://github.com/UOR-Foundation/uor-r4.git?rev=9e9f0e9fff5efca6d3d18589d7926e4b1bc6d276#9e9f0e9fff5efca6d3d18589d7926e4b1bc6d276"
 dependencies = [
  "blake3",
  "serde",
@@ -967,6 +977,7 @@ dependencies = [
 [[package]]
 name = "uor-r4-graph-compiler"
 version = "0.1.0"
+source = "git+https://github.com/UOR-Foundation/uor-r4.git?rev=9e9f0e9fff5efca6d3d18589d7926e4b1bc6d276#9e9f0e9fff5efca6d3d18589d7926e4b1bc6d276"
 dependencies = [
  "blake3",
  "env_logger",
@@ -982,6 +993,7 @@ dependencies = [
 [[package]]
 name = "uor-r4-graph-format"
 version = "0.1.0"
+source = "git+https://github.com/UOR-Foundation/uor-r4.git?rev=9e9f0e9fff5efca6d3d18589d7926e4b1bc6d276#9e9f0e9fff5efca6d3d18589d7926e4b1bc6d276"
 dependencies = [
  "blake3",
  "serde",
@@ -990,6 +1002,7 @@ dependencies = [
 [[package]]
 name = "uor-r4-graph-runtime"
 version = "0.1.0"
+source = "git+https://github.com/UOR-Foundation/uor-r4.git?rev=9e9f0e9fff5efca6d3d18589d7926e4b1bc6d276#9e9f0e9fff5efca6d3d18589d7926e4b1bc6d276"
 dependencies = [
  "uor-r4-graph-format",
 ]
@@ -997,6 +1010,7 @@ dependencies = [
 [[package]]
 name = "uor-r4-model-source"
 version = "0.1.0"
+source = "git+https://github.com/UOR-Foundation/uor-r4.git?rev=9e9f0e9fff5efca6d3d18589d7926e4b1bc6d276#9e9f0e9fff5efca6d3d18589d7926e4b1bc6d276"
 dependencies = [
  "blake3",
  "hex",

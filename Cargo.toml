@@ -25,19 +25,20 @@ hologram-ai-huggingface = { path = "crates/hologram-ai-huggingface" }
 # ── hologram (`.holo` container + layer model) ─────────────────────────────
 # Pinned base: Hologram-Technologies/hologram @ 94ecb886811115491a77c8229e494965bea03fc2
 # plus the PR-ready branch `feature/inference-model-layer` (.holo v4 +
-# LayerKind::InferenceModel). Path deps until that PR merges upstream; then
-# replace with: { git = "https://github.com/Hologram-Technologies/hologram.git", rev = "<merge-sha>" }.
+# LayerKind::InferenceModel) — open as Hologram-Technologies/hologram#97 (CI green).
+# Pinned by rev to that branch tip so the workspace builds without the sibling
+# worktree. AFTER #97 merges, re-pin `rev` to its merge-commit SHA on `main`.
 # See docs/upstream/hologram-contract.md.
-hologram-archive = { path = "../hologram-im/crates/hologram-archive" }
-hologram-space   = { path = "../hologram-im/crates/hologram-space" }
+hologram-archive = { git = "https://github.com/Hologram-Technologies/hologram.git", rev = "fdd119045ab7ef595132b651915b16ed1618039c" }
+hologram-space   = { git = "https://github.com/Hologram-Technologies/hologram.git", rev = "fdd119045ab7ef595132b651915b16ed1618039c" }
 
 # ── uor-r4 (compiler + R4G1 runtime) ────────────────────────────────────────
 # Pinned base: UOR-Foundation/uor-r4 @ f1b4859e65363eda9aa7dbeb0db467d93c8f4b02
-# plus the PR-ready branch `feature/typed-integration-facade` (crate uor-r4-api).
-# Path dep until that PR merges upstream; then replace with:
-# { git = "https://github.com/UOR-Foundation/uor-r4.git", rev = "<merge-sha>" }.
+# plus the PR-ready branch `feature/typed-integration-facade` (crate uor-r4-api)
+# — open as UOR-Foundation/uor-r4#184 (CI green). Pinned by rev to that branch
+# tip. AFTER #184 merges, re-pin `rev` to its merge-commit SHA on `main`.
 # See docs/upstream/uor-r4-contract.md.
-uor-r4-api = { path = "../uor-r4-facade/crates/uor-r4-api" }
+uor-r4-api = { git = "https://github.com/UOR-Foundation/uor-r4.git", rev = "9e9f0e9fff5efca6d3d18589d7926e4b1bc6d276" }
 
 # ── Third-party ─────────────────────────────────────────────────────────────
 # default-features = false keeps blake3 no_std-compatible for the bundle
