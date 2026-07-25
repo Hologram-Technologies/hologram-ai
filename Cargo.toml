@@ -36,8 +36,10 @@ hologram-space   = { path = "../hologram-im/crates/hologram-space" }
 # plus the PR-ready branch `feature/typed-integration-facade` (crate uor-r4-api).
 # Path dep until that PR merges upstream; then replace with:
 # { git = "https://github.com/UOR-Foundation/uor-r4.git", rev = "<merge-sha>" }.
-# See docs/upstream/uor-r4-contract.md. Wired in Phase 4 (hologram-ai-r4).
-#uor-r4-api = { path = "../uor-r4-facade/crates/uor-r4-api" }
+# See docs/upstream/uor-r4-contract.md.
+uor-r4-api = { path = "../uor-r4-facade/crates/uor-r4-api" }
 
 # ── Third-party ─────────────────────────────────────────────────────────────
-blake3 = "1"
+# default-features = false keeps blake3 no_std-compatible for the bundle
+# codec; std crates opt back in with features = ["std"].
+blake3 = { version = "1", default-features = false }
