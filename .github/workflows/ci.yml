@@ -1,8 +1,5 @@
 name: ci
 
-# The V&V gate set — mirrors `just vv` job-for-job (docs/architecture/ARCHITECTURE.md §5).
-# All substrate repos are public: cargo fetches the pinned git deps directly.
-
 on:
   push:
     branches: [main]
@@ -14,205 +11,86 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
-  CARGO_INCREMENTAL: 0
-  RUST_BACKTRACE: 1
 
 jobs:
-  # fmt, lint, docs, the whole test suite (unit + integration + the honesty
-  # meta-gate + the κ-materialization e2e witness), the default-lane BDD run,
-  # oracle integrity, the ledger, and the anti-hardcode gate.
   gate:
+    name: fmt / clippy / tests
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Install protoc
-        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@master
         with:
-          components: rustfmt, clippy
+          toolchain: "1.97.0"
+          components: clippy, rustfmt
       - uses: Swatinem/rust-cache@v2
+      # Upstream patches are consumed by path until their PRs merge; CI
+      # materializes the sibling worktrees at the pinned revisions.
+      - name: Check out hologram (feature/inference-model-layer base)
+        uses: actions/checkout@v4
         with:
-          shared-key: gate
-      - name: fmt
-        run: cargo fmt --all --check
-      - name: clippy
-        run: cargo clippy --workspace --all-targets -- -D warnings
-      - name: doc
-        run: cargo doc --workspace --no-deps
-        env:
-          RUSTDOCFLAGS: -D warnings
-      - name: test (unit + integration + honesty + materialize e2e)
-        run: cargo test --workspace
-      - name: bdd (default lane — fails on any skipped/undefined step)
-        run: cargo test -p hologram-ai-conformance --test bdd
-        env:
-          HOLOGRAM_AI_BDD_LANE: default
-      - name: oracle integrity
-        run: cargo run -q -p xtask -- oracle-verify
-      - name: conformance ledger
-        run: cargo run -q -p xtask -- report
-      - name: anti-hardcode
-        run: ./scripts/anti-hardcode.sh
-
-  # The substrate-contract witnesses in their isolated binaries (ZA needs the
-  # counting allocator to own the process).
-  structural:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - name: Install protoc
-        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+          repository: Hologram-Technologies/hologram
+          ref: 94ecb886811115491a77c8229e494965bea03fc2
+          path: hologram-im
+      - name: Check out uor-r4 (feature/typed-integration-facade base)
+        uses: actions/checkout@v4
         with:
-          shared-key: structural
-      - name: structural witnesses (ZA/ZM/CE/CF/LW/IM)
+          repository: UOR-Foundation/uor-r4
+          ref: f1b4859e65363eda9aa7dbeb0db467d93c8f4b02
+          path: uor-r4-facade
+      - name: Apply upstream patch branches
         run: |
-          cargo test --release -p hologram-ai-conformance --features=structural \
-            --test structural_ce --test structural_za --test structural_zm \
-            --test structural_cf --test structural_lw --test structural_im
+          # The path deps expect ../hologram-im and ../uor-r4-facade relative
+          # to this repo; move the checkouts into place and apply the
+          # patch-ready diffs mirrored under docs/upstream/patches/.
+          mv hologram-im ../hologram-im
+          mv uor-r4-facade ../uor-r4-facade
+          git -C ../hologram-im apply "$PWD/docs/upstream/patches/hologram-inference-model.patch"
+          git -C ../uor-r4-facade apply "$PWD/docs/upstream/patches/uor-r4-typed-facade.patch"
+      - run: cargo fmt --all --check
+      - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+      - run: cargo test --workspace --all-features
 
-  # External-authority execution parity: ONNX Runtime linked as the reference.
-  ort:
+  portable-core:
+    name: wasm32 portable core
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Install protoc
-        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: dtolnay/rust-toolchain@master
         with:
-          shared-key: ort
-      - name: Install ONNX Runtime (pinned v1.18.1)
-        run: |
-          curl -fsSL -o /tmp/ort.tgz \
-            https://github.com/microsoft/onnxruntime/releases/download/v1.18.1/onnxruntime-linux-x64-1.18.1.tgz
-          tar -xzf /tmp/ort.tgz -C /tmp
-          echo "ORT_DYLIB_PATH=/tmp/onnxruntime-linux-x64-1.18.1/lib/libonnxruntime.so" >> "$GITHUB_ENV"
-      - name: bdd (ort lane)
-        run: cargo test -p hologram-ai-conformance --features conformance --test bdd
-        env:
-          HOLOGRAM_AI_BDD_LANE: ort
-      - name: conformance (EE — execution parity vs ORT)
-        run: cargo test --release -p hologram-ai-conformance --features=conformance
-
-  # The runtime core stays no_std-portable; the browser binding builds for wasm.
-  portability:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - name: Install protoc
-        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: wasm32-unknown-unknown, thumbv7em-none-eabi
-      - uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: portability
-      - name: runtime core on wasm32
-        run: |
-          cargo build --target wasm32-unknown-unknown -p hologram-ai-quant
-          cargo build --target wasm32-unknown-unknown -p hologram-ai-tokenizer --no-default-features
-      - name: runtime core on thumbv7em (bare metal)
-        run: |
-          cargo build --target thumbv7em-none-eabi -p hologram-ai-quant
-          cargo build --target thumbv7em-none-eabi -p hologram-ai-tokenizer --no-default-features
-      - name: browser binding on wasm32
-        run: cargo check --target wasm32-unknown-unknown -p hologram-ai-wasm
-
-  # Every pinned upstream is live (online).
-  pin-check:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - name: Install protoc
-        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: gate
-      - name: pin-check
-        run: cargo run -q -p xtask -- pin-check
-
-  # The measured probes for `open` rows — reported, never gating.
-  target-probes:
-    runs-on: ubuntu-latest
-    continue-on-error: true
-    steps:
-      - uses: actions/checkout@v4
-      - name: Install protoc
-        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: gate
-      - name: bdd (target lane — measurements)
-        run: cargo test -p hologram-ai-conformance --test bdd -- --nocapture
-        env:
-          HOLOGRAM_AI_BDD_LANE: target
-
-  # The hermetic browser journey: download → compile → materialize → run →
-  # three-message handshake, in real Chromium. The same job name gates the
-  # Pages deployment (dictionary row `deployment-gate`).
-  journey:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - name: Install protoc
-        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
-      - uses: dtolnay/rust-toolchain@stable
-        with:
+          toolchain: "1.97.0"
           targets: wasm32-unknown-unknown
-      - name: Nightly + rust-src for the multi-threaded wasm build (ADR-0018)
-        run: |
-          rustup toolchain install "$HAI_WASM_THREADS_NIGHTLY" --profile minimal --component rust-src
-          rustup target add wasm32-unknown-unknown --toolchain "$HAI_WASM_THREADS_NIGHTLY"
-        env:
-          HAI_WASM_THREADS_NIGHTLY: nightly-2026-07-09
       - uses: Swatinem/rust-cache@v2
+      - run: cargo check -p hologram-ai-core --no-default-features --target wasm32-unknown-unknown
+      - run: cargo check -p hologram-ai-bundle --no-default-features --target wasm32-unknown-unknown
+
+  dependency-audit:
+    name: no tensor / GPU / runtime-network deps
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
         with:
-          shared-key: journey
-      - name: Install wasm-pack
-        run: curl -fsSL https://rustwasm.github.io/wasm-pack/installer/init.sh | sh
-      - uses: pnpm/action-setup@v4
-        with:
-          version: 10
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: pnpm
-          cache-dependency-path: apps/web/pnpm-lock.yaml
-      - name: Install web deps
-        working-directory: apps/web
-        run: pnpm install --frozen-lockfile
-      - name: Browser decode kernels in-wasm (wasm-pack test --node)
-        # Runs the REAL substrate decode kernels compiled to wasm — the target
-        # the browser ships. `cargo check` (portability job) proves it builds;
-        # this proves it RUNS: the bare κ119/κ120 fused step and the resident-KV
-        # carry/steal at production head_dim 128, plus the guard that the wasm
-        # build ships the legacy (non-trapping) decode. The blind spot that let
-        # the v0.9.0 `unreachable` trap reach production.
-        run: wasm-pack test --node crates/hologram-ai-wasm
-      - name: Build wasm binding (single-threaded fallback)
-        working-directory: apps/web
-        run: pnpm wasm
-      - name: Build wasm binding (multi-threaded pool)
-        working-directory: apps/web
-        run: pnpm wasm:threads
-        env:
-          HAI_WASM_THREADS_NIGHTLY: nightly-2026-07-09
-      - name: Install Chromium
-        working-directory: apps/web
-        run: pnpm exec playwright install --with-deps chromium
-      - name: Web unit tests
-        working-directory: apps/web
-        run: pnpm test
-      - name: Browser BDD (hermetic journey + handshake)
-        working-directory: apps/web
-        run: pnpm bdd
-      - name: Pool registration witness (Node worker_threads)
-        working-directory: apps/web
-        run: node bdd/probe-pool-registration.mjs
-      - name: Multi-threaded pool browser probe (isolated + byte-exact fixture)
-        working-directory: apps/web
-        run: node bdd/probe-threads-local.mjs
+          toolchain: "1.97.0"
+      - uses: Swatinem/rust-cache@v2
+      - name: Forbidden dependency audit
+        run: |
+          set -e
+          TREE="$(cargo tree --workspace --all-features 2>/dev/null || true)"
+          for pat in onnxruntime ort candle tch-src torch cuda cudarc metal wgpu rocm opencl; do
+            if printf '%s' "$TREE" | grep -qi "$pat"; then
+              echo "forbidden dependency pattern in tree: $pat"; exit 1
+            fi
+          done
+      - name: No public binary target
+        run: |
+          ! grep -RIn --include=Cargo.toml '^\[\[bin\]\]' crates/
+      - name: No tless_store in bundles
+        run: |
+          # Real guarantee: the bundle round-trip + exclusion tests (run in the
+          # `fmt / clippy / tests` job). This scan is a belt-and-suspenders on
+          # non-test source; tests legitimately name the file to assert its
+          # exclusion, so they are out of scope, and any remaining mention must
+          # sit on a line that marks it excluded/never-packaged.
+          ! grep -RIn 'tless_store' crates/ --include='*.rs' \
+              | grep -v '/tests/' \
+              | grep -iv 'never\|exclud'

@@ -1,0 +1,2425 @@
+diff --git a/AGENTS.md b/AGENTS.md
+index 7f074ec..b187172 100644
+--- a/AGENTS.md
++++ b/AGENTS.md
+@@ -21,6 +21,7 @@ the wasm dashboard are exploratory and stay out of the graph migration path.
+ - `crates/uor-r4-router` — geometric router + dashboard backend (f64; untouched by the graph plan)
+ - `crates/uor-r4-graph-format` — R4G1 packed artifact format, two-stage validation, borrowed `GraphView`
+ - `crates/uor-r4-proof-model` — executable proof obligations + proof-status matrix
++- `crates/uor-r4-api` — typed compile + engine library façade for downstream consumers (wraps the CLI-shaped stages; see its README)
+ - root package `uor-r4-wasm-router` — façade + `r4` CLI + local server/chat
+ - `docs/` — plan, RFC (`transformerless/R4G1.md`), baseline, threat model, explainers
+ 
+diff --git a/Cargo.lock b/Cargo.lock
+index 7616fea..785e472 100644
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -1654,6 +1654,19 @@ dependencies = [
+  "uor-prism-numerics",
+ ]
+ 
++[[package]]
++name = "uor-r4-api"
++version = "0.1.0"
++dependencies = [
++ "blake3",
++ "serde_json",
++ "uor-r4-core",
++ "uor-r4-graph-certify",
++ "uor-r4-graph-cli",
++ "uor-r4-graph-compiler",
++ "uor-r4-graph-format",
++]
++
+ [[package]]
+ name = "uor-r4-core"
+ version = "0.1.0"
+@@ -1785,6 +1798,7 @@ dependencies = [
+  "uor-foundation 0.5.2 (git+https://github.com/UOR-Foundation/UOR-Framework.git?rev=51c01382200b0179d6640b07e9c8119364ab69a1)",
+  "uor-foundation-sdk 0.5.2 (git+https://github.com/UOR-Foundation/UOR-Framework.git?rev=51c01382200b0179d6640b07e9c8119364ab69a1)",
+  "uor-foundation-verify",
++ "uor-r4-api",
+  "uor-r4-core",
+  "uor-r4-graph-certify",
+  "uor-r4-graph-cli",
+diff --git a/Cargo.toml b/Cargo.toml
+index 1bc55e2..606b063 100644
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -8,6 +8,7 @@ members = [
+     "crates/uor-r4-graph-runtime",
+     "crates/uor-r4-graph-certify",
+     "crates/uor-r4-graph-cli",
++    "crates/uor-r4-api",
+ ]
+ default-members = [
+     ".",
+@@ -56,6 +57,7 @@ uor-r4-model-source = { path = "crates/uor-r4-model-source" }
+ uor-r4-graph-compiler = { path = "crates/uor-r4-graph-compiler" }
+ uor-r4-graph-certify = { path = "crates/uor-r4-graph-certify" }
+ uor-r4-graph-cli = { path = "crates/uor-r4-graph-cli" }
++uor-r4-api = { path = "crates/uor-r4-api" }
+ 
+ [dev-dependencies]
+ uor-foundation-verify = { git = "https://github.com/UOR-Foundation/UOR-Framework.git", rev = "51c01382200b0179d6640b07e9c8119364ab69a1" }
+diff --git a/crates/uor-r4-api/Cargo.toml b/crates/uor-r4-api/Cargo.toml
+new file mode 100644
+index 0000000..3896f62
+--- /dev/null
++++ b/crates/uor-r4-api/Cargo.toml
+@@ -0,0 +1,15 @@
++[package]
++name = "uor-r4-api"
++version = "0.1.0"
++edition = "2021"
++description = "Typed compile and engine APIs over the uor-r4 transformerless graph stack, for library consumers"
++
++[dependencies]
++uor-r4-core = { path = "../uor-r4-core" }
++uor-r4-graph-format = { path = "../uor-r4-graph-format" }
++uor-r4-graph-compiler = { path = "../uor-r4-graph-compiler" }
++uor-r4-graph-certify = { path = "../uor-r4-graph-certify" }
++uor-r4-graph-cli = { path = "../uor-r4-graph-cli" }
++serde_json = "1.0"
++# Pinned to the workspace-wide blake3 version.
++blake3 = "=1.5.0"
+diff --git a/crates/uor-r4-api/README.md b/crates/uor-r4-api/README.md
+new file mode 100644
+index 0000000..c8dccd1
+--- /dev/null
++++ b/crates/uor-r4-api/README.md
+@@ -0,0 +1,61 @@
++# uor-r4-api
++
++Typed library façade over the uor-r4 transformerless graph stack, for
++downstream consumers (e.g. hologram-ai) that embed uor-r4 as a **library**
++rather than driving its CLI.
++
++## What it exposes
++
++- **Typed compile** (`compile::compile`): one call from a verified local
++  Hugging Face-style source directory (`config.json`, `tokenizer.json`,
++  `*.safetensors`) to a `CompiledModel` — the scored deployable R4G1
++  graph, the signature artifact, tokenizer, and both reports, all as
++  owned bytes, plus provenance (options, format/contract versions,
++  blake3 digests). Orchestrates the three existing compiler stages
++  in-process: teacher bundle → multiresolution cover → scoring.
++  Resumable: an incomplete teacher corpus returns
++  `CompileOutcome::Incomplete` and re-calling with the same request
++  resumes from the work-directory checkpoint (detected structurally from
++  the corpus metadata done byte — the same gate the corpus loader
++  applies — never by parsing stage stdout).
++- **Typed engine** (`engine::R4Engine`): loads from byte slices only
++  (`EngineParts`) — no filesystem access. The graph passes the format
++  crate's two-stage structural validation and CID verification before
++  any scorer state is built. The D4 manifest status policy is data
++  (defaults + `score_report.json` override), abstention is a typed
++  outcome (never a fabricated token), and the steady-state
++  predict/generate step is allocation-free (scratch allocated once at
++  `load`). Text helpers (`encode_text_into` / `decode_tokens_into`) ride
++  the same engine via the bytes-based tokenizer.
++- **Tokenizer from bytes** (`Tokenizer::from_bytes`, re-exported from
++  `uor-r4-core`): parses the binary tokenizer.bin format in memory.
++
++## Downstream contract
++
++- Inputs are byte slices exactly as the compiler emitted them; outputs
++  are typed structs/enums with focused error enums (`CompileError`,
++  `LoadError`, `InferenceError`, all `std::error::Error`).
++- `AbiVersion` (`R4Engine::abi_version`) reports the R4G1 format
++  version, the normative inference operation contract version, and this
++  crate's version — pin against it when persisting artifacts.
++- Nothing here changes algorithms, scoring, or the kernel contract; this
++  crate only wraps existing stages and the existing deployed adapter
++  (moved from the root package's `src/r4g1.rs`, which is now a thin
++  path-based wrapper over `engine`).
++
++## Known shim
++
++The stage entry points predate this crate and take CLI flag strings.
++Building those flags from the typed request is a **private, temporary
++compat shim** inside `compile` (the `stage_*_flags` functions); it goes
++away when the stages grow typed entry points. No stage stdout is parsed.
++
++## Testing
++
++Unit tests run with the workspace (`cargo test --workspace --offline`).
++An ignored end-to-end compile + load test exists for local use:
++
++```sh
++UOR_R4_API_E2E_SOURCE=/path/to/local/hf-source \
++  cargo test -p uor-r4-api --release -- --ignored e2e --nocapture
++```
+diff --git a/crates/uor-r4-api/src/compile.rs b/crates/uor-r4-api/src/compile.rs
+new file mode 100644
+index 0000000..29a8461
+--- /dev/null
++++ b/crates/uor-r4-api/src/compile.rs
+@@ -0,0 +1,565 @@
++//! Typed compile API: one call from a verified local teacher source to a
++//! scored deployable R4G1 graph, orchestrating the three existing
++//! compiler stages in-process:
++//!
++//! 1. teacher bundle (`uor-r4-graph-cli::compile_hugging_face_with_progress`)
++//!    — tokenizer export, resumable teacher corpus, table-native
++//!    artifact, graded store, calibration, manifest;
++//! 2. multiresolution cover (`uor-r4-graph-compiler::compile`) —
++//!    `compiled.r4g1` + `compile_report.json`;
++//! 3. scoring (`uor-r4-graph-cli::score_command`) — `score.r4g1` +
++//!    `score_report.json`.
++//!
++//! COMPAT SHIM: the stage entry points predate this crate and take CLI
++//! flag strings. Building those flags from the typed request is the
++//! sanctioned translation layer; it lives entirely in the private
++//! `stage_*_flags` functions below and goes away when the stages grow
++//! typed entry points. No stage stdout is parsed anywhere: the only
++//! resumability signal is the structural corpus-completion check in
++//! [`corpus_complete`], which mirrors the gate the corpus loader
++//! applies (`uor-r4-core`'s `transformerless::compiler::load_corpus_from`).
++//!
++//! All stage I/O stays inside the caller-supplied work directory; the
++//! returned [`CompiledModel`] carries the deployable components as bytes.
++
++use std::fmt;
++use std::path::{Path, PathBuf};
++
++use uor_r4_graph_certify::score::{
++    DEFAULT_EMISSION_ENTRIES, DEFAULT_EXCT_TOP_X, DEFAULT_ROOT_TOP_B,
++    DEFAULT_TRANSITION_OUT_DEGREE, DEFAULT_WITNESS_SAMPLE,
++};
++use uor_r4_graph_compiler::induction::{
++    DEFAULT_DEPTHS, DEFAULT_K0, DEFAULT_MEMORY_BUDGET_MB, DEFAULT_REGIONS_BUDGET,
++};
++use uor_r4_graph_format::{
++    ContractVersion, FORMAT_VERSION_MAJOR, FORMAT_VERSION_MINOR,
++    INFERENCE_OPERATION_CONTRACT_VERSION,
++};
++
++/// Which compiler stage a progress event or failure belongs to.
++#[derive(Debug, Clone, Copy, PartialEq, Eq)]
++pub enum Stage {
++    /// Teacher bundle generation (tokenizer, corpus, artifact, store).
++    TeacherBundle,
++    /// Multiresolution cover induction (`compiled.r4g1`).
++    GraphCover,
++    /// Transition/emission scoring (`score.r4g1`).
++    Scoring,
++}
++
++impl Stage {
++    /// Stable lowercase label for logs and error messages.
++    pub fn label(self) -> &'static str {
++        match self {
++            Stage::TeacherBundle => "teacher-bundle",
++            Stage::GraphCover => "graph-cover",
++            Stage::Scoring => "scoring",
++        }
++    }
++}
++
++impl fmt::Display for Stage {
++    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
++        write!(f, "{}", self.label())
++    }
++}
++
++/// One progress observation. `percent` is stage-local (0–100): the
++/// teacher-bundle stage reports its own coarse phases; the cover and
++/// scoring stages bracket their single call with 0 and 100.
++#[derive(Debug, Clone, Copy, PartialEq, Eq)]
++pub struct ProgressEvent {
++    pub stage: Stage,
++    pub percent: u8,
++    pub label: &'static str,
++}
++
++/// The quality basis declared in the score report. Hugging Face-sourced
++/// builds default to `RelativeTla`: their teacher-generated distributions
++/// are not comparable to the legacy fixture corpus that established the
++/// absolute pinned floor (see `validate_quality_report`).
++#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
++pub enum QualityProfile {
++    /// Absolute pinned floor (legacy fixture corpus basis).
++    Pinned,
++    /// Relative to the TLA baseline of the same teacher (HF builds).
++    #[default]
++    RelativeTla,
++}
++
++impl QualityProfile {
++    fn as_flag(self) -> &'static str {
++        match self {
++            QualityProfile::Pinned => "pinned",
++            QualityProfile::RelativeTla => "relative_tla",
++        }
++    }
++}
++
++/// Scoring-stage knobs; defaults mirror the `score` command's own.
++#[derive(Debug, Clone, Copy, PartialEq, Eq)]
++pub struct ScoringOptions {
++    pub transition_out_degree: usize,
++    pub emission_entries: usize,
++    pub root_top_b: usize,
++    pub exct_top_x: usize,
++    pub witness_sample: usize,
++}
++
++impl Default for ScoringOptions {
++    fn default() -> Self {
++        Self {
++            transition_out_degree: DEFAULT_TRANSITION_OUT_DEGREE,
++            emission_entries: DEFAULT_EMISSION_ENTRIES,
++            root_top_b: DEFAULT_ROOT_TOP_B,
++            exct_top_x: DEFAULT_EXCT_TOP_X,
++            witness_sample: DEFAULT_WITNESS_SAMPLE,
++        }
++    }
++}
++
++/// Knobs for all three stages; defaults mirror the stage commands' own.
++#[derive(Debug, Clone, Copy, PartialEq, Eq)]
++pub struct CompileOptions {
++    /// Teacher-corpus generation budget in wall-clock seconds per run.
++    pub seconds: u64,
++    /// Teacher-corpus target size (records) before the bundle compiles.
++    pub target: usize,
++    /// Oracle sequence length.
++    pub sequence_length: usize,
++    /// Enable the R4 attention variant in the teacher oracle.
++    pub r4_attention: bool,
++    /// Cover depth count.
++    pub depths: usize,
++    /// Cover branching factor.
++    pub k0: usize,
++    /// Cover region budget.
++    pub regions_budget: usize,
++    /// Cover induction memory budget (MiB).
++    pub memory_budget_mb: u64,
++    /// Scoring-stage knobs.
++    pub scoring: ScoringOptions,
++    /// Quality basis declared in the score report.
++    pub quality_profile: QualityProfile,
++}
++
++impl Default for CompileOptions {
++    fn default() -> Self {
++        Self {
++            seconds: 300,
++            target: 20_000,
++            sequence_length: 128,
++            r4_attention: false,
++            depths: DEFAULT_DEPTHS,
++            k0: DEFAULT_K0,
++            regions_budget: DEFAULT_REGIONS_BUDGET,
++            memory_budget_mb: DEFAULT_MEMORY_BUDGET_MB,
++            scoring: ScoringOptions::default(),
++            quality_profile: QualityProfile::default(),
++        }
++    }
++}
++
++/// A typed compile invocation.
++#[derive(Debug, Clone)]
++pub struct CompileRequest {
++    /// Verified local Hugging Face-style source directory (must contain
++    /// `config.json`, `tokenizer.json`, and at least one `*.safetensors`).
++    pub source_dir: PathBuf,
++    /// Private resumable workspace: the corpus, checkpoints, and
++    /// intermediate artifacts live here. Re-running [`compile`] with the
++    /// same request resumes an incomplete corpus.
++    pub work_dir: PathBuf,
++    /// Stage knobs.
++    pub options: CompileOptions,
++}
++
++/// How to resume an incomplete compile.
++#[derive(Debug, Clone, PartialEq, Eq)]
++pub struct ResumeHint {
++    /// The work directory holding the partial corpus.
++    pub work_dir: PathBuf,
++    /// Human-readable resume instruction.
++    pub detail: String,
++}
++
++/// The deployable output of a completed compile: all components as
++/// bytes, with provenance.
++#[derive(Debug, Clone)]
++pub struct CompiledModel {
++    /// Scored deployable R4G1 graph (`score.r4g1` bytes).
++    pub graph: Vec<u8>,
++    /// Teacher artifact bytes the engine derives input signatures from.
++    pub signature_artifact: Vec<u8>,
++    /// Bundle tokenizer bytes (binary tokenizer.bin format).
++    pub tokenizer: Option<Vec<u8>>,
++    /// `score_report.json` bytes.
++    pub score_report: Vec<u8>,
++    /// `compile_report.json` bytes.
++    pub compile_report: Vec<u8>,
++    /// Options + format/contract versions + component digests.
++    pub provenance: CompileProvenance,
++}
++
++/// The result of one [`compile`] call: either the scored graph is ready,
++/// or the teacher corpus is still incomplete and the same request should
++/// be re-run (the corpus checkpoint in the work directory resumes). The
++/// complete model is boxed to keep the enum small.
++#[derive(Debug, Clone)]
++pub enum CompileOutcome {
++    Complete(Box<CompiledModel>),
++    Incomplete { resume_hint: ResumeHint },
++}
++
++/// blake3 digests (`blake3:<hex>`) of the returned components.
++#[derive(Debug, Clone, PartialEq, Eq)]
++pub struct ComponentDigests {
++    pub graph: String,
++    pub signature_artifact: String,
++    pub tokenizer: Option<String>,
++    pub score_report: String,
++    pub compile_report: String,
++}
++
++/// What a completed compile ran with and produced.
++#[derive(Debug, Clone)]
++pub struct CompileProvenance {
++    /// The exact options the stages ran with.
++    pub options: CompileOptions,
++    /// R4G1 format version of the emitted graph.
++    pub format_version: (u8, u8),
++    /// Normative inference operation contract version.
++    pub contract_version: ContractVersion,
++    /// Component digests.
++    pub digests: ComponentDigests,
++}
++
++/// Focused compile failures.
++#[derive(Debug)]
++pub enum CompileError {
++    /// The source directory is not a verified local HF-style source.
++    SourceInvalid {
++        /// What is missing or malformed.
++        message: String,
++    },
++    /// Filesystem failure while preparing the work directory or
++    /// collecting outputs.
++    Io {
++        /// The stage whose I/O failed.
++        stage: Stage,
++        /// The underlying I/O error.
++        source: std::io::Error,
++    },
++    /// A compiler stage rejected its inputs or failed mid-run (the
++    /// stage's own message, forwarded verbatim).
++    Stage {
++        /// The failing stage.
++        stage: Stage,
++        /// The stage's error message.
++        message: String,
++    },
++    /// A path derived from the request is not UTF-8 (the stage
++    /// implementations stringify corpus paths).
++    NonUtf8Path {
++        /// The stage that needs the path.
++        stage: Stage,
++        /// The offending path.
++        path: PathBuf,
++    },
++}
++
++impl fmt::Display for CompileError {
++    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
++        match self {
++            CompileError::SourceInvalid { message } => write!(f, "invalid source: {message}"),
++            CompileError::Io { stage, source } => write!(f, "{stage} stage I/O: {source}"),
++            CompileError::Stage { stage, message } => write!(f, "{stage} stage: {message}"),
++            CompileError::NonUtf8Path { stage, path } => {
++                write!(f, "{stage} stage: path is not UTF-8: {}", path.display())
++            }
++        }
++    }
++}
++
++impl std::error::Error for CompileError {
++    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
++        match self {
++            CompileError::Io { source, .. } => Some(source),
++            _ => None,
++        }
++    }
++}
++
++/// Orchestrate the three compiler stages for `request`. Resumable: an
++/// incomplete teacher corpus returns
++/// [`CompileOutcome::Incomplete`] and re-calling with the same request
++/// continues generation from the checkpoint in the work directory.
++pub fn compile(
++    request: &CompileRequest,
++    progress: &mut dyn FnMut(ProgressEvent),
++) -> Result<CompileOutcome, CompileError> {
++    validate_source(&request.source_dir)?;
++    let work = &request.work_dir;
++    std::fs::create_dir_all(work).map_err(|source| CompileError::Io {
++        stage: Stage::TeacherBundle,
++        source,
++    })?;
++    let meta = work.join("corpus.meta");
++    let recs = work.join("corpus.records");
++    let artifacts = work.join("tless_artifacts.bin");
++    for path in [&meta, &recs, &artifacts] {
++        utf8(path, Stage::TeacherBundle)?;
++    }
++
++    uor_r4_graph_cli::compile_hugging_face_with_progress(
++        &stage_a_flags(request),
++        |percent, label| {
++            progress(ProgressEvent {
++                stage: Stage::TeacherBundle,
++                percent,
++                label,
++            });
++        },
++    )
++    .map_err(|message| CompileError::Stage {
++        stage: Stage::TeacherBundle,
++        message,
++    })?;
++
++    if !corpus_complete(&meta)? {
++        return Ok(CompileOutcome::Incomplete {
++            resume_hint: ResumeHint {
++                work_dir: work.clone(),
++                detail: "teacher corpus incomplete; call `compile` again with the same request \
++                         to resume from the work-directory checkpoint"
++                    .to_owned(),
++            },
++        });
++    }
++
++    let cover_out = work.join("graph");
++    progress(ProgressEvent {
++        stage: Stage::GraphCover,
++        percent: 0,
++        label: "Inducing multiresolution cover...",
++    });
++    uor_r4_graph_compiler::compile(&stage_b_flags(request, &cover_out)).map_err(|message| {
++        CompileError::Stage {
++            stage: Stage::GraphCover,
++            message,
++        }
++    })?;
++    progress(ProgressEvent {
++        stage: Stage::GraphCover,
++        percent: 100,
++        label: "Cover compiled.",
++    });
++
++    let scored_out = work.join("scored");
++    progress(ProgressEvent {
++        stage: Stage::Scoring,
++        percent: 0,
++        label: "Compiling transitions and emission residuals...",
++    });
++    uor_r4_graph_cli::score_command(&stage_c_flags(request, &cover_out, &scored_out)).map_err(
++        |message| CompileError::Stage {
++            stage: Stage::Scoring,
++            message,
++        },
++    )?;
++    progress(ProgressEvent {
++        stage: Stage::Scoring,
++        percent: 100,
++        label: "Scored graph ready.",
++    });
++
++    let graph = read_stage_file(Stage::Scoring, &scored_out.join("score.r4g1"))?;
++    let signature_artifact = read_stage_file(Stage::TeacherBundle, &artifacts)?;
++    let tokenizer = match std::fs::read(work.join("tokenizer.bin")) {
++        Ok(bytes) => Some(bytes),
++        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
++        Err(source) => {
++            return Err(CompileError::Io {
++                stage: Stage::TeacherBundle,
++                source,
++            })
++        }
++    };
++    let score_report = read_stage_file(Stage::Scoring, &scored_out.join("score_report.json"))?;
++    let compile_report =
++        read_stage_file(Stage::GraphCover, &cover_out.join("compile_report.json"))?;
++
++    let digests = ComponentDigests {
++        graph: digest(&graph),
++        signature_artifact: digest(&signature_artifact),
++        tokenizer: tokenizer.as_deref().map(digest),
++        score_report: digest(&score_report),
++        compile_report: digest(&compile_report),
++    };
++    let provenance = CompileProvenance {
++        options: request.options,
++        format_version: (FORMAT_VERSION_MAJOR, FORMAT_VERSION_MINOR),
++        contract_version: INFERENCE_OPERATION_CONTRACT_VERSION,
++        digests,
++    };
++    Ok(CompileOutcome::Complete(Box::new(CompiledModel {
++        graph,
++        signature_artifact,
++        tokenizer,
++        score_report,
++        compile_report,
++        provenance,
++    })))
++}
++
++/// A verified local HF-style source: `config.json`, `tokenizer.json`,
++/// and at least one `*.safetensors` weight file. Downloading is out of
++/// scope for this crate by design.
++fn validate_source(source: &Path) -> Result<(), CompileError> {
++    let invalid = |message: String| CompileError::SourceInvalid { message };
++    let metadata = source
++        .metadata()
++        .map_err(|error| invalid(format!("{}: {error}", source.display())))?;
++    if !metadata.is_dir() {
++        return Err(invalid(format!("{} is not a directory", source.display())));
++    }
++    for required in ["config.json", "tokenizer.json"] {
++        if !source.join(required).is_file() {
++            return Err(invalid(format!(
++                "{} is missing {required}",
++                source.display()
++            )));
++        }
++    }
++    let has_weights = std::fs::read_dir(source)
++        .map_err(|error| invalid(format!("{}: {error}", source.display())))?
++        .filter_map(Result::ok)
++        .any(|entry| {
++            entry
++                .path()
++                .extension()
++                .is_some_and(|ext| ext == "safetensors")
++        });
++    if !has_weights {
++        return Err(invalid(format!(
++            "{} carries no *.safetensors weights",
++            source.display()
++        )));
++    }
++    Ok(())
++}
++
++/// Structural corpus-completion check: the corpus metadata trailer's
++/// done byte. Mirrors the gate of
++/// `uor_r4_core::transformerless::compiler::load_corpus_from` (25-byte
++/// meta, `meta[24] == 1`) without loading the corpus; a missing or
++/// partial meta means the teacher-bundle stage has more generation to
++/// do. This is the ONLY resume signal — no stage stdout is parsed.
++fn corpus_complete(meta: &Path) -> Result<bool, CompileError> {
++    match std::fs::read(meta) {
++        Ok(bytes) => Ok(bytes.len() == 25 && bytes[24] == 1),
++        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
++        Err(source) => Err(CompileError::Io {
++            stage: Stage::TeacherBundle,
++            source,
++        }),
++    }
++}
++
++fn utf8(path: &Path, stage: Stage) -> Result<(), CompileError> {
++    path.to_str()
++        .map(|_| ())
++        .ok_or_else(|| CompileError::NonUtf8Path {
++            stage,
++            path: path.to_path_buf(),
++        })
++}
++
++fn read_stage_file(stage: Stage, path: &Path) -> Result<Vec<u8>, CompileError> {
++    std::fs::read(path).map_err(|source| CompileError::Io { stage, source })
++}
++
++fn digest(bytes: &[u8]) -> String {
++    format!("blake3:{}", blake3::hash(bytes).to_hex())
++}
++
++// ------------------------------------------------------------ compat shim
++// The stage entry points take CLI flag strings; these builders are the
++// sanctioned translation layer (see the module docs). Private, and
++// temporary until the stages grow typed entry points.
++
++fn stage_a_flags(request: &CompileRequest) -> Vec<String> {
++    let options = &request.options;
++    let mut flags = vec![
++        "--source".to_owned(),
++        request.source_dir.display().to_string(),
++        "--output".to_owned(),
++        request.work_dir.display().to_string(),
++        "--seconds".to_owned(),
++        options.seconds.to_string(),
++        "--target".to_owned(),
++        options.target.to_string(),
++        "--sequence-length".to_owned(),
++        options.sequence_length.to_string(),
++    ];
++    if options.r4_attention {
++        flags.push("--r4-attention".to_owned());
++    }
++    flags
++}
++
++fn stage_b_flags(request: &CompileRequest, cover_out: &Path) -> Vec<String> {
++    let options = &request.options;
++    let work = &request.work_dir;
++    vec![
++        "--corpus-meta".to_owned(),
++        work.join("corpus.meta").display().to_string(),
++        "--corpus-recs".to_owned(),
++        work.join("corpus.records").display().to_string(),
++        "--artifacts".to_owned(),
++        work.join("tless_artifacts.bin").display().to_string(),
++        "--depths".to_owned(),
++        options.depths.to_string(),
++        "--k0".to_owned(),
++        options.k0.to_string(),
++        "--regions-budget".to_owned(),
++        options.regions_budget.to_string(),
++        "--memory-budget".to_owned(),
++        options.memory_budget_mb.to_string(),
++        "--out".to_owned(),
++        cover_out.display().to_string(),
++    ]
++}
++
++fn stage_c_flags(request: &CompileRequest, cover_out: &Path, scored_out: &Path) -> Vec<String> {
++    let options = &request.options;
++    let work = &request.work_dir;
++    let scoring = &options.scoring;
++    vec![
++        "--corpus-meta".to_owned(),
++        work.join("corpus.meta").display().to_string(),
++        "--corpus-recs".to_owned(),
++        work.join("corpus.records").display().to_string(),
++        "--artifacts".to_owned(),
++        work.join("tless_artifacts.bin").display().to_string(),
++        // The cover artifact of stage B: byte-identical to re-induction
++        // by construction, so this is a pure cache.
++        "--cover".to_owned(),
++        cover_out.join("compiled.r4g1").display().to_string(),
++        "--transition-out-degree".to_owned(),
++        scoring.transition_out_degree.to_string(),
++        "--emission-entries".to_owned(),
++        scoring.emission_entries.to_string(),
++        "--root-top-b".to_owned(),
++        scoring.root_top_b.to_string(),
++        "--exct-top-x".to_owned(),
++        scoring.exct_top_x.to_string(),
++        "--witness-sample".to_owned(),
++        scoring.witness_sample.to_string(),
++        "--quality-profile".to_owned(),
++        options.quality_profile.as_flag().to_owned(),
++        "--out".to_owned(),
++        scored_out.display().to_string(),
++    ]
++}
+diff --git a/src/r4g1.rs b/crates/uor-r4-api/src/engine.rs
+similarity index 63%
+copy from src/r4g1.rs
+copy to crates/uor-r4-api/src/engine.rs
+index 31e4e8f..077289f 100644
+--- a/src/r4g1.rs
++++ b/crates/uor-r4-api/src/engine.rs
+@@ -1,13 +1,19 @@
+-//! Native R4G1 graph-runtime adapter used by the HTTP server.
++//! Typed R4G1 engine: the deployed graph-runtime adapter as library code.
+ //!
+-//! The graph scorer is intentionally kept separate from the exploratory f64
+-//! router. It derives the packed input signature with the transformerless
+-//! artifact, then selects a token from the validated R4G1 graph.
++//! Moved from the root package's `src/r4g1.rs` (same repository) so
++//! library consumers load the engine from byte slices instead of
++//! filesystem paths; the root package keeps a thin path-based wrapper
++//! over this module with unchanged behavior.
++//!
++//! The graph scorer is intentionally kept separate from the exploratory
++//! f64 router. It derives the packed input signature with the
++//! transformerless artifact, then selects a token from the validated
++//! R4G1 graph.
+ //!
+ //! # ResolutionStatus-driven behavior (issue #78, decision D4)
+ //!
+-//! Every prediction carries a resolution status and the deployed behavior is
+-//! declared as data in [`StatusPolicy`] (the D4 manifest policy):
++//! Every prediction carries a resolution status and the deployed behavior
++//! is declared as data in [`StatusPolicy`] (the D4 manifest policy):
+ //!
+ //! | status | default action |
+ //! |---|---|
+@@ -17,17 +23,18 @@
+ //! | `contradictory` | [`StatusAction::Abstain`] (reserved; the scorer does not produce it yet) |
+ //!
+ //! `WidenOnce` retries the prediction with the per-depth membership set
+-//! widened to [`WIDENED_TOP_M`] exactly once; a signature still Novel after
+-//! widening is remembered in a bounded FIFO so identical probes abstain
+-//! without widening again (threat model: fallback denial-of-service).
+-//! Abstention is a typed outcome — no token is emitted, none is guessed,
+-//! and the server surfaces the status. An optional override is read from
+-//! the graph's `score_report.json` (`config.status_policy`, e.g.
+-//! `{"novel": "abstain"}` with values `serve` / `widen_once` / `abstain`);
+-//! absent or invalid rows keep the defaults.
++//! widened to [`WIDENED_TOP_M`] exactly once; a signature still Novel
++//! after widening is remembered in a bounded FIFO so identical probes
++//! abstain without widening again (threat model: fallback
++//! denial-of-service). Abstention is a typed outcome — no token is
++//! emitted, none is guessed, and the caller surfaces the status. An
++//! optional override is read from the graph's `score_report.json`
++//! (`config.status_policy`, e.g. `{"novel": "abstain"}` with values
++//! `serve` / `widen_once` / `abstain`); absent or invalid rows keep the
++//! defaults.
+ 
+-use std::cell::RefCell;
+-use std::path::{Path, PathBuf};
++use std::fmt;
++use std::io;
+ 
+ use uor_r4_core::transformerless::compiler::{self, Compiled, SIG_BYTES, STAGES, WINDOW};
+ use uor_r4_core::transformerless::runtime;
+@@ -36,6 +43,129 @@ use uor_r4_graph_certify::{
+     GraphScorer, ScoreStatus, StepState, DEFAULT_EXCT_TOP_X, DEFAULT_ROOT_TOP_B, TOP_M,
+     WIDENED_TOP_M,
+ };
++use uor_r4_graph_format::{
++    ContractVersion, FormatError, GraphView, FORMAT_VERSION_MAJOR, FORMAT_VERSION_MINOR,
++    INFERENCE_OPERATION_CONTRACT_VERSION,
++};
++
++/// The resolution status of a scored prediction. Alias of the production
++/// scorer's [`ScoreStatus`] — no second definition of the status space.
++pub type ResolutionStatus = ScoreStatus;
++
++/// Owned inputs for [`R4Engine::load`]: every component as bytes, exactly
++/// as the compile pipeline emitted it. `signature_artifact` is the
++/// teacher artifact the packed input signatures derive from;
++/// `score_report` is the graph's JSON quality/config report (optional —
++/// absent means D4 policy defaults and scorer defaults).
++#[derive(Debug, Clone, Copy)]
++pub struct EngineParts<'a> {
++    /// Scored deployable R4G1 graph bytes (`score.r4g1`).
++    pub graph: &'a [u8],
++    /// Teacher artifact bytes the input signatures derive from.
++    pub signature_artifact: &'a [u8],
++    /// Optional bundle tokenizer bytes (binary tokenizer.bin format).
++    pub tokenizer: Option<&'a [u8]>,
++    /// Optional `score_report.json` bytes.
++    pub score_report: Option<&'a [u8]>,
++}
++
++/// The version surface the loaded engine runs against: the R4G1 format
++/// version, the normative inference operation contract version, and this
++/// crate's own version.
++#[derive(Debug, Clone, Copy, PartialEq, Eq)]
++pub struct AbiVersion {
++    pub format_major: u8,
++    pub format_minor: u8,
++    pub contract: ContractVersion,
++    pub api_crate_version: &'static str,
++}
++
++impl AbiVersion {
++    /// The ABI surface of this build.
++    pub fn current() -> Self {
++        Self {
++            format_major: FORMAT_VERSION_MAJOR,
++            format_minor: FORMAT_VERSION_MINOR,
++            contract: INFERENCE_OPERATION_CONTRACT_VERSION,
++            api_crate_version: env!("CARGO_PKG_VERSION"),
++        }
++    }
++}
++
++/// Focused load-time failures of [`R4Engine::load`].
++#[derive(Debug)]
++pub enum LoadError {
++    /// The graph bytes failed the format crate's two-stage structural
++    /// validation or CID verification.
++    InvalidGraph(FormatError),
++    /// The signature artifact is not a TLA3/TLA4/TLA5 teacher container.
++    InvalidSignatureArtifact,
++    /// The score report bytes are not well-formed JSON.
++    InvalidScoreReport(String),
++    /// The tokenizer bytes are not a well-formed binary tokenizer.
++    InvalidTokenizer(io::Error),
++    /// The graph's Rule 1+2 quality digresses from the declared quality
++    /// basis (see [`validate_quality_report`]).
++    QualityGate(String),
++    /// The production scorer rejected the validated parts.
++    Scorer(String),
++    /// The teacher token table exceeds the u32 token-id space.
++    TeacherTooLarge,
++}
++
++impl fmt::Display for LoadError {
++    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
++        match self {
++            LoadError::InvalidGraph(error) => write!(f, "invalid R4G1 graph: {error}"),
++            LoadError::InvalidSignatureArtifact => {
++                write!(f, "not a TLA3/TLA4/TLA5 teacher artifact")
++            }
++            LoadError::InvalidScoreReport(message) => {
++                write!(f, "invalid score report: {message}")
++            }
++            LoadError::InvalidTokenizer(error) => write!(f, "invalid tokenizer bytes: {error}"),
++            LoadError::QualityGate(message) => write!(f, "{message}"),
++            LoadError::Scorer(message) => write!(f, "{message}"),
++            LoadError::TeacherTooLarge => write!(f, "teacher token table too large"),
++        }
++    }
++}
++
++impl std::error::Error for LoadError {
++    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
++        match self {
++            LoadError::InvalidGraph(error) => Some(error),
++            LoadError::InvalidTokenizer(error) => Some(error),
++            _ => None,
++        }
++    }
++}
++
++/// Focused predict/generate-time failures of [`R4Engine`].
++#[derive(Debug)]
++pub enum InferenceError {
++    /// A window carried a token id the teacher artifact cannot decode
++    /// (boundary check: signature derivation indexes by token id).
++    TokenOutOfVocabulary {
++        /// Exclusive upper bound of decodable token ids.
++        token_rows: u32,
++    },
++    /// The production scorer failed on a validated input.
++    Scorer(String),
++}
++
++impl fmt::Display for InferenceError {
++    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
++        match self {
++            InferenceError::TokenOutOfVocabulary { token_rows } => {
++                write!(f, "token id outside the teacher vocabulary ({token_rows})")
++            }
++            InferenceError::Scorer(message) => write!(f, "{message}"),
++        }
++    }
++}
++
++impl std::error::Error for InferenceError {}
+ 
+ // BEGIN DEPLOYED STATUS POLICY (INTEGER-ONLY) -------------------------
+ // The D4 manifest policy and the status-aware prediction path below are
+@@ -227,6 +357,18 @@ pub struct GenerateStatus {
+     pub abstained: bool,
+ }
+ 
++/// Caller-owned prediction result slot for [`R4Engine::predict_next_into`],
++/// mirroring [`PredictDecision`] semantics in flat form: when `abstained`
++/// is set, no token was emitted and none is guessed (`token` is written
++/// as 0 and carries no meaning).
++#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
++pub struct PredictOutput {
++    pub token: u32,
++    pub status: Option<ResolutionStatus>,
++    pub widened: bool,
++    pub abstained: bool,
++}
++
+ /// Bound of the widen-once memory: confirmed-Novel signatures whose
+ /// widening would deterministically re-resolve Novel (scoring is a pure
+ /// function of the loaded artifact, so the memory is sound for the
+@@ -276,7 +418,7 @@ struct ScoredProbe {
+ 
+ /// A loaded, CID-verified scored graph and the teacher artifact needed to
+ /// derive input signatures from token ids.
+-pub struct R4g1State {
++pub struct R4Engine {
+     artifacts: Compiled,
+     scorer: GraphScorer,
+     rotations: [usize; WINDOW + 1],
+@@ -288,15 +430,15 @@ pub struct R4g1State {
+     /// The D4 manifest policy in force (defaults or report override).
+     policy: StatusPolicy,
+     /// Fixed-capacity scoring scratch, allocated once in `load`.
+-    step: RefCell<StepState>,
++    step: StepState,
+     /// False only for legacy TLS1 exact-context artifacts, which stay on
+     /// the reference scorer (no widening there).
+     step_supported: bool,
+-    counters: RefCell<PolicyCounters>,
+-    novel_seen: RefCell<NovelSeen>,
++    counters: PolicyCounters,
++    novel_seen: NovelSeen,
+ }
+ 
+-impl R4g1State {
++impl R4Engine {
+     /// The manifest policy in force (D4 defaults or the score-report
+     /// override).
+     pub fn policy(&self) -> StatusPolicy {
+@@ -305,12 +447,7 @@ impl R4g1State {
+ 
+     /// A snapshot of the status-path counters.
+     pub fn policy_counters(&self) -> PolicyCounters {
+-        *self.counters.borrow()
+-    }
+-
+-    /// Update one counter group.
+-    fn bump(&self, update: impl Fn(&mut PolicyCounters)) {
+-        update(&mut self.counters.borrow_mut());
++        self.counters
+     }
+ 
+     /// Derive the packed input signature of a token window.
+@@ -321,12 +458,11 @@ impl R4g1State {
+ 
+     /// Reject a window carrying a token id the teacher artifact cannot
+     /// decode (boundary check: the decode below indexes by token id).
+-    fn check_window(&self, window: &[u32]) -> Result<(), String> {
++    fn check_window(&self, window: &[u32]) -> Result<(), InferenceError> {
+         if window.iter().any(|&t| t >= self.token_rows) {
+-            return Err(format!(
+-                "token id outside the teacher vocabulary ({})",
+-                self.token_rows
+-            ));
++            return Err(InferenceError::TokenOutOfVocabulary {
++                token_rows: self.token_rows,
++            });
+         }
+         Ok(())
+     }
+@@ -336,24 +472,25 @@ impl R4g1State {
+     /// scorer (the deployed step requires residualized RX1 evidence);
+     /// that path ignores the width — widening is unavailable there.
+     fn score_sig(
+-        &self,
++        &mut self,
+         sig: &[u8; SIG_BYTES],
+         top_m: usize,
+         recent_tokens: &[u32],
+-    ) -> Result<ScoredProbe, String> {
++    ) -> Result<ScoredProbe, InferenceError> {
+         if self.step_supported {
+-            let outcome = self.scorer.score_step_with_recent(
+-                sig,
+-                top_m,
+-                &mut self.step.borrow_mut(),
+-                recent_tokens,
+-            )?;
++            let outcome = self
++                .scorer
++                .score_step_with_recent(sig, top_m, &mut self.step, recent_tokens)
++                .map_err(InferenceError::Scorer)?;
+             Ok(ScoredProbe {
+                 token: outcome.selected,
+                 status: outcome.status,
+             })
+         } else {
+-            let outcome = self.scorer.score_candidates(sig, recent_tokens)?;
++            let outcome = self
++                .scorer
++                .score_candidates(sig, recent_tokens)
++                .map_err(InferenceError::Scorer)?;
+             Ok(ScoredProbe {
+                 token: outcome.selected,
+                 status: outcome.witness.status,
+@@ -367,22 +504,22 @@ impl R4g1State {
+     /// [`WIDENED_TOP_M`]; a signature still Novel after widening is
+     /// remembered so identical probes abstain without widening again.
+     pub fn predict_signature_status(
+-        &self,
++        &mut self,
+         sig: &[u8; SIG_BYTES],
+-    ) -> Result<PredictDecision, String> {
++    ) -> Result<PredictDecision, InferenceError> {
+         self.predict_signature_status_with_recent(sig, &[])
+     }
+ 
+     fn predict_signature_status_with_recent(
+-        &self,
++        &mut self,
+         sig: &[u8; SIG_BYTES],
+         recent_tokens: &[u32],
+-    ) -> Result<PredictDecision, String> {
+-        self.bump(|c| c.predicts += 1);
++    ) -> Result<PredictDecision, InferenceError> {
++        self.counters.predicts += 1;
+         let first = self.score_sig(sig, TOP_M, recent_tokens)?;
+         match self.policy.action(first.status.into()) {
+             StatusAction::Serve => {
+-                self.bump(|c| c.serves += 1);
++                self.counters.serves += 1;
+                 Ok(PredictDecision::Serve(PredictOutcome {
+                     token: first.token,
+                     status: first.status,
+@@ -390,7 +527,7 @@ impl R4g1State {
+                 }))
+             }
+             StatusAction::Abstain => {
+-                self.bump(|c| c.abstains += 1);
++                self.counters.abstains += 1;
+                 Ok(PredictDecision::Abstain(AbstainOutcome {
+                     status: first.status,
+                     widened: false,
+@@ -400,36 +537,34 @@ impl R4g1State {
+                 if !self.step_supported {
+                     // No widening on the legacy reference path: abstain
+                     // directly (documented degrade for TLS1 artifacts).
+-                    self.bump(|c| c.abstains += 1);
++                    self.counters.abstains += 1;
+                     return Ok(PredictDecision::Abstain(AbstainOutcome {
+                         status: first.status,
+                         widened: false,
+                     }));
+                 }
+-                if self.novel_seen.borrow().contains(sig) {
+-                    self.bump(|c| {
+-                        c.widen_skipped_seen += 1;
+-                        c.abstains += 1;
+-                    });
++                if self.novel_seen.contains(sig) {
++                    self.counters.widen_skipped_seen += 1;
++                    self.counters.abstains += 1;
+                     return Ok(PredictDecision::Abstain(AbstainOutcome {
+                         status: first.status,
+                         widened: false,
+                     }));
+                 }
+-                self.bump(|c| c.widen_attempts += 1);
++                self.counters.widen_attempts += 1;
+                 let second = self.score_sig(sig, WIDENED_TOP_M, recent_tokens)?;
+                 if second.status == ScoreStatus::Novel {
+-                    self.novel_seen.borrow_mut().insert(sig);
++                    self.novel_seen.insert(sig);
+                 }
+                 if self.policy.action(second.status.into()) == StatusAction::Serve {
+-                    self.bump(|c| c.serves += 1);
++                    self.counters.serves += 1;
+                     Ok(PredictDecision::Serve(PredictOutcome {
+                         token: second.token,
+                         status: second.status,
+                         widened: true,
+                     }))
+                 } else {
+-                    self.bump(|c| c.abstains += 1);
++                    self.counters.abstains += 1;
+                     Ok(PredictDecision::Abstain(AbstainOutcome {
+                         status: second.status,
+                         widened: true,
+@@ -439,20 +574,47 @@ impl R4g1State {
+         }
+     }
+ 
+-    /// Score one token window through the D4 policy.
+-    pub fn predict_window_status(&self, window: &[u32]) -> Result<PredictDecision, String> {
++    /// The status-aware decision for one token window: score the packed
++    /// signature through the D4 policy. Abstention is a typed outcome —
++    /// no guessed token is emitted.
++    pub fn predict_decision(&mut self, window: &[u32]) -> Result<PredictDecision, InferenceError> {
+         self.check_window(window)?;
+         self.predict_signature_status_with_recent(&self.derive_sig(window), window)
+     }
+ 
++    /// Score one token window into a caller-owned output slot. Mirrors
++    /// [`PredictDecision`] semantics: on a policy abstention
++    /// `out.abstained` is set and `out.token` carries no meaning.
++    pub fn predict_next_into(
++        &mut self,
++        window: &[u32],
++        out: &mut PredictOutput,
++    ) -> Result<(), InferenceError> {
++        match self.predict_decision(window)? {
++            PredictDecision::Serve(outcome) => {
++                out.token = outcome.token;
++                out.status = Some(outcome.status);
++                out.widened = outcome.widened;
++                out.abstained = false;
++            }
++            PredictDecision::Abstain(outcome) => {
++                out.token = 0;
++                out.status = Some(outcome.status);
++                out.widened = outcome.widened;
++                out.abstained = true;
++            }
++        }
++        Ok(())
++    }
++
+     /// Generate a greedy continuation with per-step policy decisions:
+     /// stops at the first abstention (returning the count so far and
+     /// the abstaining status) and never emits a guessed token.
+-    pub fn generate_into_status(
+-        &self,
++    pub fn generate_into(
++        &mut self,
+         seed: &[u32],
+         out: &mut [u32],
+-    ) -> Result<GenerateStatus, String> {
++    ) -> Result<GenerateStatus, InferenceError> {
+         self.check_window(seed)?;
+         let mut window = [0u32; WINDOW];
+         let seed = &seed[seed.len().saturating_sub(WINDOW)..];
+@@ -462,7 +624,7 @@ impl R4g1State {
+         let mut last_status = None;
+         let mut widened = false;
+         for (generated, token) in out.iter_mut().enumerate() {
+-            match self.predict_window_status(&window[..window_len])? {
++            match self.predict_decision(&window[..window_len])? {
+                 PredictDecision::Serve(outcome) => {
+                     let next = outcome.token;
+                     last_status = Some(outcome.status);
+@@ -505,26 +667,28 @@ impl R4g1State {
+ 
+ // END DEPLOYED STATUS POLICY (INTEGER-ONLY) ---------------------------
+ 
+-impl R4g1State {
+-    /// Load and validate a scored graph. The teacher artifact supplies the
+-    /// compressed token rows used to derive input signatures. EXCT is not
+-    /// enabled because its reference implementation performs probe-time
+-    /// floating-point quantization.
+-    pub fn load(graph_path: &Path, teacher_path: &Path) -> Result<Self, String> {
+-        let graph_bytes = std::fs::read(graph_path)
+-            .map_err(|error| format!("{}: {error}", graph_path.display()))?;
+-        let teacher_bytes = std::fs::read(teacher_path)
+-            .map_err(|error| format!("{}: {error}", teacher_path.display()))?;
+-        let artifacts = compiler::parse_artifacts(&teacher_bytes).ok_or_else(|| {
+-            format!(
+-                "{}: not a TLA3/TLA4/TLA5 teacher artifact",
+-                teacher_path.display()
+-            )
+-        })?;
+-        let score_report = graph_path
+-            .parent()
+-            .and_then(|parent| std::fs::read(parent.join("score_report.json")).ok())
+-            .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok());
++impl R4Engine {
++    /// Load and validate an engine from byte-slice parts. The graph is
++    /// structurally validated (format crate two-stage parse) and its CIDs
++    /// verified before any scorer state is built. The teacher artifact
++    /// supplies the compressed token rows used to derive input
++    /// signatures. EXCT is not enabled because its reference
++    /// implementation performs probe-time floating-point quantization.
++    pub fn load(parts: EngineParts<'_>) -> Result<Self, LoadError> {
++        // Fail fast with a typed format error before any scorer state is
++        // built (the scorer re-validates internally; this surfaces the
++        // format crate's focused error at the library boundary).
++        let view = GraphView::parse(parts.graph).map_err(LoadError::InvalidGraph)?;
++        view.verify_cids().map_err(LoadError::InvalidGraph)?;
++        let artifacts = compiler::parse_artifacts(parts.signature_artifact)
++            .ok_or(LoadError::InvalidSignatureArtifact)?;
++        let score_report = parts
++            .score_report
++            .map(|bytes| {
++                serde_json::from_slice::<serde_json::Value>(bytes)
++                    .map_err(|error| LoadError::InvalidScoreReport(error.to_string()))
++            })
++            .transpose()?;
+         let root_top_b = score_report
+             .as_ref()
+             .and_then(|report| report.pointer("/config/root_top_b"))
+@@ -542,25 +706,28 @@ impl R4g1State {
+         // The compiled RX1 EXCT table contains integer residuals. Supplying
+         // the teacher artifact here is only for integer class-code lookup;
+         // no probe-time log quantization occurs in the deployed path.
+-        let scorer =
+-            GraphScorer::from_artifact(&graph_bytes, Some(&teacher_bytes), root_top_b, exct_top_x)
+-                .map_err(|error| format!("{}: {error}", graph_path.display()))?;
++        let scorer = GraphScorer::from_artifact(
++            parts.graph,
++            Some(parts.signature_artifact),
++            root_top_b,
++            exct_top_x,
++        )
++        .map_err(LoadError::Scorer)?;
+         if let Some(report) = score_report.as_ref() {
+-            validate_quality_report(report)?;
++            validate_quality_report(report).map_err(LoadError::QualityGate)?;
+         }
+-        let tokenizer = teacher_path
+-            .parent()
+-            .map(|parent| parent.join("tokenizer.bin"))
+-            .filter(|path| path.is_file())
+-            .and_then(|path| Tokenizer::try_load(path).ok());
++        let tokenizer = parts
++            .tokenizer
++            .map(|bytes| Tokenizer::from_bytes(bytes).map_err(LoadError::InvalidTokenizer))
++            .transpose()?;
+ 
+         let policy = StatusPolicy::from_report(score_report.as_ref());
+         let step_supported = !scorer.has_legacy_exct();
+         let step = scorer
+             .step_state(WIDENED_TOP_M)
+-            .map_err(|error| format!("{}: {error}", graph_path.display()))?;
++            .map_err(LoadError::Scorer)?;
+         let token_rows = u32::try_from(artifacts.token_codes.len() / STAGES)
+-            .map_err(|_| format!("{}: teacher token table too large", teacher_path.display()))?;
++            .map_err(|_| LoadError::TeacherTooLarge)?;
+ 
+         Ok(Self {
+             artifacts,
+@@ -569,45 +736,42 @@ impl R4g1State {
+             tokenizer,
+             token_rows,
+             policy,
+-            step: RefCell::new(step),
++            step,
+             step_supported,
+-            counters: RefCell::new(PolicyCounters::default()),
+-            novel_seen: RefCell::new(NovelSeen::new(NOVEL_SEEN_CAPACITY)),
++            counters: PolicyCounters::default(),
++            novel_seen: NovelSeen::new(NOVEL_SEEN_CAPACITY),
+         })
+     }
+ 
+-    /// Encode with the bundle-matched tokenizer when one is available.
+-    pub fn encode_into(&self, text: &str, out: &mut [u32]) -> Option<usize> {
+-        self.tokenizer.as_ref()?.encode_into(text, out).ok()
+-    }
+-
+-    /// Decode with the bundle-matched tokenizer when one is available.
+-    pub fn decode_into(&self, tokens: &[u32], out: &mut [u8]) -> Option<usize> {
+-        self.tokenizer.as_ref()?.decode_into(tokens, out).ok()
+-    }
+-
+-    /// Score one token window using the validated graph artifact.
+-    ///
+-    /// Delegates to [`Self::predict_window_status`] and discards the
+-    /// status: served predictions return their token; a policy
+-    /// abstention is an error here — no guessed token is emitted.
+-    pub fn predict_window(&self, window: &[u32]) -> Result<u32, String> {
+-        match self.predict_window_status(window)? {
+-            PredictDecision::Serve(outcome) => Ok(outcome.token),
+-            PredictDecision::Abstain(outcome) => Err(format!(
+-                "R4G1 policy abstained (status: {})",
+-                PolicyStatus::from(outcome.status).label()
+-            )),
++    /// Reset the session state: status-path counters, the widen-once
++    /// memory, and the scoring scratch. The loaded artifacts and policy
++    /// are untouched. Rebuilding the scratch cannot fail for the scorer
++    /// it was built from; on that unreachable error the previous scratch
++    /// is retained.
++    pub fn reset(&mut self) {
++        self.counters = PolicyCounters::default();
++        self.novel_seen = NovelSeen::new(NOVEL_SEEN_CAPACITY);
++        if let Ok(step) = self.scorer.step_state(WIDENED_TOP_M) {
++            self.step = step;
+         }
+     }
+ 
+-    /// Generate a greedy continuation from a token seed. This mirrors the
+-    /// legacy runtime's fixed-width window behavior while replacing its
+-    /// graded-store lookup with R4G1 graph scoring. Delegates to
+-    /// [`Self::generate_into_status`] and discards the status fields; on
+-    /// a policy abstention the tokens generated so far are returned.
+-    pub fn generate_into(&self, seed: &[u32], out: &mut [u32]) -> Result<usize, String> {
+-        Ok(self.generate_into_status(seed, out)?.count)
++    /// The version surface this engine runs against.
++    pub fn abi_version(&self) -> AbiVersion {
++        AbiVersion::current()
++    }
++
++    /// Encode text with the bundle-matched tokenizer when one is
++    /// available. (The tokenizer's BPE path allocates an intermediate
++    /// `String`; text helpers sit outside the allocation-free step path.)
++    pub fn encode_text_into(&self, text: &str, out: &mut [u32]) -> Option<usize> {
++        self.tokenizer.as_ref()?.encode_into(text, out).ok()
++    }
++
++    /// Decode tokens with the bundle-matched tokenizer when one is
++    /// available.
++    pub fn decode_tokens_into(&self, tokens: &[u32], out: &mut [u8]) -> Option<usize> {
++        self.tokenizer.as_ref()?.decode_into(tokens, out).ok()
+     }
+ }
+ 
+@@ -671,13 +835,3 @@ pub fn validate_quality_report(report: &serde_json::Value) -> Result<(), String>
+     }
+     Ok(())
+ }
+-
+-/// Resolve the graph path from an explicit setting or the conventional
+-/// compiled-bundle location beside `tless_artifacts.bin`.
+-pub fn discover_path(explicit: Option<&str>, teacher_path: &Path) -> Option<PathBuf> {
+-    explicit.map(PathBuf::from).or_else(|| {
+-        teacher_path
+-            .parent()
+-            .map(|parent| parent.join("graph/score.r4g1"))
+-    })
+-}
+diff --git a/crates/uor-r4-api/src/lib.rs b/crates/uor-r4-api/src/lib.rs
+new file mode 100644
+index 0000000..b64ad07
+--- /dev/null
++++ b/crates/uor-r4-api/src/lib.rs
+@@ -0,0 +1,39 @@
++//! Typed library façade over the uor-r4 transformerless graph stack.
++//!
++//! Two boundaries, both byte-oriented and filesystem-free at the library
++//! edge (compilation writes only inside the caller-supplied work
++//! directory; the engine never touches the filesystem):
++//!
++//! - [`compile`]: orchestrates the three existing compiler stages
++//!   (teacher bundle → multiresolution cover → scored graph) behind a
++//!   typed [`CompileRequest`] / [`CompileOutcome`] surface with structured
++//!   progress and errors. The stage entry points predate this crate and
++//!   take CLI flag strings; the translation lives in private shims inside
++//!   [`compile`] and is documented there.
++//! - [`engine`]: the deployed R4G1 inference adapter ([`R4Engine`]) —
++//!   CID-verified scored graph + teacher artifact loaded from byte
++//!   slices, the D4 manifest status policy as data, typed abstention,
++//!   and an allocation-free steady-state predict/generate step.
++//!
++//! Claim language follows `docs/formal_vocabulary.md`; nothing here
++//! strengthens or weakens the guarantees of the underlying crates.
++
++pub mod compile;
++pub mod engine;
++
++pub use compile::{
++    compile, CompileError, CompileOptions, CompileOutcome, CompileProvenance, CompileRequest,
++    CompiledModel, ComponentDigests, ProgressEvent, QualityProfile, ResumeHint, ScoringOptions,
++    Stage,
++};
++pub use engine::{
++    validate_quality_report, AbiVersion, AbstainOutcome, EngineParts, GenerateStatus,
++    InferenceError, LoadError, PolicyCounters, PolicyStatus, PredictDecision, PredictOutcome,
++    PredictOutput, R4Engine, ResolutionStatus, StatusAction, StatusPolicy,
++};
++
++// The bytes-based tokenizer the engine's text helpers use
++// (`Tokenizer::from_bytes`); re-exported so downstream consumers encode
++// and decode against the same vocabulary the bundle was compiled with.
++pub use uor_r4_core::transformerless::scenarios::Tokenizer;
++pub use uor_r4_graph_certify::ScoreStatus;
+diff --git a/crates/uor-r4-api/tests/api.rs b/crates/uor-r4-api/tests/api.rs
+new file mode 100644
+index 0000000..ab6e837
+--- /dev/null
++++ b/crates/uor-r4-api/tests/api.rs
+@@ -0,0 +1,282 @@
++//! Unit tests for the typed façade: error paths, the version surface,
++//! parts validation, and the bytes-based tokenizer. None of these need a
++//! real teacher model; the end-to-end compile test is `#[ignore]`d (see
++//! its comment) — hologram-ai owns the real E2E.
++
++use std::error::Error;
++use std::path::PathBuf;
++
++use uor_r4_api::compile::{
++    compile, CompileError, CompileOptions, CompileOutcome, CompileRequest, QualityProfile, Stage,
++};
++use uor_r4_api::engine::{AbiVersion, EngineParts, LoadError, PredictOutput, R4Engine};
++use uor_r4_api::Tokenizer;
++use uor_r4_graph_format::{
++    FORMAT_VERSION_MAJOR, FORMAT_VERSION_MINOR, INFERENCE_OPERATION_CONTRACT_VERSION,
++};
++
++// ------------------------------------------------------------ tokenizer --
++
++/// The binary tokenizer.bin format: per token, i32 LE length then bytes.
++fn tokenizer_bytes(tokens: &[&[u8]]) -> Vec<u8> {
++    let mut bytes = Vec::new();
++    for token in tokens {
++        bytes.extend_from_slice(&(token.len() as i32).to_le_bytes());
++        bytes.extend_from_slice(token);
++    }
++    bytes
++}
++
++#[test]
++fn tokenizer_from_bytes_roundtrip() {
++    // The greedy pair-merge encoder needs every input character to be
++    // encodable as a whole token or via byte fallback, so the fixture
++    // vocab carries the single characters plus mergeable pairs.
++    let bytes = tokenizer_bytes(&[b"<unk>", b"<s>", b"</s>", b" ", b"a", b"b", b" a", b"ab"]);
++    let tokenizer = Tokenizer::from_bytes(&bytes).expect("parses");
++    assert_eq!(tokenizer.vocab.len(), 8);
++    assert_eq!(tokenizer.vocab[6], b" a");
++
++    let mut encoded = [0u32; 8];
++    let count = tokenizer.encode_into(" ab", &mut encoded).expect("encodes");
++    let mut decoded = [0u8; 16];
++    let len = tokenizer
++        .decode_into(&encoded[..count], &mut decoded)
++        .expect("decodes");
++    assert!(!decoded[..len].is_empty());
++}
++
++#[test]
++fn tokenizer_from_bytes_rejects_truncated() {
++    // Declared length longer than the remaining bytes.
++    let bytes = 4i32
++        .to_le_bytes()
++        .into_iter()
++        .chain([b'a'])
++        .collect::<Vec<_>>();
++    let error = match Tokenizer::from_bytes(&bytes) {
++        Err(error) => error,
++        Ok(_) => panic!("truncated token must fail"),
++    };
++    assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
++
++    // Negative length.
++    let bytes = (-1i32).to_le_bytes().to_vec();
++    assert!(Tokenizer::from_bytes(&bytes).is_err());
++
++    // Trailing partial length field.
++    assert!(Tokenizer::from_bytes(&[0u8, 1]).is_err());
++}
++
++// ---------------------------------------------------------- abi version --
++
++#[test]
++fn abi_version_reports_format_and_contract_surface() {
++    let abi = AbiVersion::current();
++    assert_eq!(abi.format_major, FORMAT_VERSION_MAJOR);
++    assert_eq!(abi.format_minor, FORMAT_VERSION_MINOR);
++    assert_eq!(abi.contract, INFERENCE_OPERATION_CONTRACT_VERSION);
++    assert_eq!(abi.api_crate_version, env!("CARGO_PKG_VERSION"));
++}
++
++// -------------------------------------------------------- engine errors --
++
++#[test]
++fn engine_load_rejects_garbage_graph() {
++    let parts = EngineParts {
++        graph: b"not an r4g1 artifact",
++        signature_artifact: b"not a teacher artifact",
++        tokenizer: None,
++        score_report: None,
++    };
++    match R4Engine::load(parts) {
++        Err(LoadError::InvalidGraph(_)) => {}
++        other => panic!("expected InvalidGraph, got {}", outcome_label(other)),
++    }
++}
++
++#[test]
++fn engine_load_rejects_garbage_score_report_after_valid_graph_shape() {
++    // A graph that fails structural parse still reports InvalidGraph
++    // before the score report is examined (fail-fast order).
++    let parts = EngineParts {
++        graph: &[],
++        signature_artifact: &[],
++        tokenizer: None,
++        score_report: Some(b"{not json"),
++    };
++    match R4Engine::load(parts) {
++        Err(LoadError::InvalidGraph(_)) => {}
++        other => panic!("expected InvalidGraph, got {}", outcome_label(other)),
++    }
++}
++
++fn outcome_label(result: Result<R4Engine, LoadError>) -> String {
++    match result {
++        Ok(_) => "Ok(engine)".to_owned(),
++        Err(error) => format!("Err({error})"),
++    }
++}
++
++#[test]
++fn engine_errors_implement_std_error() {
++    let parts = EngineParts {
++        graph: b"garbage",
++        signature_artifact: b"garbage",
++        tokenizer: None,
++        score_report: None,
++    };
++    let error = match R4Engine::load(parts) {
++        Err(error) => error,
++        Ok(_) => panic!("garbage graph must fail"),
++    };
++    // Display is non-empty and the wrapped FormatError is chained.
++    assert!(!error.to_string().is_empty());
++    assert!(error.source().is_some());
++}
++
++#[test]
++fn predict_output_defaults_to_no_prediction() {
++    let out = PredictOutput::default();
++    assert!(!out.abstained);
++    assert_eq!(out.token, 0);
++    assert_eq!(out.status, None);
++}
++
++// ------------------------------------------------------- compile errors --
++
++fn request(source: PathBuf, work: PathBuf) -> CompileRequest {
++    CompileRequest {
++        source_dir: source,
++        work_dir: work,
++        options: CompileOptions::default(),
++    }
++}
++
++fn temp_dir(tag: &str) -> PathBuf {
++    let dir = std::env::temp_dir().join(format!(
++        "uor-r4-api-test-{}-{}-{}",
++        tag,
++        std::process::id(),
++        std::thread::current().name().unwrap_or("t")
++    ));
++    let _ = std::fs::remove_dir_all(&dir);
++    std::fs::create_dir_all(&dir).expect("temp dir");
++    dir
++}
++
++#[test]
++fn compile_rejects_missing_source() {
++    let work = temp_dir("work-missing");
++    let outcome = compile(
++        &request(
++            PathBuf::from("/nonexistent/uor-r4-api-source"),
++            work.clone(),
++        ),
++        &mut |_| {},
++    );
++    match outcome {
++        Err(CompileError::SourceInvalid { .. }) => {}
++        other => panic!("expected SourceInvalid, got {other:?}"),
++    }
++    let _ = std::fs::remove_dir_all(&work);
++}
++
++#[test]
++fn compile_rejects_source_without_required_files() {
++    let source = temp_dir("src-incomplete");
++    let work = temp_dir("work-incomplete");
++    std::fs::write(source.join("config.json"), b"{}").expect("config");
++    // tokenizer.json and weights missing.
++    match compile(&request(source.clone(), work.clone()), &mut |_| {}) {
++        Err(CompileError::SourceInvalid { message }) => {
++            assert!(message.contains("tokenizer.json"), "{message}");
++        }
++        other => panic!("expected SourceInvalid, got {other:?}"),
++    }
++    // Weights still missing after the tokenizer appears.
++    std::fs::write(source.join("tokenizer.json"), b"{}").expect("tokenizer");
++    match compile(&request(source.clone(), work.clone()), &mut |_| {}) {
++        Err(CompileError::SourceInvalid { message }) => {
++            assert!(message.contains("safetensors"), "{message}");
++        }
++        other => panic!("expected SourceInvalid, got {other:?}"),
++    }
++    let _ = std::fs::remove_dir_all(&source);
++    let _ = std::fs::remove_dir_all(&work);
++}
++
++#[test]
++fn compile_options_default_to_stage_defaults() {
++    let options = CompileOptions::default();
++    assert_eq!(options.quality_profile, QualityProfile::RelativeTla);
++    assert!(options.depths > 0 && options.k0 > 0 && options.regions_budget > 0);
++    assert!(options.scoring.root_top_b > 0 && options.scoring.exct_top_x > 0);
++    assert_eq!(Stage::TeacherBundle.label(), "teacher-bundle");
++}
++
++// -------------------------------------------------------------- e2e -----
++
++/// End-to-end compile + engine load against a real local HF-style source.
++/// Ignored by default (needs a pinned teacher on disk and minutes of CPU);
++/// hologram-ai owns the maintained E2E. To run:
++///
++/// ```sh
++/// UOR_R4_API_E2E_SOURCE=/path/to/local/hf-source \
++///   cargo test -p uor-r4-api --release -- --ignored e2e --nocapture
++/// ```
++///
++/// The source directory must carry config.json, tokenizer.json, and
++/// safetensors weights. The corpus budget is tiny, so the first call may
++/// legitimately return `Incomplete`; re-run to resume.
++#[test]
++#[ignore]
++fn e2e_compile_then_engine_load() {
++    let Ok(source) = std::env::var("UOR_R4_API_E2E_SOURCE") else {
++        eprintln!("UOR_R4_API_E2E_SOURCE not set; skipping");
++        return;
++    };
++    let work = temp_dir("e2e-work");
++    let mut events = 0usize;
++    let outcome = compile(
++        &CompileRequest {
++            source_dir: PathBuf::from(source),
++            work_dir: work.clone(),
++            options: CompileOptions {
++                seconds: 30,
++                target: 2_000,
++                ..CompileOptions::default()
++            },
++        },
++        &mut |event| {
++            events += 1;
++            eprintln!("[{} {:>3}%] {}", event.stage, event.percent, event.label);
++        },
++    )
++    .expect("compile stages run");
++    assert!(events > 0, "progress events observed");
++    let model = match outcome {
++        CompileOutcome::Complete(model) => model,
++        CompileOutcome::Incomplete { resume_hint } => {
++            eprintln!("corpus incomplete; re-run to resume: {resume_hint:?}");
++            let _ = std::fs::remove_dir_all(&work);
++            return;
++        }
++    };
++    let mut engine = R4Engine::load(EngineParts {
++        graph: &model.graph,
++        signature_artifact: &model.signature_artifact,
++        tokenizer: model.tokenizer.as_deref(),
++        score_report: Some(&model.score_report),
++    })
++    .expect("compiled parts load as an engine");
++    let abi = engine.abi_version();
++    assert_eq!(abi.format_major, FORMAT_VERSION_MAJOR);
++    // One prediction through the typed output slot.
++    let mut out = PredictOutput::default();
++    engine
++        .predict_next_into(&[1], &mut out)
++        .expect("prediction runs");
++    assert!(out.status.is_some());
++    let _ = std::fs::remove_dir_all(&work);
++}
+diff --git a/crates/uor-r4-core/src/transformerless/scenarios.rs b/crates/uor-r4-core/src/transformerless/scenarios.rs
+index 1ea03e4..10fcc52 100644
+--- a/crates/uor-r4-core/src/transformerless/scenarios.rs
++++ b/crates/uor-r4-core/src/transformerless/scenarios.rs
+@@ -190,6 +190,14 @@ impl Tokenizer {
+ 
+         // 2. Fall back to binary tokenizer.bin format
+         let bytes = std::fs::read(path_ref)?;
++        Self::from_bytes(&bytes)
++    }
++
++    /// Parse a tokenizer from in-memory bytes in the binary tokenizer.bin
++    /// format (per token: i32 little-endian length, then the token bytes).
++    /// Split from [`try_load`](Self::try_load) so library consumers can
++    /// validate a bundled tokenizer without filesystem access.
++    pub fn from_bytes(bytes: &[u8]) -> io::Result<Self> {
+         let mut vocab = Vec::new();
+         let mut offset = 0usize;
+         while offset < bytes.len() {
+diff --git a/src/r4g1.rs b/src/r4g1.rs
+index 31e4e8f..cfd3f1b 100644
+--- a/src/r4g1.rs
++++ b/src/r4g1.rs
+@@ -4,6 +4,10 @@
+ //! router. It derives the packed input signature with the transformerless
+ //! artifact, then selects a token from the validated R4G1 graph.
+ //!
++//! This module is the path-based wrapper over the library engine in
++//! `uor-r4-api::engine` (moved there so library consumers load from byte
++//! slices). All policy types are re-exports; behavior is unchanged.
++//!
+ //! # ResolutionStatus-driven behavior (issue #78, decision D4)
+ //!
+ //! Every prediction carries a resolution status and the deployed behavior is
+@@ -17,7 +21,7 @@
+ //! | `contradictory` | [`StatusAction::Abstain`] (reserved; the scorer does not produce it yet) |
+ //!
+ //! `WidenOnce` retries the prediction with the per-depth membership set
+-//! widened to [`WIDENED_TOP_M`] exactly once; a signature still Novel after
++//! widened to `WIDENED_TOP_M` exactly once; a signature still Novel after
+ //! widening is remembered in a bounded FIFO so identical probes abstain
+ //! without widening again (threat model: fallback denial-of-service).
+ //! Abstention is a typed outcome — no token is emitted, none is guessed,
+@@ -29,420 +33,58 @@
+ use std::cell::RefCell;
+ use std::path::{Path, PathBuf};
+ 
+-use uor_r4_core::transformerless::compiler::{self, Compiled, SIG_BYTES, STAGES, WINDOW};
+-use uor_r4_core::transformerless::runtime;
++use uor_r4_api::engine::{EngineParts, LoadError, R4Engine};
++use uor_r4_core::transformerless::compiler::SIG_BYTES;
+ use uor_r4_core::transformerless::scenarios::Tokenizer;
+-use uor_r4_graph_certify::{
+-    GraphScorer, ScoreStatus, StepState, DEFAULT_EXCT_TOP_X, DEFAULT_ROOT_TOP_B, TOP_M,
+-    WIDENED_TOP_M,
++
++// The deployed status-policy types and the status-aware decision path are
++// re-exports of the library engine (the integer-only delimited block the
++// status-policy suite source-scans lives in
++// `crates/uor-r4-api/src/engine.rs`).
++pub use uor_r4_api::engine::{
++    validate_quality_report, AbstainOutcome, GenerateStatus, PolicyCounters, PolicyStatus,
++    PredictDecision, PredictOutcome, StatusAction, StatusPolicy,
+ };
+ 
+-// BEGIN DEPLOYED STATUS POLICY (INTEGER-ONLY) -------------------------
+-// The D4 manifest policy and the status-aware prediction path below are
+-// part of the deployed integer contract: no float, no multiply/divide/
+-// modulo in value arithmetic, and no per-prediction allocation in
+-// steady state (one-time buffers are built in `load`). The
+-// status-policy test suite machine-checks this delimited block by
+-// source scan (the P-4 pattern) and censuses the prediction calls.
+-
+-/// The adapter-level status space of the D4 manifest policy: the
+-/// scorer's three [`ScoreStatus`] outcomes plus the reserved
+-/// `Contradictory` (glossary "Resolution status"). The scorer does not
+-/// produce `Contradictory` yet; the policy arm is declared and enforced
+-/// now so the deployed behavior is total when it lands.
+-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+-pub enum PolicyStatus {
+-    /// Exact-context evidence resolved (Rule 2).
+-    ExactContext,
+-    /// Graph residuals resolved (Rule 1 with a covered chain).
+-    Graph,
+-    /// No calibrated region covers the input.
+-    Novel,
+-    /// Active regions materially disagree (reserved).
+-    Contradictory,
+-}
+-
+-impl From<ScoreStatus> for PolicyStatus {
+-    fn from(status: ScoreStatus) -> Self {
+-        match status {
+-            ScoreStatus::ExactContext => PolicyStatus::ExactContext,
+-            ScoreStatus::Graph => PolicyStatus::Graph,
+-            ScoreStatus::Novel => PolicyStatus::Novel,
+-        }
+-    }
+-}
+-
+-impl PolicyStatus {
+-    /// The wire label used in server JSON responses.
+-    pub fn label(self) -> &'static str {
+-        match self {
+-            PolicyStatus::ExactContext => "exact_context",
+-            PolicyStatus::Graph => "graph",
+-            PolicyStatus::Novel => "novel",
+-            PolicyStatus::Contradictory => "contradictory",
+-        }
+-    }
+-}
+-
+-/// One row of the manifest policy: what the deployed adapter does with
+-/// a prediction of this status.
+-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+-pub enum StatusAction {
+-    /// Emit the selected token.
+-    Serve,
+-    /// Retry once with the membership set widened to [`WIDENED_TOP_M`];
+-    /// if the retry does not resolve to a served status, abstain. A
+-    /// signature confirmed Novel after widening is remembered (bounded)
+-    /// so identical probes abstain without widening again.
+-    WidenOnce,
+-    /// Emit no token; the caller surfaces the status.
+-    Abstain,
+-}
+-
+-/// The D4 manifest policy as data — one action per status. The defaults
+-/// implement the plan's D4 recommendation (exact-residual evidence,
+-/// then abstain): ExactContext to Serve, Graph to Serve, Novel to
+-/// WidenOnce (then Abstain), Contradictory to Abstain.
+-///
+-/// Optional override: the `status_policy` key inside `config` of the
+-/// graph's `score_report.json`, for example
+-/// `{"exact_context": "serve", "graph": "serve", "novel": "widen_once",
+-/// "contradictory": "abstain"}`. Missing keys and unknown values keep
+-/// the default for that row.
+-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+-pub struct StatusPolicy {
+-    pub exact_context: StatusAction,
+-    pub graph: StatusAction,
+-    pub novel: StatusAction,
+-    pub contradictory: StatusAction,
+-}
+-
+-impl Default for StatusPolicy {
+-    fn default() -> Self {
+-        Self {
+-            exact_context: StatusAction::Serve,
+-            graph: StatusAction::Serve,
+-            novel: StatusAction::WidenOnce,
+-            contradictory: StatusAction::Abstain,
+-        }
+-    }
+-}
+-
+-impl StatusPolicy {
+-    /// The action declared for `status`.
+-    pub fn action(&self, status: PolicyStatus) -> StatusAction {
+-        match status {
+-            PolicyStatus::ExactContext => self.exact_context,
+-            PolicyStatus::Graph => self.graph,
+-            PolicyStatus::Novel => self.novel,
+-            PolicyStatus::Contradictory => self.contradictory,
+-        }
+-    }
+-
+-    /// Read the optional `status_policy` override from the score
+-    /// report's `config` section; absent or invalid rows fall back to
+-    /// the D4 defaults.
+-    pub fn from_report(report: Option<&serde_json::Value>) -> Self {
+-        let defaults = Self::default();
+-        let overrides = report
+-            .and_then(|r| r.get("config"))
+-            .and_then(|c| c.get("status_policy"));
+-        let parse = |key: &str, default: StatusAction| {
+-            overrides
+-                .and_then(|o| o.get(key))
+-                .and_then(serde_json::Value::as_str)
+-                .and_then(parse_action)
+-                .unwrap_or(default)
+-        };
+-        Self {
+-            exact_context: parse("exact_context", defaults.exact_context),
+-            graph: parse("graph", defaults.graph),
+-            novel: parse("novel", defaults.novel),
+-            contradictory: parse("contradictory", defaults.contradictory),
+-        }
+-    }
+-}
+-
+-/// Parse one override value (`serve`, `widen_once`, `abstain`).
+-fn parse_action(value: &str) -> Option<StatusAction> {
+-    match value {
+-        "serve" => Some(StatusAction::Serve),
+-        "widen_once" => Some(StatusAction::WidenOnce),
+-        "abstain" => Some(StatusAction::Abstain),
+-        _ => None,
+-    }
+-}
+-
+-/// Observable counters of the status-aware path: the widen-once bound
+-/// and the abstain/serve rates, asserted by the probe suite and
+-/// reportable by the server.
+-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+-pub struct PolicyCounters {
+-    /// Status-aware predictions run.
+-    pub predicts: u64,
+-    /// Predictions served a token.
+-    pub serves: u64,
+-    /// Predictions abstained.
+-    pub abstains: u64,
+-    /// Widened re-probes run (at most one per distinct Novel
+-    /// signature; the bounded memory answers the rest).
+-    pub widen_attempts: u64,
+-    /// Novel signatures answered from the widen-once memory instead of
+-    /// re-widening.
+-    pub widen_skipped_seen: u64,
+-}
+-
+-/// A served prediction: the selected token, the status that resolved,
+-/// and whether a widened re-probe ran for this prediction.
+-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+-pub struct PredictOutcome {
+-    pub token: u32,
+-    pub status: ScoreStatus,
+-    pub widened: bool,
+-}
+-
+-/// A typed abstention: no token was emitted and none is guessed.
+-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+-pub struct AbstainOutcome {
+-    pub status: ScoreStatus,
+-    pub widened: bool,
+-}
+-
+-/// The status-aware prediction result of the deployed adapter: either
+-/// the policy serves a token or it abstains with the status recorded.
+-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+-pub enum PredictDecision {
+-    Serve(PredictOutcome),
+-    Abstain(AbstainOutcome),
+-}
+-
+-/// The result of a status-aware generation run: tokens written, the
+-/// final step's status, whether any step widened, and whether the run
+-/// stopped on an abstention (no guessed token was emitted).
+-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+-pub struct GenerateStatus {
+-    pub count: usize,
+-    pub status: Option<ScoreStatus>,
+-    pub widened: bool,
+-    pub abstained: bool,
+-}
+-
+-/// Bound of the widen-once memory: confirmed-Novel signatures whose
+-/// widening would deterministically re-resolve Novel (scoring is a pure
+-/// function of the loaded artifact, so the memory is sound for the
+-/// lifetime of this state; a recompile replaces the whole state).
+-const NOVEL_SEEN_CAPACITY: usize = 1024;
+-
+-/// Fixed-capacity FIFO of confirmed-Novel signatures (threat model:
+-/// repeated adversarial out-of-distribution probes abstain after one
+-/// membership scan instead of forcing constant widening).
+-struct NovelSeen {
+-    sigs: Vec<[u8; SIG_BYTES]>,
+-    next: usize,
+-}
+-
+-impl NovelSeen {
+-    fn new(capacity: usize) -> Self {
+-        Self {
+-            sigs: Vec::with_capacity(capacity),
+-            next: 0,
+-        }
+-    }
+-    fn contains(&self, sig: &[u8; SIG_BYTES]) -> bool {
+-        self.sigs.iter().any(|entry| entry == sig)
+-    }
+-    fn insert(&mut self, sig: &[u8; SIG_BYTES]) {
+-        if self.sigs.capacity() == 0 {
+-            return;
+-        }
+-        if self.sigs.len() < self.sigs.capacity() {
+-            self.sigs.push(*sig);
+-        } else {
+-            self.sigs[self.next] = *sig;
+-        }
+-        self.next += 1;
+-        if self.next == self.sigs.capacity() {
+-            self.next = 0;
+-        }
+-    }
+-}
+-
+-/// One scored probe: the selection and its status at the given
+-/// membership width.
+-struct ScoredProbe {
+-    token: u32,
+-    status: ScoreStatus,
+-}
+-
+ /// A loaded, CID-verified scored graph and the teacher artifact needed to
+-/// derive input signatures from token ids.
++/// derive input signatures from token ids. Thin `&self` façade over
++/// [`R4Engine`] for the server's shared-state access pattern.
+ pub struct R4g1State {
+-    artifacts: Compiled,
+-    scorer: GraphScorer,
+-    rotations: [usize; WINDOW + 1],
++    engine: RefCell<R4Engine>,
++    /// The bundle tokenizer, loaded with the historical fallback chain
++    /// (`Tokenizer::try_load` probes sibling vocab.json candidates).
+     tokenizer: Option<Tokenizer>,
+-    /// Number of token rows in the teacher artifact: the exclusive upper
+-    /// bound of decodable token ids (checked at the prediction boundary
+-    /// so an out-of-vocabulary window is a typed error, not a panic).
+-    token_rows: u32,
+-    /// The D4 manifest policy in force (defaults or report override).
+-    policy: StatusPolicy,
+-    /// Fixed-capacity scoring scratch, allocated once in `load`.
+-    step: RefCell<StepState>,
+-    /// False only for legacy TLS1 exact-context artifacts, which stay on
+-    /// the reference scorer (no widening there).
+-    step_supported: bool,
+-    counters: RefCell<PolicyCounters>,
+-    novel_seen: RefCell<NovelSeen>,
+ }
+ 
+ impl R4g1State {
+     /// The manifest policy in force (D4 defaults or the score-report
+     /// override).
+     pub fn policy(&self) -> StatusPolicy {
+-        self.policy
++        self.engine.borrow().policy()
+     }
+ 
+     /// A snapshot of the status-path counters.
+     pub fn policy_counters(&self) -> PolicyCounters {
+-        *self.counters.borrow()
++        self.engine.borrow().policy_counters()
+     }
+ 
+-    /// Update one counter group.
+-    fn bump(&self, update: impl Fn(&mut PolicyCounters)) {
+-        update(&mut self.counters.borrow_mut());
+-    }
+-
+-    /// Derive the packed input signature of a token window.
+-    fn derive_sig(&self, window: &[u32]) -> [u8; SIG_BYTES] {
+-        let bundle = runtime::bundle_window_plain(&self.artifacts, &self.rotations, window);
+-        runtime::sig_plain(&self.artifacts, &bundle)
+-    }
+-
+-    /// Reject a window carrying a token id the teacher artifact cannot
+-    /// decode (boundary check: the decode below indexes by token id).
+-    fn check_window(&self, window: &[u32]) -> Result<(), String> {
+-        if window.iter().any(|&t| t >= self.token_rows) {
+-            return Err(format!(
+-                "token id outside the teacher vocabulary ({})",
+-                self.token_rows
+-            ));
+-        }
+-        Ok(())
+-    }
+-
+-    /// Score one signature at the given membership width. Artifacts
+-    /// with legacy TLS1 exact-context evidence stay on the reference
+-    /// scorer (the deployed step requires residualized RX1 evidence);
+-    /// that path ignores the width — widening is unavailable there.
+-    fn score_sig(
+-        &self,
+-        sig: &[u8; SIG_BYTES],
+-        top_m: usize,
+-        recent_tokens: &[u32],
+-    ) -> Result<ScoredProbe, String> {
+-        if self.step_supported {
+-            let outcome = self.scorer.score_step_with_recent(
+-                sig,
+-                top_m,
+-                &mut self.step.borrow_mut(),
+-                recent_tokens,
+-            )?;
+-            Ok(ScoredProbe {
+-                token: outcome.selected,
+-                status: outcome.status,
+-            })
+-        } else {
+-            let outcome = self.scorer.score_candidates(sig, recent_tokens)?;
+-            Ok(ScoredProbe {
+-                token: outcome.selected,
+-                status: outcome.witness.status,
+-            })
+-        }
+-    }
+-
+-    /// The D4 policy decision for one input signature: score at the
+-    /// manifest membership width, then Serve / WidenOnce / Abstain per
+-    /// the declared policy. WidenOnce re-probes once at
+-    /// [`WIDENED_TOP_M`]; a signature still Novel after widening is
+-    /// remembered so identical probes abstain without widening again.
++    /// The D4 policy decision for one input signature.
+     pub fn predict_signature_status(
+         &self,
+         sig: &[u8; SIG_BYTES],
+     ) -> Result<PredictDecision, String> {
+-        self.predict_signature_status_with_recent(sig, &[])
+-    }
+-
+-    fn predict_signature_status_with_recent(
+-        &self,
+-        sig: &[u8; SIG_BYTES],
+-        recent_tokens: &[u32],
+-    ) -> Result<PredictDecision, String> {
+-        self.bump(|c| c.predicts += 1);
+-        let first = self.score_sig(sig, TOP_M, recent_tokens)?;
+-        match self.policy.action(first.status.into()) {
+-            StatusAction::Serve => {
+-                self.bump(|c| c.serves += 1);
+-                Ok(PredictDecision::Serve(PredictOutcome {
+-                    token: first.token,
+-                    status: first.status,
+-                    widened: false,
+-                }))
+-            }
+-            StatusAction::Abstain => {
+-                self.bump(|c| c.abstains += 1);
+-                Ok(PredictDecision::Abstain(AbstainOutcome {
+-                    status: first.status,
+-                    widened: false,
+-                }))
+-            }
+-            StatusAction::WidenOnce => {
+-                if !self.step_supported {
+-                    // No widening on the legacy reference path: abstain
+-                    // directly (documented degrade for TLS1 artifacts).
+-                    self.bump(|c| c.abstains += 1);
+-                    return Ok(PredictDecision::Abstain(AbstainOutcome {
+-                        status: first.status,
+-                        widened: false,
+-                    }));
+-                }
+-                if self.novel_seen.borrow().contains(sig) {
+-                    self.bump(|c| {
+-                        c.widen_skipped_seen += 1;
+-                        c.abstains += 1;
+-                    });
+-                    return Ok(PredictDecision::Abstain(AbstainOutcome {
+-                        status: first.status,
+-                        widened: false,
+-                    }));
+-                }
+-                self.bump(|c| c.widen_attempts += 1);
+-                let second = self.score_sig(sig, WIDENED_TOP_M, recent_tokens)?;
+-                if second.status == ScoreStatus::Novel {
+-                    self.novel_seen.borrow_mut().insert(sig);
+-                }
+-                if self.policy.action(second.status.into()) == StatusAction::Serve {
+-                    self.bump(|c| c.serves += 1);
+-                    Ok(PredictDecision::Serve(PredictOutcome {
+-                        token: second.token,
+-                        status: second.status,
+-                        widened: true,
+-                    }))
+-                } else {
+-                    self.bump(|c| c.abstains += 1);
+-                    Ok(PredictDecision::Abstain(AbstainOutcome {
+-                        status: second.status,
+-                        widened: true,
+-                    }))
+-                }
+-            }
+-        }
++        self.engine
++            .borrow_mut()
++            .predict_signature_status(sig)
++            .map_err(|error| error.to_string())
+     }
+ 
+     /// Score one token window through the D4 policy.
+     pub fn predict_window_status(&self, window: &[u32]) -> Result<PredictDecision, String> {
+-        self.check_window(window)?;
+-        self.predict_signature_status_with_recent(&self.derive_sig(window), window)
++        self.engine
++            .borrow_mut()
++            .predict_decision(window)
++            .map_err(|error| error.to_string())
+     }
+ 
+     /// Generate a greedy continuation with per-step policy decisions:
+@@ -453,59 +95,12 @@ impl R4g1State {
+         seed: &[u32],
+         out: &mut [u32],
+     ) -> Result<GenerateStatus, String> {
+-        self.check_window(seed)?;
+-        let mut window = [0u32; WINDOW];
+-        let seed = &seed[seed.len().saturating_sub(WINDOW)..];
+-        let mut window_len = seed.len();
+-        window[..window_len].copy_from_slice(seed);
+-
+-        let mut last_status = None;
+-        let mut widened = false;
+-        for (generated, token) in out.iter_mut().enumerate() {
+-            match self.predict_window_status(&window[..window_len])? {
+-                PredictDecision::Serve(outcome) => {
+-                    let next = outcome.token;
+-                    last_status = Some(outcome.status);
+-                    widened = widened || outcome.widened;
+-                    *token = next;
+-                    if next == 1 || next == 2 {
+-                        return Ok(GenerateStatus {
+-                            count: generated,
+-                            status: last_status,
+-                            widened,
+-                            abstained: false,
+-                        });
+-                    }
+-                    if window_len < WINDOW {
+-                        window[window_len] = next;
+-                        window_len += 1;
+-                    } else {
+-                        window.copy_within(1.., 0);
+-                        window[WINDOW - 1] = next;
+-                    }
+-                }
+-                PredictDecision::Abstain(outcome) => {
+-                    return Ok(GenerateStatus {
+-                        count: generated,
+-                        status: Some(outcome.status),
+-                        widened: widened || outcome.widened,
+-                        abstained: true,
+-                    });
+-                }
+-            }
+-        }
+-        Ok(GenerateStatus {
+-            count: out.len(),
+-            status: last_status,
+-            widened,
+-            abstained: false,
+-        })
++        self.engine
++            .borrow_mut()
++            .generate_into(seed, out)
++            .map_err(|error| error.to_string())
+     }
+-}
+ 
+-// END DEPLOYED STATUS POLICY (INTEGER-ONLY) ---------------------------
+-
+-impl R4g1State {
+     /// Load and validate a scored graph. The teacher artifact supplies the
+     /// compressed token rows used to derive input signatures. EXCT is not
+     /// enabled because its reference implementation performs probe-time
+@@ -515,64 +110,36 @@ impl R4g1State {
+             .map_err(|error| format!("{}: {error}", graph_path.display()))?;
+         let teacher_bytes = std::fs::read(teacher_path)
+             .map_err(|error| format!("{}: {error}", teacher_path.display()))?;
+-        let artifacts = compiler::parse_artifacts(&teacher_bytes).ok_or_else(|| {
+-            format!(
+-                "{}: not a TLA3/TLA4/TLA5 teacher artifact",
+-                teacher_path.display()
+-            )
+-        })?;
++        // Historical behavior: a score report that does not parse is
++        // ignored (D4 defaults), not an error — pre-validate before
++        // handing the bytes to the typed loader.
+         let score_report = graph_path
+             .parent()
+             .and_then(|parent| std::fs::read(parent.join("score_report.json")).ok())
+-            .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok());
+-        let root_top_b = score_report
+-            .as_ref()
+-            .and_then(|report| report.pointer("/config/root_top_b"))
+-            .and_then(serde_json::Value::as_u64)
+-            .and_then(|value| usize::try_from(value).ok())
+-            .filter(|&value| value > 0)
+-            .unwrap_or(DEFAULT_ROOT_TOP_B);
+-        let exct_top_x = score_report
+-            .as_ref()
+-            .and_then(|report| report.pointer("/config/exct_top_x"))
+-            .and_then(serde_json::Value::as_u64)
+-            .and_then(|value| usize::try_from(value).ok())
+-            .filter(|&value| value > 0)
+-            .unwrap_or(DEFAULT_EXCT_TOP_X);
+-        // The compiled RX1 EXCT table contains integer residuals. Supplying
+-        // the teacher artifact here is only for integer class-code lookup;
+-        // no probe-time log quantization occurs in the deployed path.
+-        let scorer =
+-            GraphScorer::from_artifact(&graph_bytes, Some(&teacher_bytes), root_top_b, exct_top_x)
+-                .map_err(|error| format!("{}: {error}", graph_path.display()))?;
+-        if let Some(report) = score_report.as_ref() {
+-            validate_quality_report(report)?;
+-        }
++            .filter(|bytes| serde_json::from_slice::<serde_json::Value>(bytes).is_ok());
++        let engine = R4Engine::load(EngineParts {
++            graph: &graph_bytes,
++            signature_artifact: &teacher_bytes,
++            // The engine's own text helpers are unused here: this wrapper
++            // keeps the historical tokenizer fallback chain below.
++            tokenizer: None,
++            score_report: score_report.as_deref(),
++        })
++        .map_err(|error| match error {
++            LoadError::InvalidSignatureArtifact | LoadError::TeacherTooLarge => {
++                format!("{}: {error}", teacher_path.display())
++            }
++            other => format!("{}: {other}", graph_path.display()),
++        })?;
+         let tokenizer = teacher_path
+             .parent()
+             .map(|parent| parent.join("tokenizer.bin"))
+             .filter(|path| path.is_file())
+             .and_then(|path| Tokenizer::try_load(path).ok());
+ 
+-        let policy = StatusPolicy::from_report(score_report.as_ref());
+-        let step_supported = !scorer.has_legacy_exct();
+-        let step = scorer
+-            .step_state(WIDENED_TOP_M)
+-            .map_err(|error| format!("{}: {error}", graph_path.display()))?;
+-        let token_rows = u32::try_from(artifacts.token_codes.len() / STAGES)
+-            .map_err(|_| format!("{}: teacher token table too large", teacher_path.display()))?;
+-
+         Ok(Self {
+-            artifacts,
+-            scorer,
+-            rotations: compiler::derive_rotations(),
++            engine: RefCell::new(engine),
+             tokenizer,
+-            token_rows,
+-            policy,
+-            step: RefCell::new(step),
+-            step_supported,
+-            counters: RefCell::new(PolicyCounters::default()),
+-            novel_seen: RefCell::new(NovelSeen::new(NOVEL_SEEN_CAPACITY)),
+         })
+     }
+ 
+@@ -611,67 +178,6 @@ impl R4g1State {
+     }
+ }
+ 
+-/// Pinned quality floor (issue #110, era: #65-chain anchors). The deployed
+-/// graph must not digress from the Rule 1+2 anchors the quality chain
+-/// measured (31.7086% top-1, 9.8612 bits/token) beyond the margins the CI
+-/// trend alarm allows. Keep these constants in sync with
+-/// `scripts/check_gate_c_regression.py`; when a compiler redesign
+-/// legitimately moves the anchors, update both sites in the same commit with
+-/// an era note.
+-const QUALITY_FLOOR_TOP1_AGREEMENT: f64 = 0.317 - 0.02;
+-const QUALITY_FLOOR_BITS_PER_TOKEN: f64 = 9.86 + 0.10;
+-
+-/// Validate the graph's Rule 1+2 quality against the declared quality basis.
+-/// Reports without a profile retain the historical pinned-floor behavior.
+-/// Dynamic Hugging Face builds use `config.quality_profile = "relative_tla"`
+-/// because their teacher-generated distributions are not comparable to the
+-/// legacy fixture corpus that established the absolute floor.
+-pub fn validate_quality_report(report: &serde_json::Value) -> Result<(), String> {
+-    let graph_agreement = report
+-        .pointer("/gate_c/rule12_precedence/top1_agreement")
+-        .and_then(serde_json::Value::as_f64);
+-    let graph_bits = report
+-        .pointer("/gate_c/rule12_precedence/bits_per_token")
+-        .and_then(serde_json::Value::as_f64);
+-    let baseline_agreement = report
+-        .pointer("/gate_c/tla3_baseline/top1_agreement")
+-        .and_then(serde_json::Value::as_f64);
+-    if let (Some(graph), Some(baseline)) = (graph_agreement, baseline_agreement) {
+-        if graph < baseline {
+-            return Err(format!(
+-                "R4G1 quality gate failed: graph runtime top-1 {:.2}% is below TLA baseline {:.2}%",
+-                graph * 100.0,
+-                baseline * 100.0
+-            ));
+-        }
+-    }
+-    let quality_profile = report
+-        .pointer("/config/quality_profile")
+-        .and_then(serde_json::Value::as_str)
+-        .unwrap_or("pinned");
+-    if quality_profile == "relative_tla" {
+-        return Ok(());
+-    }
+-    if let Some(graph) = graph_agreement {
+-        if graph < QUALITY_FLOOR_TOP1_AGREEMENT {
+-            return Err(format!(
+-                "R4G1 quality gate failed: graph runtime top-1 {:.2}% digresses below the pinned floor {:.2}%",
+-                graph * 100.0,
+-                QUALITY_FLOOR_TOP1_AGREEMENT * 100.0
+-            ));
+-        }
+-    }
+-    if let Some(bits) = graph_bits {
+-        if bits > QUALITY_FLOOR_BITS_PER_TOKEN {
+-            return Err(format!(
+-                "R4G1 quality gate failed: graph runtime {:.4} bits/token digresses above the pinned ceiling {:.4}",
+-                bits, QUALITY_FLOOR_BITS_PER_TOKEN
+-            ));
+-        }
+-    }
+-    Ok(())
+-}
+-
+ /// Resolve the graph path from an explicit setting or the conventional
+ /// compiled-bundle location beside `tless_artifacts.bin`.
+ pub fn discover_path(explicit: Option<&str>, teacher_path: &Path) -> Option<PathBuf> {
+diff --git a/tests/status_policy.rs b/tests/status_policy.rs
+index 4fbbec0..ce5ecdd 100644
+--- a/tests/status_policy.rs
++++ b/tests/status_policy.rs
+@@ -12,7 +12,9 @@
+ //! - (d) adversarial repetition of the same probe is deterministic;
+ //! - generation stops at the first abstention (count + status returned);
+ //! - the manifest policy is data (defaults + score-report override);
+-//! - the delimited policy block in `src/r4g1.rs` is integer-only by source
++//! - the delimited policy block in `crates/uor-r4-api/src/engine.rs`
++//!   (moved from `src/r4g1.rs`, which now wraps the library engine) is
++//!   integer-only by source
+ //!   scan (the P-4 pattern; `score_runtime.rs` is covered whole-file by
+ //!   `tests/score.rs`'s scan in the core crate).
+ 
+@@ -409,14 +411,16 @@ fn materialize_window_fixture_bundle() {
+ 
+ // ------------------------------------------- integer-only source scan --
+ 
+-/// The delimited status-policy block of `src/r4g1.rs` carries no
++/// The delimited status-policy block of `crates/uor-r4-api/src/engine.rs`
++/// (moved from `src/r4g1.rs`; the root module is now a thin wrapper over
++/// the library engine) carries no
+ /// `f32`/`f64`, no `*` `/` `%` value arithmetic, and no unsafe code
+ /// (the P-4 scan pattern of `transformerless/mod.rs`, mirrored from
+ /// `crates/uor-r4-core/tests/score.rs`; the deployed `score_step` code in
+ /// `score_runtime.rs` is covered by that crate's whole-file scan).
+ #[test]
+ fn deployed_status_path_is_integer_only_by_source_scan() {
+-    let src = include_str!("../src/r4g1.rs");
++    let src = include_str!("../crates/uor-r4-api/src/engine.rs");
+     let mut block = String::new();
+     let mut in_block = false;
+     let mut blocks = 0u32;

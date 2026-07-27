@@ -1,0 +1,12 @@
+[package]
+name        = "hologram-ai-huggingface"
+description = "Immutable Hugging Face and local model-source acquisition for hologram-ai."
+version.workspace     = true
+edition.workspace     = true
+rust-version.workspace = true
+license.workspace     = true
+repository.workspace  = true
+
+[dependencies]
+hologram-ai-core = { workspace = true, features = ["std"] }
+blake3 = { workspace = true, features = ["std"] }

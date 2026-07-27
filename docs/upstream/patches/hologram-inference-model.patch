@@ -1,0 +1,1458 @@
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index 335a5da..0ecc94c 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
+ 
+ ## [Unreleased]
+ 
++### Added
++- `.holo` **format v4** (specs/refactor/03 §v4): `LayerKind::InferenceModel = 4`
++  appended to the closed layer-kind set — an engine-agnostic AI-model layer
++  (mandatory engine tag in `aux`, mandatory service name in `entry`, no exit
++  code). `Layer::inference_model(content, entry, engine)` constructor; new
++  `ManifestError` variants `EmptyLayerEntry` / `MissingEngineTag` /
++  `DuplicateLayerEntry`; non-empty layer entry names must now be unique within a
++  manifest. Writers emit v4; v2/v3 archives remain loadable.
++- `hologram ai` CLI group (download / compile / inspect / infer) behind the new
++  `ai` cargo feature on hologram-cli (default off), delegating to the sibling
++  `hologram-ai` crate — hologram stays engine-agnostic.
++- `hologram_ai_*` C ABI surface behind the new `ai` cargo feature on
++  hologram-ffi (default off): compile / download / app load / model listing /
++  JSON session invoke, with the `HOLOGRAM_ERROR_AI_*` error band (100–111) and
++  `ai-*` FEATURES probes.
++
+ ## [0.12.1] - 2026-07-20
+ 
+ ### Added
+diff --git a/CONFORMANCE.md b/CONFORMANCE.md
+index baa75f0..09b9e09 100644
+--- a/CONFORMANCE.md
++++ b/CONFORMANCE.md
+@@ -32,7 +32,7 @@
+ | **CS** | Specification conformance (holospaces docs) — the documentation vs arc42 / C4 / OPM ISO 19450 / ISO 15288, via validators V1–V8 — spec 06 §docs (MG-8) | validator scripts (`specs/holospaces/scripts/v*-*`) |
+ | **LAW** | Repo-wide laws (SPINE-1..6, κ-only identity, capability attenuation, async/sync, one surface) — refactor spec 00 | BDD scenarios (features/suites/s0_laws) |
+ | **SP** | Space contract trait set + laws + TCK battery; external-repo parity (D21) — spec 02 | BDD scenarios (s1_space_contract) |
+-| **HF** | `.holo` v3 container, attenuated nesting, per-layer certificates — spec 03 | BDD scenarios (s2_holo_format) |
++| **HF** | `.holo` v3/v4 container (v4 appends the inference-model layer kind), attenuated nesting, per-layer certificates — spec 03 | BDD scenarios (s2_holo_format) |
+ | **NW** | Network κ-realization, KappaSync/DHT, public/restricted/private tiers — spec 04 | BDD scenarios (s3_networks) |
+ | **TL** | One binary, one public facade crate, FFI over Client — spec 05 | BDD scenarios (s4_tooling) |
+ | **MG** | Phased always-green migration gates (P0–P6) — spec 06 | BDD scenarios (s5_migration) |
+@@ -390,13 +390,14 @@ addressing and warm-start do.
+ | **SP-4** | The reference HAL seams (`Entropy`/`Clock`/`Spawner`, spec 02 §4) are hermetic and deterministic — equally-seeded entropy reproduces the same stream, the clock advances only when told, and the background spawner is inert — so V&V is reproducible. | BDD scenario (witnessed against `hologram-space`'s `SeededEntropy`/`ManualClock`/`NoopSpawner`) | `s1_space_contract/hal_seams.feature::the reference HAL seams are hermetic and deterministic` | ✅ |
+ | **SP-5** | Headless is a first-class conformance profile (spec 02 §5): a space with no display satisfies `Surface` via the null projection — `project` yields the canonical empty-projection κ and `intent` refuses with a typed headless error. | BDD scenario (witnessed against `hologram-space`'s `NullSurface`) | `s1_space_contract/surface_headless.feature::a headless space satisfies the Surface contract via the null projection` | ✅ |
+ 
+-## HF — .holo v3 format (refactor spec 03; BDD)
++## HF — .holo v3/v4 format (refactor spec 03; BDD)
+ 
+ | ID | Statement | Enforcement | Witness | Status |
+ |---|---|---|---|---|
+ | **HF-1** | `.holo` v3 is the one application container; a tensor-only archive is the degenerate single-layer case. | BDD scenario | `s2_holo_format/container.feature::single format covers tensor-only` | ✅ |
+ | **HF-2** | App nesting is capability-attenuated: a child's κ refs + delegated CapabilitySet are a subset of the parent's. | BDD scenario | `s2_holo_format/nesting.feature::nested app cannot exceed parent` | ✅ |
+ | **HF-3** | v3 per-layer certificates verify; inspection APIs never strip them. | BDD scenario | `s2_holo_format/certificates.feature::per-layer certificates verify` | ✅ |
++| **HF-4** | v4 appends the `inference-model` layer kind (discriminant 4, closed enum — appended, never renumbered): non-exit-bearing (never a manifest `primary`), mandatory engine tag (`aux`) and service name (`entry`), unique non-empty entries per manifest; writers emit v4, v2/v3 archives remain loadable. Space-side validation: the `inference_model_*` and `duplicate_service_entries_are_rejected` unit tests in `realizations.rs`. | unit + round-trip tests | `crates/hologram-archive/tests/app_manifest_v3.rs::v4_archive_round_trips_an_inference_model_layer` | ✅ |
+ 
+ ## NW — networks (refactor spec 04; BDD)
+ 
+diff --git a/Cargo.lock b/Cargo.lock
+index 2912ec8..609296f 100644
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -1627,6 +1627,7 @@ dependencies = [
+  "hashbrown 0.15.5",
+  "hologram-compute",
+  "hologram-graph",
++ "hologram-space",
+  "hologram-types",
+  "memmap2",
+  "smallvec",
+diff --git a/api/CHANGELOG.md b/api/CHANGELOG.md
+index 36f976e..9a50c63 100644
+--- a/api/CHANGELOG.md
++++ b/api/CHANGELOG.md
+@@ -1,5 +1,33 @@
+ # Public API changelog
+ 
++## Unreleased
++
++`.holo` format v4 + the AI application surface (specs/refactor/03 §v4):
++
++- **Format**: `hologram-archive`'s `FORMAT_VERSION` is now **4** (snapshot text is
++  value-free, so `api/hologram-archive.txt` is unchanged). v4 appends the
++  `inference-model` layer kind (discriminant 4) to the manifest's closed kind set;
++  the section set is unchanged and v2/v3 archives remain loadable
++  (`MIN_READ_VERSION` stays 2). Writers emit v4 only.
++- **hologram-space** (not covered by the api/ snapshot set): `LayerKind::InferenceModel = 4`,
++  `Layer::inference_model(content, entry, engine)`, and new `ManifestError` variants
++  `EmptyLayerEntry` / `MissingEngineTag` / `DuplicateLayerEntry`.
++- **hologram-cli**: new `hologram ai` subcommand group (download / compile /
++  inspect / infer), cfg-gated behind the new `ai` cargo feature (default off; the
++  sibling `hologram-ai` dependency is documented but commented out until that
++  crate is published — see `crates/hologram-cli/src/ai.rs`).
++- **hologram-ffi**: new `ai` cargo feature (default off) adding the
++  `hologram_ai_*` C ABI surface (compile / download / app load / model listing /
++  JSON session invoke) and the `HOLOGRAM_ERROR_AI_*` error band (100–111), all
++  cfg-gated, plus cfg-gated `ai-compile` / `ai-download` / `ai-app` /
++  `ai-session` FEATURES probes. Default-feature public API is unchanged, so
++  `api/hologram-ffi.txt` is unchanged.
++
++_Snapshot note_: the api/*.txt snapshots are tool-generated
++(`scripts/update-api-snapshots.sh`); no snapshot diff results from this change
++(default features, value-free consts), so they were not regenerated.
++
++
+ ## v0.12.1
+ 
+ _No public-API changes._
+diff --git a/crates/hologram-archive/Cargo.toml b/crates/hologram-archive/Cargo.toml
+index 2a5d01c..46a7a1b 100644
+--- a/crates/hologram-archive/Cargo.toml
++++ b/crates/hologram-archive/Cargo.toml
+@@ -33,6 +33,9 @@ memmap2           = { workspace = true, optional = true }
+ 
+ [dev-dependencies]
+ hologram-compute = { workspace = true }
++# The v4 app-manifest round-trip test frames a real `AppManifest` realization
++# (with an inference-model layer) through the writer/loader.
++hologram-space   = { workspace = true }
+ # V&V ONLY — the upstream BLAKE3 reference implementation (by the
+ # algorithm's authors) used as an INDEPENDENT external oracle to verify
+ # hologram's σ-axis against, mirroring prism-btc validating SHA against
+diff --git a/crates/hologram-archive/src/format.rs b/crates/hologram-archive/src/format.rs
+index 97176c0..59a03c6 100644
+--- a/crates/hologram-archive/src/format.rs
++++ b/crates/hologram-archive/src/format.rs
+@@ -1,19 +1,24 @@
+ //! `.holo` binary layout (spec X.1).
+ 
+ pub const MAGIC: [u8; 4] = *b"HOLO";
+-/// `.holo` format version (spec `refactor/03`). **v3** makes `.holo` the one
+-/// application container: it adds the [`SectionKind::AppManifest`] section —
+-/// an IRI-tagged `AppManifest` realization naming an application's ordered,
+-/// κ-referenced layers plus its composed children — on top of the v2
+-/// tensor-graph sections (kinds 0–14, unchanged). A tensor-only archive is the
+-/// degenerate single-layer case. **v2** enriched the `Inputs`/`Outputs` port
+-/// wire format with a port `name` and full `shape`, and added the open
+-/// [`SectionKind::Extension`] section.
++/// `.holo` format version (spec `refactor/03`). **v4** appends the
++/// `inference-model` layer kind (discriminant 4, `hologram-space::LayerKind`)
++/// to the manifest's closed kind set — an engine-agnostic AI-model layer whose
++/// `aux` tag is the mandatory engine identifier and whose `entry` names a
++/// callable service. The section set is unchanged (v4 is manifest-content
++/// only). **v3** makes `.holo` the one application container: it adds the
++/// [`SectionKind::AppManifest`] section — an IRI-tagged `AppManifest`
++/// realization naming an application's ordered, κ-referenced layers plus its
++/// composed children — on top of the v2 tensor-graph sections (kinds 0–14,
++/// unchanged). A tensor-only archive is the degenerate single-layer case.
++/// **v2** enriched the `Inputs`/`Outputs` port wire format with a port `name`
++/// and full `shape`, and added the open [`SectionKind::Extension`] section.
+ ///
+-/// Writers emit v3 only; readers accept [`MIN_READ_VERSION`]`..=FORMAT_VERSION`
+-/// so a v2 tensor archive stays loadable (the loader treats it as a single
+-/// tensor-plan layer). v1 archives (flat unnamed ports) are not loadable.
+-pub const FORMAT_VERSION: u16 = 3;
++/// Writers emit v4 only; readers accept [`MIN_READ_VERSION`]`..=FORMAT_VERSION`
++/// so v2/v3 archives stay loadable (the loader treats a v2 tensor archive as a
++/// single tensor-plan layer). v1 archives (flat unnamed ports) are not
++/// loadable.
++pub const FORMAT_VERSION: u16 = 4;
+ 
+ /// Lowest `.holo` version this build still reads (the v2 read-shim, spec 03
+ /// §Compatibility). Below this the archive is rejected with
+diff --git a/crates/hologram-archive/src/loader.rs b/crates/hologram-archive/src/loader.rs
+index b894121..b411d6d 100644
+--- a/crates/hologram-archive/src/loader.rs
++++ b/crates/hologram-archive/src/loader.rs
+@@ -151,8 +151,8 @@ impl<'a> HoloLoader<'a> {
+             return Err(ArchiveError::BadMagic(m));
+         }
+         let ver = u16::from_le_bytes([bytes[4], bytes[5]]);
+-        // Read-shim (spec 03 §Compatibility): accept v2 tensor archives through
+-        // the current version; writers emit v3 only. Below MIN_READ_VERSION or
++        // Read-shim (spec 03 §Compatibility): accept v2/v3 archives through
++        // the current version; writers emit v4 only. Below MIN_READ_VERSION or
+         // above the current version is rejected.
+         if !(crate::format::MIN_READ_VERSION..=FORMAT_VERSION).contains(&ver) {
+             return Err(ArchiveError::UnsupportedVersion(ver));
+diff --git a/crates/hologram-archive/tests/app_manifest_v3.rs b/crates/hologram-archive/tests/app_manifest_v3.rs
+index 1b540f7..bdb4685 100644
+--- a/crates/hologram-archive/tests/app_manifest_v3.rs
++++ b/crates/hologram-archive/tests/app_manifest_v3.rs
+@@ -1,18 +1,54 @@
+-//! `.holo` v3: the `AppManifest` section + the v2 read-shim (spec `refactor/03`).
++//! `.holo` v3/v4: the `AppManifest` section + the v2 read-shim (spec `refactor/03`).
+ //!
+-//! v3 makes `.holo` the one application container. The archive layer carries the
+-//! manifest opaquely (its bytes are an `AppManifest` realization decoded by the
+-//! app-load layer); a bare tensor archive omits it. Writers emit v3; readers
+-//! accept `MIN_READ_VERSION..=FORMAT_VERSION` so a v2 tensor archive still loads.
++//! v3 makes `.holo` the one application container; v4 appends the `inference-model`
++//! layer kind to the manifest's closed kind set (the section set is unchanged). The
++//! archive layer carries the manifest opaquely (its bytes are an `AppManifest`
++//! realization decoded by the app-load layer); a bare tensor archive omits it.
++//! Writers emit v4; readers accept `MIN_READ_VERSION..=FORMAT_VERSION` so v2/v3
++//! archives still load.
+ 
+ use hologram_archive::{ArchiveError, HoloLoader, HoloWriter, SectionKind, FORMAT_VERSION};
+ 
+ #[test]
+-fn writer_stamps_version_3() {
++fn writer_stamps_version_4() {
+     let bytes = HoloWriter::new().finish().unwrap();
+-    assert_eq!(FORMAT_VERSION, 3);
++    assert_eq!(FORMAT_VERSION, 4);
+     // Header: magic[4] || version[2 LE] || …
+-    assert_eq!(u16::from_le_bytes([bytes[4], bytes[5]]), 3);
++    assert_eq!(u16::from_le_bytes([bytes[4], bytes[5]]), 4);
++}
++
++#[test]
++fn v4_archive_round_trips_an_inference_model_layer() {
++    use hologram_space::{address_bytes, AppManifest, Layer, LayerKind, Realization};
++
++    // A v4 model-only app: no primary (non-executable / library artifact), one
++    // inference-model layer whose aux tag is the engine identifier and whose
++    // entry names the callable service.
++    let manifest = AppManifest {
++        primary: None,
++        requires: address_bytes(b"caps"),
++        layers: vec![Layer::inference_model(
++            address_bytes(b"r4g1-model"),
++            "ai.default",
++            "uor-r4",
++        )],
++        children: vec![],
++    };
++    manifest.validate().unwrap();
++
++    let mut w = HoloWriter::new();
++    w.set_app_manifest(manifest.canonicalize());
++    let bytes = w.finish().unwrap();
++    assert_eq!(u16::from_le_bytes([bytes[4], bytes[5]]), 4);
++
++    let plan = HoloLoader::from_bytes(&bytes).unwrap().into_plan().unwrap();
++    let decoded = AppManifest::decode(plan.app_manifest().unwrap()).unwrap();
++    decoded.validate().unwrap();
++    assert_eq!(decoded.primary, None);
++    assert_eq!(decoded.layers.len(), 1);
++    assert_eq!(decoded.layers[0].kind, LayerKind::InferenceModel);
++    assert_eq!(decoded.layers[0].entry, "ai.default");
++    assert_eq!(decoded.layers[0].aux, "uor-r4");
+ }
+ 
+ #[test]
+@@ -44,7 +80,7 @@ fn bare_tensor_archive_has_no_manifest() {
+ }
+ 
+ #[test]
+-fn read_shim_accepts_v2_and_v3_but_rejects_others() {
++fn read_shim_accepts_v2_through_v4_but_rejects_others() {
+     // The version gate runs BEFORE footer verification, so mutating the version
+     // byte (without re-signing) distinguishes acceptance from rejection by the
+     // error kind: a rejected version fails at the gate (UnsupportedVersion); an
+@@ -52,13 +88,15 @@ fn read_shim_accepts_v2_and_v3_but_rejects_others() {
+     // (ChecksumMismatch).
+     let mut bytes = HoloWriter::new().finish().unwrap();
+ 
+-    // v2 accepted (read-shim): reaches the footer check.
+-    bytes[4] = 2;
+-    bytes[5] = 0;
+-    assert!(matches!(
+-        HoloLoader::from_bytes(&bytes),
+-        Err(ArchiveError::ChecksumMismatch)
+-    ));
++    // v2 and v3 accepted (read-shim): reach the footer check.
++    for v in [2u8, 3] {
++        bytes[4] = v;
++        bytes[5] = 0;
++        assert!(matches!(
++            HoloLoader::from_bytes(&bytes),
++            Err(ArchiveError::ChecksumMismatch)
++        ));
++    }
+ 
+     // v1 rejected at the gate (below MIN_READ_VERSION).
+     bytes[4] = 1;
+@@ -67,10 +105,11 @@ fn read_shim_accepts_v2_and_v3_but_rejects_others() {
+         Err(ArchiveError::UnsupportedVersion(1))
+     ));
+ 
+-    // v4 rejected at the gate (above the current version).
+-    bytes[4] = 4;
++    // v5 rejected at the gate (above the current version) — a v3 reader rejects
++    // a v4 archive the same way, one version lower.
++    bytes[4] = 5;
+     assert!(matches!(
+         HoloLoader::from_bytes(&bytes),
+-        Err(ArchiveError::UnsupportedVersion(4))
++        Err(ArchiveError::UnsupportedVersion(5))
+     ));
+ }
+diff --git a/crates/hologram-cli/Cargo.toml b/crates/hologram-cli/Cargo.toml
+index 9ba3d30..2f61a93 100644
+--- a/crates/hologram-cli/Cargo.toml
++++ b/crates/hologram-cli/Cargo.toml
+@@ -30,6 +30,11 @@ hologram-runtime      = { workspace = true, features = ["engine-wasmtime"] }
+ hologram-net          = { workspace = true, features = ["live", "tcp"] }
+ pollster              = { workspace = true }
+ tokio                 = { version = "1", features = ["rt", "macros"] }
++# ── Uncomment to build `--features ai` (and set `ai = ["dep:hologram-ai"]`
++# below). Sibling-repo path during development; becomes a git pin once
++# hologram-ai is published/pinned. Kept commented because an optional path dep
++# on a non-existent path breaks workspace resolution even with the feature off.
++# hologram-ai = { path = "../../../hologram-ai/crates/hologram-ai", optional = true }
+ 
+ [dev-dependencies]
+ # The node module's inline tests run against the reference MemKappaStore.
+@@ -40,3 +45,10 @@ default = []
+ frontend-python = ["hologram-compiler/frontend-python"]
+ frontend-rust = ["hologram-compiler/frontend-rust"]
+ frontend-typescript = ["hologram-compiler/frontend-typescript"]
++# `hologram ai …` — AI application tooling (`.holo` v4 inference-model layers),
++# delegating to the sibling `hologram-ai` crate. The dependency stays commented
++# out (see [dependencies]) until hologram-ai is published/pinned. To enable:
++# uncomment the dep AND change this to `ai = ["dep:hologram-ai"]`. Enabling `ai`
++# without the dep is a deliberate compile error — no stub fallback. See src/ai.rs
++# for the wiring + the assumed `hologram_ai::cli` API contract.
++ai = []
+diff --git a/crates/hologram-cli/src/ai.rs b/crates/hologram-cli/src/ai.rs
+new file mode 100644
+index 0000000..d9a0337
+--- /dev/null
++++ b/crates/hologram-cli/src/ai.rs
+@@ -0,0 +1,212 @@
++//! `hologram ai` — AI application tooling over `.holo` v4 inference-model layers
++//! (spec `refactor/03` §v4).
++//!
++//! **Feature `ai` (default off).** This module is a thin adapter: clap parsing →
++//! `hologram_ai::cli` → print. Hologram itself stays engine-agnostic — every AI
++//! concern (model download, model compile, the engine runtime, inference) lives in
++//! the sibling `hologram-ai` crate (hologram-ai repository). Hologram never depends
++//! on an engine in its default build.
++//!
++//! # Wiring (hologram-ai is not yet published)
++//!
++//! The dependency is commented out in `crates/hologram-cli/Cargo.toml`: the
++//! `hologram-ai` crate does not exist on crates.io yet, and an optional *path*
++//! dependency on a non-existent path breaks `cargo check --workspace` resolution
++//! even with the feature off. To build with `--features ai`:
++//!
++//! 1. Uncomment the `hologram-ai` path dependency in `Cargo.toml` (adjust the path
++//!    to your hologram-ai checkout; it becomes a git pin once hologram-ai is
++//!    published/pinned).
++//! 2. Change the feature to `ai = ["dep:hologram-ai"]`.
++//!
++//! Enabling `ai` without that dependency is a deliberate compile error (unresolved
++//! `hologram_ai` import) — there is no stub fallback.
++//!
++//! # Assumed `hologram-ai` API (the contract this adapter is written against)
++//!
++//! ```ignore
++//! // hologram_ai::cli — one entry point per `hologram ai` verb. `CliOutput.text`
++//! // is human-readable text, or a JSON document when the verb's `--json` was set.
++//! pub struct CliOutput { pub code: i32, pub text: String }
++//! pub struct DownloadArgs { pub repository: String, pub revision: String, pub offline: bool, pub json: bool }
++//! pub struct CompileArgs {
++//!     pub repository: Option<String>, pub revision: Option<String>,
++//!     pub source: Option<std::path::PathBuf>, pub output: std::path::PathBuf,
++//!     pub entry: String, pub json: bool,
++//! }
++//! pub struct InspectArgs { pub file: std::path::PathBuf, pub json: bool }
++//! pub struct InferArgs {
++//!     pub file: std::path::PathBuf, pub model: Option<String>, pub operation: String,
++//!     pub prompt: Option<String>, pub max_output_tokens: Option<u32>, pub json: bool,
++//! }
++//! pub fn download(args: DownloadArgs) -> CliOutput;
++//! pub fn compile(args: CompileArgs) -> CliOutput;
++//! pub fn inspect(args: InspectArgs) -> CliOutput;
++//! pub fn infer(args: InferArgs) -> CliOutput;
++//! ```
++
++use clap::Subcommand;
++use hologram_compiler::error::CompileError;
++use std::path::PathBuf;
++
++/// `hologram ai <subcommand>` — AI application tooling (delegates to `hologram-ai`).
++#[derive(clap::Args, Debug)]
++pub struct AiCli {
++    #[command(subcommand)]
++    command: AiCommand,
++}
++
++#[derive(Subcommand, Debug)]
++enum AiCommand {
++    /// Download a pinned model repository revision into the local cache.
++    Download(DownloadArgs),
++    /// Compile a model into a `.holo` v4 application with an inference-model layer.
++    Compile(CompileArgs),
++    /// Inspect a `.holo` AI application: its inference-model layers + engine tags.
++    Inspect(InspectArgs),
++    /// Invoke an inference-model layer's service in a `.holo` AI application.
++    Infer(InferArgs),
++}
++
++/// `hologram ai download <repository> --revision <full-sha> [--offline] [--json]`.
++#[derive(clap::Args, Debug)]
++struct DownloadArgs {
++    /// Model repository (e.g. a Hugging Face repo id).
++    repository: String,
++    /// Full commit SHA to pin — κ-only identity: a floating ref is not an identity.
++    #[arg(long)]
++    revision: String,
++    /// Resolve from the local cache only — fail rather than touch the network.
++    #[arg(long)]
++    offline: bool,
++    /// Emit machine-readable JSON.
++    #[arg(long)]
++    json: bool,
++}
++
++/// `hologram ai compile [repository] [--revision <sha> | --source <dir>] --output
++/// <file.holo> [--entry <name>] [--json]`.
++#[derive(clap::Args, Debug)]
++struct CompileArgs {
++    /// Model repository (omit when compiling from a local `--source` tree).
++    repository: Option<String>,
++    /// Full commit SHA to pin (with `repository`).
++    #[arg(long, conflicts_with = "source")]
++    revision: Option<String>,
++    /// Local source directory to compile instead of a repository.
++    #[arg(long)]
++    source: Option<PathBuf>,
++    /// Output `.holo` application path.
++    #[arg(long)]
++    output: PathBuf,
++    /// Callable service name for the inference-model layer's entry.
++    #[arg(long, default_value = "ai.default")]
++    entry: String,
++    /// Emit machine-readable JSON.
++    #[arg(long)]
++    json: bool,
++}
++
++/// `hologram ai inspect <file.holo> [--json]`.
++#[derive(clap::Args, Debug)]
++struct InspectArgs {
++    /// The `.holo` application to inspect.
++    file: PathBuf,
++    /// Emit machine-readable JSON.
++    #[arg(long)]
++    json: bool,
++}
++
++/// `hologram ai infer <file.holo> [--model <entry>] [--operation <op>] [--prompt
++/// <text>] [--max-output-tokens <n>] [--json]`.
++#[derive(clap::Args, Debug)]
++struct InferArgs {
++    /// The `.holo` application to invoke.
++    file: PathBuf,
++    /// Service entry to invoke (defaults to the app's default model).
++    #[arg(long)]
++    model: Option<String>,
++    /// Operation to invoke on the service.
++    #[arg(long, default_value = "generate")]
++    operation: String,
++    /// Prompt text for the operation.
++    #[arg(long)]
++    prompt: Option<String>,
++    /// Cap on generated output tokens.
++    #[arg(long)]
++    max_output_tokens: Option<u32>,
++    /// Emit machine-readable JSON.
++    #[arg(long)]
++    json: bool,
++}
++
++/// Run `hologram ai …`: parse → delegate to `hologram_ai::cli` → print the payload.
++pub fn run(ai_cli: AiCli) -> Result<(), CompileError> {
++    finish(ai_cli.command.dispatch())
++}
++
++impl AiCommand {
++    fn dispatch(self) -> hologram_ai::cli::CliOutput {
++        match self {
++            AiCommand::Download(a) => hologram_ai::cli::download(a.into()),
++            AiCommand::Compile(a) => hologram_ai::cli::compile(a.into()),
++            AiCommand::Inspect(a) => hologram_ai::cli::inspect(a.into()),
++            AiCommand::Infer(a) => hologram_ai::cli::infer(a.into()),
++        }
++    }
++}
++
++fn finish(output: hologram_ai::cli::CliOutput) -> Result<(), CompileError> {
++    println!("{}", output.text);
++    if output.code == 0 {
++        Ok(())
++    } else {
++        Err(CompileError::SourceParse("ai command failed"))
++    }
++}
++
++impl From<DownloadArgs> for hologram_ai::cli::DownloadArgs {
++    fn from(a: DownloadArgs) -> Self {
++        Self {
++            repository: a.repository,
++            revision: a.revision,
++            offline: a.offline,
++            json: a.json,
++        }
++    }
++}
++
++impl From<CompileArgs> for hologram_ai::cli::CompileArgs {
++    fn from(a: CompileArgs) -> Self {
++        Self {
++            repository: a.repository,
++            revision: a.revision,
++            source: a.source,
++            output: a.output,
++            entry: a.entry,
++            json: a.json,
++        }
++    }
++}
++
++impl From<InspectArgs> for hologram_ai::cli::InspectArgs {
++    fn from(a: InspectArgs) -> Self {
++        Self {
++            file: a.file,
++            json: a.json,
++        }
++    }
++}
++
++impl From<InferArgs> for hologram_ai::cli::InferArgs {
++    fn from(a: InferArgs) -> Self {
++        Self {
++            file: a.file,
++            model: a.model,
++            operation: a.operation,
++            prompt: a.prompt,
++            max_output_tokens: a.max_output_tokens,
++            json: a.json,
++        }
++    }
++}
+diff --git a/crates/hologram-cli/src/cmd.rs b/crates/hologram-cli/src/cmd.rs
+index 53472fc..4d3766b 100644
+--- a/crates/hologram-cli/src/cmd.rs
++++ b/crates/hologram-cli/src/cmd.rs
+@@ -111,6 +111,11 @@ enum CommandArgs {
+     /// Network tooling (spec `refactor/04`): create a Network realization (the VPC analogue) or show
+     /// one. Membership/policy/key are κ-addressed — a member/policy/key is content, named by its κ.
+     Network(NetworkCli),
++    /// AI application tooling (`.holo` v4 inference-model layers, spec `refactor/03` §v4):
++    /// download / compile / inspect / infer, delegated to the sibling `hologram-ai` crate —
++    /// hologram stays engine-agnostic. Only present with the `ai` cargo feature.
++    #[cfg(feature = "ai")]
++    Ai(crate::ai::AiCli),
+ }
+ 
+ /// `hologram network <subcommand>` — network (VPC-analogue) tooling.
+@@ -398,6 +403,8 @@ fn run_args(cli: CliArgs) -> Result<(), CompileError> {
+         CommandArgs::Node(node_cli) => std::process::exit(i32::from(crate::node::run(node_cli))),
+         CommandArgs::App(app_cli) => run_app(app_cli),
+         CommandArgs::Network(net_cli) => run_network(net_cli),
++        #[cfg(feature = "ai")]
++        CommandArgs::Ai(ai_cli) => crate::ai::run(ai_cli),
+     }
+ }
+ 
+diff --git a/crates/hologram-cli/src/lib.rs b/crates/hologram-cli/src/lib.rs
+index a036cf5..d872316 100644
+--- a/crates/hologram-cli/src/lib.rs
++++ b/crates/hologram-cli/src/lib.rs
+@@ -1,4 +1,6 @@
+ //! Hologram CLI library surface.
+ 
++#[cfg(feature = "ai")]
++pub mod ai;
+ pub mod cmd;
+ pub mod node;
+diff --git a/crates/hologram-ffi/Cargo.toml b/crates/hologram-ffi/Cargo.toml
+index 1dbba8a..973aaeb 100644
+--- a/crates/hologram-ffi/Cargo.toml
++++ b/crates/hologram-ffi/Cargo.toml
+@@ -19,6 +19,11 @@ hologram-archive  = { workspace = true, features = ["std"] }
+ hologram-compute  = { workspace = true, features = ["std", "cpu"] }
+ hologram-graph    = { workspace = true }
+ uor-prism         = { workspace = true }
++# ── Uncomment to build `--features ai` (and set `ai = ["dep:hologram-ai"]`
++# below). Sibling-repo path during development; becomes a git pin once
++# hologram-ai is published/pinned. Kept commented because an optional path dep
++# on a non-existent path breaks workspace resolution even with the feature off.
++# hologram-ai = { path = "../../../hologram-ai/crates/hologram-ai", optional = true }
+ 
+ [dev-dependencies]
+ hologram-types = { workspace = true }
+@@ -27,3 +32,10 @@ uor-prism     = { workspace = true }
+ [features]
+ default = []
+ wasm = []
++# The `hologram_ai_*` C ABI surface (`.holo` v4 inference-model apps), delegating
++# to the sibling `hologram-ai` crate. The dependency stays commented out (see
++# [dependencies]) until hologram-ai is published/pinned. To enable: uncomment the
++# dep AND change this to `ai = ["dep:hologram-ai"]`. Enabling `ai` without the
++# dep is a deliberate compile error — no stub fallback. See src/ai.rs for the
++# wiring + the assumed `hologram_ai::ffi` API contract.
++ai = []
+diff --git a/crates/hologram-ffi/src/ai.rs b/crates/hologram-ffi/src/ai.rs
+new file mode 100644
+index 0000000..615be0e
+--- /dev/null
++++ b/crates/hologram-ffi/src/ai.rs
+@@ -0,0 +1,355 @@
++//! `hologram-ai` C ABI surface (cargo feature `ai`, **default off**) — compile /
++//! download / load / invoke `.holo` v4 inference-model applications (spec
++//! `refactor/03` §v4) with JSON request/response payloads for binding simplicity.
++//!
++//! Every function here is fully wired Rust that delegates to the sibling
++//! `hologram-ai` crate — hologram itself stays engine-agnostic (no engine code,
++//! no engine dependency in the default build). Enabling `ai` without the
++//! (currently commented-out) `hologram-ai` dependency is a deliberate compile
++//! error — there is no stub fallback. See `crates/hologram-ffi/Cargo.toml` for
++//! the wiring steps; they mirror `crates/hologram-cli/src/ai.rs`.
++//!
++//! # Assumed `hologram-ai` API (the contract this surface is written against)
++//!
++//! ```ignore
++//! // hologram_ai::ffi — the engine-side implementation of this surface. `AiError.code`
++//! // is one of the HOLOGRAM_ERROR_AI_* categories below.
++//! pub struct AiError { pub code: i32, pub message: String }
++//! pub struct AiApp { /* opaque: a loaded `.holo` v4 AI application */ }
++//! pub struct AiSession { /* opaque: an invocation session over one service entry; 'static */ }
++//! pub fn compile_huggingface(repository: &str, revision: &str, entry: &str, output_path: &str) -> Result<(), AiError>;
++//! pub fn compile_source(source_dir: &str, entry: &str, output_path: &str) -> Result<(), AiError>;
++//! pub fn download(repository: &str, revision: &str, offline: bool) -> Result<(), AiError>;
++//! pub fn app_load_path(path: &str) -> Result<AiApp, AiError>;
++//! pub fn app_load_bytes(bytes: &[u8]) -> Result<AiApp, AiError>;
++//! impl AiApp { pub fn model_entries(&self) -> Vec<String>; }
++//! pub fn session_open(app: &AiApp, entry: &str) -> Result<AiSession, AiError>;
++//! pub fn session_invoke_json(session: &mut AiSession, request_json: &str) -> Result<String, AiError>;
++//! ```
++
++use std::os::raw::{c_int, c_uchar};
++use std::sync::{Mutex, OnceLock};
++
++use crate::{clear_error, error_code, ffi_bytes, ffi_str, set_error_message, HologramString};
++use hologram_ai::ffi::{AiApp, AiError, AiSession};
++
++// AI error categories — appended to the core 0..=12 range. The 100+ band is
++// reserved for AI-surface failures so the core codes never renumber and SDK
++// bindings can branch on category ranges.
++/// Invalid or unpinnable model source (repository / revision / source tree).
++pub const HOLOGRAM_ERROR_AI_SOURCE: c_int = 100;
++/// Registry authentication/authorization failed.
++pub const HOLOGRAM_ERROR_AI_AUTH: c_int = 101;
++/// The model / operation / engine is unsupported by this build.
++pub const HOLOGRAM_ERROR_AI_UNSUPPORTED: c_int = 102;
++/// Model → `.holo` v4 compilation failed.
++pub const HOLOGRAM_ERROR_AI_COMPILE: c_int = 103;
++/// The compiled bundle is malformed.
++pub const HOLOGRAM_ERROR_AI_BUNDLE: c_int = 104;
++/// The `.holo` archive failed to load.
++pub const HOLOGRAM_ERROR_AI_ARCHIVE: c_int = 105;
++/// Content integrity (κ / certificate verification) failed.
++pub const HOLOGRAM_ERROR_AI_INTEGRITY: c_int = 106;
++/// The requested service entry does not exist in the app.
++pub const HOLOGRAM_ERROR_AI_SELECTION: c_int = 107;
++/// The layer's named engine is unavailable or rejected the model.
++pub const HOLOGRAM_ERROR_AI_ENGINE: c_int = 108;
++/// Inference itself failed.
++pub const HOLOGRAM_ERROR_AI_INFERENCE: c_int = 109;
++/// The operation was cancelled.
++pub const HOLOGRAM_ERROR_AI_CANCELLED: c_int = 110;
++/// AI-surface ABI misuse (null handle, poisoned table, capacity abuse).
++pub const HOLOGRAM_ERROR_AI_ABI: c_int = 111;
++
++/// Convert an FFI string, or return its recorded error code from the extern fn.
++macro_rules! cstr {
++    ($s:expr) => {
++        match ffi_str($s) {
++            Ok(s) => s,
++            Err(e) => return error_code(e),
++        }
++    };
++}
++
++/// Parsed compile request shared by both compile verbs.
++struct CompileRequest {
++    source: CompileSource,
++    entry: String,
++    output_path: String,
++}
++
++enum CompileSource {
++    HuggingFace {
++        repository: String,
++        revision: String,
++    },
++    SourceDir(String),
++}
++
++fn apps() -> &'static Mutex<Vec<Option<AiApp>>> {
++    static APPS: OnceLock<Mutex<Vec<Option<AiApp>>>> = OnceLock::new();
++    APPS.get_or_init(|| Mutex::new(Vec::new()))
++}
++
++fn ai_sessions() -> &'static Mutex<Vec<Option<AiSession>>> {
++    static SESSIONS: OnceLock<Mutex<Vec<Option<AiSession>>>> = OnceLock::new();
++    SESSIONS.get_or_init(|| Mutex::new(Vec::new()))
++}
++
++/// Compile a pinned Hugging Face repository revision into a `.holo` v4 AI
++/// application at `output_path`, with `entry` as the inference-model layer's
++/// service name. Returns 0 on success, -1 on error (see `hologram_last_error*`).
++#[no_mangle]
++pub unsafe extern "C" fn hologram_ai_compile_huggingface(
++    repository: HologramString,
++    revision: HologramString,
++    entry: HologramString,
++    output_path: HologramString,
++) -> c_int {
++    clear_error();
++    let request = CompileRequest {
++        source: CompileSource::HuggingFace {
++            repository: cstr!(repository),
++            revision: cstr!(revision),
++        },
++        entry: cstr!(entry),
++        output_path: cstr!(output_path),
++    };
++    compile(request)
++}
++
++/// Compile a local source tree into a `.holo` v4 AI application (see
++/// [`hologram_ai_compile_huggingface`]).
++#[no_mangle]
++pub unsafe extern "C" fn hologram_ai_compile_source(
++    source_dir: HologramString,
++    entry: HologramString,
++    output_path: HologramString,
++) -> c_int {
++    clear_error();
++    let request = CompileRequest {
++        source: CompileSource::SourceDir(cstr!(source_dir)),
++        entry: cstr!(entry),
++        output_path: cstr!(output_path),
++    };
++    compile(request)
++}
++
++/// Download a pinned model repository revision into the local cache (`offline !=
++/// 0` resolves from the cache only). Returns 0 on success, -1 on error.
++#[no_mangle]
++pub unsafe extern "C" fn hologram_ai_download(
++    repository: HologramString,
++    revision: HologramString,
++    offline: c_int,
++) -> c_int {
++    clear_error();
++    status(hologram_ai::ffi::download(
++        &cstr!(repository),
++        &cstr!(revision),
++        offline != 0,
++    ))
++}
++
++/// Load a `.holo` v4 AI application from a file path. Returns an opaque app
++/// handle (a session-table index), or -1 on error.
++#[no_mangle]
++pub unsafe extern "C" fn hologram_ai_app_load_path(path: HologramString) -> c_int {
++    clear_error();
++    app_handle(hologram_ai::ffi::app_load_path(&cstr!(path)))
++}
++
++/// Load a `.holo` v4 AI application from bytes. Returns an opaque app handle,
++/// or -1 on error.
++#[no_mangle]
++pub unsafe extern "C" fn hologram_ai_app_load_bytes(
++    bytes_ptr: *const c_uchar,
++    bytes_len: usize,
++) -> c_int {
++    clear_error();
++    let bytes = match ffi_bytes(bytes_ptr, bytes_len) {
++        Ok(b) => b,
++        Err(e) => return error_code(e),
++    };
++    app_handle(hologram_ai::ffi::app_load_bytes(&bytes))
++}
++
++/// Number of inference-model service entries in a loaded app, or -1 on error.
++#[no_mangle]
++pub unsafe extern "C" fn hologram_ai_model_count(app: c_int) -> c_int {
++    clear_error();
++    with_app(app, |a| a.model_entries().len() as c_int).unwrap_or(-1)
++}
++
++/// Copy the service entry name at `index` into `out`. Returns the **total name
++/// length** (snprintf-style; a value > `out_capacity` means truncated, retry
++/// with a larger buffer), or -1 on error / out of range.
++#[no_mangle]
++pub unsafe extern "C" fn hologram_ai_model_entry(
++    app: c_int,
++    index: usize,
++    out: *mut c_uchar,
++    out_capacity: usize,
++) -> c_int {
++    clear_error();
++    with_app(app, |a| unsafe { copy_entry(a, index, out, out_capacity) }).unwrap_or(-1)
++}
++
++/// Open an invocation session over one of the app's service entries. Returns an
++/// opaque session handle, or -1 on error (unknown entry ⇒
++/// [`HOLOGRAM_ERROR_AI_SELECTION`]).
++#[no_mangle]
++pub unsafe extern "C" fn hologram_ai_session_open(app: c_int, entry: HologramString) -> c_int {
++    clear_error();
++    let entry = cstr!(entry);
++    match with_app(app, |a| hologram_ai::ffi::session_open(a, &entry)) {
++        Ok(Ok(session)) => push_slot(ai_sessions(), session),
++        Ok(Err(e)) => ai_fail(e),
++        Err(code) => code,
++    }
++}
++
++/// Invoke a session with a JSON request document, writing the JSON response
++/// into `out`. Returns the **total response length** (snprintf-style; a value >
++/// `out_capacity` means truncated, retry with a larger buffer), or -1 on error.
++#[no_mangle]
++pub unsafe extern "C" fn hologram_ai_session_invoke_json(
++    session: c_int,
++    request: HologramString,
++    out: *mut c_uchar,
++    out_capacity: usize,
++) -> c_int {
++    clear_error();
++    let request = cstr!(request);
++    with_session_mut(session, |s| unsafe {
++        invoke_json(s, &request, out, out_capacity)
++    })
++}
++
++/// Drop a previously-opened AI session. Returns 0 on success, -1 on error.
++#[no_mangle]
++pub unsafe extern "C" fn hologram_ai_session_close(session: c_int) -> c_int {
++    clear_error();
++    close_slot(ai_sessions(), session)
++}
++
++fn compile(request: CompileRequest) -> c_int {
++    let (entry, output_path) = (request.entry.as_str(), request.output_path.as_str());
++    let result = match &request.source {
++        CompileSource::HuggingFace {
++            repository,
++            revision,
++        } => hologram_ai::ffi::compile_huggingface(repository, revision, entry, output_path),
++        CompileSource::SourceDir(dir) => hologram_ai::ffi::compile_source(dir, entry, output_path),
++    };
++    status(result)
++}
++
++/// 0 on success; on failure records the AI error and returns -1.
++fn status(result: Result<(), AiError>) -> c_int {
++    match result {
++        Ok(()) => 0,
++        Err(e) => ai_fail(e),
++    }
++}
++
++fn app_handle(result: Result<AiApp, AiError>) -> c_int {
++    match result {
++        Ok(app) => push_slot(apps(), app),
++        Err(e) => ai_fail(e),
++    }
++}
++
++fn push_slot<T>(table: &Mutex<Vec<Option<T>>>, value: T) -> c_int {
++    match table.lock() {
++        Ok(mut tab) => {
++            tab.push(Some(value));
++            (tab.len() - 1) as c_int
++        }
++        Err(_) => abi_fail("handle table poisoned"),
++    }
++}
++
++fn close_slot<T>(table: &Mutex<Vec<Option<T>>>, handle: c_int) -> c_int {
++    if handle < 0 {
++        return abi_fail("negative handle");
++    }
++    match table.lock() {
++        Ok(mut tab) => match tab.get_mut(handle as usize) {
++            Some(slot) => {
++                *slot = None;
++                0
++            }
++            None => abi_fail("unknown handle"),
++        },
++        Err(_) => abi_fail("handle table poisoned"),
++    }
++}
++
++fn with_app<R, F: FnOnce(&AiApp) -> R>(handle: c_int, f: F) -> Result<R, c_int> {
++    if handle < 0 {
++        return Err(abi_fail("negative handle"));
++    }
++    match apps().lock() {
++        Ok(tab) => match tab.get(handle as usize).and_then(|s| s.as_ref()) {
++            Some(app) => Ok(f(app)),
++            None => Err(abi_fail("unknown app handle")),
++        },
++        Err(_) => Err(abi_fail("handle table poisoned")),
++    }
++}
++
++fn with_session_mut<F: FnOnce(&mut AiSession) -> c_int>(handle: c_int, f: F) -> c_int {
++    if handle < 0 {
++        return abi_fail("negative handle");
++    }
++    match ai_sessions().lock() {
++        Ok(mut tab) => match tab.get_mut(handle as usize).and_then(|s| s.as_mut()) {
++            Some(session) => f(session),
++            None => abi_fail("unknown session handle"),
++        },
++        Err(_) => abi_fail("handle table poisoned"),
++    }
++}
++
++unsafe fn copy_entry(app: &AiApp, index: usize, out: *mut c_uchar, out_capacity: usize) -> c_int {
++    let entries = app.model_entries();
++    let Some(name) = entries.get(index) else {
++        return ai_fail_static(HOLOGRAM_ERROR_AI_SELECTION, "model entry out of range");
++    };
++    copy_out(name.as_bytes(), out, out_capacity)
++}
++
++unsafe fn invoke_json(
++    session: &mut AiSession,
++    request: &str,
++    out: *mut c_uchar,
++    out_capacity: usize,
++) -> c_int {
++    match hologram_ai::ffi::session_invoke_json(session, request) {
++        Ok(response) => copy_out(response.as_bytes(), out, out_capacity),
++        Err(e) => ai_fail(e),
++    }
++}
++
++/// snprintf-style copy: writes at most `out_capacity` bytes, returns the total.
++unsafe fn copy_out(bytes: &[u8], out: *mut c_uchar, out_capacity: usize) -> c_int {
++    if !out.is_null() {
++        let n = bytes.len().min(out_capacity);
++        std::slice::from_raw_parts_mut(out, n).copy_from_slice(&bytes[..n]);
++    }
++    bytes.len() as c_int
++}
++
++fn ai_fail(error: AiError) -> c_int {
++    ai_fail_static(error.code, &error.message)
++}
++
++fn abi_fail(message: &'static str) -> c_int {
++    ai_fail_static(HOLOGRAM_ERROR_AI_ABI, message)
++}
++
++fn ai_fail_static(code: c_int, message: &str) -> c_int {
++    set_error_message(code, message);
++    -1
++}
+diff --git a/crates/hologram-ffi/src/lib.rs b/crates/hologram-ffi/src/lib.rs
+index 735f1c1..e5c536b 100644
+--- a/crates/hologram-ffi/src/lib.rs
++++ b/crates/hologram-ffi/src/lib.rs
+@@ -8,6 +8,9 @@
+ 
+ pub mod sdk;
+ 
++#[cfg(feature = "ai")]
++pub mod ai;
++
+ use std::cell::RefCell;
+ use std::ffi::CString;
+ use std::os::raw::{c_char, c_int, c_uchar};
+@@ -684,26 +687,44 @@ fn set_error(error: FfiError) {
+     LAST_ERROR.with(|slot| *slot.borrow_mut() = record);
+ }
+ 
++/// Record a dynamically-owned error message (the `ai` surface: engine-side
++/// `AiError`s carry owned messages, unlike the core surface's static strings).
++#[cfg(feature = "ai")]
++fn set_error_message(code: c_int, message: &str) {
++    let record = CString::new(message).ok().map(|message| FfiErrorRecord {
++        code,
++        message,
++        line: 0,
++        column: 0,
++        rejected: None,
++    });
++    LAST_ERROR.with(|slot| *slot.borrow_mut() = record);
++}
++
+ fn error_code(error: FfiError) -> c_int {
+     set_error(error);
+     -1
+ }
+ 
+ fn feature_supported(feature: &str) -> bool {
+-    matches!(
+-        feature,
++    match feature {
+         "abi.v1"
+-            | "archive.v2"
+-            | "compile.empty"
+-            | "compile.source"
+-            | "session"
+-            | "source-builder"
+-            | "source-builder.const"
+-            | "source-builder.const-ref"
+-            | "source-builder.output-alias"
+-            | "errors.structured"
+-            | "errors.locations"
+-    )
++        | "archive.v2"
++        | "compile.empty"
++        | "compile.source"
++        | "session"
++        | "source-builder"
++        | "source-builder.const"
++        | "source-builder.const-ref"
++        | "source-builder.output-alias"
++        | "errors.structured"
++        | "errors.locations" => true,
++        // The `ai` surface probes 1 only when the `ai` cargo feature is compiled
++        // in (mirrors the cfg-gated entries in `sdk::FEATURES`).
++        #[cfg(feature = "ai")]
++        "ai-compile" | "ai-download" | "ai-app" | "ai-session" => true,
++        _ => false,
++    }
+ }
+ 
+ fn invalid_arg_error(message: &'static str) -> FfiError {
+diff --git a/crates/hologram-ffi/src/sdk.rs b/crates/hologram-ffi/src/sdk.rs
+index 74798d2..e9f4d96 100644
+--- a/crates/hologram-ffi/src/sdk.rs
++++ b/crates/hologram-ffi/src/sdk.rs
+@@ -47,6 +47,17 @@ pub const FEATURES: &[&str] = &[
+     "source-builder.output-alias",
+     "errors.structured",
+     "errors.locations",
++    // The `ai` surface (`hologram_ai_*` C ABI) exists only with the `ai` cargo
++    // feature, so its probes are cfg-gated likewise: a default build neither
++    // advertises nor answers them (the generated SDK metadata is unchanged).
++    #[cfg(feature = "ai")]
++    "ai-compile",
++    #[cfg(feature = "ai")]
++    "ai-download",
++    #[cfg(feature = "ai")]
++    "ai-app",
++    #[cfg(feature = "ai")]
++    "ai-session",
+ ];
+ 
+ /// Iterate generated op metadata from the canonical op catalog.
+diff --git a/crates/hologram-ffi/tests/c_abi.rs b/crates/hologram-ffi/tests/c_abi.rs
+index 438b7bf..d39a77d 100644
+--- a/crates/hologram-ffi/tests/c_abi.rs
++++ b/crates/hologram-ffi/tests/c_abi.rs
+@@ -77,8 +77,8 @@ fn compile_empty_round_trip() {
+ #[test]
+ fn reports_versions_and_supported_features() {
+     assert_eq!(hologram_abi_version(), HOLOGRAM_ABI_VERSION);
+-    // `.holo` is v3 since P4 (the multi-layer application container); the FFI reports FORMAT_VERSION.
+-    assert_eq!(hologram_archive_format_version(), 3);
++    // `.holo` is v4 (the inference-model layer kind, spec 03 §v4); the FFI reports FORMAT_VERSION.
++    assert_eq!(hologram_archive_format_version(), 4);
+     assert_eq!(
+         unsafe { hologram_feature_supported(ffi_str(b"source-builder")) },
+         1
+diff --git a/crates/hologram-space/src/realizations.rs b/crates/hologram-space/src/realizations.rs
+index de40674..51f79f2 100644
+--- a/crates/hologram-space/src/realizations.rs
++++ b/crates/hologram-space/src/realizations.rs
+@@ -691,10 +691,11 @@ realization!(
+ // One format: an application is a manifest naming an ordered list of κ-referenced layers plus
+ // the child apps it composes (D9). A tensor-only archive is the degenerate single-layer case.
+ 
+-/// A `.holo` v3 layer's kind (spec 03 §v3 structure) — a **closed** enum, extended only by a
+-/// format-version bump (exhaustive matching, no catch-all). The kind alone fixes whether a layer
+-/// bears an exit code: an application is "a binary with an exit code", so only the code-bearing
+-/// kinds may serve as a manifest's `primary` (an app's exit code cannot be undefined).
++/// A `.holo` layer's kind (spec 03 §v3 structure, §v4) — a **closed** enum, extended only by a
++/// format-version bump (exhaustive matching, no catch-all; discriminants are appended, never
++/// renumbered). The kind alone fixes whether a layer bears an exit code: an application is "a
++/// binary with an exit code", so only the code-bearing kinds may serve as a manifest's `primary`
++/// (an app's exit code cannot be undefined).
+ #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+ #[repr(u8)]
+ pub enum LayerKind {
+@@ -709,6 +710,11 @@ pub enum LayerKind {
+     /// A UI view (D10), attached when its surface is ready; no exit code. Its `aux` tag carries the
+     /// `surface` (`portable`, `native(ios)`, …).
+     View = 3,
++    /// A packaged AI inference model, invoked as a callable service; no exit code (FORMAT_VERSION 4,
++    /// spec 03 §v4). Its `aux` tag carries the mandatory **engine** identifier (e.g. `uor-r4`) and
++    /// its `entry` names the callable service. Hologram is engine-agnostic: it stores and routes
++    /// the layer; the named engine interprets it.
++    InferenceModel = 4,
+ }
+ 
+ impl LayerKind {
+@@ -723,6 +729,7 @@ impl LayerKind {
+             1 => Ok(LayerKind::TensorPlan),
+             2 => Ok(LayerKind::RootfsImage),
+             3 => Ok(LayerKind::View),
++            4 => Ok(LayerKind::InferenceModel),
+             _ => Err(RealizationError::Malformed),
+         }
+     }
+@@ -730,17 +737,19 @@ impl LayerKind {
+ 
+ /// One layer of a `.holo` v3 application: a κ-referenced payload plus its boot descriptor. The
+ /// `entry` is the layer's entrypoint (like `main`); `aux` is the kind-specific tag — the **arch**
+-/// for a rootfs-image (mandatory, ISA fixed at provision) or the **surface** for a view, empty for
+-/// the portable code/tensor kinds.
++/// for a rootfs-image (mandatory, ISA fixed at provision), the **surface** for a view, or the
++/// **engine** for an inference-model (mandatory, v4), empty for the portable code/tensor kinds.
+ #[derive(Clone, PartialEq, Eq, Debug)]
+ pub struct Layer {
+     pub kind: LayerKind,
+-    /// The layer's payload κ (a codemodule, tensor plan, rootfs image, or view bundle). Dedup
+-    /// spans layers: a model shared by two layers is stored once (Law L3).
++    /// The layer's payload κ (a codemodule, tensor plan, rootfs image, view bundle, or inference
++    /// model). Dedup spans layers: a model shared by two layers is stored once (Law L3).
+     pub content: KappaLabel71,
+-    /// Entrypoint name (e.g. `_start`, a session id, `boot`).
++    /// Entrypoint name (e.g. `_start`, a session id, `boot`, or a callable service name for an
++    /// inference-model layer).
+     pub entry: String,
+-    /// Kind-specific tag: arch for rootfs-image, surface for view, empty otherwise.
++    /// Kind-specific tag: arch for rootfs-image, surface for view, engine for inference-model,
++    /// empty otherwise.
+     pub aux: String,
+ }
+ 
+@@ -785,6 +794,21 @@ impl Layer {
+             aux: surface.into(),
+         }
+     }
++    /// An inference-model layer (v4; no exit code) served by `engine` under the callable service
++    /// name `entry`. Hologram is engine-agnostic — `engine` is an opaque identifier (e.g.
++    /// `"uor-r4"`) resolved by the host at invocation time.
++    pub fn inference_model(
++        content: KappaLabel71,
++        entry: impl Into<String>,
++        engine: impl Into<String>,
++    ) -> Self {
++        Self {
++            kind: LayerKind::InferenceModel,
++            content,
++            entry: entry.into(),
++            aux: engine.into(),
++        }
++    }
+ }
+ 
+ /// Why an [`AppManifest`] is not loadable (spec 03 §Encoding decisions — validated at load, before
+@@ -804,6 +828,13 @@ pub enum ManifestError {
+     PortableLayerHasArch,
+     /// A view layer is missing its `surface` tag.
+     ViewMissingSurface,
++    /// An inference-model layer (v4) is missing its callable service name (`entry`).
++    EmptyLayerEntry,
++    /// An inference-model layer (v4) is missing its mandatory engine tag (`aux`).
++    MissingEngineTag,
++    /// Two layers share one non-empty `entry` name — service names are the invoke seam, so they
++    /// must be unique within a manifest.
++    DuplicateLayerEntry,
+ }
+ 
+ /// `https://hologram.foundation/realization/app-manifest` — a `.holo` v3 application (spec 03).
+@@ -854,33 +885,28 @@ impl AppManifest {
+         if self.layers.is_empty() {
+             return Err(ManifestError::NoLayers);
+         }
+-        if let Some(i) = self.primary {
+-            let layer = self
+-                .layers
+-                .get(i as usize)
+-                .ok_or(ManifestError::PrimaryOutOfRange)?;
+-            if !layer.kind.has_exit_semantics() {
+-                return Err(ManifestError::PrimaryNotExitBearing);
+-            }
+-        }
++        self.validate_primary()?;
+         for layer in &self.layers {
+-            match layer.kind {
+-                LayerKind::RootfsImage => {
+-                    if layer.aux.is_empty() {
+-                        return Err(ManifestError::RootfsMissingArch);
+-                    }
+-                }
+-                LayerKind::View => {
+-                    if layer.aux.is_empty() {
+-                        return Err(ManifestError::ViewMissingSurface);
+-                    }
+-                }
+-                LayerKind::WasmCodemodule | LayerKind::TensorPlan => {
+-                    if !layer.aux.is_empty() {
+-                        return Err(ManifestError::PortableLayerHasArch);
+-                    }
+-                }
+-            }
++            validate_layer_descriptor(layer)?;
++        }
++        if has_duplicate_entries(&self.layers) {
++            return Err(ManifestError::DuplicateLayerEntry);
++        }
++        Ok(())
++    }
++
++    /// `primary`, when present, must index a layer with exit semantics (an app's exit code cannot
++    /// be undefined). `None` is a non-executable / library artifact.
++    fn validate_primary(&self) -> Result<(), ManifestError> {
++        let Some(i) = self.primary else {
++            return Ok(());
++        };
++        let layer = self
++            .layers
++            .get(i as usize)
++            .ok_or(ManifestError::PrimaryOutOfRange)?;
++        if !layer.kind.has_exit_semantics() {
++            return Err(ManifestError::PrimaryNotExitBearing);
+         }
+         Ok(())
+     }
+@@ -963,6 +989,30 @@ impl AppManifest {
+         })
+     }
+ }
++
++/// Per-layer descriptor invariants (spec 03 §Encoding decisions + §v4): which kinds require or
++/// forbid the `aux` tag, and the v4 inference-model service-name / engine-tag requirements.
++fn validate_layer_descriptor(layer: &Layer) -> Result<(), ManifestError> {
++    match layer.kind {
++        LayerKind::RootfsImage if layer.aux.is_empty() => Err(ManifestError::RootfsMissingArch),
++        LayerKind::View if layer.aux.is_empty() => Err(ManifestError::ViewMissingSurface),
++        LayerKind::WasmCodemodule | LayerKind::TensorPlan if !layer.aux.is_empty() => {
++            Err(ManifestError::PortableLayerHasArch)
++        }
++        LayerKind::InferenceModel if layer.entry.is_empty() => Err(ManifestError::EmptyLayerEntry),
++        LayerKind::InferenceModel if layer.aux.is_empty() => Err(ManifestError::MissingEngineTag),
++        _ => Ok(()),
++    }
++}
++
++/// Whether two layers share one non-empty `entry` name — service names are the invoke seam, so
++/// they must be unique within a manifest (empty entries, e.g. view layers, are exempt).
++fn has_duplicate_entries(layers: &[Layer]) -> bool {
++    layers.iter().enumerate().any(|(i, layer)| {
++        !layer.entry.is_empty() && layers[..i].iter().any(|l| l.entry == layer.entry)
++    })
++}
++
+ realization!(
+     AppManifest,
+     "https://hologram.foundation/realization/app-manifest"
+@@ -2211,6 +2261,95 @@ mod tests {
+         );
+     }
+ 
++    // ── .holo v4 inference-model layers (spec 03 §v4) ──
++
++    /// A v4 model-only app: inference-model layers, no primary (a library artifact — invoking it
++    /// is calling a service, not running an exit-bearing binary).
++    fn model_only_app() -> AppManifest {
++        AppManifest {
++            primary: None,
++            requires: k(b"caps"),
++            layers: alloc::vec![Layer::inference_model(
++                k(b"model-a"),
++                "ai.default",
++                "uor-r4"
++            )],
++            children: alloc::vec![],
++        }
++    }
++
++    #[test]
++    fn inference_model_kind_decodes_and_has_no_exit_semantics() {
++        assert_eq!(LayerKind::from_u8(4), Ok(LayerKind::InferenceModel));
++        assert!(LayerKind::from_u8(5).is_err());
++        assert!(!LayerKind::InferenceModel.has_exit_semantics());
++    }
++
++    #[test]
++    fn model_only_manifest_validates_and_round_trips() {
++        let m = model_only_app();
++        m.validate().unwrap();
++        let decoded = AppManifest::decode(&m.canonicalize()).unwrap();
++        assert_eq!(decoded.primary, None);
++        assert_eq!(decoded.layers, m.layers);
++        assert_eq!(decoded.layers[0].kind, LayerKind::InferenceModel);
++        assert_eq!(decoded.layers[0].entry, "ai.default");
++        assert_eq!(decoded.layers[0].aux, "uor-r4");
++    }
++
++    #[test]
++    fn inference_model_primary_is_rejected() {
++        // An inference-model layer has no exit code, so it cannot be an app's primary.
++        let bad = AppManifest {
++            primary: Some(0),
++            ..model_only_app()
++        };
++        assert_eq!(bad.validate(), Err(ManifestError::PrimaryNotExitBearing));
++    }
++
++    #[test]
++    fn inference_model_requires_entry_and_engine() {
++        let no_entry = AppManifest {
++            layers: alloc::vec![Layer {
++                kind: LayerKind::InferenceModel,
++                content: k(b"m"),
++                entry: String::new(), // the callable service name is mandatory
++                aux: "uor-r4".into(),
++            }],
++            ..model_only_app()
++        };
++        assert_eq!(no_entry.validate(), Err(ManifestError::EmptyLayerEntry));
++        let no_engine = AppManifest {
++            layers: alloc::vec![Layer::inference_model(k(b"m"), "ai.default", "")],
++            ..model_only_app()
++        };
++        assert_eq!(no_engine.validate(), Err(ManifestError::MissingEngineTag));
++    }
++
++    #[test]
++    fn duplicate_service_entries_are_rejected() {
++        let dup = AppManifest {
++            layers: alloc::vec![
++                Layer::inference_model(k(b"a"), "ai.default", "uor-r4"),
++                Layer::inference_model(k(b"b"), "ai.default", "uor-r4"),
++            ],
++            ..model_only_app()
++        };
++        assert_eq!(dup.validate(), Err(ManifestError::DuplicateLayerEntry));
++        // Distinct service names over shared content are fine (dedup spans layers, Law L3);
++        // empty view entries never collide.
++        let ok = AppManifest {
++            layers: alloc::vec![
++                Layer::inference_model(k(b"a"), "ai.default", "uor-r4"),
++                Layer::inference_model(k(b"a"), "ai.alt", "uor-r4"),
++                Layer::view(k(b"v1"), "portable"),
++                Layer::view(k(b"v2"), "native(ios)"),
++            ],
++            ..model_only_app()
++        };
++        ok.validate().unwrap();
++    }
++
+     #[test]
+     fn app_identity_binds_every_operand_and_the_layer_order() {
+         let base = full_app();
+diff --git a/sdk/python/hologram/_hologram.py b/sdk/python/hologram/_hologram.py
+index 1e00f0a..599a1e2 100644
+--- a/sdk/python/hologram/_hologram.py
++++ b/sdk/python/hologram/_hologram.py
+@@ -23,7 +23,7 @@ from .errors import (
+ )
+ 
+ ABI_VERSION = 1
+-ARCHIVE_FORMAT_VERSION = 3
++ARCHIVE_FORMAT_VERSION = 4
+ INITIAL_ARCHIVE_CAPACITY = 16 * 1024
+ 
+ 
+@@ -113,7 +113,7 @@ def last_error_rejected() -> str | None:
+ def assert_compatible() -> None:
+     if abi_version() != ABI_VERSION:
+         raise AbiMismatchError(f"unsupported Hologram ABI {abi_version()}")
+-    if archive_format_version() not in (2, 3):
++    if archive_format_version() not in (2, 3, 4):
+         raise AbiMismatchError(f"unsupported Hologram archive format {archive_format_version()}")
+     missing = [feature for feature in REQUIRED_FEATURES if not feature_supported(feature)]
+     if missing:
+diff --git a/sdk/typescript/native/src/index.ts b/sdk/typescript/native/src/index.ts
+index 40c68df..68f2360 100644
+--- a/sdk/typescript/native/src/index.ts
++++ b/sdk/typescript/native/src/index.ts
+@@ -312,7 +312,7 @@ function checkNative(addon: NativeAddon): void {
+   if (addon.abiVersion() !== 1) {
+     throw errorFromCode(ERROR_ABI_MISMATCH, `unsupported Hologram ABI ${addon.abiVersion()}`);
+   }
+-  if (addon.archiveFormatVersion() !== 2 && addon.archiveFormatVersion() !== 3) {
++  if (![2, 3, 4].includes(addon.archiveFormatVersion())) {
+     throw errorFromCode(ERROR_ABI_MISMATCH, `unsupported Hologram archive format ${addon.archiveFormatVersion()}`);
+   }
+   for (const feature of REQUIRED_FEATURES) {
+diff --git a/sdk/typescript/wasm/src/index.ts b/sdk/typescript/wasm/src/index.ts
+index 78e449a..cfe2c66 100644
+--- a/sdk/typescript/wasm/src/index.ts
++++ b/sdk/typescript/wasm/src/index.ts
+@@ -296,7 +296,7 @@ function checkDriver(driver: WasmDriver): void {
+   if (driver.abiVersion() !== 1) {
+     throw errorFromCode(ERROR_ABI_MISMATCH, `unsupported Hologram ABI ${driver.abiVersion()}`);
+   }
+-  if (driver.archiveFormatVersion() !== 2 && driver.archiveFormatVersion() !== 3) {
++  if (![2, 3, 4].includes(driver.archiveFormatVersion())) {
+     throw errorFromCode(ERROR_ABI_MISMATCH, `unsupported Hologram archive format ${driver.archiveFormatVersion()}`);
+   }
+   for (const feature of REQUIRED_FEATURES) {
+diff --git a/specs/refactor/03-holo-format.md b/specs/refactor/03-holo-format.md
+index d2e24ce..4070c95 100644
+--- a/specs/refactor/03-holo-format.md
++++ b/specs/refactor/03-holo-format.md
+@@ -49,9 +49,10 @@ Manifest fields fixed here (they were prose-only before):
+   so `resolve_closure(app κ)` fetches a whole application transitively — migration of an
+   app between peers is the same operation as migrating any content.
+ - **Layer kinds** are a closed enum (exhaustive matching, no catch-all): wasm-codemodule,
+-  tensor-plan, rootfs-image, view, (extensible only by format version bump). Each layer
+-  carries an entrypoint and, where meaningful, exit-code semantics — an application, like
+-  any workload, is "a binary with an exit code."
++  tensor-plan, rootfs-image, view, (extensible only by format version bump — v4 appends
++  inference-model; see §v4). Each layer carries an entrypoint and, where meaningful,
++  exit-code semantics — an application, like any workload, is "a binary with an exit
++  code."
+ - **Weights/blob dedup spans layers**: a model shared by two layers is stored once; two
+   apps sharing content share κs, so a store holding both holds one copy (Law L3).
+ - **Degenerate case**: a v2-style compiled tensor graph is a v3 archive whose manifest has
+@@ -161,10 +162,36 @@ from being a hologram application.
+ 
+ ## Compatibility & migration
+ 
+-- FORMAT_VERSION 2 archives remain loadable (read-side compatibility) through at least
+-  the first published release cycle; the loader wraps them as single-layer apps in
+-  memory. Writers emit v3 only.
++- FORMAT_VERSION 2 and 3 archives remain loadable (read-side compatibility) through at
++  least the first published release cycle; the loader wraps v2 archives as single-layer
++  apps in memory. Writers emit v4 only (see §v4).
+ - Format work lands in migration phase P4 (`06-migration.md`), after the crate moves are
+   stable, so codec changes never interleave with tree moves.
+ - First-party applications (hologram-apps repo) and hologram-ai adopt v3 from their own
+   repos once P4 ships in a published release (D1).
++
++## v4: the inference-model layer kind
++
++v4 is a **manifest-content-only** bump: the section set is unchanged; the closed
++`LayerKind` enum gains one appended discriminant — `inference-model = 4` (existing kinds
++0–3 keep theirs, κ-stability). A v3 reader rejects a v4 archive at the version gate,
++exactly as it rejects any newer version.
++
++- **Semantics**: an inference-model layer is a packaged AI model invoked as a **callable
++  service**, not a booted process. It carries **no exit code** (it can never be a
++  manifest's `primary` — the existing primary-must-be-exit-bearing rule covers this). Its
++  `entry` is the mandatory, non-empty service name; its `aux` tag is the mandatory
++  **engine identifier** (e.g. `uor-r4`). A model-only archive (`primary` absent, only
++  inference-model layers) is a valid non-executable / library artifact.
++- **Engine-agnosticism**: hologram stores, dedups, addresses, and routes the layer; the
++  named engine interprets and executes it. The format fixes the slots (content κ, service
++  name, engine tag) and nothing about the engine's algorithms — no engine code, no
++  engine dependency, no tensor-plan changes land in hologram itself.
++- **Service-name uniqueness**: non-empty `entry` names must be unique across a manifest's
++  layers — service names are the invoke seam, so two layers may not answer to one name
++  (empty entries, e.g. view layers, are exempt).
++- **Validation additions** (at manifest load, with the v3 checks): an inference-model
++  layer missing its service name ⇒ `EmptyLayerEntry`; missing its engine tag ⇒
++  `MissingEngineTag`; a duplicated non-empty entry ⇒ `DuplicateLayerEntry`. The v3 rule
++  that portable kinds carry no `aux` tag does not extend to inference-model — its engine
++  tag is mandatory, not forbidden.

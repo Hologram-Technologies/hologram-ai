@@ -1,126 +1,17 @@
 [package]
-name    = "hologram-ai"
-version.workspace = true
-edition.workspace = true
-license.workspace = true
-
-[[bin]]
-name = "hologram-ai"
-path = "src/cli.rs"
-
-[features]
-default = ["native", "parallel", "std"]
-# Re-enables the host-shell substrate stack's `std` (they are pulled
-# `default-features = false` above). On by default so the native lib/CLI/benches
-# are unchanged; `hologram-ai-wasm` omits it so the browser build resolves the
-# stack no_std and `hologram-backend` reaches its `Atomics.wait` futex. ADR-0018.
-std = [
-    "hologram-compiler/std",
-    "hologram-exec/std",
-    "hologram-archive/std",
-    "hologram-backend/std",
-    "hologram-host/std",
-    "hologram-ai-common/std",
-]
-# Multi-threaded browser decode: forwards to the substrate's embedder worker
-# pool (`hologram-backend/wasm-threads`). Requires a shared-memory build
-# (`+atomics,+bulk-memory`) and the no_std backend path (i.e. NOT `std`). Off for
-# the single-threaded fallback build. ADR-0018.
-wasm-threads = ["hologram-backend/wasm-threads"]
-# Native host capabilities: the model downloader + CLI logging. Off for the wasm
-# build (these crates don't compile on wasm32). The compile/run/generate core is
-# feature-independent and builds on both.
-native = [
-    "dep:futures",
-    "dep:reqwest",
-    "dep:indicatif",
-    "dep:tokio",
-    "dep:tempfile",
-    "dep:sha2",
-    "dep:dirs",
-    "dep:which",
-    "dep:memmap2",
-    "dep:tracing-subscriber",
-]
-# Multi-core execution (rayon), defaulted on for the native lib/CLI/benches so
-# performance (class PV) is unchanged. The wasm build (`hologram-ai-wasm`) omits
-# it — rayon cannot spawn threads on wasm32. See ADR-0017.
-parallel = [
-    "hologram-exec/parallel",
-    "hologram-backend/parallel",
-    "hologram-ai-common/parallel",
-]
-# Feature-gate large model E2E tests that require local model files (not run in CI).
-e2e = []
+name        = "hologram-ai"
+description = "Production Rust API: compile Hugging Face or local model sources through uor-r4 into .holo InferenceModel layers and serve deterministic R4G1 inference."
+version.workspace     = true
+edition.workspace     = true
+rust-version.workspace = true
+license.workspace     = true
+repository.workspace  = true
 
 [dependencies]
-hologram-ai-core   = { workspace = true }
-hologram-ai-common.workspace = true
-hologram-ai-quant.workspace  = true
-hologram-ai-onnx.workspace   = true
-hologram-ai-tokenizer.workspace = true
-# hologram 0.5.0 member crates. The workspace pins the host-shell stack
-# `default-features = false` (its `std` is opt-in); the native lib/CLI re-enables
-# it via the default-on `std` feature below, and the `hologram-ai-wasm` browser
-# build omits it — resolving the stack no_std so `hologram-backend` compiles its
-# `Atomics.wait` futex (multi-threaded decode) not the busy-spin std path. ADR-0018.
-hologram-types.workspace    = true
-hologram-ops.workspace      = true
-hologram-graph.workspace    = true
-hologram-compiler.workspace = true
-hologram-exec.workspace     = true
-hologram-archive.workspace  = true
-hologram-backend.workspace  = true
-hologram-host.workspace     = true
-uor-foundation = "0.5.2"
-# Model-file content addressing (MA): mints a model's uor-addr κ-label used
-# as its dedup / warm-start identity (architecture §8). The format features
-# enable the ONNX / GGUF / JSON canonical realizations.
-uor-addr = { version = "0.2", features = ["onnx", "gguf"] }
-
-bytemuck.workspace     = true
-half.workspace         = true
-anyhow.workspace       = true
-thiserror.workspace    = true
-clap.workspace         = true
-tracing.workspace      = true
-serde.workspace        = true
-serde_json.workspace   = true
-toml.workspace         = true
-rkyv.workspace         = true
-parking_lot.workspace  = true
-
-# Native-only (the `native` feature): the model downloader + its toolchain.
-# These do not build on wasm32, so the browser build omits them (the wasm crate
-# depends on this facade with `default-features = false`). See ADR-0017.
-futures              = { workspace = true, optional = true }
-reqwest              = { workspace = true, optional = true }
-indicatif            = { workspace = true, optional = true }
-tokio                = { workspace = true, optional = true }
-tempfile             = { workspace = true, optional = true }
-sha2                 = { workspace = true, optional = true }
-dirs                 = { workspace = true, optional = true }
-which                = { workspace = true, optional = true }
-memmap2              = { workspace = true, optional = true }
-tracing-subscriber   = { version = "0.3", features = ["env-filter"], optional = true }
-hologram-ai-safetensors = { version = "0.1.0", path = "../hologram-ai-safetensors" }
-
-[dev-dependencies]
-# Provides onnx_builder (pure Rust, no ORT) for mini fixture tests.
-hologram-ai-conformance = { path = "../hologram-ai-conformance" }
-# Graph nodes carry `SmallVec` input lists; the substrate-contract witness builds
-# raw hologram graphs, so it needs the same container the node struct declares.
-smallvec = { workspace = true }
-# hologram-backend is accessed via hologram's re-export
-bytemuck = { workspace = true }
-criterion = { workspace = true }
-# The kv_rehash_cost example measures the same BLAKE3 the substrate addresses with.
-blake3 = { workspace = true }
-
-[[bench]]
-name = "inference"
-harness = false
-
-[[bench]]
-name = "scaling"
-harness = false
+hologram-ai-core       = { workspace = true, features = ["std"] }
+hologram-ai-bundle     = { workspace = true, features = ["std"] }
+hologram-ai-r4         = { workspace = true }
+hologram-ai-huggingface = { workspace = true }
+hologram-archive       = { workspace = true }
+hologram-space         = { workspace = true }
+blake3                 = { workspace = true, features = ["std"] }

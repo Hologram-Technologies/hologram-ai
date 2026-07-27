@@ -1,20 +1,10 @@
 # Workspace-level Cargo configuration.
 
 [net]
-# Fetch git deps via the `git` CLI rather than libgit2. The hologram crates are
-# sourced from a private GitHub repo, which the `ghu_` env-supplied token 403s
-# on; the git CLI uses git's credential helper (the gh CLI keyring) which has
-# the necessary access. No-op once the dep is cached in ~/.cargo/git.
+# Fetch git deps via the `git` CLI rather than libgit2 (uses git's credential
+# helper, which has the access private UOR/Hologram repos need).
 git-fetch-with-cli = true
 
-[env]
-# Use the system-installed ONNX Runtime for conformance tests.
-# Prevents ORT from downloading a copy on every `cargo test`.
-# Requires ORT to be installed (e.g. via Homebrew: brew install onnxruntime).
-ORT_STRATEGY = "system"
-
-# wasm32 builds target the browsers the app already requires (OPFS sync
-# access handles), all of which ship SIMD128 — scalar-only wasm kernels
-# would leave a multiple of the decode throughput on the table.
+# wasm32 builds target browsers that ship SIMD128.
 [target.wasm32-unknown-unknown]
 rustflags = ["-C", "target-feature=+simd128"]
