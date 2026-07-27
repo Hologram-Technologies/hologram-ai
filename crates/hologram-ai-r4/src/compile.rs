@@ -3,8 +3,8 @@
 //!
 //! The bundle carries exactly what the deployed R4G1 runtime needs
 //! (ADR-0002/ADR-0005): scored graph, signature artifact, tokenizer when
-//! the compile produced one, and the score report. `tless_store.bin` is
-//! never packaged (it is not even returned by `uor-r4-api`), and the
+//! the compile produced one, and the score report. `tless_store.bin` is never
+//! packaged (it is not even returned by `uor-r4-api`), and the
 //! cover stage's `compile_report.json` stays in the private work
 //! directory — it is a build diagnostic, not a runtime component.
 
@@ -563,8 +563,8 @@ mod tests {
 
     /// The bundle must carry only the deployed components: graph,
     /// signature artifact, tokenizer, score report. The cover stage's
-    /// compile report stays in the work dir, and `tless_store.bin` is
-    /// never packaged (ADR-0002) — `uor-r4-api` does not even return it,
+    /// compile report stays in the work dir, and `tless_store.bin` is never
+    /// packaged (ADR-0002) — `uor-r4-api` does not even return it,
     /// so the assertion is over the bundle's role set and payloads
     /// against a stand-in store payload.
     #[test]

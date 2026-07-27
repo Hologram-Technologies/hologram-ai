@@ -86,4 +86,11 @@ jobs:
           ! grep -RIn --include=Cargo.toml '^\[\[bin\]\]' crates/
       - name: No tless_store in bundles
         run: |
-          ! grep -RIn 'tless_store' crates/ --include='*.rs' | grep -v 'never\|excluded\|EXCLUDED'
+          # Real guarantee: the bundle round-trip + exclusion tests (run in the
+          # `fmt / clippy / tests` job). This scan is a belt-and-suspenders on
+          # non-test source; tests legitimately name the file to assert its
+          # exclusion, so they are out of scope, and any remaining mention must
+          # sit on a line that marks it excluded/never-packaged.
+          ! grep -RIn 'tless_store' crates/ --include='*.rs' \
+              | grep -v '/tests/' \
+              | grep -iv 'never\|exclud'
